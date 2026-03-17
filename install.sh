@@ -8,6 +8,8 @@
 # Options:
 #   --non-interactive   Skip all prompts and use defaults / .env values
 #   --skip-docker-check Skip Docker version validation
+#   --uninstall | -u    Remove containers, volumes, and networks (keep images)
+#   --all       | -a    Remove containers, volumes, networks, AND images
 #   --help              Show this help
 # =============================================================================
 
@@ -43,16 +45,83 @@ retry() {
   done
 }
 
+# ─── Uninstall helper ────────────────────────────────────────────────────────
+# do_uninstall <remove_images: true|false>
+# Stops and removes all Dependency-Track containers, volumes, and networks.
+# Pass "true" to also remove the Docker images.
+do_uninstall() {
+  local remove_images="$1"
+
+  step "Uninstalling Dependency-Track"
+
+  if ! command -v docker &>/dev/null; then
+    die "docker is required but not found"
+  fi
+
+  if docker compose version &>/dev/null; then
+    COMPOSE_CMD="docker compose"
+  elif command -v docker-compose &>/dev/null; then
+    COMPOSE_CMD="docker-compose"
+  else
+    die "Docker Compose not found. Install from https://docs.docker.com/compose/install/"
+  fi
+
+  local env_args=()
+  [[ -f "$SCRIPT_DIR/.env" ]] && env_args=(--env-file "$SCRIPT_DIR/.env")
+
+  echo ""
+  echo -e "  ${BOLD}The following will be permanently removed:${RESET}"
+  echo -e "    • Containers : dt-apiserver, dt-frontend, dt-postgres, dt-dashboard"
+  echo -e "    • Volumes    : dependency-track-data, postgres-data"
+  echo -e "    • Network    : dependency-track"
+  if [[ "$remove_images" == "true" ]]; then
+    echo -e "    • Images     : dependencytrack/apiserver, dependencytrack/frontend,"
+    echo -e "                   postgres:15-alpine, nginx:alpine"
+  fi
+  echo ""
+
+  if [[ "$NON_INTERACTIVE" == "false" ]]; then
+    read -rp "  Are you sure? This cannot be undone. [y/N]: " _confirm
+    if [[ "$_confirm" != "y" && "$_confirm" != "Y" ]]; then
+      info "Aborted."
+      exit 0
+    fi
+  fi
+
+  local down_flags=(-v)
+  [[ "$remove_images" == "true" ]] && down_flags+=(--rmi all)
+
+  info "Stopping and removing containers, volumes, and networks…"
+  $COMPOSE_CMD -f "$SCRIPT_DIR/docker-compose.yml" "${env_args[@]}" down "${down_flags[@]}" \
+    || warn "docker compose down reported errors — some resources may already be removed"
+
+  echo ""
+  success "Uninstall complete."
+  echo ""
+  if [[ "$remove_images" == "true" ]]; then
+    echo -e "  All containers, volumes, networks, and images have been removed."
+  else
+    echo -e "  All containers, volumes, and networks have been removed."
+    echo -e "  Docker images were kept. To also remove images, run:"
+    echo -e "    ${BOLD}./install.sh --all${RESET}"
+  fi
+  echo ""
+}
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 NON_INTERACTIVE=false
 SKIP_DOCKER_CHECK=false
+UNINSTALL=false
+REMOVE_IMAGES=false
 
 for arg in "$@"; do
   case $arg in
     --non-interactive) NON_INTERACTIVE=true ;;
     --skip-docker-check) SKIP_DOCKER_CHECK=true ;;
+    --uninstall|-u) UNINSTALL=true ;;
+    --all|-a) UNINSTALL=true; REMOVE_IMAGES=true ;;
     --help)
-      sed -n '2,18p' "$0"; exit 0 ;;
+      sed -n '2,20p' "$0"; exit 0 ;;
   esac
 done
 
@@ -71,6 +140,12 @@ echo -e "${RESET}"
 echo -e "  ${BOLD}Repository:${RESET} https://github.com/DependencyTrack/dependency-track"
 echo -e "  ${BOLD}Docs:${RESET}       https://docs.dependencytrack.org"
 echo ""
+
+# ─── Uninstall dispatch ──────────────────────────────────────────────────────
+if [[ "$UNINSTALL" == "true" ]]; then
+  do_uninstall "$REMOVE_IMAGES"
+  exit 0
+fi
 
 # ─── Step 1 — Prerequisites ──────────────────────────────────────────────────
 step "Step 1 — Checking Prerequisites"
