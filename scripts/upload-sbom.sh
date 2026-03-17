@@ -6,8 +6,8 @@
 #   ./scripts/upload-sbom.sh [OPTIONS] <sbom-file>
 #
 # Supported SBOM formats:
-#   - CycloneDX JSON  (.json)
-#   - CycloneDX XML   (.xml)
+#   - CycloneDX JSON  (.json, .cdx.json)
+#   - CycloneDX XML   (.xml, .cdx.xml)
 #   - SPDX JSON       (.spdx.json)
 #
 # Options:
@@ -68,8 +68,12 @@ done
 FILENAME="$(basename "$SBOM_FILE")"
 case "$FILENAME" in
   *.spdx.json) BOM_FORMAT="SPDX" ;;
+  *.cdx.json)  BOM_FORMAT="CycloneDX" ;;
   *.json)      BOM_FORMAT="CycloneDX" ;;
+  *.cdx.xml)   BOM_FORMAT="CycloneDX" ;;
   *.xml)       BOM_FORMAT="CycloneDX" ;;
+  *.tar|*.zip|*.gz)
+               die "Archive files are not supported. Extract the SBOM (.json or .xml) from the archive first:\n  tar -xf $FILENAME" ;;
   *)           warn "Unknown extension — assuming CycloneDX"; BOM_FORMAT="CycloneDX" ;;
 esac
 info "Detected format: $BOM_FORMAT  ($FILENAME)"

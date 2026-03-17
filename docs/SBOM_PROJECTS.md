@@ -32,12 +32,19 @@ multiple vulnerability databases:
 
 ## 2. Supported Formats
 
-| Format         | Extension        | Notes                                    |
-|----------------|------------------|------------------------------------------|
-| CycloneDX JSON | `.json`          | **Recommended** — most feature-rich      |
-| CycloneDX XML  | `.xml`           | Fully supported                          |
-| SPDX JSON      | `.spdx.json`     | Supported (limited metadata mapping)     |
-| SPDX RDF       | `.spdx.rdf`      | Supported                                |
+| Format         | Extension              | Notes                                    |
+|----------------|------------------------|------------------------------------------|
+| CycloneDX JSON | `.json`, `.cdx.json`   | **Recommended** — most feature-rich      |
+| CycloneDX XML  | `.xml`, `.cdx.xml`     | Fully supported                          |
+| SPDX JSON      | `.spdx.json`           | Supported (limited metadata mapping)     |
+| SPDX RDF       | `.spdx.rdf`            | Supported                                |
+
+> **Note:** Archive files (`.tar`, `.zip`, `.gz`) are **not** accepted.
+> Extract the SBOM file from the archive before uploading:
+> ```bash
+> tar -xf cs-api-gateway-internal-springcloud_1.4.0.tar
+> ./scripts/upload-sbom.sh --file cs-api-gateway-internal-springcloud_1.4.0.cdx.json
+> ```
 
 **CycloneDX** is the recommended format as it provides:
 - Component hashes (SHA-1, SHA-256)

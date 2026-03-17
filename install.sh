@@ -316,12 +316,21 @@ fi
 # ─── Step 7 — Validate API Key ───────────────────────────────────────────────
 step "Step 7 — Verifying API Key"
 
-# Retry fetching the API key up to 4 times — auth may lag slightly after a
-# password change.
+# Newer DependencyTrack versions dropped basic-auth on /api/v1/team.
+# We first obtain a short-lived JWT from the login endpoint, then use it
+# as a Bearer token to fetch the team list.  Retry up to 4 times.
 API_KEY=""
 _fetch_key() {
+  local _token
+  _token=$(curl -sf \
+    -X POST "${API_URL}/api/v1/user/login" \
+    -H "Content-Type: application/x-www-form-urlencoded" \
+    --data-urlencode "username=${ADMIN_USER}" \
+    --data-urlencode "password=${ADMIN_PASS}" 2>/dev/null || echo "")
+  [[ -z "$_token" ]] && return 1
+
   API_KEY=$(curl -sf \
-    -u "${ADMIN_USER}:${ADMIN_PASS}" \
+    -H "Authorization: Bearer ${_token}" \
     "${API_URL}/api/v1/team" 2>/dev/null \
     | jq -r '.[0].apiKeys[0].key // empty' 2>/dev/null || echo "")
   [[ -n "$API_KEY" ]]
