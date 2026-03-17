@@ -414,7 +414,7 @@
       <div class="status-dot"></div>
       <span>Mock Data</span>
     </div>
-    <button class="btn" onclick="openModal('apiModal')">⚙ Connect Live API</button>
+    <button class="btn" onclick="openModal('apiModal')">⚙ Connect API</button>
     <button class="btn primary" onclick="refreshData()">↻ Refresh</button>
   </header>
 
@@ -480,10 +480,8 @@
   <div class="modal">
     <button class="modal-close" onclick="closeModal('apiModal')">&times;</button>
     <h2>⚙ Connect to Live DependencyTrack API</h2>
-    <p>Enter your DependencyTrack API URL and an API key. The key can be found in <strong>Administration → Access Management → Teams</strong>.</p>
-    <label style="font-size:12px;color:var(--text-muted)">API Base URL</label>
-    <input id="apiUrlInput" class="search-input" style="width:100%;margin:6px 0 12px"
-           placeholder="http://localhost:8081" value="http://localhost:8081" />
+    <p>API calls are routed through this dashboard's built-in nginx proxy — no cross-origin issues, no CORS configuration needed.</p>
+    <p>Enter the API key for your DependencyTrack instance. The key can be found in <strong>Administration → Access Management → Teams</strong>.</p>
     <label style="font-size:12px;color:var(--text-muted)">API Key</label>
     <input id="apiKeyInput" class="search-input" style="width:100%;margin:6px 0 12px"
            placeholder="odt_xxxxxxxxxxxxxxxxxxxxxxxxxx" />
@@ -492,11 +490,12 @@
       <button class="btn" onclick="loadMockData(); closeModal('apiModal')">Use Mock Data</button>
     </div>
     <p style="margin-top:16px;font-size:12px">
-      Need to generate an API key?<br/>
-      See <strong>docs/DASHBOARD_INTEGRATION.md</strong> or run:
+      Need to generate an API key? Run:
     </p>
-    <code>curl -s -u admin:admin http://localhost:8081/api/v1/team \
-  | jq -r '.[0].apiKeys[0].key'</code>
+    <code>TOKEN=$(curl -sf -X POST http://localhost:8081/api/v1/user/login \
+  -d 'username=admin&password=YOUR_PASS') \
+&& curl -sf -H "Authorization: Bearer $TOKEN" \
+  http://localhost:8081/api/v1/team | jq -r '.[0].apiKeys[0].key'</code>
   </div>
 </div>
 
@@ -512,7 +511,8 @@ let filtered      = [];
 let sortCol       = 'name';
 let sortDir       = 'asc';
 let liveMode      = false;
-let apiUrl        = 'http://localhost:8081';
+// API calls always go through the nginx proxy at /api/ (same origin).
+// This avoids CORS entirely — no API URL needed from the user.
 let apiKey        = '';
 
 // ── Mock Data ─────────────────────────────────────────────────────────────
@@ -742,8 +742,8 @@ function loadMockData() {
 }
 
 // ── Connect to live API ────────────────────────────────────────────────────
+// All requests go through the nginx /api/ proxy (same-origin) — no CORS.
 async function connectLiveApi() {
-  apiUrl = document.getElementById('apiUrlInput').value.replace(/\/$/, '');
   apiKey = document.getElementById('apiKeyInput').value.trim();
 
   if (!apiKey) {
@@ -754,20 +754,19 @@ async function connectLiveApi() {
     '<div class="status-dot" style="background:var(--medium);animation:pulse 0.5s infinite"></div><span>Connecting…</span>';
 
   try {
-    // Fetch all projects
-    const res = await fetch(`${apiUrl}/api/v1/project?pageSize=500&pageNumber=1`, {
+    // Fetch all projects via nginx proxy (/api/ → dtrack-apiserver:8080/api/)
+    const res = await fetch('/api/v1/project?pageSize=500&pageNumber=1', {
       headers: { 'X-Api-Key': apiKey }
     });
 
-    if (!res.ok) throw new Error(`HTTP ${res.status} — check API key and URL`);
+    if (!res.ok) throw new Error(`HTTP ${res.status} — check your API key`);
     const data = await res.json();
     const projects = data.values || data;
 
     // Map to our schema
     allProjects = await Promise.all(projects.map(async (p) => {
-      let metrics = { critical:0, high:0, medium:0, low:0 };
       try {
-        const mr = await fetch(`${apiUrl}/api/v1/metrics/project/${p.uuid}/current`, {
+        const mr = await fetch(`/api/v1/metrics/project/${p.uuid}/current`, {
           headers: { 'X-Api-Key': apiKey }
         });
         if (mr.ok) {
@@ -802,7 +801,7 @@ async function connectLiveApi() {
 
     liveMode = true;
     document.getElementById('dataBanner').innerHTML =
-      `✓ Live data from <strong>${apiUrl}</strong> — ${allProjects.length} projects loaded.`;
+      `✓ Live data — ${allProjects.length} projects loaded.`;
     document.getElementById('dataBanner').className = 'data-banner live';
     document.getElementById('apiStatus').innerHTML =
       '<div class="status-dot"></div><span>Live</span>';
