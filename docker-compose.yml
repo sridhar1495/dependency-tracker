@@ -91,7 +91,7 @@ services:
         # immediately — it will keep retrying API connections on its own.
         condition: service_started
     environment:
-      API_BASE_URL: "http://localhost:${DT_API_PORT:-8081}"
+      API_BASE_URL: "http://${DT_HOST:-localhost}:${DT_API_PORT:-8081}"
     ports:
       - "${DT_FRONTEND_PORT:-8080}:8080"
     networks:

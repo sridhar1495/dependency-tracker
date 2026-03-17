@@ -124,6 +124,11 @@ if [[ "$NON_INTERACTIVE" == "false" ]]; then
   echo -e "${BOLD}Configure your installation (press Enter to keep current value):${RESET}"
   echo ""
 
+  # Host (used as browser-side API URL — must be reachable from the user's browser)
+  _default_host="${DT_HOST:-localhost}"
+  read -rp "  Server hostname or IP        [${_default_host}]: " _in
+  [[ -n "$_in" ]] && DT_HOST="$_in" || DT_HOST="$_default_host"
+
   # Ports
   read -rp "  DependencyTrack UI port      [${DT_FRONTEND_PORT:-8080}]: " _in
   [[ -n "$_in" ]] && DT_FRONTEND_PORT="$_in"
@@ -150,6 +155,7 @@ if [[ "$NON_INTERACTIVE" == "false" ]]; then
   # Write back
   cat > "$ENV_FILE" <<ENVFILE
 DT_VERSION=${DT_VERSION:-latest}
+DT_HOST=${DT_HOST:-localhost}
 DT_FRONTEND_PORT=${DT_FRONTEND_PORT:-8080}
 DT_API_PORT=${DT_API_PORT:-8081}
 DT_DASHBOARD_PORT=${DT_DASHBOARD_PORT:-3000}
