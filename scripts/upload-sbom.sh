@@ -162,18 +162,15 @@ fi
 
 # ── Upload SBOM ───────────────────────────────────────────────────────────────
 info "Uploading SBOM to project ${PROJECT_UUID}…"
-ENCODED_BOM=$(base64 -w0 < "$SBOM_FILE")
-
-UPLOAD_PAYLOAD=$(jq -n \
-  --arg pu "$PROJECT_UUID" \
-  --arg bom "$ENCODED_BOM" \
-  '{ projectUuid: $pu, bom: $bom }')
-
+# Use multipart POST so curl streams the file directly — avoids base64-encoding
+# the BOM into a shell variable which fails with "Argument list too long" for
+# large SBOMs (base64 output exceeds the OS ARG_MAX when passed via --arg to jq
+# or as -d to curl).
 HTTP_STATUS=$(curl -s -o /tmp/dt_bom_response.json -w "%{http_code}" \
-  -X PUT "${API_URL}/api/v1/bom" \
+  -X POST "${API_URL}/api/v1/bom" \
   -H "Authorization: Bearer ${TOKEN}" \
-  -H "Content-Type: application/json" \
-  -d "$UPLOAD_PAYLOAD")
+  -F "project=${PROJECT_UUID}" \
+  -F "bom=@${SBOM_FILE}")
 
 if [[ "$HTTP_STATUS" == "200" ]]; then
   TOKEN_RESP=$(jq -r '.token // empty' /tmp/dt_bom_response.json 2>/dev/null || echo "")
