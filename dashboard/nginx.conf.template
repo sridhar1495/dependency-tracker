@@ -9,11 +9,13 @@ server {
         try_files $uri $uri/ /index.html;
     }
 
-    # Proxy API calls to DependencyTrack API server.
-    # Dashboard JS calls /api/* (same-origin) — nginx forwards to the container.
-    # CORS headers are added here as a safety net for any direct browser access.
+    # Proxy API calls to DependencyTrack.
+    # Target is set by DT_API_INTERNAL_URL (injected at container start via envsubst).
+    #   Local Docker:  http://dtrack-apiserver:8080   (default)
+    #   Production:    https://dtrack.company.com
+    # The browser always calls /api/* on this same origin — no CORS from the browser side.
     location /api/ {
-        proxy_pass http://dtrack-apiserver:8080/api/;
+        proxy_pass ${DT_API_INTERNAL_URL}/api/;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
