@@ -1,0 +1,111 @@
+version: "3.9"
+
+#
+# Dependency-Track Community Edition — Docker Compose
+# Includes: API Server, Frontend, PostgreSQL, and Custom Dashboard
+#
+
+volumes:
+  dependency-track-data:
+    driver: local
+  postgres-data:
+    driver: local
+
+networks:
+  dependency-track:
+    driver: bridge
+
+services:
+
+  # ─── PostgreSQL Database ────────────────────────────────────────────────────
+  postgres:
+    image: postgres:15-alpine
+    container_name: dt-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-dtrack}
+      POSTGRES_USER: ${POSTGRES_USER:-dtrack}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-dtrack_password_change_me}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    networks:
+      - dependency-track
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-dtrack} -d ${POSTGRES_DB:-dtrack}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
+
+  # ─── DependencyTrack API Server ─────────────────────────────────────────────
+  dtrack-apiserver:
+    image: dependencytrack/apiserver:${DT_VERSION:-latest}
+    container_name: dt-apiserver
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      # ── Database ──────────────────────────────────────────────────────────
+      ALPINE_DATABASE_MODE: "external"
+      ALPINE_DATABASE_URL: "jdbc:postgresql://postgres:5432/${POSTGRES_DB:-dtrack}"
+      ALPINE_DATABASE_DRIVER: "org.postgresql.Driver"
+      ALPINE_DATABASE_USERNAME: "${POSTGRES_USER:-dtrack}"
+      ALPINE_DATABASE_PASSWORD: "${POSTGRES_PASSWORD:-dtrack_password_change_me}"
+      # ── API Key for initial admin bootstrap ───────────────────────────────
+      ALPINE_FORCE_CHANGE_PASSWORD: "false"
+      # ── HTTP ──────────────────────────────────────────────────────────────
+      ALPINE_HTTP_PORT: "8080"
+      # ── Data directory ────────────────────────────────────────────────────
+      ALPINE_DATA_DIRECTORY: "/data"
+      # ── OIDC (optional, uncomment to enable) ──────────────────────────────
+      # ALPINE_OIDC_ENABLED: "true"
+      # ALPINE_OIDC_ISSUER: "https://your-idp/.well-known/openid-configuration"
+    volumes:
+      - dependency-track-data:/data
+    ports:
+      - "${DT_API_PORT:-8081}:8080"
+    networks:
+      - dependency-track
+    deploy:
+      resources:
+        limits:
+          memory: 12g
+        reservations:
+          memory: 4g
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:8080/api/version || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 10
+      start_period: 120s
+
+  # ─── DependencyTrack Frontend ────────────────────────────────────────────────
+  dtrack-frontend:
+    image: dependencytrack/frontend:${DT_VERSION:-latest}
+    container_name: dt-frontend
+    restart: unless-stopped
+    depends_on:
+      dtrack-apiserver:
+        condition: service_healthy
+    environment:
+      API_BASE_URL: "http://localhost:${DT_API_PORT:-8081}"
+    ports:
+      - "${DT_FRONTEND_PORT:-8080}:8080"
+    networks:
+      - dependency-track
+
+  # ─── Custom Risk Dashboard ────────────────────────────────────────────────────
+  dt-dashboard:
+    image: nginx:alpine
+    container_name: dt-dashboard
+    restart: unless-stopped
+    volumes:
+      - ./dashboard:/usr/share/nginx/html:ro
+      - ./dashboard/nginx.conf:/etc/nginx/conf.d/default.conf:ro
+    ports:
+      - "${DT_DASHBOARD_PORT:-3000}:80"
+    networks:
+      - dependency-track
+    depends_on:
+      - dtrack-apiserver

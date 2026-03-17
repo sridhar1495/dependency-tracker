@@ -1,0 +1,847 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Dependency-Track — Risk Dashboard</title>
+  <style>
+    /* ── Reset & Base ─────────────────────────────────────────────────────── */
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg:           #0f1117;
+      --surface:      #1a1d27;
+      --surface2:     #21253a;
+      --border:       #2e3352;
+      --text:         #e2e8f0;
+      --text-muted:   #8892a4;
+      --accent:       #6366f1;
+
+      --critical:     #ef4444;
+      --critical-bg:  rgba(239,68,68,0.12);
+      --high:         #f97316;
+      --high-bg:      rgba(249,115,22,0.12);
+      --medium:       #eab308;
+      --medium-bg:    rgba(234,179,8,0.12);
+      --low:          #3b82f6;
+      --low-bg:       rgba(59,130,246,0.12);
+      --ok:           #22c55e;
+      --ok-bg:        rgba(34,197,94,0.08);
+
+      --header-h:     64px;
+      --row-h:        46px;
+      --radius:       8px;
+    }
+
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+      font-size: 14px;
+      min-height: 100vh;
+    }
+
+    /* ── Layout ───────────────────────────────────────────────────────────── */
+    .app { display: flex; flex-direction: column; min-height: 100vh; }
+
+    /* ── Top Bar ──────────────────────────────────────────────────────────── */
+    .topbar {
+      height: var(--header-h);
+      background: var(--surface);
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      padding: 0 24px;
+      gap: 16px;
+      position: sticky;
+      top: 0;
+      z-index: 100;
+    }
+    .topbar-logo {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      font-size: 18px;
+      font-weight: 700;
+      color: var(--text);
+      text-decoration: none;
+    }
+    .topbar-logo svg { flex-shrink: 0; }
+    .topbar-subtitle {
+      font-size: 12px;
+      color: var(--text-muted);
+      font-weight: 400;
+    }
+    .topbar-spacer { flex: 1; }
+    .topbar-status {
+      display: flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 12px;
+      color: var(--text-muted);
+    }
+    .status-dot {
+      width: 8px; height: 8px;
+      border-radius: 50%;
+      background: var(--ok);
+      animation: pulse 2s ease-in-out infinite;
+    }
+    @keyframes pulse {
+      0%, 100% { opacity: 1; }
+      50%       { opacity: 0.4; }
+    }
+
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 7px 14px;
+      border-radius: var(--radius);
+      border: 1px solid var(--border);
+      background: var(--surface2);
+      color: var(--text);
+      font-size: 13px;
+      cursor: pointer;
+      transition: background 0.15s, border-color 0.15s;
+      white-space: nowrap;
+    }
+    .btn:hover { background: var(--border); border-color: var(--accent); }
+    .btn.primary {
+      background: var(--accent);
+      border-color: var(--accent);
+      color: #fff;
+    }
+    .btn.primary:hover { background: #4f46e5; }
+
+    /* ── Main content ─────────────────────────────────────────────────────── */
+    .main { flex: 1; padding: 24px; }
+
+    /* ── Summary cards ────────────────────────────────────────────────────── */
+    .summary-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+      gap: 16px;
+      margin-bottom: 28px;
+    }
+    .summary-card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 18px 20px;
+    }
+    .summary-card .label {
+      font-size: 12px;
+      color: var(--text-muted);
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      margin-bottom: 8px;
+    }
+    .summary-card .value {
+      font-size: 28px;
+      font-weight: 700;
+      line-height: 1;
+    }
+    .summary-card .sub {
+      font-size: 11px;
+      color: var(--text-muted);
+      margin-top: 4px;
+    }
+    .c-critical { color: var(--critical); }
+    .c-high     { color: var(--high); }
+    .c-medium   { color: var(--medium); }
+    .c-low      { color: var(--low); }
+    .c-ok       { color: var(--ok); }
+
+    /* ── Controls bar ─────────────────────────────────────────────────────── */
+    .controls {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      margin-bottom: 16px;
+      flex-wrap: wrap;
+    }
+    .controls h1 {
+      font-size: 18px;
+      font-weight: 600;
+      flex: 1;
+      min-width: 200px;
+    }
+    .controls h1 span {
+      color: var(--text-muted);
+      font-weight: 400;
+      font-size: 14px;
+      margin-left: 8px;
+    }
+    .search-input {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      color: var(--text);
+      font-size: 13px;
+      padding: 7px 12px;
+      width: 240px;
+      outline: none;
+      transition: border-color 0.15s;
+    }
+    .search-input:focus { border-color: var(--accent); }
+    .search-input::placeholder { color: var(--text-muted); }
+
+    select.filter-select {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      color: var(--text);
+      font-size: 13px;
+      padding: 7px 12px;
+      outline: none;
+      cursor: pointer;
+    }
+
+    /* ── Table wrapper ────────────────────────────────────────────────────── */
+    .table-wrap {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      overflow: auto;
+      max-height: calc(100vh - 300px);
+    }
+
+    /* ── Table ────────────────────────────────────────────────────────────── */
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      min-width: 1000px;
+    }
+
+    /* Sticky header */
+    thead tr { position: sticky; top: 0; z-index: 10; }
+
+    /* Group header row */
+    .th-group {
+      background: var(--surface2);
+      padding: 8px 0;
+      text-align: center;
+      font-size: 11px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.8px;
+      border-bottom: 1px solid var(--border);
+    }
+    .th-group.security   { color: var(--high);   border-left: 3px solid var(--high); }
+    .th-group.operations { color: #a78bfa;        border-left: 3px solid #a78bfa; }
+    .th-group.license    { color: var(--medium);  border-left: 3px solid var(--medium); }
+
+    /* Column header row */
+    .th-col {
+      background: var(--surface2);
+      padding: 10px 10px;
+      font-size: 11px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      color: var(--text-muted);
+      border-bottom: 2px solid var(--border);
+      white-space: nowrap;
+      cursor: pointer;
+      user-select: none;
+      text-align: center;
+    }
+    .th-col:hover { color: var(--text); }
+    .th-col.sort-asc::after  { content: ' ↑'; color: var(--accent); }
+    .th-col.sort-desc::after { content: ' ↓'; color: var(--accent); }
+
+    .th-project {
+      text-align: left;
+      padding-left: 20px;
+      min-width: 220px;
+      cursor: pointer;
+    }
+
+    /* Data rows */
+    tbody tr {
+      border-bottom: 1px solid rgba(46, 51, 82, 0.6);
+      transition: background 0.1s;
+    }
+    tbody tr:last-child { border-bottom: none; }
+    tbody tr:hover { background: rgba(99,102,241,0.06); }
+
+    td {
+      padding: 0 10px;
+      height: var(--row-h);
+      text-align: center;
+      vertical-align: middle;
+      font-variant-numeric: tabular-nums;
+    }
+    td.project-name {
+      text-align: left;
+      padding-left: 20px;
+      font-weight: 500;
+      white-space: nowrap;
+    }
+    td.project-name .version-badge {
+      margin-left: 6px;
+      font-size: 10px;
+      color: var(--text-muted);
+      background: var(--surface2);
+      border: 1px solid var(--border);
+      border-radius: 4px;
+      padding: 1px 5px;
+    }
+
+    /* Risk pill */
+    .pill {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-width: 32px;
+      height: 22px;
+      padding: 0 6px;
+      border-radius: 4px;
+      font-size: 12px;
+      font-weight: 600;
+    }
+    .pill-critical { background: var(--critical-bg); color: var(--critical); }
+    .pill-high     { background: var(--high-bg);     color: var(--high); }
+    .pill-medium   { background: var(--medium-bg);   color: var(--medium); }
+    .pill-low      { background: var(--low-bg);      color: var(--low); }
+    .pill-ok       { background: var(--ok-bg);       color: var(--ok); }
+    .pill-zero     { color: var(--text-muted); font-size: 11px; }
+
+    /* Column separators */
+    .sep-left { border-left: 2px solid var(--border); }
+
+    /* ── Data mode banner ─────────────────────────────────────────────────── */
+    .data-banner {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      background: rgba(234,179,8,0.08);
+      border: 1px solid rgba(234,179,8,0.25);
+      border-radius: var(--radius);
+      padding: 10px 16px;
+      margin-bottom: 16px;
+      font-size: 13px;
+      color: var(--medium);
+    }
+    .data-banner.live {
+      background: rgba(34,197,94,0.06);
+      border-color: rgba(34,197,94,0.2);
+      color: var(--ok);
+    }
+
+    /* ── Modal ────────────────────────────────────────────────────────────── */
+    .modal-overlay {
+      position: fixed; inset: 0;
+      background: rgba(0,0,0,0.65);
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      z-index: 200;
+      opacity: 0;
+      pointer-events: none;
+      transition: opacity 0.2s;
+    }
+    .modal-overlay.open { opacity: 1; pointer-events: all; }
+    .modal {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 28px;
+      width: 520px;
+      max-width: 90vw;
+      max-height: 80vh;
+      overflow-y: auto;
+      transform: scale(0.95);
+      transition: transform 0.2s;
+    }
+    .modal-overlay.open .modal { transform: scale(1); }
+    .modal h2 { font-size: 16px; margin-bottom: 16px; }
+    .modal p { font-size: 13px; color: var(--text-muted); line-height: 1.6; margin-bottom: 10px; }
+    .modal code {
+      display: block;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      padding: 10px 14px;
+      font-size: 12px;
+      font-family: 'Courier New', monospace;
+      color: #a5f3fc;
+      margin: 8px 0 14px;
+      white-space: pre;
+    }
+    .modal-close {
+      float: right;
+      background: none;
+      border: none;
+      color: var(--text-muted);
+      font-size: 20px;
+      cursor: pointer;
+      line-height: 1;
+    }
+    .modal-close:hover { color: var(--text); }
+
+    /* ── Footer ───────────────────────────────────────────────────────────── */
+    .footer {
+      text-align: center;
+      padding: 16px;
+      font-size: 11px;
+      color: var(--text-muted);
+      border-top: 1px solid var(--border);
+    }
+
+    /* ── Scrollbar ────────────────────────────────────────────────────────── */
+    ::-webkit-scrollbar { width: 6px; height: 6px; }
+    ::-webkit-scrollbar-track { background: transparent; }
+    ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+    ::-webkit-scrollbar-thumb:hover { background: #3e4462; }
+  </style>
+</head>
+<body>
+<div class="app">
+
+  <!-- ── Top Bar ─────────────────────────────────────────────────────────── -->
+  <header class="topbar">
+    <a class="topbar-logo" href="#">
+      <svg width="28" height="28" viewBox="0 0 28 28" fill="none">
+        <rect width="28" height="28" rx="7" fill="#6366f1"/>
+        <path d="M7 14C7 10.134 10.134 7 14 7V21C10.134 21 7 17.866 7 14Z" fill="white" opacity="0.9"/>
+        <path d="M14 7C17.866 7 21 10.134 21 14C21 17.866 17.866 21 14 21V7Z" fill="white" opacity="0.5"/>
+      </svg>
+      <span>Dependency-Track<span class="topbar-subtitle">  Risk Dashboard</span></span>
+    </a>
+    <div class="topbar-spacer"></div>
+    <div class="topbar-status" id="apiStatus">
+      <div class="status-dot"></div>
+      <span>Mock Data</span>
+    </div>
+    <button class="btn" onclick="openModal('apiModal')">⚙ Connect Live API</button>
+    <button class="btn primary" onclick="refreshData()">↻ Refresh</button>
+  </header>
+
+  <!-- ── Main ────────────────────────────────────────────────────────────── -->
+  <main class="main">
+
+    <!-- Data mode notice -->
+    <div class="data-banner" id="dataBanner">
+      ⚠ Showing <strong>mock data</strong> — click "Connect Live API" to pull real project risks from your DependencyTrack instance.
+    </div>
+
+    <!-- KPI Cards -->
+    <div class="summary-grid" id="summaryGrid"><!-- filled by JS --></div>
+
+    <!-- Table controls -->
+    <div class="controls">
+      <h1>Projects <span id="projectCount"></span></h1>
+      <input class="search-input" id="searchInput" placeholder="Search projects…" oninput="applyFilters()" />
+      <select class="filter-select" id="riskFilter" onchange="applyFilters()">
+        <option value="all">All risk levels</option>
+        <option value="critical">Has Critical</option>
+        <option value="high">Has High</option>
+        <option value="medium">Has Medium</option>
+        <option value="low">Has Low</option>
+        <option value="ok">Clean (OK)</option>
+      </select>
+      <select class="filter-select" id="categoryFilter" onchange="applyFilters()">
+        <option value="all">All categories</option>
+        <option value="security">Security</option>
+        <option value="operations">Operational</option>
+        <option value="license">License</option>
+      </select>
+    </div>
+
+    <!-- Table -->
+    <div class="table-wrap">
+      <table id="riskTable">
+        <thead>
+          <tr>
+            <th class="th-col th-project" rowspan="2" onclick="sortBy('name')">Project / Version</th>
+            <th class="th-group security" colspan="4">Security Risk</th>
+            <th class="th-group operations" colspan="4">Operational Risk</th>
+            <th class="th-group license" colspan="4">License Risk</th>
+          </tr>
+          <tr id="colHeaders">
+            <!-- filled by JS -->
+          </tr>
+        </thead>
+        <tbody id="tableBody"><!-- filled by JS --></tbody>
+      </table>
+    </div>
+  </main>
+
+  <!-- ── Footer ──────────────────────────────────────────────────────────── -->
+  <footer class="footer">
+    Dependency-Track Community Edition &nbsp;·&nbsp; Custom Risk Dashboard &nbsp;·&nbsp;
+    <a href="https://docs.dependencytrack.org" target="_blank" style="color:var(--accent)">docs.dependencytrack.org</a>
+  </footer>
+</div>
+
+<!-- ── API Config Modal ─────────────────────────────────────────────────── -->
+<div class="modal-overlay" id="apiModal">
+  <div class="modal">
+    <button class="modal-close" onclick="closeModal('apiModal')">&times;</button>
+    <h2>⚙ Connect to Live DependencyTrack API</h2>
+    <p>Enter your DependencyTrack API URL and an API key. The key can be found in <strong>Administration → Access Management → Teams</strong>.</p>
+    <label style="font-size:12px;color:var(--text-muted)">API Base URL</label>
+    <input id="apiUrlInput" class="search-input" style="width:100%;margin:6px 0 12px"
+           placeholder="http://localhost:8081" value="http://localhost:8081" />
+    <label style="font-size:12px;color:var(--text-muted)">API Key</label>
+    <input id="apiKeyInput" class="search-input" style="width:100%;margin:6px 0 12px"
+           placeholder="odt_xxxxxxxxxxxxxxxxxxxxxxxxxx" />
+    <div style="display:flex;gap:8px;margin-top:8px">
+      <button class="btn primary" onclick="connectLiveApi()">Connect</button>
+      <button class="btn" onclick="loadMockData(); closeModal('apiModal')">Use Mock Data</button>
+    </div>
+    <p style="margin-top:16px;font-size:12px">
+      Need to generate an API key?<br/>
+      See <strong>docs/DASHBOARD_INTEGRATION.md</strong> or run:
+    </p>
+    <code>curl -s -u admin:admin http://localhost:8081/api/v1/team \
+  | jq -r '.[0].apiKeys[0].key'</code>
+  </div>
+</div>
+
+<script>
+// ── Constants ─────────────────────────────────────────────────────────────
+const LEVELS   = ['critical','high','medium','low'];
+const CATS     = ['security','operations','license'];
+const CAT_LABELS = { security: 'Security', operations: 'Operational', license: 'License' };
+
+// ── State ─────────────────────────────────────────────────────────────────
+let allProjects   = [];
+let filtered      = [];
+let sortCol       = 'name';
+let sortDir       = 'asc';
+let liveMode      = false;
+let apiUrl        = 'http://localhost:8081';
+let apiKey        = '';
+
+// ── Mock Data ─────────────────────────────────────────────────────────────
+function generateMockProjects() {
+  const names = [
+    'payment-service','auth-gateway','user-profile-api','inventory-ms',
+    'notification-worker','product-catalog','order-management','shipping-service',
+    'analytics-pipeline','report-generator','audit-logger','config-server',
+    'api-gateway','session-manager','file-storage-service','email-service',
+    'sms-gateway','search-indexer','recommendation-engine','fraud-detection',
+    'billing-service','subscription-manager','checkout-flow','cart-service',
+    'wishlist-service','review-aggregator','rating-engine','pricing-service',
+    'discount-service','coupon-manager','loyalty-points','referral-tracker',
+    'content-delivery','media-processor','thumbnail-generator','image-optimizer',
+    'data-exporter','import-worker','etl-pipeline','warehouse-connector',
+    'crm-integration','erp-bridge','payment-gateway-adapter','tax-calculator',
+    'compliance-checker','gdpr-service','consent-manager','data-masking-util',
+    'identity-provider','oauth-server','mfa-service','token-revocation',
+    'health-monitor','metrics-collector','alert-manager','log-aggregator'
+  ];
+
+  return names.map((name, i) => {
+    const v = `${Math.floor(Math.random()*3)+1}.${Math.floor(Math.random()*9)}.${Math.floor(Math.random()*9)}`;
+    const rnd = (max) => Math.floor(Math.random() * (max + 1));
+    return {
+      uuid: `mock-${i}`,
+      name,
+      version: v,
+      security:   { critical: rnd(3), high: rnd(8), medium: rnd(15), low: rnd(20) },
+      operations: { critical: rnd(2), high: rnd(6), medium: rnd(12), low: rnd(18) },
+      license:    { critical: rnd(1), high: rnd(4), medium: rnd(8),  low: rnd(10) },
+    };
+  });
+}
+
+// ── Risk score for sorting/filtering ──────────────────────────────────────
+function riskScore(proj) {
+  let s = 0;
+  CATS.forEach(c => {
+    s += (proj[c].critical || 0) * 1000;
+    s += (proj[c].high     || 0) * 100;
+    s += (proj[c].medium   || 0) * 10;
+    s += (proj[c].low      || 0) * 1;
+  });
+  return s;
+}
+
+// ── Build column headers ───────────────────────────────────────────────────
+function buildColHeaders() {
+  const row = document.getElementById('colHeaders');
+  row.innerHTML = '';
+  CATS.forEach((cat, ci) => {
+    LEVELS.forEach(lvl => {
+      const th = document.createElement('th');
+      th.className = 'th-col' + (lvl === 'critical' && ci > 0 ? ' sep-left' : '');
+      th.textContent = lvl.charAt(0).toUpperCase() + lvl.slice(1);
+      th.onclick = () => sortBy(`${cat}.${lvl}`);
+      th.dataset.sort = `${cat}.${lvl}`;
+      row.appendChild(th);
+    });
+  });
+}
+
+// ── Render pill ────────────────────────────────────────────────────────────
+function pill(n) {
+  if (n === 0) return `<span class="pill pill-zero">—</span>`;
+  let cls = 'ok';
+  return `<span class="pill pill-${cls} pill-${cls}">${n}</span>`;
+}
+
+// Context-aware pill (we pass the level)
+function pillFor(n, level) {
+  if (n === 0) return `<span class="pill pill-zero">—</span>`;
+  return `<span class="pill pill-${level}">${n}</span>`;
+}
+
+// ── Render table body ──────────────────────────────────────────────────────
+function renderTable() {
+  const tbody = document.getElementById('tableBody');
+  tbody.innerHTML = '';
+
+  if (filtered.length === 0) {
+    tbody.innerHTML = `<tr><td colspan="13" style="text-align:center;padding:40px;color:var(--text-muted)">No projects match your filters.</td></tr>`;
+    return;
+  }
+
+  filtered.forEach(proj => {
+    const tr = document.createElement('tr');
+    let html = `<td class="project-name">${escHtml(proj.name)}<span class="version-badge">v${escHtml(proj.version)}</span></td>`;
+
+    CATS.forEach((cat, ci) => {
+      LEVELS.forEach((lvl, li) => {
+        const isFirst = li === 0;
+        html += `<td class="${isFirst && ci > 0 ? 'sep-left' : ''}">${pillFor(proj[cat][lvl] || 0, lvl)}</td>`;
+      });
+    });
+
+    tr.innerHTML = html;
+    tbody.appendChild(tr);
+  });
+}
+
+// ── KPI summary cards ──────────────────────────────────────────────────────
+function renderSummary() {
+  const totals = { critical:0, high:0, medium:0, low:0 };
+  allProjects.forEach(p => {
+    CATS.forEach(c => {
+      LEVELS.forEach(l => { totals[l] += (p[c][l] || 0); });
+    });
+  });
+
+  const totalRiskyProjects = allProjects.filter(p => riskScore(p) > 0).length;
+
+  document.getElementById('summaryGrid').innerHTML = `
+    <div class="summary-card">
+      <div class="label">Total Projects</div>
+      <div class="value" style="color:var(--accent)">${allProjects.length}</div>
+      <div class="sub">${totalRiskyProjects} with risks</div>
+    </div>
+    <div class="summary-card">
+      <div class="label">Critical Issues</div>
+      <div class="value c-critical">${totals.critical}</div>
+      <div class="sub">across all categories</div>
+    </div>
+    <div class="summary-card">
+      <div class="label">High Issues</div>
+      <div class="value c-high">${totals.high}</div>
+      <div class="sub">across all categories</div>
+    </div>
+    <div class="summary-card">
+      <div class="label">Medium Issues</div>
+      <div class="value c-medium">${totals.medium}</div>
+      <div class="sub">across all categories</div>
+    </div>
+    <div class="summary-card">
+      <div class="label">Low Issues</div>
+      <div class="value c-low">${totals.low}</div>
+      <div class="sub">across all categories</div>
+    </div>
+    <div class="summary-card">
+      <div class="label">Clean Projects</div>
+      <div class="value c-ok">${allProjects.length - totalRiskyProjects}</div>
+      <div class="sub">no known risks</div>
+    </div>
+  `;
+}
+
+// ── Filters ────────────────────────────────────────────────────────────────
+function applyFilters() {
+  const q    = document.getElementById('searchInput').value.toLowerCase();
+  const risk = document.getElementById('riskFilter').value;
+  const cat  = document.getElementById('categoryFilter').value;
+
+  filtered = allProjects.filter(proj => {
+    // Text search
+    if (q && !proj.name.toLowerCase().includes(q)) return false;
+
+    // Risk filter
+    if (risk !== 'all') {
+      if (risk === 'ok') {
+        if (riskScore(proj) !== 0) return false;
+      } else {
+        const catsToCheck = cat === 'all' ? CATS : [cat === 'operations' ? 'operations' : cat];
+        const found = catsToCheck.some(c => (proj[c]?.[risk] || 0) > 0);
+        if (!found) return false;
+      }
+    }
+
+    // Category filter — no row-level filtering on category alone,
+    // but useful in combination with risk filter above
+    return true;
+  });
+
+  // Sort
+  filtered.sort((a, b) => {
+    let va, vb;
+    if (sortCol === 'name') {
+      va = a.name; vb = b.name;
+    } else if (sortCol === 'risk') {
+      va = riskScore(a); vb = riskScore(b);
+    } else {
+      const parts = sortCol.split('.');
+      va = (a[parts[0]]?.[parts[1]] || 0);
+      vb = (b[parts[0]]?.[parts[1]] || 0);
+    }
+    if (va < vb) return sortDir === 'asc' ? -1 : 1;
+    if (va > vb) return sortDir === 'asc' ? 1  : -1;
+    return 0;
+  });
+
+  document.getElementById('projectCount').textContent =
+    `(${filtered.length} of ${allProjects.length})`;
+
+  renderTable();
+}
+
+function sortBy(col) {
+  if (sortCol === col) {
+    sortDir = sortDir === 'asc' ? 'desc' : 'asc';
+  } else {
+    sortCol = col;
+    sortDir = col === 'name' ? 'asc' : 'desc';
+  }
+
+  // Update header classes
+  document.querySelectorAll('.th-col').forEach(th => {
+    th.classList.remove('sort-asc','sort-desc');
+    if (th.dataset.sort === col || (col === 'name' && th.classList.contains('th-project'))) {
+      th.classList.add(sortDir === 'asc' ? 'sort-asc' : 'sort-desc');
+    }
+  });
+
+  applyFilters();
+}
+
+// ── Load mock data ─────────────────────────────────────────────────────────
+function loadMockData() {
+  liveMode = false;
+  allProjects = generateMockProjects();
+  document.getElementById('dataBanner').innerHTML =
+    '⚠ Showing <strong>mock data</strong> — click "Connect Live API" to pull real project risks from your DependencyTrack instance.';
+  document.getElementById('dataBanner').className = 'data-banner';
+  document.getElementById('apiStatus').innerHTML =
+    '<div class="status-dot" style="background:var(--medium)"></div><span>Mock Data</span>';
+  renderSummary();
+  applyFilters();
+}
+
+// ── Connect to live API ────────────────────────────────────────────────────
+async function connectLiveApi() {
+  apiUrl = document.getElementById('apiUrlInput').value.replace(/\/$/, '');
+  apiKey = document.getElementById('apiKeyInput').value.trim();
+
+  if (!apiKey) {
+    alert('Please enter an API key.'); return;
+  }
+
+  document.getElementById('apiStatus').innerHTML =
+    '<div class="status-dot" style="background:var(--medium);animation:pulse 0.5s infinite"></div><span>Connecting…</span>';
+
+  try {
+    // Fetch all projects
+    const res = await fetch(`${apiUrl}/api/v1/project?pageSize=500&pageNumber=1`, {
+      headers: { 'X-Api-Key': apiKey }
+    });
+
+    if (!res.ok) throw new Error(`HTTP ${res.status} — check API key and URL`);
+    const data = await res.json();
+    const projects = data.values || data;
+
+    // Map to our schema
+    allProjects = await Promise.all(projects.map(async (p) => {
+      let metrics = { critical:0, high:0, medium:0, low:0 };
+      try {
+        const mr = await fetch(`${apiUrl}/api/v1/metrics/project/${p.uuid}/current`, {
+          headers: { 'X-Api-Key': apiKey }
+        });
+        if (mr.ok) {
+          const m = await mr.json();
+          return {
+            uuid: p.uuid,
+            name: p.name,
+            version: p.version || 'latest',
+            security:   {
+              critical: m.critical || 0, high: m.high || 0,
+              medium: m.medium || 0, low: m.low || 0
+            },
+            operations: {
+              critical: 0, high: m.unassigned || 0,
+              medium: m.suppressed || 0, low: 0
+            },
+            license:    {
+              critical: m.policyViolationsFail || 0,
+              high: m.policyViolationsWarn || 0,
+              medium: m.policyViolationsInfo || 0, low: 0
+            }
+          };
+        }
+      } catch(_) {}
+      return {
+        uuid: p.uuid, name: p.name, version: p.version || 'latest',
+        security:   { critical:0, high:0, medium:0, low:0 },
+        operations: { critical:0, high:0, medium:0, low:0 },
+        license:    { critical:0, high:0, medium:0, low:0 }
+      };
+    }));
+
+    liveMode = true;
+    document.getElementById('dataBanner').innerHTML =
+      `✓ Live data from <strong>${apiUrl}</strong> — ${allProjects.length} projects loaded.`;
+    document.getElementById('dataBanner').className = 'data-banner live';
+    document.getElementById('apiStatus').innerHTML =
+      '<div class="status-dot"></div><span>Live</span>';
+
+    closeModal('apiModal');
+    renderSummary();
+    applyFilters();
+  } catch(err) {
+    document.getElementById('apiStatus').innerHTML =
+      '<div class="status-dot" style="background:var(--critical)"></div><span>Error</span>';
+    alert('Connection failed: ' + err.message);
+  }
+}
+
+async function refreshData() {
+  if (liveMode) {
+    await connectLiveApi();
+  } else {
+    loadMockData();
+  }
+}
+
+// ── Modal helpers ──────────────────────────────────────────────────────────
+function openModal(id)  { document.getElementById(id).classList.add('open'); }
+function closeModal(id) { document.getElementById(id).classList.remove('open'); }
+document.querySelectorAll('.modal-overlay').forEach(el => {
+  el.addEventListener('click', e => { if (e.target === el) el.classList.remove('open'); });
+});
+
+// ── Utility ────────────────────────────────────────────────────────────────
+function escHtml(s) {
+  return String(s)
+    .replace(/&/g,'&amp;').replace(/</g,'&lt;')
+    .replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+
+// ── Init ───────────────────────────────────────────────────────────────────
+buildColHeaders();
+loadMockData();
+</script>
+</body>
+</html>
