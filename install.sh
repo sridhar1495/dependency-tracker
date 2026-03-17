@@ -24,6 +24,25 @@ error()   { echo -e "${RED}[ERROR]${RESET} $*" >&2; }
 step()    { echo -e "\n${BOLD}${CYAN}━━━ $* ━━━${RESET}"; }
 die()     { error "$*"; exit 1; }
 
+# ─── Retry helper ─────────────────────────────────────────────────────────────
+# retry <max_attempts> <initial_delay_seconds> <command...>
+# Retries the command with exponential backoff on failure.
+# Example: retry 4 2 docker compose pull
+retry() {
+  local max="$1" delay="$2"; shift 2
+  local attempt=1
+  until "$@"; do
+    if (( attempt >= max )); then
+      error "Command failed after $max attempt(s): $*"
+      return 1
+    fi
+    warn "Attempt $attempt/$max failed — retrying in ${delay}s…"
+    sleep "$delay"
+    delay=$(( delay * 2 ))   # exponential backoff: 2 → 4 → 8 → 16 s
+    (( attempt++ ))
+  done
+}
+
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 NON_INTERACTIVE=false
 SKIP_DOCKER_CHECK=false
@@ -149,27 +168,32 @@ set -a; source "$ENV_FILE"; set +a
 
 # ─── Step 3 — Pull images ────────────────────────────────────────────────────
 step "Step 3 — Pulling Docker Images"
-$COMPOSE_CMD -f "$SCRIPT_DIR/docker-compose.yml" --env-file "$ENV_FILE" pull
+# Retry up to 4 times with exponential backoff (2 s, 4 s, 8 s) for network blips.
+retry 4 2 \
+  $COMPOSE_CMD -f "$SCRIPT_DIR/docker-compose.yml" --env-file "$ENV_FILE" pull
 success "Images pulled"
 
 # ─── Step 4 — Start services ─────────────────────────────────────────────────
 step "Step 4 — Starting Services"
-$COMPOSE_CMD -f "$SCRIPT_DIR/docker-compose.yml" --env-file "$ENV_FILE" up -d
+# Retry up to 3 times in case the Docker daemon returns a transient error.
+retry 3 5 \
+  $COMPOSE_CMD -f "$SCRIPT_DIR/docker-compose.yml" --env-file "$ENV_FILE" up -d
 success "Containers started"
 
 # ─── Step 5 — Wait for API server ────────────────────────────────────────────
 step "Step 5 — Waiting for DependencyTrack API Server"
 API_URL="${DT_API_URL:-http://localhost:8081}"
-MAX_WAIT=180
+# First-run NVD database download can take 5–15 min; allow up to 15 min total.
+MAX_WAIT=900
 WAITED=0
-INTERVAL=10
+INTERVAL=15
 
-info "API URL: $API_URL  (timeout: ${MAX_WAIT}s)"
+info "API URL: $API_URL  (timeout: ${MAX_WAIT}s — first run may take up to 15 min)"
 until curl -sf "${API_URL}/api/version" -o /dev/null 2>/dev/null; do
   if (( WAITED >= MAX_WAIT )); then
     error "API server did not respond within ${MAX_WAIT}s"
     warn "Check logs: docker logs dt-apiserver"
-    die "Installation aborted"
+    die "Installation aborted — is the container still running? (docker ps)"
   fi
   echo -ne "  Waiting… ${WAITED}s / ${MAX_WAIT}s\r"
   sleep "$INTERVAL"
@@ -186,32 +210,42 @@ ADMIN_PASS="${DT_ADMIN_PASS:-admin}"
 DEFAULT_PASS="admin"
 
 info "Attempting to change default admin password…"
-HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
-  -X POST "${API_URL}/api/v1/user/forceChangePassword" \
-  -H "Content-Type: application/x-www-form-urlencoded" \
-  --data-urlencode "username=${ADMIN_USER}" \
-  --data-urlencode "password=${DEFAULT_PASS}" \
-  --data-urlencode "newPassword=${ADMIN_PASS}" \
-  --data-urlencode "confirmPassword=${ADMIN_PASS}" 2>/dev/null || echo "000")
-
-if [[ "$HTTP_STATUS" == "200" ]]; then
-  success "Admin password updated"
-elif [[ "$HTTP_STATUS" == "401" ]]; then
-  warn "Password may already be changed — continuing"
+# Retry up to 4 times (2 s, 4 s, 8 s) — the API may still be settling.
+_change_pass() {
+  HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" \
+    -X POST "${API_URL}/api/v1/user/forceChangePassword" \
+    -H "Content-Type: application/x-www-form-urlencoded" \
+    --data-urlencode "username=${ADMIN_USER}" \
+    --data-urlencode "password=${DEFAULT_PASS}" \
+    --data-urlencode "newPassword=${ADMIN_PASS}" \
+    --data-urlencode "confirmPassword=${ADMIN_PASS}" 2>/dev/null || echo "000")
+  # Treat 200 (changed) and 401 (already changed) as success for retry purposes
+  [[ "$HTTP_STATUS" == "200" || "$HTTP_STATUS" == "401" ]]
+}
+if retry 4 2 _change_pass; then
+  if [[ "$HTTP_STATUS" == "200" ]]; then
+    success "Admin password updated"
+  else
+    warn "Password already changed (HTTP 401) — continuing"
+  fi
 else
-  warn "Password change returned HTTP $HTTP_STATUS — may need manual update in UI"
+  warn "Password change returned HTTP $HTTP_STATUS — update manually in the UI"
 fi
 
 # ─── Step 7 — Validate API Key ───────────────────────────────────────────────
 step "Step 7 — Verifying API Key"
 
-API_KEY=$(curl -sf \
-  -u "${ADMIN_USER}:${ADMIN_PASS}" \
-  "${API_URL}/api/v1/team" 2>/dev/null \
-  | jq -r '.[0].apiKeys[0].key // empty' 2>/dev/null || echo "")
-
-if [[ -n "$API_KEY" ]]; then
-  # Save API key to env
+# Retry fetching the API key up to 4 times — auth may lag slightly after a
+# password change.
+API_KEY=""
+_fetch_key() {
+  API_KEY=$(curl -sf \
+    -u "${ADMIN_USER}:${ADMIN_PASS}" \
+    "${API_URL}/api/v1/team" 2>/dev/null \
+    | jq -r '.[0].apiKeys[0].key // empty' 2>/dev/null || echo "")
+  [[ -n "$API_KEY" ]]
+}
+if retry 4 2 _fetch_key; then
   grep -v "^DT_API_KEY=" "$ENV_FILE" > "${ENV_FILE}.tmp" && mv "${ENV_FILE}.tmp" "$ENV_FILE"
   echo "DT_API_KEY=${API_KEY}" >> "$ENV_FILE"
   success "API key saved to .env"
