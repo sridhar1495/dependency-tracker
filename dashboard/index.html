@@ -767,7 +767,25 @@ async function connectLiveApi() {
 
     if (!res.ok) throw new Error(`HTTP ${res.status} — check your API key`);
     const data = await res.json();
-    const projects = data.values || data;
+    // DT may return a paginated envelope {values:[...]} or a bare array [...]
+    // Guard against unexpected shapes (e.g. empty object {}) with Array.isArray.
+    const projects = Array.isArray(data.values) ? data.values
+                   : Array.isArray(data)         ? data
+                   : [];
+
+    if (projects.length === 0) {
+      liveMode = true;
+      allProjects = [];
+      document.getElementById('dataBanner').innerHTML =
+        '✓ Connected — no projects found. Upload an SBOM to get started.';
+      document.getElementById('dataBanner').className = 'data-banner live';
+      document.getElementById('apiStatus').innerHTML =
+        '<div class="status-dot"></div><span>Live</span>';
+      closeModal('apiModal');
+      renderSummary();
+      applyFilters();
+      return;
+    }
 
     // Map to our schema
     allProjects = await Promise.all(projects.map(async (p) => {
