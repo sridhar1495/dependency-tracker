@@ -480,8 +480,14 @@
   <div class="modal">
     <button class="modal-close" onclick="closeModal('apiModal')">&times;</button>
     <h2>⚙ Connect to Live DependencyTrack API</h2>
-    <p>API calls are routed through this dashboard's built-in nginx proxy — no cross-origin issues, no CORS configuration needed.</p>
-    <p>Enter the API key for your DependencyTrack instance. The key can be found in <strong>Administration → Access Management → Teams</strong>.</p>
+    <p>
+      Requests go through this dashboard's <strong>server-side nginx proxy</strong> — the browser
+      never talks directly to DependencyTrack, so there are no CORS issues.
+    </p>
+    <p id="proxyTargetNote" style="font-size:12px;background:var(--surface2);border:1px solid var(--border);border-radius:6px;padding:8px 12px;margin-bottom:12px">
+      Proxy target: <strong id="proxyTargetDisplay">loading…</strong><br/>
+      <span style="color:var(--text-muted)">To connect to a different instance set <code>DT_API_INTERNAL_URL</code> in <code>.env</code> and restart the container.</span>
+    </p>
     <label style="font-size:12px;color:var(--text-muted)">API Key</label>
     <input id="apiKeyInput" class="search-input" style="width:100%;margin:6px 0 12px"
            placeholder="odt_xxxxxxxxxxxxxxxxxxxxxxxxxx" />
@@ -490,12 +496,12 @@
       <button class="btn" onclick="loadMockData(); closeModal('apiModal')">Use Mock Data</button>
     </div>
     <p style="margin-top:16px;font-size:12px">
-      Need to generate an API key? Run:
+      Need to generate an API key? Run on the server hosting DependencyTrack:
     </p>
-    <code>TOKEN=$(curl -sf -X POST http://localhost:8081/api/v1/user/login \
+    <code>TOKEN=$(curl -sf -X POST http://&lt;DT-HOST&gt;:8081/api/v1/user/login \
   -d 'username=admin&password=YOUR_PASS') \
 && curl -sf -H "Authorization: Bearer $TOKEN" \
-  http://localhost:8081/api/v1/team | jq -r '.[0].apiKeys[0].key'</code>
+  http://&lt;DT-HOST&gt;:8081/api/v1/team | jq -r '.[0].apiKeys[0].key'</code>
   </div>
 </div>
 
@@ -837,6 +843,29 @@ function escHtml(s) {
     .replace(/&/g,'&amp;').replace(/</g,'&lt;')
     .replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 }
+
+// ── Probe proxy target (shown in the Connect modal) ────────────────────────
+// The dashboard never knows the raw DT_API_INTERNAL_URL (it's server-side),
+// but we can show the DT version string which confirms the proxy is working.
+async function probeProxyTarget() {
+  const el = document.getElementById('proxyTargetDisplay');
+  if (!el) return;
+  try {
+    const r = await fetch('/api/version', { signal: AbortSignal.timeout(4000) });
+    if (r.ok) {
+      const v = await r.json();
+      el.textContent = `DependencyTrack ${v.application || ''} ${v.version || '(connected)'}`.trim();
+    } else {
+      el.textContent = 'proxy reachable — DT not responding yet';
+    }
+  } catch (_) {
+    el.textContent = 'proxy target not reachable — check DT_API_INTERNAL_URL in .env';
+    el.style.color = 'var(--critical)';
+  }
+}
+document.getElementById('apiModal').addEventListener('transitionend', () => {
+  if (document.getElementById('apiModal').classList.contains('open')) probeProxyTarget();
+});
 
 // ── Init ───────────────────────────────────────────────────────────────────
 buildColHeaders();
