@@ -29,7 +29,7 @@
       --ok-bg:        rgba(34,197,94,0.08);
 
       --header-h:     64px;
-      --row-h:        46px;
+      --row-h:        44px;
       --radius:       8px;
     }
 
@@ -41,7 +41,6 @@
       min-height: 100vh;
     }
 
-    /* ── Layout ───────────────────────────────────────────────────────────── */
     .app { display: flex; flex-direction: column; min-height: 100vh; }
 
     /* ── Top Bar ──────────────────────────────────────────────────────────── */
@@ -58,44 +57,28 @@
       z-index: 100;
     }
     .topbar-logo {
-      display: flex;
-      align-items: center;
-      gap: 10px;
-      font-size: 18px;
-      font-weight: 700;
-      color: var(--text);
-      text-decoration: none;
+      display: flex; align-items: center; gap: 10px;
+      font-size: 18px; font-weight: 700;
+      color: var(--text); text-decoration: none;
     }
     .topbar-logo svg { flex-shrink: 0; }
-    .topbar-subtitle {
-      font-size: 12px;
-      color: var(--text-muted);
-      font-weight: 400;
-    }
+    .topbar-subtitle { font-size: 12px; color: var(--text-muted); font-weight: 400; }
     .topbar-spacer { flex: 1; }
     .topbar-status {
-      display: flex;
-      align-items: center;
-      gap: 6px;
-      font-size: 12px;
-      color: var(--text-muted);
+      display: flex; align-items: center; gap: 6px;
+      font-size: 12px; color: var(--text-muted);
     }
     .status-dot {
-      width: 8px; height: 8px;
-      border-radius: 50%;
+      width: 8px; height: 8px; border-radius: 50%;
       background: var(--ok);
       animation: pulse 2s ease-in-out infinite;
     }
-    @keyframes pulse {
-      0%, 100% { opacity: 1; }
-      50%       { opacity: 0.4; }
-    }
+    @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.4} }
 
+    /* ── Buttons ──────────────────────────────────────────────────────────── */
     .btn {
-      display: inline-flex;
-      align-items: center;
-      gap: 6px;
-      padding: 7px 14px;
+      display: inline-flex; align-items: center; gap: 6px;
+      padding: 7px 13px;
       border-radius: var(--radius);
       border: 1px solid var(--border);
       background: var(--surface2);
@@ -106,20 +89,18 @@
       white-space: nowrap;
     }
     .btn:hover { background: var(--border); border-color: var(--accent); }
-    .btn.primary {
-      background: var(--accent);
-      border-color: var(--accent);
-      color: #fff;
-    }
+    .btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
     .btn.primary:hover { background: #4f46e5; }
     .btn.export {
-      background: rgba(34,197,94,0.12);
-      border-color: rgba(34,197,94,0.35);
-      color: var(--ok);
+      background: rgba(34,197,94,0.12); border-color: rgba(34,197,94,0.35); color: var(--ok);
     }
     .btn.export:hover { background: rgba(34,197,94,0.22); border-color: var(--ok); }
+    .btn.ar-on {
+      background: rgba(34,197,94,0.12); border-color: rgba(34,197,94,0.35); color: var(--ok);
+    }
+    .btn.ar-on:hover { background: rgba(34,197,94,0.22); border-color: var(--ok); }
 
-    /* ── Main content ─────────────────────────────────────────────────────── */
+    /* ── Main ─────────────────────────────────────────────────────────────── */
     .main { flex: 1; padding: 24px; }
 
     /* ── Summary cards ────────────────────────────────────────────────────── */
@@ -127,7 +108,7 @@
       display: grid;
       grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
       gap: 16px;
-      margin-bottom: 28px;
+      margin-bottom: 24px;
     }
     .summary-card {
       background: var(--surface);
@@ -136,373 +117,226 @@
       padding: 18px 20px;
     }
     .summary-card .label {
-      font-size: 12px;
-      color: var(--text-muted);
-      text-transform: uppercase;
-      letter-spacing: 0.5px;
-      margin-bottom: 8px;
+      font-size: 12px; color: var(--text-muted);
+      text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 8px;
     }
-    .summary-card .value {
-      font-size: 28px;
-      font-weight: 700;
-      line-height: 1;
-    }
-    .summary-card .sub {
-      font-size: 11px;
-      color: var(--text-muted);
-      margin-top: 4px;
-    }
+    .summary-card .value { font-size: 28px; font-weight: 700; line-height: 1; }
+    .summary-card .sub { font-size: 11px; color: var(--text-muted); margin-top: 4px; }
     .c-critical { color: var(--critical); }
     .c-high     { color: var(--high); }
     .c-medium   { color: var(--medium); }
     .c-low      { color: var(--low); }
     .c-ok       { color: var(--ok); }
 
-    /* ── Controls bar ─────────────────────────────────────────────────────── */
+    /* ── Controls ─────────────────────────────────────────────────────────── */
     .controls {
-      display: flex;
-      align-items: center;
-      gap: 10px;
-      margin-bottom: 16px;
-      flex-wrap: wrap;
+      display: flex; align-items: center; gap: 8px;
+      flex-wrap: wrap; margin-bottom: 8px;
     }
-    .controls h1 {
-      font-size: 18px;
-      font-weight: 600;
-      flex: 1;
-      min-width: 160px;
+    .controls.filters { margin-bottom: 14px; }
+    .ctrl-title {
+      font-size: 18px; font-weight: 600;
+      flex: 1; min-width: 160px;
     }
-    .controls h1 span {
-      color: var(--text-muted);
-      font-weight: 400;
-      font-size: 14px;
-      margin-left: 8px;
-    }
+    .ctrl-title span { color: var(--text-muted); font-weight: 400; font-size: 14px; margin-left: 8px; }
+
     .search-input {
-      background: var(--surface);
-      border: 1px solid var(--border);
-      border-radius: var(--radius);
-      color: var(--text);
-      font-size: 13px;
-      padding: 7px 12px;
-      width: 200px;
-      outline: none;
+      background: var(--surface); border: 1px solid var(--border);
+      border-radius: var(--radius); color: var(--text); font-size: 13px;
+      padding: 7px 12px; width: 200px; outline: none;
       transition: border-color 0.15s;
     }
     .search-input:focus { border-color: var(--accent); }
     .search-input::placeholder { color: var(--text-muted); }
 
     select.filter-select {
-      background: var(--surface);
-      border: 1px solid var(--border);
-      border-radius: var(--radius);
-      color: var(--text);
-      font-size: 13px;
-      padding: 7px 12px;
-      outline: none;
-      cursor: pointer;
+      background: var(--surface); border: 1px solid var(--border);
+      border-radius: var(--radius); color: var(--text); font-size: 13px;
+      padding: 7px 12px; outline: none; cursor: pointer;
     }
 
     /* ── Multi-select dropdown ────────────────────────────────────────────── */
-    .ms-wrap {
-      position: relative;
-    }
+    .ms-wrap { position: relative; }
     .ms-btn {
-      display: inline-flex;
-      align-items: center;
-      gap: 6px;
-      padding: 7px 12px;
-      border-radius: var(--radius);
-      border: 1px solid var(--border);
-      background: var(--surface);
-      color: var(--text);
-      font-size: 13px;
-      cursor: pointer;
-      white-space: nowrap;
-      transition: border-color 0.15s;
-      user-select: none;
+      display: inline-flex; align-items: center; gap: 6px;
+      padding: 7px 12px; border-radius: var(--radius);
+      border: 1px solid var(--border); background: var(--surface);
+      color: var(--text); font-size: 13px; cursor: pointer;
+      white-space: nowrap; transition: border-color 0.15s; user-select: none;
     }
     .ms-btn:hover { border-color: var(--accent); }
     .ms-btn.active { border-color: var(--accent); color: var(--accent); }
     .ms-btn .ms-caret { font-size: 10px; color: var(--text-muted); margin-left: 2px; }
     .ms-badge {
-      display: inline-flex;
-      align-items: center;
-      justify-content: center;
-      min-width: 18px;
-      height: 18px;
-      padding: 0 4px;
-      background: var(--accent);
-      color: #fff;
-      border-radius: 9px;
-      font-size: 10px;
-      font-weight: 700;
+      display: inline-flex; align-items: center; justify-content: center;
+      min-width: 18px; height: 18px; padding: 0 4px;
+      background: var(--accent); color: #fff;
+      border-radius: 9px; font-size: 10px; font-weight: 700;
     }
     .ms-panel {
-      position: absolute;
-      top: calc(100% + 4px);
-      left: 0;
-      background: var(--surface);
-      border: 1px solid var(--border);
-      border-radius: var(--radius);
-      padding: 6px;
-      min-width: 180px;
-      z-index: 60;
-      display: none;
-      max-height: 240px;
-      overflow-y: auto;
+      position: absolute; top: calc(100% + 4px); left: 0;
+      background: var(--surface); border: 1px solid var(--border);
+      border-radius: var(--radius); padding: 6px;
+      min-width: 180px; z-index: 60;
+      display: none; max-height: 240px; overflow-y: auto;
       box-shadow: 0 8px 24px rgba(0,0,0,0.4);
     }
     .ms-panel.open { display: block; }
     .ms-panel-header {
-      display: flex;
-      justify-content: space-between;
-      padding: 4px 6px 6px;
-      border-bottom: 1px solid var(--border);
-      margin-bottom: 4px;
+      display: flex; justify-content: space-between;
+      padding: 4px 6px 6px; border-bottom: 1px solid var(--border); margin-bottom: 4px;
     }
     .ms-panel-header button {
-      background: none;
-      border: none;
-      color: var(--accent);
-      font-size: 11px;
-      cursor: pointer;
-      padding: 0;
+      background: none; border: none; color: var(--accent);
+      font-size: 11px; cursor: pointer; padding: 0;
     }
     .ms-panel-header button:hover { text-decoration: underline; }
     .ms-panel label {
-      display: flex;
-      align-items: center;
-      gap: 8px;
-      padding: 5px 6px;
-      border-radius: 4px;
-      cursor: pointer;
-      font-size: 13px;
-      color: var(--text);
-      transition: background 0.1s;
+      display: flex; align-items: center; gap: 8px;
+      padding: 5px 6px; border-radius: 4px; cursor: pointer;
+      font-size: 13px; color: var(--text); transition: background 0.1s;
     }
     .ms-panel label:hover { background: var(--surface2); }
     .ms-panel input[type=checkbox] {
-      accent-color: var(--accent);
-      width: 14px; height: 14px;
-      cursor: pointer;
-      flex-shrink: 0;
+      accent-color: var(--accent); width: 14px; height: 14px;
+      cursor: pointer; flex-shrink: 0;
     }
-    .ms-empty {
-      padding: 6px 8px;
-      font-size: 12px;
-      color: var(--text-muted);
-      font-style: italic;
-    }
+    .ms-empty { padding: 6px 8px; font-size: 12px; color: var(--text-muted); font-style: italic; }
 
     /* ── Table wrapper ────────────────────────────────────────────────────── */
     .table-wrap {
-      background: var(--surface);
-      border: 1px solid var(--border);
-      border-radius: var(--radius);
-      overflow: auto;
-      max-height: calc(100vh - 300px);
+      background: var(--surface); border: 1px solid var(--border);
+      border-radius: var(--radius); overflow: auto;
+      max-height: calc(100vh - 320px);
     }
-
-    /* ── Table ────────────────────────────────────────────────────────────── */
-    table {
-      width: 100%;
-      border-collapse: collapse;
-      min-width: 1100px;
-    }
-
-    /* Sticky header */
+    table { width: 100%; border-collapse: collapse; min-width: 1100px; }
     thead tr { position: sticky; top: 0; z-index: 10; }
 
-    /* Group header row */
     .th-group {
-      background: var(--surface2);
-      padding: 8px 0;
-      text-align: center;
-      font-size: 11px;
-      font-weight: 700;
-      text-transform: uppercase;
-      letter-spacing: 0.8px;
+      background: var(--surface2); padding: 8px 0;
+      text-align: center; font-size: 11px; font-weight: 700;
+      text-transform: uppercase; letter-spacing: 0.8px;
       border-bottom: 1px solid var(--border);
     }
-    .th-group.security   { color: var(--high);   border-left: 3px solid var(--high); }
-    .th-group.operations { color: #a78bfa;        border-left: 3px solid #a78bfa; }
-    .th-group.license    { color: var(--medium);  border-left: 3px solid var(--medium); }
+    .th-group.security   { color: var(--high);  border-left: 3px solid var(--high); }
+    .th-group.operations { color: #a78bfa;       border-left: 3px solid #a78bfa; }
+    .th-group.license    { color: var(--medium); border-left: 3px solid var(--medium); }
 
-    /* Column header row */
     .th-col {
-      background: var(--surface2);
-      padding: 10px 10px;
-      font-size: 11px;
-      font-weight: 600;
-      text-transform: uppercase;
-      letter-spacing: 0.5px;
-      color: var(--text-muted);
-      border-bottom: 2px solid var(--border);
-      white-space: nowrap;
-      cursor: pointer;
-      user-select: none;
-      text-align: center;
+      background: var(--surface2); padding: 10px;
+      font-size: 11px; font-weight: 600;
+      text-transform: uppercase; letter-spacing: 0.5px;
+      color: var(--text-muted); border-bottom: 2px solid var(--border);
+      white-space: nowrap; cursor: pointer; user-select: none; text-align: center;
     }
     .th-col:hover { color: var(--text); }
     .th-col.sort-asc::after  { content: ' ↑'; color: var(--accent); }
     .th-col.sort-desc::after { content: ' ↓'; color: var(--accent); }
+    .th-project { text-align: left; padding-left: 12px; min-width: 280px; }
+    .th-level   { min-width: 54px; }
 
-    .th-project {
-      text-align: left;
-      padding-left: 20px;
-      min-width: 240px;
-      cursor: pointer;
-    }
-    .th-level {
-      min-width: 60px;
-      cursor: pointer;
-    }
-
-    /* Data rows */
-    tbody tr {
-      border-bottom: 1px solid rgba(46, 51, 82, 0.6);
-      transition: background 0.1s;
-    }
+    tbody tr { border-bottom: 1px solid rgba(46,51,82,0.6); transition: background 0.1s; }
     tbody tr:last-child { border-bottom: none; }
     tbody tr:hover { background: rgba(99,102,241,0.06); }
 
+    /* Group rows */
+    tbody tr.group-row { background: rgba(99,102,241,0.035); }
+    tbody tr.group-row:hover { background: rgba(99,102,241,0.08); }
+    tbody tr.group-row td.project-name { font-weight: 600; }
+
     td {
-      padding: 0 10px;
-      height: var(--row-h);
-      text-align: center;
-      vertical-align: middle;
+      padding: 0 10px; height: var(--row-h);
+      text-align: center; vertical-align: middle;
       font-variant-numeric: tabular-nums;
     }
-    td.project-name {
-      text-align: left;
-      padding-left: 20px;
-      font-weight: 500;
-    }
-    td.project-name .version-badge {
-      margin-left: 6px;
-      font-size: 10px;
-      color: var(--text-muted);
-      background: var(--surface2);
-      border: 1px solid var(--border);
-      border-radius: 4px;
-      padding: 1px 5px;
-    }
-    td.project-name .tag-chip {
-      display: inline-block;
-      margin-left: 4px;
-      font-size: 10px;
-      color: #a78bfa;
-      background: rgba(167,139,250,0.1);
-      border: 1px solid rgba(167,139,250,0.25);
-      border-radius: 4px;
-      padding: 1px 5px;
-    }
-    td.level-cell {
-      color: var(--text-muted);
-      font-size: 12px;
-      font-weight: 600;
-    }
+    td.project-name { text-align: left; padding-left: 0; white-space: nowrap; }
+    td.level-cell { color: var(--text-muted); font-size: 12px; font-weight: 600; }
 
-    /* Risk pill */
+    /* ── Tree controls ────────────────────────────────────────────────────── */
+    .tree-toggle {
+      display: inline-flex; align-items: center; justify-content: center;
+      width: 18px; height: 18px; border-radius: 3px;
+      cursor: pointer; font-size: 10px; color: var(--text-muted);
+      flex-shrink: 0; transition: color 0.15s, background 0.15s;
+      margin-right: 2px; vertical-align: middle;
+    }
+    .tree-toggle:hover { color: var(--accent); background: var(--surface2); }
+    .tree-indent { display: inline-block; width: 20px; flex-shrink: 0; }
+
+    /* ── Name cell inline elements ────────────────────────────────────────── */
+    .version-badge {
+      margin-left: 6px; font-size: 10px; color: var(--text-muted);
+      background: var(--surface2); border: 1px solid var(--border);
+      border-radius: 4px; padding: 1px 5px;
+    }
+    .tag-chip {
+      display: inline-block; margin-left: 4px;
+      font-size: 10px; color: #a78bfa;
+      background: rgba(167,139,250,0.1); border: 1px solid rgba(167,139,250,0.25);
+      border-radius: 4px; padding: 1px 5px;
+    }
+    a.project-link { color: inherit; text-decoration: none; }
+    a.project-link:hover { color: var(--accent); text-decoration: underline; }
+
+    /* ── Pills ────────────────────────────────────────────────────────────── */
     .pill {
-      display: inline-flex;
-      align-items: center;
-      justify-content: center;
-      min-width: 32px;
-      height: 22px;
-      padding: 0 6px;
-      border-radius: 4px;
-      font-size: 12px;
-      font-weight: 600;
+      display: inline-flex; align-items: center; justify-content: center;
+      min-width: 32px; height: 22px; padding: 0 6px;
+      border-radius: 4px; font-size: 12px; font-weight: 600;
     }
     .pill-critical { background: var(--critical-bg); color: var(--critical); }
     .pill-high     { background: var(--high-bg);     color: var(--high); }
     .pill-medium   { background: var(--medium-bg);   color: var(--medium); }
     .pill-low      { background: var(--low-bg);      color: var(--low); }
-    .pill-ok       { background: var(--ok-bg);       color: var(--ok); }
     .pill-zero     { color: var(--text-muted); font-size: 11px; }
-
-    /* Column separators */
-    .sep-left { border-left: 2px solid var(--border); }
+    .sep-left      { border-left: 2px solid var(--border); }
 
     /* ── Data mode banner ─────────────────────────────────────────────────── */
     .data-banner {
-      display: flex;
-      align-items: center;
-      gap: 10px;
-      background: rgba(234,179,8,0.08);
-      border: 1px solid rgba(234,179,8,0.25);
-      border-radius: var(--radius);
-      padding: 10px 16px;
-      margin-bottom: 16px;
-      font-size: 13px;
-      color: var(--medium);
+      display: flex; align-items: center; gap: 10px;
+      background: rgba(234,179,8,0.08); border: 1px solid rgba(234,179,8,0.25);
+      border-radius: var(--radius); padding: 10px 16px;
+      margin-bottom: 16px; font-size: 13px; color: var(--medium);
     }
     .data-banner.live {
-      background: rgba(34,197,94,0.06);
-      border-color: rgba(34,197,94,0.2);
-      color: var(--ok);
+      background: rgba(34,197,94,0.06); border-color: rgba(34,197,94,0.2); color: var(--ok);
     }
 
     /* ── Modal ────────────────────────────────────────────────────────────── */
     .modal-overlay {
-      position: fixed; inset: 0;
-      background: rgba(0,0,0,0.65);
-      display: flex;
-      align-items: center;
-      justify-content: center;
-      z-index: 200;
-      opacity: 0;
-      pointer-events: none;
-      transition: opacity 0.2s;
+      position: fixed; inset: 0; background: rgba(0,0,0,0.65);
+      display: flex; align-items: center; justify-content: center;
+      z-index: 200; opacity: 0; pointer-events: none; transition: opacity 0.2s;
     }
     .modal-overlay.open { opacity: 1; pointer-events: all; }
     .modal {
-      background: var(--surface);
-      border: 1px solid var(--border);
-      border-radius: 12px;
-      padding: 28px;
-      width: 520px;
-      max-width: 90vw;
-      max-height: 80vh;
-      overflow-y: auto;
-      transform: scale(0.95);
-      transition: transform 0.2s;
+      background: var(--surface); border: 1px solid var(--border);
+      border-radius: 12px; padding: 28px; width: 540px;
+      max-width: 90vw; max-height: 85vh; overflow-y: auto;
+      transform: scale(0.95); transition: transform 0.2s;
     }
     .modal-overlay.open .modal { transform: scale(1); }
     .modal h2 { font-size: 16px; margin-bottom: 16px; }
     .modal p { font-size: 13px; color: var(--text-muted); line-height: 1.6; margin-bottom: 10px; }
+    .modal label { font-size: 12px; color: var(--text-muted); display: block; margin-bottom: 4px; }
     .modal code {
-      display: block;
-      background: var(--bg);
-      border: 1px solid var(--border);
-      border-radius: 6px;
-      padding: 10px 14px;
-      font-size: 12px;
-      font-family: 'Courier New', monospace;
-      color: #a5f3fc;
-      margin: 8px 0 14px;
-      white-space: pre;
+      display: block; background: var(--bg); border: 1px solid var(--border);
+      border-radius: 6px; padding: 10px 14px;
+      font-size: 12px; font-family: 'Courier New', monospace;
+      color: #a5f3fc; margin: 8px 0 14px; white-space: pre;
     }
     .modal-close {
-      float: right;
-      background: none;
-      border: none;
-      color: var(--text-muted);
-      font-size: 20px;
-      cursor: pointer;
-      line-height: 1;
+      float: right; background: none; border: none;
+      color: var(--text-muted); font-size: 20px; cursor: pointer; line-height: 1;
     }
     .modal-close:hover { color: var(--text); }
+    .modal-row { display: flex; gap: 8px; margin-bottom: 12px; }
+    .modal-row .search-input { flex: 1; }
 
     /* ── Footer ───────────────────────────────────────────────────────────── */
     .footer {
-      text-align: center;
-      padding: 16px;
-      font-size: 11px;
-      color: var(--text-muted);
-      border-top: 1px solid var(--border);
+      text-align: center; padding: 16px; font-size: 11px;
+      color: var(--text-muted); border-top: 1px solid var(--border);
     }
 
     /* ── Scrollbar ────────────────────────────────────────────────────────── */
@@ -527,8 +361,7 @@
     </a>
     <div class="topbar-spacer"></div>
     <div class="topbar-status" id="apiStatus">
-      <div class="status-dot"></div>
-      <span>Mock Data</span>
+      <div class="status-dot"></div><span>Mock Data</span>
     </div>
     <button class="btn" onclick="openModal('apiModal')">⚙ Connect API</button>
     <button class="btn primary" onclick="refreshData()">↻ Refresh</button>
@@ -537,22 +370,29 @@
   <!-- ── Main ────────────────────────────────────────────────────────────── -->
   <main class="main">
 
-    <!-- Data mode notice -->
     <div class="data-banner" id="dataBanner">
-      ⚠ Showing <strong>mock data</strong> — click "Connect Live API" to pull real project risks from your DependencyTrack instance.
+      ⚠ Showing <strong>mock data</strong> — click "Connect Live API" to pull real project risks.
     </div>
 
-    <!-- KPI Cards -->
-    <div class="summary-grid" id="summaryGrid"><!-- filled by JS --></div>
+    <div class="summary-grid" id="summaryGrid"></div>
 
-    <!-- Table controls -->
+    <!-- Controls row 1: title + tree actions + auto-refresh + export -->
     <div class="controls">
-      <h1>Projects <span id="projectCount"></span></h1>
+      <h1 class="ctrl-title">Projects <span id="projectCount"></span></h1>
+      <button class="btn" onclick="expandAll()" title="Expand all groups">▼ Expand All</button>
+      <button class="btn" onclick="collapseAll()" title="Collapse all groups">▶ Collapse All</button>
+      <button class="btn" id="arBtn" onclick="toggleAutoRefresh()" title="Toggle auto-refresh">↺ Auto: Off</button>
+      <select class="filter-select" id="arInterval" style="display:none" onchange="changeArInterval()" title="Auto-refresh interval">
+        <option value="30">30 sec</option>
+        <option value="60" selected>1 min</option>
+        <option value="300">5 min</option>
+      </select>
+      <button class="btn export" onclick="exportCSV()">↓ Export CSV</button>
+    </div>
 
-      <!-- Search -->
+    <!-- Controls row 2: filters -->
+    <div class="controls filters">
       <input class="search-input" id="searchInput" placeholder="Search projects…" oninput="applyFilters()" />
-
-      <!-- Risk level filter (single-select) -->
       <select class="filter-select" id="riskFilter" onchange="applyFilters()">
         <option value="all">All risk levels</option>
         <option value="critical">Has Critical</option>
@@ -561,8 +401,6 @@
         <option value="low">Has Low</option>
         <option value="ok">Clean (OK)</option>
       </select>
-
-      <!-- Category filter (single-select) -->
       <select class="filter-select" id="categoryFilter" onchange="applyFilters()">
         <option value="all">All categories</option>
         <option value="security">Security</option>
@@ -570,11 +408,10 @@
         <option value="license">License</option>
       </select>
 
-      <!-- Hierarchy Level multi-select -->
+      <!-- Level multi-select -->
       <div class="ms-wrap" id="levelWrap">
         <div class="ms-btn" id="levelBtn" onclick="toggleDropdown('levelPanel')">
-          Level
-          <span class="ms-badge" id="levelBadge" style="display:none"></span>
+          Level <span class="ms-badge" id="levelBadge" style="display:none"></span>
           <span class="ms-caret">▾</span>
         </div>
         <div class="ms-panel" id="levelPanel">
@@ -586,11 +423,10 @@
         </div>
       </div>
 
-      <!-- Tag multi-select -->
+      <!-- Tags multi-select -->
       <div class="ms-wrap" id="tagWrap">
         <div class="ms-btn" id="tagBtn" onclick="toggleDropdown('tagPanel')">
-          Tags
-          <span class="ms-badge" id="tagBadge" style="display:none"></span>
+          Tags <span class="ms-badge" id="tagBadge" style="display:none"></span>
           <span class="ms-caret">▾</span>
         </div>
         <div class="ms-panel" id="tagPanel">
@@ -601,11 +437,6 @@
           <div id="tagOptions"><span class="ms-empty">Load data first</span></div>
         </div>
       </div>
-
-      <!-- Export CSV -->
-      <button class="btn export" onclick="exportCSV()">
-        ↓ Export CSV
-      </button>
     </div>
 
     <!-- Table -->
@@ -614,21 +445,18 @@
         <thead>
           <tr>
             <th class="th-col th-project" rowspan="2" onclick="sortBy('name')">Project / Version</th>
-            <th class="th-col th-level" rowspan="2" onclick="sortBy('level')" title="Hierarchy depth (1 = top-level)">Lvl</th>
-            <th class="th-group security" colspan="4">Security Risk</th>
+            <th class="th-col th-level"   rowspan="2" onclick="sortBy('level')" title="Hierarchy depth">Lvl</th>
+            <th class="th-group security"   colspan="4">Security Risk</th>
             <th class="th-group operations" colspan="4">Operational Risk</th>
-            <th class="th-group license" colspan="4">License Risk</th>
+            <th class="th-group license"    colspan="4">License Risk</th>
           </tr>
-          <tr id="colHeaders">
-            <!-- filled by JS -->
-          </tr>
+          <tr id="colHeaders"></tr>
         </thead>
-        <tbody id="tableBody"><!-- filled by JS --></tbody>
+        <tbody id="tableBody"></tbody>
       </table>
     </div>
   </main>
 
-  <!-- ── Footer ──────────────────────────────────────────────────────────── -->
   <footer class="footer">
     Dependency-Track Community Edition &nbsp;·&nbsp; Custom Risk Dashboard &nbsp;·&nbsp;
     <a href="https://docs.dependencytrack.org" target="_blank" style="color:var(--accent)">docs.dependencytrack.org</a>
@@ -640,24 +468,28 @@
   <div class="modal">
     <button class="modal-close" onclick="closeModal('apiModal')">&times;</button>
     <h2>⚙ Connect to Live DependencyTrack API</h2>
-    <p>
-      Requests go through this dashboard's <strong>server-side nginx proxy</strong> — the browser
-      never talks directly to DependencyTrack, so there are no CORS issues.
-    </p>
-    <p id="proxyTargetNote" style="font-size:12px;background:var(--surface2);border:1px solid var(--border);border-radius:6px;padding:8px 12px;margin-bottom:12px">
+    <p>Requests go through the <strong>server-side nginx proxy</strong> — no CORS issues.</p>
+    <p id="proxyTargetNote" style="font-size:12px;background:var(--surface2);border:1px solid var(--border);border-radius:6px;padding:8px 12px;margin-bottom:14px">
       Proxy target: <strong id="proxyTargetDisplay">loading…</strong><br/>
-      <span style="color:var(--text-muted)">To connect to a different instance set <code>DT_API_INTERNAL_URL</code> in <code>.env</code> and restart the container.</span>
+      <span style="color:var(--text-muted)">Change via <code style="display:inline;background:none;border:none;padding:0;color:inherit">DT_API_INTERNAL_URL</code> in <code style="display:inline;background:none;border:none;padding:0;color:inherit">.env</code></span>
     </p>
-    <label style="font-size:12px;color:var(--text-muted)">API Key</label>
-    <input id="apiKeyInput" class="search-input" style="width:100%;margin:6px 0 12px"
-           placeholder="odt_xxxxxxxxxxxxxxxxxxxxxxxxxx" />
-    <div style="display:flex;gap:8px;margin-top:8px">
+    <div class="modal-row">
+      <div style="flex:1">
+        <label>API Key</label>
+        <input id="apiKeyInput" class="search-input" style="width:100%" placeholder="odt_xxxxxxxxxxxxxxxxxxxxxxxxxx" />
+      </div>
+    </div>
+    <div class="modal-row">
+      <div style="flex:1">
+        <label>DependencyTrack Frontend URL <span style="color:var(--text-muted)">(optional — enables project hyperlinks)</span></label>
+        <input id="dtFrontendUrlInput" class="search-input" style="width:100%" placeholder="http://10.121.163.69:8080" />
+      </div>
+    </div>
+    <div style="display:flex;gap:8px;margin-top:4px">
       <button class="btn primary" onclick="connectLiveApi()">Connect</button>
       <button class="btn" onclick="loadMockData(); closeModal('apiModal')">Use Mock Data</button>
     </div>
-    <p style="margin-top:16px;font-size:12px">
-      Need to generate an API key? Run on the server hosting DependencyTrack:
-    </p>
+    <p style="margin-top:16px;font-size:12px">Generate an API key:</p>
     <code>TOKEN=$(curl -sf -X POST http://&lt;DT-HOST&gt;:8081/api/v1/user/login \
   -d 'username=admin&password=YOUR_PASS') \
 && curl -sf -H "Authorization: Bearer $TOKEN" \
@@ -667,83 +499,86 @@
 
 <script>
 // ── Constants ─────────────────────────────────────────────────────────────
-const LEVELS   = ['critical','high','medium','low'];
-const CATS     = ['security','operations','license'];
+const LEVELS = ['critical','high','medium','low'];
+const CATS   = ['security','operations','license'];
 
 // ── State ─────────────────────────────────────────────────────────────────
-let allProjects   = [];
-let filtered      = [];
-let sortCol       = 'name';
-let sortDir       = 'asc';
-let liveMode      = false;
-let apiKey        = '';
-let selectedLevels = new Set(); // empty = all levels shown
-let selectedTags   = new Set(); // empty = all tags shown
+let allProjects    = [];   // flat array (source of truth)
+let filtered       = [];   // flat array matching current filters (for CSV + count)
+let treeRoots      = [];   // root TreeNode[]
+let nodeMap        = new Map(); // uuid → TreeNode
+let expandedUuids  = new Set();
+let selectedLevels = new Set();
+let selectedTags   = new Set();
+let sortCol        = 'name';
+let sortDir        = 'asc';
+let liveMode       = false;
+let apiKey         = '';
+let dtFrontendUrl  = '';
+let autoRefreshTimer   = null;
+let autoRefreshSeconds = 60;
 
 // ── Mock Data ─────────────────────────────────────────────────────────────
 function generateMockProjects() {
-  const MOCK_TAGS = ['production','staging','critical-service','internal','external','java','node','python','go'];
+  const rnd = (max) => Math.floor(Math.random() * (max + 1));
+  let idx = 0;
 
-  // Build a realistic hierarchy: groups → sub-groups → leaf versions
+  // Realistic hierarchy matching the DependencyTrack screenshots
   const rawTree = [
-    { name: 'RET',           children: [
+    { name: 'Fresh_X_Suite_Dev', tags: ['production'] },
+    { name: 'IND', tags: ['internal'] },
+    { name: 'LAB', tags: ['staging'] },
+    { name: 'LXC_SEC_Test', tags: ['container'] },
+    { name: 'LXC_Test_1.4', version: '1.4', tags: ['container','production'] },
+    { name: 'RET', children: [
       { name: 'FreshX Suite', children: [
         { name: 'FreshX-BE', children: [
           { name: 'FreshX-BE', version: '1.4.1', tags: ['java','production'] },
           { name: 'FreshX-BE', version: '1.4.2', tags: ['java','production'] },
           { name: 'FreshX-BE', version: '1.5.0', tags: ['java','staging'] },
         ]},
-        { name: 'FreshX-FE', children: [
-          { name: 'FreshX-FE', version: '2.1.0', tags: ['node','production'] },
+        { name: 'FreshX.BE.Containers', children: [
+          { name: 'cs-websocket-proxy', children: [
+            { name: 'cs-websocket-proxy', version: '1.4.1', tags: ['container','production'] },
+          ]},
+          { name: 'freshx-hub-poc',             tags: ['container','staging'] },
+          { name: 'freshx-transform-poc',        tags: ['container','staging'] },
+          { name: 'freshx-workflow-poc',          tags: ['container','staging'] },
+          { name: 'fs-alert-notification-management-service', tags: ['container','production'] },
+          { name: 'fs-application-configuration-service',     tags: ['container','production'] },
+          { name: 'fs-certification-management-service',      tags: ['container','production'] },
+          { name: 'fs-custom-iam-service',                    tags: ['container','production'] },
         ]},
-      ]},
-      { name: 'IND',          children: [
-        { name: 'payments-service', version: '3.2.1', tags: ['java','critical-service','production'] },
-        { name: 'auth-gateway',     version: '1.0.4', tags: ['go','internal','production'] },
+        { name: 'FreshX-Common', tags: ['java','production'] },
       ]},
     ]},
     { name: 'Platform', children: [
-      { name: 'api-gateway',          version: '2.3.0', tags: ['go','external','production'] },
-      { name: 'notification-worker',  version: '1.1.7', tags: ['python','internal'] },
-      { name: 'analytics-pipeline',   version: '0.9.1', tags: ['python','staging'] },
+      { name: 'api-gateway',         version: '2.3.0', tags: ['go','external','production'] },
+      { name: 'notification-worker', version: '1.1.7', tags: ['python','internal'] },
+      { name: 'analytics-pipeline',  version: '0.9.1', tags: ['python','staging'] },
     ]},
-    { name: 'audit-logger',   version: '1.2.0', tags: ['java','internal'] },
-    { name: 'config-server',  version: '3.0.0', tags: ['java','production','critical-service'] },
-    { name: 'fraud-detection',version: '2.0.5', tags: ['python','critical-service','production'] },
-    { name: 'billing-service',version: '4.1.2', tags: ['java','critical-service','production'] },
-    { name: 'email-service',  version: '1.0.9', tags: ['node','internal'] },
-    { name: 'search-indexer', version: '2.2.0', tags: ['go','internal','staging'] },
   ];
-
-  const rnd = (max) => Math.floor(Math.random() * (max + 1));
-  let idx = 0;
 
   function makeProject(node, parentUuid, level) {
     const uuid = `mock-${idx++}`;
     const hasChildren = Array.isArray(node.children) && node.children.length > 0;
+    const mkRisk = (maxC, maxH, maxM, maxL) => ({
+      critical: rnd(maxC), high: rnd(maxH), medium: rnd(maxM), low: rnd(maxL)
+    });
     const proj = {
       uuid,
-      name: node.name,
-      version: node.version || '',
+      name:       node.name,
+      version:    node.version || '',
       parentUuid: parentUuid || null,
       level,
-      tags: node.tags || [],
-      // Groups have aggregated counts; leaves have actual data
-      security:   hasChildren
-        ? { critical: rnd(5), high: rnd(20), medium: rnd(40), low: rnd(60) }
-        : { critical: rnd(3), high: rnd(8),  medium: rnd(15), low: rnd(20) },
-      operations: hasChildren
-        ? { critical: rnd(2), high: rnd(12), medium: rnd(25), low: rnd(30) }
-        : { critical: rnd(1), high: rnd(5),  medium: rnd(10), low: rnd(15) },
-      license: hasChildren
-        ? { critical: rnd(1), high: rnd(8),  medium: rnd(15), low: rnd(20) }
-        : { critical: rnd(1), high: rnd(3),  medium: rnd(6),  low: rnd(8)  },
+      tags:       node.tags || [],
+      security:   hasChildren ? mkRisk(5,20,40,60) : mkRisk(3,8,15,20),
+      operations: hasChildren ? mkRisk(2,12,25,30) : mkRisk(1,5,10,15),
+      license:    hasChildren ? mkRisk(1,8,15,20)  : mkRisk(1,3,6,8),
     };
     const result = [proj];
     if (hasChildren) {
-      node.children.forEach(child => {
-        result.push(...makeProject(child, uuid, level + 1));
-      });
+      node.children.forEach(child => result.push(...makeProject(child, uuid, level + 1)));
     }
     return result;
   }
@@ -751,77 +586,292 @@ function generateMockProjects() {
   return rawTree.flatMap(node => makeProject(node, null, 1));
 }
 
-// ── Compute hierarchy levels from parent UUIDs (live data) ─────────────────
+// ── Build tree from flat array ─────────────────────────────────────────────
+function buildTree(projects) {
+  nodeMap.clear();
+  const tempMap = new Map();
+
+  // Clone projects into nodes with children arrays
+  projects.forEach(p => {
+    const node = { ...p, children: [] };
+    tempMap.set(p.uuid, node);
+    nodeMap.set(p.uuid, node);
+  });
+
+  const roots = [];
+  tempMap.forEach(node => {
+    if (node.parentUuid && tempMap.has(node.parentUuid)) {
+      tempMap.get(node.parentUuid).children.push(node);
+    } else {
+      roots.push(node);
+    }
+  });
+
+  // Sort siblings by name
+  function sortSiblings(nodes) {
+    nodes.sort((a, b) => a.name.localeCompare(b.name));
+    nodes.forEach(n => sortSiblings(n.children));
+  }
+  sortSiblings(roots);
+  return roots;
+}
+
+// ── Compute aggregated totals (bottom-up, sum of self + all descendants) ──
+function computeAggregates(node) {
+  if (node.children.length === 0) {
+    node.aggregated = {
+      security:   { ...node.security },
+      operations: { ...node.operations },
+      license:    { ...node.license },
+    };
+    return;
+  }
+  node.children.forEach(computeAggregates);
+
+  const agg = {
+    security:   { critical:0, high:0, medium:0, low:0 },
+    operations: { critical:0, high:0, medium:0, low:0 },
+    license:    { critical:0, high:0, medium:0, low:0 },
+  };
+  // Include this node's own data
+  CATS.forEach(c => LEVELS.forEach(l => { agg[c][l] += node[c][l] || 0; }));
+  // Include all children recursively
+  node.children.forEach(child => {
+    CATS.forEach(c => LEVELS.forEach(l => { agg[c][l] += child.aggregated[c][l] || 0; }));
+  });
+  node.aggregated = agg;
+}
+
+// ── Compute hierarchy depth from parent chain (live data) ─────────────────
 function computeLevels(projects) {
   const byUuid = {};
   projects.forEach(p => { byUuid[p.uuid] = p; });
-
   function depth(p, visited) {
     if (!p.parentUuid) return 1;
-    if (visited.has(p.uuid)) return 1; // cycle guard
+    if (visited.has(p.uuid)) return 1;
     visited.add(p.uuid);
     const parent = byUuid[p.parentUuid];
     return parent ? 1 + depth(parent, visited) : 2;
   }
-
   projects.forEach(p => { p.level = depth(p, new Set()); });
 }
 
-// ── Build filter option panels (called after data loads) ───────────────────
-function buildFilterOptions() {
-  // Levels
-  const levels = [...new Set(allProjects.map(p => p.level).filter(l => l != null))].sort((a, b) => a - b);
-  const levelOpts = document.getElementById('levelOptions');
-  if (levels.length === 0) {
-    levelOpts.innerHTML = '<span class="ms-empty">No level data</span>';
-  } else {
-    levelOpts.innerHTML = levels.map(l =>
-      `<label>
-        <input type="checkbox" value="${l}" onchange="onMultiChange('level')">
-        Level ${l}${l === 1 ? ' <span style="color:var(--text-muted);font-size:11px">(Top)</span>' : ''}
-      </label>`
-    ).join('');
+// ── After data load: build tree + compute aggregates + set all expanded ────
+function afterLoad() {
+  treeRoots = buildTree(allProjects);
+  treeRoots.forEach(computeAggregates);
+  expandedUuids = new Set(allProjects.map(p => p.uuid));
+  buildFilterOptions();
+  renderSummary();
+  applyFilters();
+}
+
+// ── hasMatch: does this node or any descendant match the set? ──────────────
+function hasMatch(node, matchSet) {
+  if (matchSet.has(node.uuid)) return true;
+  return node.children.some(c => hasMatch(c, matchSet));
+}
+
+// ── collectVisible: nodes to render (respects expand state + filter) ───────
+function collectVisible(nodes, matchSet) {
+  // Sort siblings by current sort key
+  const sorted = [...nodes].sort((a, b) => {
+    let va, vb;
+    if (sortCol === 'name')  { va = a.name;        vb = b.name; }
+    else if (sortCol === 'level') { va = a.level ?? 99; vb = b.level ?? 99; }
+    else {
+      const [cat, lvl] = sortCol.split('.');
+      // For sorting, use aggregated data for groups
+      const da = a.children.length > 0 ? a.aggregated : a;
+      const db = b.children.length > 0 ? b.aggregated : b;
+      va = (da[cat]?.[lvl] || 0);
+      vb = (db[cat]?.[lvl] || 0);
+    }
+    if (va < vb) return sortDir === 'asc' ? -1 : 1;
+    if (va > vb) return sortDir === 'asc' ?  1 : -1;
+    return 0;
+  });
+
+  const result = [];
+  for (const node of sorted) {
+    const visible = matchSet === null || hasMatch(node, matchSet);
+    if (!visible) continue;
+    result.push(node);
+    if (node.children.length > 0 && expandedUuids.has(node.uuid)) {
+      result.push(...collectVisible(node.children, matchSet));
+    }
+  }
+  return result;
+}
+
+// ── Tree expand / collapse ─────────────────────────────────────────────────
+function toggleNode(uuid) {
+  if (expandedUuids.has(uuid)) { expandedUuids.delete(uuid); }
+  else                         { expandedUuids.add(uuid); }
+  applyFilters();
+}
+
+function expandAll() {
+  allProjects.forEach(p => expandedUuids.add(p.uuid));
+  applyFilters();
+}
+
+function collapseAll() {
+  expandedUuids.clear();
+  applyFilters();
+}
+
+// ── Render tree ────────────────────────────────────────────────────────────
+function renderTree(matchSet) {
+  const tbody = document.getElementById('tableBody');
+  tbody.innerHTML = '';
+
+  const visibleNodes = collectVisible(treeRoots, matchSet);
+
+  if (visibleNodes.length === 0) {
+    tbody.innerHTML = `<tr><td colspan="14" style="text-align:center;padding:40px;color:var(--text-muted)">No projects match your filters.</td></tr>`;
+    return;
   }
 
-  // Tags
+  visibleNodes.forEach(node => {
+    const isGroup    = node.children.length > 0;
+    const isExpanded = expandedUuids.has(node.uuid);
+    // Collapsed groups show aggregate; expanded groups and leaves show own data
+    const data = (isGroup && !isExpanded) ? node.aggregated : node;
+
+    const indent = (node.level - 1) * 22;
+    const toggle = isGroup
+      ? `<span class="tree-toggle" onclick="toggleNode('${node.uuid}')">${isExpanded ? '▼' : '▶'}</span>`
+      : `<span class="tree-indent"></span>`;
+
+    const nameInner = escHtml(node.name);
+    const nameEl = dtFrontendUrl
+      ? `<a class="project-link" href="${escHtml(dtFrontendUrl)}/#/projects/${escHtml(node.uuid)}" target="_blank" rel="noopener">${nameInner}</a>`
+      : nameInner;
+
+    const vBadge   = node.version ? `<span class="version-badge">v${escHtml(node.version)}</span>` : '';
+    const tagChips = (node.tags || []).map(t => `<span class="tag-chip">${escHtml(t)}</span>`).join('');
+
+    let html = `<td class="project-name" style="padding-left:${indent + 10}px">${toggle}${nameEl}${vBadge}${tagChips}</td>`;
+    html += `<td class="level-cell">${node.level}</td>`;
+
+    CATS.forEach((cat, ci) => {
+      LEVELS.forEach((lvl, li) => {
+        const val = (data[cat] || {})[lvl] || 0;
+        html += `<td class="${li === 0 && ci > 0 ? 'sep-left' : ''}">${pillFor(val, lvl)}</td>`;
+      });
+    });
+
+    const tr = document.createElement('tr');
+    tr.innerHTML = html;
+    if (isGroup) tr.classList.add('group-row');
+    tbody.appendChild(tr);
+  });
+}
+
+// ── KPI summary cards ──────────────────────────────────────────────────────
+function renderSummary() {
+  const totals = { critical:0, high:0, medium:0, low:0 };
+  allProjects.forEach(p => {
+    CATS.forEach(c => LEVELS.forEach(l => { totals[l] += (p[c][l] || 0); }));
+  });
+  const risky = allProjects.filter(p => riskScore(p) > 0).length;
+  document.getElementById('summaryGrid').innerHTML = `
+    <div class="summary-card"><div class="label">Total Projects</div><div class="value" style="color:var(--accent)">${allProjects.length}</div><div class="sub">${risky} with risks</div></div>
+    <div class="summary-card"><div class="label">Critical Issues</div><div class="value c-critical">${totals.critical}</div><div class="sub">across all categories</div></div>
+    <div class="summary-card"><div class="label">High Issues</div><div class="value c-high">${totals.high}</div><div class="sub">across all categories</div></div>
+    <div class="summary-card"><div class="label">Medium Issues</div><div class="value c-medium">${totals.medium}</div><div class="sub">across all categories</div></div>
+    <div class="summary-card"><div class="label">Low Issues</div><div class="value c-low">${totals.low}</div><div class="sub">across all categories</div></div>
+    <div class="summary-card"><div class="label">Clean Projects</div><div class="value c-ok">${allProjects.length - risky}</div><div class="sub">no known risks</div></div>
+  `;
+}
+
+// ── Build filter option panels ─────────────────────────────────────────────
+function buildFilterOptions() {
+  const levels = [...new Set(allProjects.map(p => p.level).filter(l => l != null))].sort((a,b)=>a-b);
+  const lo = document.getElementById('levelOptions');
+  lo.innerHTML = levels.length === 0
+    ? '<span class="ms-empty">No level data</span>'
+    : levels.map(l => `<label><input type="checkbox" value="${l}" onchange="onMultiChange('level')"> Level ${l}${l===1?' <span style="color:var(--text-muted);font-size:11px">(Top)</span>':''}</label>`).join('');
+
   const tags = [...new Set(allProjects.flatMap(p => p.tags || []))].sort();
-  const tagOpts = document.getElementById('tagOptions');
-  if (tags.length === 0) {
-    tagOpts.innerHTML = '<span class="ms-empty">No tags found</span>';
-  } else {
-    tagOpts.innerHTML = tags.map(t =>
-      `<label><input type="checkbox" value="${escHtml(t)}" onchange="onMultiChange('tag')"> ${escHtml(t)}</label>`
-    ).join('');
-  }
+  const to = document.getElementById('tagOptions');
+  to.innerHTML = tags.length === 0
+    ? '<span class="ms-empty">No tags found</span>'
+    : tags.map(t => `<label><input type="checkbox" value="${escHtml(t)}" onchange="onMultiChange('tag')"> ${escHtml(t)}</label>`).join('');
 
   selectedLevels.clear();
   selectedTags.clear();
   updateBadges();
 }
 
-// ── Multi-select helpers ───────────────────────────────────────────────────
-function toggleDropdown(panelId) {
-  const panel = document.getElementById(panelId);
-  const isOpen = panel.classList.contains('open');
-  // Close all open panels first
-  document.querySelectorAll('.ms-panel.open').forEach(p => p.classList.remove('open'));
-  if (!isOpen) panel.classList.add('open');
+// ── Filters ────────────────────────────────────────────────────────────────
+function applyFilters() {
+  const q    = document.getElementById('searchInput').value.toLowerCase();
+  const risk = document.getElementById('riskFilter').value;
+  const cat  = document.getElementById('categoryFilter').value;
+
+  // flat filtered array: nodes that directly match (for CSV + count)
+  filtered = allProjects.filter(proj => {
+    if (q && !proj.name.toLowerCase().includes(q)) return false;
+    if (risk !== 'all') {
+      if (risk === 'ok') { if (riskScore(proj) !== 0) return false; }
+      else {
+        const catsToCheck = cat === 'all' ? CATS : [cat];
+        if (!catsToCheck.some(c => (proj[c]?.[risk] || 0) > 0)) return false;
+      }
+    }
+    if (selectedLevels.size > 0 && !selectedLevels.has(proj.level)) return false;
+    if (selectedTags.size > 0) {
+      const pt = new Set(proj.tags || []);
+      for (const t of selectedTags) { if (!pt.has(t)) return false; }
+    }
+    return true;
+  });
+
+  // matchSet for tree visibility (null = no filter active = show all)
+  const hasFilter = q || risk !== 'all' || selectedLevels.size > 0 || selectedTags.size > 0;
+  const matchSet  = hasFilter ? new Set(filtered.map(p => p.uuid)) : null;
+
+  document.getElementById('projectCount').textContent = `(${filtered.length} of ${allProjects.length})`;
+  renderTree(matchSet);
 }
 
+function sortBy(col) {
+  sortDir = (sortCol === col) ? (sortDir === 'asc' ? 'desc' : 'asc') : (col === 'name' ? 'asc' : 'desc');
+  sortCol = col;
+  document.querySelectorAll('.th-col').forEach(th => {
+    th.classList.remove('sort-asc','sort-desc');
+    if (th.dataset.sort === col
+     || (col === 'name'  && th.classList.contains('th-project'))
+     || (col === 'level' && th.classList.contains('th-level'))) {
+      th.classList.add(sortDir === 'asc' ? 'sort-asc' : 'sort-desc');
+    }
+  });
+  applyFilters();
+}
+
+// ── Multi-select helpers ───────────────────────────────────────────────────
+function toggleDropdown(panelId) {
+  const p = document.getElementById(panelId);
+  const isOpen = p.classList.contains('open');
+  document.querySelectorAll('.ms-panel.open').forEach(x => x.classList.remove('open'));
+  if (!isOpen) p.classList.add('open');
+}
+document.addEventListener('click', e => {
+  if (!e.target.closest('.ms-wrap')) {
+    document.querySelectorAll('.ms-panel.open').forEach(p => p.classList.remove('open'));
+  }
+});
 function onMultiChange(type) {
   if (type === 'level') {
-    selectedLevels = new Set(
-      [...document.querySelectorAll('#levelOptions input:checked')].map(i => parseInt(i.value))
-    );
+    selectedLevels = new Set([...document.querySelectorAll('#levelOptions input:checked')].map(i => parseInt(i.value)));
   } else {
-    selectedTags = new Set(
-      [...document.querySelectorAll('#tagOptions input:checked')].map(i => i.value)
-    );
+    selectedTags = new Set([...document.querySelectorAll('#tagOptions input:checked')].map(i => i.value));
   }
   updateBadges();
   applyFilters();
 }
-
 function clearFilter(type) {
   if (type === 'level') {
     document.querySelectorAll('#levelOptions input').forEach(i => { i.checked = false; });
@@ -833,52 +883,98 @@ function clearFilter(type) {
   updateBadges();
   applyFilters();
 }
-
 function updateBadges() {
-  const lb = document.getElementById('levelBadge');
-  const tb = document.getElementById('tagBadge');
-  const lBtn = document.getElementById('levelBtn');
-  const tBtn = document.getElementById('tagBtn');
-
-  if (selectedLevels.size > 0) {
-    lb.textContent = selectedLevels.size;
-    lb.style.display = '';
-    lBtn.classList.add('active');
-  } else {
-    lb.style.display = 'none';
-    lBtn.classList.remove('active');
-  }
-
-  if (selectedTags.size > 0) {
-    tb.textContent = selectedTags.size;
-    tb.style.display = '';
-    tBtn.classList.add('active');
-  } else {
-    tb.style.display = 'none';
-    tBtn.classList.remove('active');
-  }
+  const lb = document.getElementById('levelBadge'), lBtn = document.getElementById('levelBtn');
+  const tb = document.getElementById('tagBadge'),   tBtn = document.getElementById('tagBtn');
+  if (selectedLevels.size > 0) { lb.textContent = selectedLevels.size; lb.style.display = ''; lBtn.classList.add('active'); }
+  else                         { lb.style.display = 'none'; lBtn.classList.remove('active'); }
+  if (selectedTags.size > 0)   { tb.textContent = selectedTags.size;   tb.style.display = ''; tBtn.classList.add('active'); }
+  else                         { tb.style.display = 'none'; tBtn.classList.remove('active'); }
 }
 
-// Close dropdowns when clicking outside
-document.addEventListener('click', e => {
-  if (!e.target.closest('.ms-wrap')) {
-    document.querySelectorAll('.ms-panel.open').forEach(p => p.classList.remove('open'));
+// ── Auto-refresh ───────────────────────────────────────────────────────────
+function toggleAutoRefresh() {
+  if (autoRefreshTimer) {
+    clearInterval(autoRefreshTimer);
+    autoRefreshTimer = null;
+    const btn = document.getElementById('arBtn');
+    btn.textContent = '↺ Auto: Off';
+    btn.classList.remove('ar-on');
+    document.getElementById('arInterval').style.display = 'none';
+  } else {
+    startAutoRefresh();
   }
-});
+}
+function startAutoRefresh() {
+  if (autoRefreshTimer) clearInterval(autoRefreshTimer);
+  autoRefreshTimer = setInterval(() => { if (liveMode) refreshData(); }, autoRefreshSeconds * 1000);
+  const btn = document.getElementById('arBtn');
+  const label = autoRefreshSeconds < 60 ? `${autoRefreshSeconds}s` : `${autoRefreshSeconds/60}m`;
+  btn.textContent = `↺ Auto: ${label}`;
+  btn.classList.add('ar-on');
+  document.getElementById('arInterval').style.display = '';
+}
+function changeArInterval() {
+  autoRefreshSeconds = parseInt(document.getElementById('arInterval').value, 10);
+  if (autoRefreshTimer) startAutoRefresh(); // restart with new interval
+}
 
-// ── Risk score for sorting/filtering ──────────────────────────────────────
+// ── Export CSV ─────────────────────────────────────────────────────────────
+// Always exports all filtered projects regardless of fold state.
+// Adds a "Type" column: Group (has children in tree) or Project (leaf).
+function exportCSV() {
+  if (filtered.length === 0) { alert('No rows to export — adjust your filters.'); return; }
+
+  const headers = [
+    'Project','Version','Level','Tags','Type',
+    'Sec Critical','Sec High','Sec Medium','Sec Low',
+    'Ops Critical','Ops High','Ops Medium','Ops Low',
+    'Lic Critical','Lic High','Lic Medium','Lic Low',
+  ];
+
+  const rows = filtered.map(p => {
+    const node = nodeMap.get(p.uuid);
+    const type = (node && node.children.length > 0) ? 'Group' : 'Project';
+    return [
+      p.name, p.version || '', p.level ?? '', (p.tags || []).join('; '), type,
+      p.security.critical,   p.security.high,   p.security.medium,   p.security.low,
+      p.operations.critical, p.operations.high, p.operations.medium, p.operations.low,
+      p.license.critical,    p.license.high,    p.license.medium,    p.license.low,
+    ];
+  });
+
+  const csv = [headers, ...rows]
+    .map(row => row.map(v => `"${String(v ?? '').replace(/"/g,'""')}"`).join(','))
+    .join('\r\n');
+
+  const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+  const url  = URL.createObjectURL(blob);
+  const a    = document.createElement('a');
+  a.href = url;
+  a.download = `dependency-track-${new Date().toISOString().slice(0,10)}.csv`;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+
+// ── Risk score (for summary + ok filter) ──────────────────────────────────
 function riskScore(proj) {
   let s = 0;
   CATS.forEach(c => {
-    s += (proj[c].critical || 0) * 1000;
-    s += (proj[c].high     || 0) * 100;
-    s += (proj[c].medium   || 0) * 10;
-    s += (proj[c].low      || 0) * 1;
+    s += (proj[c].critical||0)*1000 + (proj[c].high||0)*100
+       + (proj[c].medium||0)*10   + (proj[c].low||0);
   });
   return s;
 }
 
-// ── Build column headers ───────────────────────────────────────────────────
+// ── Pill renderer ──────────────────────────────────────────────────────────
+function pillFor(n, level) {
+  if (n === 0) return `<span class="pill pill-zero">—</span>`;
+  return `<span class="pill pill-${level}">${n}</span>`;
+}
+
+// ── Column headers ─────────────────────────────────────────────────────────
 function buildColHeaders() {
   const row = document.getElementById('colHeaders');
   row.innerHTML = '';
@@ -894,225 +990,24 @@ function buildColHeaders() {
   });
 }
 
-// Context-aware pill (we pass the level)
-function pillFor(n, level) {
-  if (n === 0) return `<span class="pill pill-zero">—</span>`;
-  return `<span class="pill pill-${level}">${n}</span>`;
-}
-
-// ── Render table body ──────────────────────────────────────────────────────
-function renderTable() {
-  const tbody = document.getElementById('tableBody');
-  tbody.innerHTML = '';
-
-  if (filtered.length === 0) {
-    tbody.innerHTML = `<tr><td colspan="14" style="text-align:center;padding:40px;color:var(--text-muted)">No projects match your filters.</td></tr>`;
-    return;
-  }
-
-  filtered.forEach(proj => {
-    const tr = document.createElement('tr');
-    const tagChips = (proj.tags || []).map(t => `<span class="tag-chip">${escHtml(t)}</span>`).join('');
-    const vBadge = proj.version
-      ? `<span class="version-badge">v${escHtml(proj.version)}</span>`
-      : '';
-    let html = `<td class="project-name">${escHtml(proj.name)}${vBadge}${tagChips}</td>`;
-    html += `<td class="level-cell">${proj.level != null ? proj.level : '—'}</td>`;
-
-    CATS.forEach((cat, ci) => {
-      LEVELS.forEach((lvl, li) => {
-        const isFirst = li === 0;
-        html += `<td class="${isFirst && ci > 0 ? 'sep-left' : ''}">${pillFor(proj[cat][lvl] || 0, lvl)}</td>`;
-      });
-    });
-
-    tr.innerHTML = html;
-    tbody.appendChild(tr);
-  });
-}
-
-// ── KPI summary cards ──────────────────────────────────────────────────────
-function renderSummary() {
-  const totals = { critical:0, high:0, medium:0, low:0 };
-  allProjects.forEach(p => {
-    CATS.forEach(c => {
-      LEVELS.forEach(l => { totals[l] += (p[c][l] || 0); });
-    });
-  });
-
-  const totalRiskyProjects = allProjects.filter(p => riskScore(p) > 0).length;
-
-  document.getElementById('summaryGrid').innerHTML = `
-    <div class="summary-card">
-      <div class="label">Total Projects</div>
-      <div class="value" style="color:var(--accent)">${allProjects.length}</div>
-      <div class="sub">${totalRiskyProjects} with risks</div>
-    </div>
-    <div class="summary-card">
-      <div class="label">Critical Issues</div>
-      <div class="value c-critical">${totals.critical}</div>
-      <div class="sub">across all categories</div>
-    </div>
-    <div class="summary-card">
-      <div class="label">High Issues</div>
-      <div class="value c-high">${totals.high}</div>
-      <div class="sub">across all categories</div>
-    </div>
-    <div class="summary-card">
-      <div class="label">Medium Issues</div>
-      <div class="value c-medium">${totals.medium}</div>
-      <div class="sub">across all categories</div>
-    </div>
-    <div class="summary-card">
-      <div class="label">Low Issues</div>
-      <div class="value c-low">${totals.low}</div>
-      <div class="sub">across all categories</div>
-    </div>
-    <div class="summary-card">
-      <div class="label">Clean Projects</div>
-      <div class="value c-ok">${allProjects.length - totalRiskyProjects}</div>
-      <div class="sub">no known risks</div>
-    </div>
-  `;
-}
-
-// ── Filters ────────────────────────────────────────────────────────────────
-function applyFilters() {
-  const q    = document.getElementById('searchInput').value.toLowerCase();
-  const risk = document.getElementById('riskFilter').value;
-  const cat  = document.getElementById('categoryFilter').value;
-
-  filtered = allProjects.filter(proj => {
-    // Text search
-    if (q && !proj.name.toLowerCase().includes(q)) return false;
-
-    // Risk filter
-    if (risk !== 'all') {
-      if (risk === 'ok') {
-        if (riskScore(proj) !== 0) return false;
-      } else {
-        const catsToCheck = cat === 'all' ? CATS : [cat === 'operations' ? 'operations' : cat];
-        const found = catsToCheck.some(c => (proj[c]?.[risk] || 0) > 0);
-        if (!found) return false;
-      }
-    }
-
-    // Hierarchy level filter
-    if (selectedLevels.size > 0 && !selectedLevels.has(proj.level)) return false;
-
-    // Tag filter — project must have ALL selected tags
-    if (selectedTags.size > 0) {
-      const projTags = new Set(proj.tags || []);
-      for (const t of selectedTags) {
-        if (!projTags.has(t)) return false;
-      }
-    }
-
-    return true;
-  });
-
-  // Sort
-  filtered.sort((a, b) => {
-    let va, vb;
-    if (sortCol === 'name') {
-      va = a.name; vb = b.name;
-    } else if (sortCol === 'level') {
-      va = a.level ?? 999; vb = b.level ?? 999;
-    } else if (sortCol === 'risk') {
-      va = riskScore(a); vb = riskScore(b);
-    } else {
-      const parts = sortCol.split('.');
-      va = (a[parts[0]]?.[parts[1]] || 0);
-      vb = (b[parts[0]]?.[parts[1]] || 0);
-    }
-    if (va < vb) return sortDir === 'asc' ? -1 : 1;
-    if (va > vb) return sortDir === 'asc' ? 1  : -1;
-    return 0;
-  });
-
-  document.getElementById('projectCount').textContent =
-    `(${filtered.length} of ${allProjects.length})`;
-
-  renderTable();
-}
-
-function sortBy(col) {
-  if (sortCol === col) {
-    sortDir = sortDir === 'asc' ? 'desc' : 'asc';
-  } else {
-    sortCol = col;
-    sortDir = col === 'name' ? 'asc' : 'desc';
-  }
-
-  document.querySelectorAll('.th-col').forEach(th => {
-    th.classList.remove('sort-asc','sort-desc');
-    if (th.dataset.sort === col || (col === 'name' && th.classList.contains('th-project'))
-        || (col === 'level' && th.classList.contains('th-level'))) {
-      th.classList.add(sortDir === 'asc' ? 'sort-asc' : 'sort-desc');
-    }
-  });
-
-  applyFilters();
-}
-
-// ── Export CSV ─────────────────────────────────────────────────────────────
-function exportCSV() {
-  if (filtered.length === 0) { alert('No rows to export — adjust your filters.'); return; }
-
-  const headers = [
-    'Project', 'Version', 'Level', 'Tags',
-    'Sec Critical', 'Sec High', 'Sec Medium', 'Sec Low',
-    'Ops Critical', 'Ops High', 'Ops Medium', 'Ops Low',
-    'Lic Critical', 'Lic High', 'Lic Medium', 'Lic Low',
-  ];
-
-  const rows = filtered.map(p => [
-    p.name,
-    p.version || '',
-    p.level != null ? p.level : '',
-    (p.tags || []).join('; '),
-    p.security.critical,   p.security.high,   p.security.medium,   p.security.low,
-    p.operations.critical, p.operations.high, p.operations.medium, p.operations.low,
-    p.license.critical,    p.license.high,    p.license.medium,    p.license.low,
-  ]);
-
-  const csvLines = [headers, ...rows].map(row =>
-    row.map(v => `"${String(v ?? '').replace(/"/g, '""')}"`).join(',')
-  );
-  const csv = csvLines.join('\r\n');
-
-  const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
-  const url  = URL.createObjectURL(blob);
-  const a    = document.createElement('a');
-  a.href     = url;
-  a.download = `dependency-track-${new Date().toISOString().slice(0, 10)}.csv`;
-  document.body.appendChild(a);
-  a.click();
-  document.body.removeChild(a);
-  URL.revokeObjectURL(url);
-}
-
 // ── Load mock data ─────────────────────────────────────────────────────────
 function loadMockData() {
   liveMode = false;
   allProjects = generateMockProjects();
   document.getElementById('dataBanner').innerHTML =
-    '⚠ Showing <strong>mock data</strong> — click "Connect Live API" to pull real project risks from your DependencyTrack instance.';
+    '⚠ Showing <strong>mock data</strong> — click "Connect Live API" to pull real project risks.';
   document.getElementById('dataBanner').className = 'data-banner';
   document.getElementById('apiStatus').innerHTML =
     '<div class="status-dot" style="background:var(--medium)"></div><span>Mock Data</span>';
-  buildFilterOptions();
-  renderSummary();
-  applyFilters();
+  afterLoad();
 }
 
 // ── Connect to live API ────────────────────────────────────────────────────
 async function connectLiveApi() {
-  apiKey = document.getElementById('apiKeyInput').value.trim();
+  apiKey        = document.getElementById('apiKeyInput').value.trim();
+  dtFrontendUrl = document.getElementById('dtFrontendUrlInput').value.trim().replace(/\/$/, '');
 
-  if (!apiKey) {
-    alert('Please enter an API key.'); return;
-  }
+  if (!apiKey) { alert('Please enter an API key.'); return; }
 
   document.getElementById('apiStatus').innerHTML =
     '<div class="status-dot" style="background:var(--medium);animation:pulse 0.5s infinite"></div><span>Connecting…</span>';
@@ -1121,11 +1016,9 @@ async function connectLiveApi() {
     const res = await fetch('/api/v1/project?pageSize=500&pageNumber=1', {
       headers: { 'X-Api-Key': apiKey }
     });
-
     if (!res.ok) throw new Error(`HTTP ${res.status} — check your API key`);
+
     const data = await res.json();
-    // DT may return a paginated envelope {values:[...]} or a bare array [...]
-    // Guard against unexpected shapes (e.g. empty object {}) with Array.isArray.
     const projects = Array.isArray(data.values) ? data.values
                    : Array.isArray(data)         ? data
                    : [];
@@ -1139,47 +1032,38 @@ async function connectLiveApi() {
       document.getElementById('apiStatus').innerHTML =
         '<div class="status-dot"></div><span>Live</span>';
       closeModal('apiModal');
-      buildFilterOptions();
-      renderSummary();
-      applyFilters();
+      afterLoad();
       return;
     }
 
-    // Map to our schema, capturing parentUuid and tags from the DT response
+    // Fetch metrics for every project concurrently
     allProjects = await Promise.all(projects.map(async (p) => {
-      let sec = { critical:0, high:0, medium:0, low:0 };
-      let ops = { critical:0, high:0, medium:0, low:0 };
-      let lic = { critical:0, high:0, medium:0, low:0 };
+      let sec = {critical:0,high:0,medium:0,low:0};
+      let ops = {critical:0,high:0,medium:0,low:0};
+      let lic = {critical:0,high:0,medium:0,low:0};
       try {
         const mr = await fetch(`/api/v1/metrics/project/${p.uuid}/current`, {
           headers: { 'X-Api-Key': apiKey }
         });
         if (mr.ok) {
           const m = await mr.json();
-          sec = { critical: m.critical || 0, high: m.high || 0, medium: m.medium || 0, low: m.low || 0 };
-          ops = { critical: 0, high: m.unassigned || 0, medium: m.suppressed || 0, low: 0 };
-          lic = { critical: m.policyViolationsFail || 0, high: m.policyViolationsWarn || 0,
-                  medium: m.policyViolationsInfo || 0, low: 0 };
+          sec = { critical: m.critical||0, high: m.high||0, medium: m.medium||0, low: m.low||0 };
+          ops = { critical: 0, high: m.unassigned||0, medium: m.suppressed||0, low: 0 };
+          lic = { critical: m.policyViolationsFail||0, high: m.policyViolationsWarn||0,
+                  medium: m.policyViolationsInfo||0, low: 0 };
         }
       } catch(_) {}
-
       return {
         uuid:       p.uuid,
         name:       p.name,
         version:    p.version || '',
-        // parent is {uuid:...} object in DT API response; store just the UUID string
         parentUuid: p.parent?.uuid || null,
-        // tags is [{name:"..."},...] in DT API response; flatten to string array
         tags:       (p.tags || []).map(t => t.name || t).filter(Boolean),
-        security:   sec,
-        operations: ops,
-        license:    lic,
+        security: sec, operations: ops, license: lic,
       };
     }));
 
-    // Compute hierarchy depth from parent UUID chain
     computeLevels(allProjects);
-
     liveMode = true;
     document.getElementById('dataBanner').innerHTML =
       `✓ Live data — ${allProjects.length} projects loaded.`;
@@ -1188,9 +1072,7 @@ async function connectLiveApi() {
       '<div class="status-dot"></div><span>Live</span>';
 
     closeModal('apiModal');
-    buildFilterOptions();
-    renderSummary();
-    applyFilters();
+    afterLoad();
   } catch(err) {
     document.getElementById('apiStatus').innerHTML =
       '<div class="status-dot" style="background:var(--critical)"></div><span>Error</span>';
@@ -1199,11 +1081,8 @@ async function connectLiveApi() {
 }
 
 async function refreshData() {
-  if (liveMode) {
-    await connectLiveApi();
-  } else {
-    loadMockData();
-  }
+  if (liveMode) await connectLiveApi();
+  else          loadMockData();
 }
 
 // ── Modal helpers ──────────────────────────────────────────────────────────
@@ -1213,14 +1092,13 @@ document.querySelectorAll('.modal-overlay').forEach(el => {
   el.addEventListener('click', e => { if (e.target === el) el.classList.remove('open'); });
 });
 
-// ── Utility ────────────────────────────────────────────────────────────────
 function escHtml(s) {
   return String(s)
     .replace(/&/g,'&amp;').replace(/</g,'&lt;')
     .replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 }
 
-// ── Probe proxy target (shown in the Connect modal) ────────────────────────
+// ── Probe proxy target ─────────────────────────────────────────────────────
 async function probeProxyTarget() {
   const el = document.getElementById('proxyTargetDisplay');
   if (!el) return;
@@ -1228,11 +1106,11 @@ async function probeProxyTarget() {
     const r = await fetch('/api/version', { signal: AbortSignal.timeout(4000) });
     if (r.ok) {
       const v = await r.json();
-      el.textContent = `DependencyTrack ${v.application || ''} ${v.version || '(connected)'}`.trim();
+      el.textContent = `DependencyTrack ${v.application||''} ${v.version||'(connected)'}`.trim();
     } else {
       el.textContent = 'proxy reachable — DT not responding yet';
     }
-  } catch (_) {
+  } catch(_) {
     el.textContent = 'proxy target not reachable — check DT_API_INTERNAL_URL in .env';
     el.style.color = 'var(--critical)';
   }

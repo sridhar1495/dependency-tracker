@@ -9,7 +9,7 @@
 6. [Filtering and Exporting](#6-filtering-and-exporting)
 7. [Customising the Dashboard](#7-customising-the-dashboard)
 8. [Embedding in Another Application](#8-embedding-in-another-application)
-9. [Automation — Auto-refresh](#9-automation--auto-refresh)
+9. [Auto-refresh](#9-auto-refresh)
 
 ---
 
@@ -18,11 +18,19 @@
 The custom risk dashboard is a **standalone, single-file HTML application**
 served by an Nginx container on port `3000`. It provides:
 
-- A sortable, filterable **risk matrix table** for all your projects
-- **Hierarchy level column** — depth in the DependencyTrack parent/child tree
+- A sortable, filterable **hierarchical tree view** mirroring the DependencyTrack
+  parent/child project structure
+- **Expand/collapse** per group row — collapsed groups show **aggregated totals**
+  for all descendants
+- **Open All / Collapse All** buttons for bulk expand/collapse
+- **Auto-refresh** toggle with selectable interval (30 s / 1 min / 5 min)
 - **Tag filtering** — filter by project tags with a multi-select dropdown
-- **CSV export** — one-click export of exactly the filtered rows
+- **Level filtering** — filter by hierarchy depth with a multi-select dropdown
+- **CSV export** — exports all matching projects regardless of fold state, with a
+  Type column (Group / Project)
 - **KPI summary cards** for total Critical, High, Medium, Low counts
+- **Project hyperlinks** — when the DT Frontend URL is configured, project names
+  link directly to that project in the DependencyTrack UI
 - **Two data modes**:
   - **Mock mode** (default) — a realistic hierarchical project tree for immediate preview
   - **Live mode** — pulls real data from your DependencyTrack API
@@ -35,9 +43,27 @@ issues. The browser never makes a direct request to DependencyTrack.
 
 ## 2. Dashboard Features
 
-### Risk Matrix Table
+### Hierarchical Tree View
 
-Each row represents one project. Columns are:
+Projects are displayed in a parent/child tree that mirrors DependencyTrack's
+project hierarchy. Each node shows its risk data inline.
+
+```
+▶ RET                               (collapsed group — shows aggregated totals)
+▼ FreshX Suite                      (expanded group)
+    ▶ FreshX-BE                     (collapsed sub-group)
+    ▼ FreshX.BE.Containers          (expanded sub-group)
+          FreshX-BE v1.4.1          (leaf project)
+          FreshX-BE v1.3.0          (leaf project)
+```
+
+**Group rows (▶ / ▼):** rows that have children. When collapsed (▶), the row
+displays the **sum of all descendant risk counts**. When expanded (▼), the row
+shows only its own direct risk data and its children are listed below it.
+
+**Leaf rows:** project rows with no children. Always show their own data.
+
+### Risk Matrix Columns
 
 | Column            | Description                                              |
 |-------------------|----------------------------------------------------------|
@@ -59,21 +85,19 @@ Each row represents one project. Columns are:
 | Low      | Blue   |
 | Zero (—) | Grey   |
 
-### Hierarchy levels
+### Expand / Collapse
 
-DependencyTrack projects can be organised in a parent/child hierarchy. The
-dashboard fetches `parent.uuid` for each project and computes the depth:
+- Click the **▶** or **▼** triangle on any group row to toggle that group.
+- Click **▼ Expand All** to open every group in the tree.
+- Click **▶ Collapse All** to fold every group (top-level groups then show their
+  fully aggregated portfolio totals).
 
-```
-Level 1   RET                    ← top-level group (no parent)
-Level 2     FreshX Suite         ← child of RET
-Level 3       FreshX-BE          ← child of FreshX Suite
-Level 4         FreshX-BE v1.4.1 ← leaf (version)
-```
+### Project Hyperlinks
 
-The **Lvl** column shows this depth. Use the **Level** multi-select filter to
-show only projects at specific depths — e.g. select "Level 4" to see only
-versioned leaf projects.
+When a **DT Frontend URL** is configured in the Connect modal (see
+[Section 3](#3-switching-from-mock-data-to-live-data)), every project name
+becomes a clickable link that opens the project directly in the DependencyTrack
+UI (`<DT_FRONTEND_URL>/#/projects/<uuid>`).
 
 ### Tags
 
@@ -87,6 +111,7 @@ all loaded projects; selecting multiple tags narrows to projects that have
 Click any column header to sort by that value. Click again to reverse.
 - Default sort: project name A–Z
 - Numeric columns: highest values first when clicking
+- Sort is applied within each sibling group, preserving the tree hierarchy.
 
 ### Filtering
 
@@ -98,7 +123,8 @@ Click any column header to sort by that value. Click again to reverse.
 | Level | Multi-select dropdown | Show only projects at selected hierarchy depths |
 | Tags | Multi-select dropdown | Show only projects that have ALL selected tags |
 
-All filters combine with AND logic.
+All filters combine with AND logic. When a filter matches a child project, its
+ancestor group rows are automatically shown so the tree context is preserved.
 
 ### KPI Cards
 
@@ -115,7 +141,9 @@ The six summary cards above the table always reflect **all loaded projects**
 2. Click the **"⚙ Connect API"** button (top right)
 3. The modal shows the **proxy target status** — confirm DependencyTrack is reachable
 4. Enter your **API Key** (see [Section 4](#4-generating-an-api-key))
-5. Click **Connect**
+5. *(Optional)* Enter the **DependencyTrack Frontend URL** to enable project
+   hyperlinks (e.g. `http://10.121.163.69:8080`)
+6. Click **Connect**
 
 The dashboard fetches all projects (`GET /api/v1/project?pageSize=500`) and their
 current metrics (`GET /api/v1/metrics/project/{uuid}/current`) in real time. It
@@ -285,7 +313,8 @@ Source: same metrics endpoint
 1. Click the **Level** button in the toolbar
 2. A dropdown shows all hierarchy depths that exist in the loaded data
 3. Check one or more levels (e.g. "Level 3", "Level 4")
-4. The table immediately narrows to matching rows
+4. The table immediately narrows to matching rows (ancestor groups are shown
+   automatically to preserve tree context)
 5. Click **Clear** to reset, or uncheck to deselect individual levels
 
 The badge on the button shows how many levels are currently selected.
@@ -304,10 +333,13 @@ The badge on the button shows how many levels are currently selected.
 2. Click **↓ Export CSV**
 3. The browser downloads `dependency-track-YYYY-MM-DD.csv`
 
-The CSV contains exactly the visible rows with these columns:
+The CSV always exports **all matching projects regardless of fold state** — if a
+group is collapsed but its children match the active filters, the children appear
+in the CSV. A **Type** column identifies each row as `Group` or `Project`.
 
 ```
-Project, Version, Level, Tags, Sec Critical, Sec High, Sec Medium, Sec Low,
+Project, Version, Level, Tags, Type,
+Sec Critical, Sec High, Sec Medium, Sec Low,
 Ops Critical, Ops High, Ops Medium, Ops Low,
 Lic Critical, Lic High, Lic Medium, Lic Low
 ```
@@ -406,14 +438,19 @@ For live data without Docker, you need to either:
 
 ---
 
-## 9. Automation — Auto-refresh
+## 9. Auto-refresh
 
-The dashboard has a manual **↻ Refresh** button. To enable **auto-refresh**,
-add this to the `// ── Init ──` section of `dashboard/index.html`:
+The dashboard includes a built-in **auto-refresh** control in the toolbar.
+Auto-refresh only runs in **live mode** (when connected to the DependencyTrack API).
 
-```javascript
-// Auto-refresh every 5 minutes in live mode
-setInterval(() => {
-  if (liveMode) refreshData();
-}, 5 * 60 * 1000);
-```
+### Using auto-refresh
+
+1. Connect to the API (see [Section 3](#3-switching-from-mock-data-to-live-data))
+2. Click **↺ Auto: Off** in the top toolbar — the button turns green and displays
+   **↺ Auto: On**
+3. An interval selector appears next to the button — choose **30 sec**, **1 min**,
+   or **5 min**
+4. The dashboard refreshes all project data and metrics at the selected interval
+5. Click **↺ Auto: On** again to stop
+
+The manual **↻ Refresh** button is always available regardless of auto-refresh state.
