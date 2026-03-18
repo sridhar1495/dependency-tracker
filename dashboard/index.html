@@ -449,9 +449,9 @@
           <tr>
             <th class="th-col th-project" rowspan="2" onclick="sortBy('name')">Project / Version</th>
             <th class="th-col th-level"   rowspan="2" onclick="sortBy('level')" title="Hierarchy depth">Lvl</th>
-            <th class="th-group security"   colspan="4">Security Risk</th>
-            <th class="th-group operations" colspan="4">Operational Risk</th>
-            <th class="th-group license"    colspan="4">License Risk</th>
+            <th class="th-group security"   colspan="5">Security Risk</th>
+            <th class="th-group operations" colspan="3">Operational Risk</th>
+            <th class="th-group license"    colspan="3">License Risk</th>
           </tr>
           <tr id="colHeaders"></tr>
         </thead>
@@ -504,8 +504,16 @@
 
 <script>
 // ── Constants ─────────────────────────────────────────────────────────────
-const LEVELS = ['critical','high','medium','low'];
-const CATS   = ['security','operations','license'];
+// Each category has its own severity levels matching DependencyTrack's data model:
+//   security:   vulnerability CVSS severities
+//   operations: operational policy violation levels (Fail/Warn/Info)
+//   license:    license policy violation levels    (Fail/Warn/Info)
+const CAT_LEVELS = {
+  security:   ['critical','high','medium','low','unassigned'],
+  operations: ['fail','warn','info'],
+  license:    ['fail','warn','info'],
+};
+const CATS = ['security','operations','license'];
 
 // ── State ─────────────────────────────────────────────────────────────────
 let allProjects    = [];   // flat array (source of truth)
@@ -569,9 +577,10 @@ function generateMockProjects() {
   function makeProject(node, parentUuid, level) {
     const uuid = `mock-${idx++}`;
     const hasChildren = Array.isArray(node.children) && node.children.length > 0;
-    const mkRisk = (maxC, maxH, maxM, maxL) => ({
-      critical: rnd(maxC), high: rnd(maxH), medium: rnd(maxM), low: rnd(maxL)
+    const mkSec = (maxC,maxH,maxM,maxL,maxU) => ({
+      critical: rnd(maxC), high: rnd(maxH), medium: rnd(maxM), low: rnd(maxL), unassigned: rnd(maxU)
     });
+    const mkPol = (maxF,maxW,maxI) => ({ fail: rnd(maxF), warn: rnd(maxW), info: rnd(maxI) });
     const proj = {
       uuid,
       name:       node.name,
@@ -579,9 +588,9 @@ function generateMockProjects() {
       parentUuid: parentUuid || null,
       level,
       tags:       node.tags || [],
-      security:   hasChildren ? mkRisk(5,20,40,60) : mkRisk(3,8,15,20),
-      operations: hasChildren ? mkRisk(2,12,25,30) : mkRisk(1,5,10,15),
-      license:    hasChildren ? mkRisk(1,8,15,20)  : mkRisk(1,3,6,8),
+      security:   hasChildren ? mkSec(5,20,40,60,10) : mkSec(3,8,15,20,5),
+      operations: hasChildren ? mkPol(2,12,25) : mkPol(1,5,10),
+      license:    hasChildren ? mkPol(1,8,15)  : mkPol(1,3,6),
     };
     const result = [proj];
     if (hasChildren) {
@@ -636,15 +645,15 @@ function computeAggregates(node) {
   node.children.forEach(computeAggregates);
 
   const agg = {
-    security:   { critical:0, high:0, medium:0, low:0 },
-    operations: { critical:0, high:0, medium:0, low:0 },
-    license:    { critical:0, high:0, medium:0, low:0 },
+    security:   { critical:0, high:0, medium:0, low:0, unassigned:0 },
+    operations: { fail:0, warn:0, info:0 },
+    license:    { fail:0, warn:0, info:0 },
   };
   // Include this node's own data
-  CATS.forEach(c => LEVELS.forEach(l => { agg[c][l] += node[c][l] || 0; }));
+  CATS.forEach(c => CAT_LEVELS[c].forEach(l => { agg[c][l] += node[c][l] || 0; }));
   // Include all children recursively
   node.children.forEach(child => {
-    CATS.forEach(c => LEVELS.forEach(l => { agg[c][l] += child.aggregated[c][l] || 0; }));
+    CATS.forEach(c => CAT_LEVELS[c].forEach(l => { agg[c][l] += child.aggregated[c][l] || 0; }));
   });
   node.aggregated = agg;
 }
@@ -766,7 +775,7 @@ function renderTree(matchSet) {
   const visibleNodes = collectVisible(treeRoots, matchSet);
 
   if (visibleNodes.length === 0) {
-    tbody.innerHTML = `<tr><td colspan="14" style="text-align:center;padding:40px;color:var(--text-muted)">No projects match your filters.</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="13" style="text-align:center;padding:40px;color:var(--text-muted)">No projects match your filters.</td></tr>`;
     return;
   }
 
@@ -793,7 +802,7 @@ function renderTree(matchSet) {
     html += `<td class="level-cell">${node.level}</td>`;
 
     CATS.forEach((cat, ci) => {
-      LEVELS.forEach((lvl, li) => {
+      CAT_LEVELS[cat].forEach((lvl, li) => {
         const val = (data[cat] || {})[lvl] || 0;
         html += `<td class="${li === 0 && ci > 0 ? 'sep-left' : ''}">${pillFor(val, lvl)}</td>`;
       });
@@ -808,10 +817,17 @@ function renderTree(matchSet) {
 
 // ── KPI summary cards ──────────────────────────────────────────────────────
 // Always reflects the current filtered set so numbers update with every filter change.
+// Ops/license Fail→critical, Warn→high, Info→medium for unified summary totals.
 function renderSummary() {
   const totals = { critical:0, high:0, medium:0, low:0 };
   filtered.forEach(p => {
-    CATS.forEach(c => LEVELS.forEach(l => { totals[l] += (p[c]?.[l] || 0); }));
+    const s = p.security   || {};
+    const o = p.operations || {};
+    const l = p.license    || {};
+    totals.critical += (s.critical||0) + (o.fail||0)  + (l.fail||0);
+    totals.high     += (s.high||0)     + (o.warn||0)  + (l.warn||0);
+    totals.medium   += (s.medium||0)   + (o.info||0)  + (l.info||0);
+    totals.low      += (s.low||0)      + (s.unassigned||0);
   });
   const risky = filtered.filter(p => riskScore(p) > 0).length;
   const activeRisk = document.getElementById('riskFilter').value;
@@ -875,7 +891,22 @@ function applyFilters() {
       if (risk === 'ok') { if (riskScore(proj) !== 0) return false; }
       else {
         const catsToCheck = cat === 'all' ? CATS : [cat];
-        if (!catsToCheck.some(c => (proj[c]?.[risk] || 0) > 0)) return false;
+        // ops/license use fail/warn/info — map filter levels accordingly
+        const hasRisk = catsToCheck.some(c => {
+          const d = proj[c] || {};
+          if (c === 'security') {
+            if (risk === 'critical') return (d.critical||0) > 0;
+            if (risk === 'high')     return (d.high||0) > 0;
+            if (risk === 'medium')   return (d.medium||0) > 0;
+            if (risk === 'low')      return (d.low||0) > 0 || (d.unassigned||0) > 0;
+          } else {
+            if (risk === 'critical') return (d.fail||0) > 0;
+            if (risk === 'high')     return (d.warn||0) > 0;
+            if (risk === 'medium')   return (d.info||0) > 0;
+          }
+          return false;
+        });
+        if (!hasRisk) return false;
       }
     }
     if (selectedLevels.size > 0 && !selectedLevels.has(proj.level)) return false;
@@ -985,9 +1016,9 @@ function exportCSV() {
 
   const headers = [
     'Project','Version','Level','Tags','Type',
-    'Sec Critical','Sec High','Sec Medium','Sec Low',
-    'Ops Critical','Ops High','Ops Medium','Ops Low',
-    'Lic Critical','Lic High','Lic Medium','Lic Low',
+    'Security Critical','Security High','Security Medium','Security Low','Security Unassigned',
+    'Operational Fail','Operational Warn','Operational Info',
+    'License Fail','License Warn','License Info',
   ];
 
   const rows = filtered.map(p => {
@@ -995,9 +1026,9 @@ function exportCSV() {
     const type = (node && node.children.length > 0) ? 'Group' : 'Project';
     return [
       p.name, p.version || '', p.level ?? '', (p.tags || []).join('; '), type,
-      p.security.critical,   p.security.high,   p.security.medium,   p.security.low,
-      p.operations.critical, p.operations.high, p.operations.medium, p.operations.low,
-      p.license.critical,    p.license.high,    p.license.medium,    p.license.low,
+      p.security.critical,    p.security.high,    p.security.medium,    p.security.low,    p.security.unassigned,
+      p.operations.fail,      p.operations.warn,  p.operations.info,
+      p.license.fail,         p.license.warn,     p.license.info,
     ];
   });
 
@@ -1018,29 +1049,38 @@ function exportCSV() {
 
 // ── Risk score (for summary + ok filter) ──────────────────────────────────
 function riskScore(proj) {
-  let s = 0;
-  CATS.forEach(c => {
-    s += (proj[c].critical||0)*1000 + (proj[c].high||0)*100
-       + (proj[c].medium||0)*10   + (proj[c].low||0);
-  });
-  return s;
+  const s = proj.security   || {};
+  const o = proj.operations || {};
+  const l = proj.license    || {};
+  return (s.critical||0)*10000 + (s.high||0)*1000 + (s.medium||0)*100 + (s.low||0)*10 + (s.unassigned||0)*5
+       + (o.fail||0)*10000     + (o.warn||0)*1000  + (o.info||0)*100
+       + (l.fail||0)*10000     + (l.warn||0)*1000  + (l.info||0)*100;
 }
 
 // ── Pill renderer ──────────────────────────────────────────────────────────
+// Maps ops/license levels (fail/warn/info) to the corresponding CSS classes.
 function pillFor(n, level) {
   if (n === 0) return `<span class="pill pill-zero">—</span>`;
-  return `<span class="pill pill-${level}">${n}</span>`;
+  const cls = level === 'fail' ? 'critical'
+            : level === 'warn' ? 'high'
+            : level === 'info' ? 'medium'
+            : level;
+  return `<span class="pill pill-${cls}">${n}</span>`;
 }
 
 // ── Column headers ─────────────────────────────────────────────────────────
 function buildColHeaders() {
   const row = document.getElementById('colHeaders');
   row.innerHTML = '';
+  const displayName = {
+    critical:'Critical', high:'High', medium:'Medium', low:'Low', unassigned:'Unassigned',
+    fail:'Fail', warn:'Warn', info:'Info',
+  };
   CATS.forEach((cat, ci) => {
-    LEVELS.forEach(lvl => {
+    CAT_LEVELS[cat].forEach((lvl, li) => {
       const th = document.createElement('th');
-      th.className = 'th-col' + (lvl === 'critical' && ci > 0 ? ' sep-left' : '');
-      th.textContent = lvl.charAt(0).toUpperCase() + lvl.slice(1);
+      th.className = 'th-col' + (li === 0 && ci > 0 ? ' sep-left' : '');
+      th.textContent = displayName[lvl] || lvl;
       th.onclick = () => sortBy(`${cat}.${lvl}`);
       th.dataset.sort = `${cat}.${lvl}`;
       row.appendChild(th);
@@ -1085,17 +1125,16 @@ async function fetchAllProjects(key) {
 
 // ── Fetch metrics for one project ─────────────────────────────────────────
 async function fetchProjectMetrics(p, key) {
-  let sec = {critical:0,high:0,medium:0,low:0};
-  let ops = {critical:0,high:0,medium:0,low:0};
-  let lic = {critical:0,high:0,medium:0,low:0};
+  let sec = {critical:0,high:0,medium:0,low:0,unassigned:0};
+  let ops = {fail:0,warn:0,info:0};
+  let lic = {fail:0,warn:0,info:0};
 
   // Prefer embedded metrics from the project list response (no extra API call needed)
   const m = p.metrics || null;
   if (m) {
-    sec = { critical: m.critical||0, high: m.high||0, medium: m.medium||0, low: m.low||0 };
-    ops = { critical: 0, high: m.unassigned||0, medium: m.suppressed||0, low: 0 };
-    lic = { critical: m.policyViolationsFail||0, high: m.policyViolationsWarn||0,
-            medium: m.policyViolationsInfo||0, low: 0 };
+    sec = { critical: m.critical||0, high: m.high||0, medium: m.medium||0, low: m.low||0, unassigned: m.unassigned||0 };
+    ops = { fail: m.policyViolationsOperationalFail||0, warn: m.policyViolationsOperationalWarn||0, info: m.policyViolationsOperationalInfo||0 };
+    lic = { fail: m.policyViolationsLicenseFail||0, warn: m.policyViolationsLicenseWarn||0, info: m.policyViolationsLicenseInfo||0 };
   } else {
     // Fall back to separate metrics endpoint for projects without embedded metrics
     try {
@@ -1104,10 +1143,9 @@ async function fetchProjectMetrics(p, key) {
       });
       if (mr.ok) {
         const m2 = await mr.json();
-        sec = { critical: m2.critical||0, high: m2.high||0, medium: m2.medium||0, low: m2.low||0 };
-        ops = { critical: 0, high: m2.unassigned||0, medium: m2.suppressed||0, low: 0 };
-        lic = { critical: m2.policyViolationsFail||0, high: m2.policyViolationsWarn||0,
-                medium: m2.policyViolationsInfo||0, low: 0 };
+        sec = { critical: m2.critical||0, high: m2.high||0, medium: m2.medium||0, low: m2.low||0, unassigned: m2.unassigned||0 };
+        ops = { fail: m2.policyViolationsOperationalFail||0, warn: m2.policyViolationsOperationalWarn||0, info: m2.policyViolationsOperationalInfo||0 };
+        lic = { fail: m2.policyViolationsLicenseFail||0, warn: m2.policyViolationsLicenseWarn||0, info: m2.policyViolationsLicenseInfo||0 };
       }
     } catch(_) {}
   }
