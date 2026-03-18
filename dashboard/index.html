@@ -112,6 +112,12 @@
       color: #fff;
     }
     .btn.primary:hover { background: #4f46e5; }
+    .btn.export {
+      background: rgba(34,197,94,0.12);
+      border-color: rgba(34,197,94,0.35);
+      color: var(--ok);
+    }
+    .btn.export:hover { background: rgba(34,197,94,0.22); border-color: var(--ok); }
 
     /* ── Main content ─────────────────────────────────────────────────────── */
     .main { flex: 1; padding: 24px; }
@@ -156,7 +162,7 @@
     .controls {
       display: flex;
       align-items: center;
-      gap: 12px;
+      gap: 10px;
       margin-bottom: 16px;
       flex-wrap: wrap;
     }
@@ -164,7 +170,7 @@
       font-size: 18px;
       font-weight: 600;
       flex: 1;
-      min-width: 200px;
+      min-width: 160px;
     }
     .controls h1 span {
       color: var(--text-muted);
@@ -179,7 +185,7 @@
       color: var(--text);
       font-size: 13px;
       padding: 7px 12px;
-      width: 240px;
+      width: 200px;
       outline: none;
       transition: border-color 0.15s;
     }
@@ -197,6 +203,98 @@
       cursor: pointer;
     }
 
+    /* ── Multi-select dropdown ────────────────────────────────────────────── */
+    .ms-wrap {
+      position: relative;
+    }
+    .ms-btn {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 7px 12px;
+      border-radius: var(--radius);
+      border: 1px solid var(--border);
+      background: var(--surface);
+      color: var(--text);
+      font-size: 13px;
+      cursor: pointer;
+      white-space: nowrap;
+      transition: border-color 0.15s;
+      user-select: none;
+    }
+    .ms-btn:hover { border-color: var(--accent); }
+    .ms-btn.active { border-color: var(--accent); color: var(--accent); }
+    .ms-btn .ms-caret { font-size: 10px; color: var(--text-muted); margin-left: 2px; }
+    .ms-badge {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-width: 18px;
+      height: 18px;
+      padding: 0 4px;
+      background: var(--accent);
+      color: #fff;
+      border-radius: 9px;
+      font-size: 10px;
+      font-weight: 700;
+    }
+    .ms-panel {
+      position: absolute;
+      top: calc(100% + 4px);
+      left: 0;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 6px;
+      min-width: 180px;
+      z-index: 60;
+      display: none;
+      max-height: 240px;
+      overflow-y: auto;
+      box-shadow: 0 8px 24px rgba(0,0,0,0.4);
+    }
+    .ms-panel.open { display: block; }
+    .ms-panel-header {
+      display: flex;
+      justify-content: space-between;
+      padding: 4px 6px 6px;
+      border-bottom: 1px solid var(--border);
+      margin-bottom: 4px;
+    }
+    .ms-panel-header button {
+      background: none;
+      border: none;
+      color: var(--accent);
+      font-size: 11px;
+      cursor: pointer;
+      padding: 0;
+    }
+    .ms-panel-header button:hover { text-decoration: underline; }
+    .ms-panel label {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 5px 6px;
+      border-radius: 4px;
+      cursor: pointer;
+      font-size: 13px;
+      color: var(--text);
+      transition: background 0.1s;
+    }
+    .ms-panel label:hover { background: var(--surface2); }
+    .ms-panel input[type=checkbox] {
+      accent-color: var(--accent);
+      width: 14px; height: 14px;
+      cursor: pointer;
+      flex-shrink: 0;
+    }
+    .ms-empty {
+      padding: 6px 8px;
+      font-size: 12px;
+      color: var(--text-muted);
+      font-style: italic;
+    }
+
     /* ── Table wrapper ────────────────────────────────────────────────────── */
     .table-wrap {
       background: var(--surface);
@@ -210,7 +308,7 @@
     table {
       width: 100%;
       border-collapse: collapse;
-      min-width: 1000px;
+      min-width: 1100px;
     }
 
     /* Sticky header */
@@ -253,7 +351,11 @@
     .th-project {
       text-align: left;
       padding-left: 20px;
-      min-width: 220px;
+      min-width: 240px;
+      cursor: pointer;
+    }
+    .th-level {
+      min-width: 60px;
       cursor: pointer;
     }
 
@@ -276,7 +378,6 @@
       text-align: left;
       padding-left: 20px;
       font-weight: 500;
-      white-space: nowrap;
     }
     td.project-name .version-badge {
       margin-left: 6px;
@@ -286,6 +387,21 @@
       border: 1px solid var(--border);
       border-radius: 4px;
       padding: 1px 5px;
+    }
+    td.project-name .tag-chip {
+      display: inline-block;
+      margin-left: 4px;
+      font-size: 10px;
+      color: #a78bfa;
+      background: rgba(167,139,250,0.1);
+      border: 1px solid rgba(167,139,250,0.25);
+      border-radius: 4px;
+      padding: 1px 5px;
+    }
+    td.level-cell {
+      color: var(--text-muted);
+      font-size: 12px;
+      font-weight: 600;
     }
 
     /* Risk pill */
@@ -432,7 +548,11 @@
     <!-- Table controls -->
     <div class="controls">
       <h1>Projects <span id="projectCount"></span></h1>
+
+      <!-- Search -->
       <input class="search-input" id="searchInput" placeholder="Search projects…" oninput="applyFilters()" />
+
+      <!-- Risk level filter (single-select) -->
       <select class="filter-select" id="riskFilter" onchange="applyFilters()">
         <option value="all">All risk levels</option>
         <option value="critical">Has Critical</option>
@@ -441,12 +561,51 @@
         <option value="low">Has Low</option>
         <option value="ok">Clean (OK)</option>
       </select>
+
+      <!-- Category filter (single-select) -->
       <select class="filter-select" id="categoryFilter" onchange="applyFilters()">
         <option value="all">All categories</option>
         <option value="security">Security</option>
         <option value="operations">Operational</option>
         <option value="license">License</option>
       </select>
+
+      <!-- Hierarchy Level multi-select -->
+      <div class="ms-wrap" id="levelWrap">
+        <div class="ms-btn" id="levelBtn" onclick="toggleDropdown('levelPanel')">
+          Level
+          <span class="ms-badge" id="levelBadge" style="display:none"></span>
+          <span class="ms-caret">▾</span>
+        </div>
+        <div class="ms-panel" id="levelPanel">
+          <div class="ms-panel-header">
+            <span style="font-size:11px;color:var(--text-muted)">Hierarchy depth</span>
+            <button onclick="clearFilter('level')">Clear</button>
+          </div>
+          <div id="levelOptions"><span class="ms-empty">Load data first</span></div>
+        </div>
+      </div>
+
+      <!-- Tag multi-select -->
+      <div class="ms-wrap" id="tagWrap">
+        <div class="ms-btn" id="tagBtn" onclick="toggleDropdown('tagPanel')">
+          Tags
+          <span class="ms-badge" id="tagBadge" style="display:none"></span>
+          <span class="ms-caret">▾</span>
+        </div>
+        <div class="ms-panel" id="tagPanel">
+          <div class="ms-panel-header">
+            <span style="font-size:11px;color:var(--text-muted)">Project tags</span>
+            <button onclick="clearFilter('tag')">Clear</button>
+          </div>
+          <div id="tagOptions"><span class="ms-empty">Load data first</span></div>
+        </div>
+      </div>
+
+      <!-- Export CSV -->
+      <button class="btn export" onclick="exportCSV()">
+        ↓ Export CSV
+      </button>
     </div>
 
     <!-- Table -->
@@ -455,6 +614,7 @@
         <thead>
           <tr>
             <th class="th-col th-project" rowspan="2" onclick="sortBy('name')">Project / Version</th>
+            <th class="th-col th-level" rowspan="2" onclick="sortBy('level')" title="Hierarchy depth (1 = top-level)">Lvl</th>
             <th class="th-group security" colspan="4">Security Risk</th>
             <th class="th-group operations" colspan="4">Operational Risk</th>
             <th class="th-group license" colspan="4">License Risk</th>
@@ -509,7 +669,6 @@
 // ── Constants ─────────────────────────────────────────────────────────────
 const LEVELS   = ['critical','high','medium','low'];
 const CATS     = ['security','operations','license'];
-const CAT_LABELS = { security: 'Security', operations: 'Operational', license: 'License' };
 
 // ── State ─────────────────────────────────────────────────────────────────
 let allProjects   = [];
@@ -517,42 +676,195 @@ let filtered      = [];
 let sortCol       = 'name';
 let sortDir       = 'asc';
 let liveMode      = false;
-// API calls always go through the nginx proxy at /api/ (same origin).
-// This avoids CORS entirely — no API URL needed from the user.
 let apiKey        = '';
+let selectedLevels = new Set(); // empty = all levels shown
+let selectedTags   = new Set(); // empty = all tags shown
 
 // ── Mock Data ─────────────────────────────────────────────────────────────
 function generateMockProjects() {
-  const names = [
-    'payment-service','auth-gateway','user-profile-api','inventory-ms',
-    'notification-worker','product-catalog','order-management','shipping-service',
-    'analytics-pipeline','report-generator','audit-logger','config-server',
-    'api-gateway','session-manager','file-storage-service','email-service',
-    'sms-gateway','search-indexer','recommendation-engine','fraud-detection',
-    'billing-service','subscription-manager','checkout-flow','cart-service',
-    'wishlist-service','review-aggregator','rating-engine','pricing-service',
-    'discount-service','coupon-manager','loyalty-points','referral-tracker',
-    'content-delivery','media-processor','thumbnail-generator','image-optimizer',
-    'data-exporter','import-worker','etl-pipeline','warehouse-connector',
-    'crm-integration','erp-bridge','payment-gateway-adapter','tax-calculator',
-    'compliance-checker','gdpr-service','consent-manager','data-masking-util',
-    'identity-provider','oauth-server','mfa-service','token-revocation',
-    'health-monitor','metrics-collector','alert-manager','log-aggregator'
+  const MOCK_TAGS = ['production','staging','critical-service','internal','external','java','node','python','go'];
+
+  // Build a realistic hierarchy: groups → sub-groups → leaf versions
+  const rawTree = [
+    { name: 'RET',           children: [
+      { name: 'FreshX Suite', children: [
+        { name: 'FreshX-BE', children: [
+          { name: 'FreshX-BE', version: '1.4.1', tags: ['java','production'] },
+          { name: 'FreshX-BE', version: '1.4.2', tags: ['java','production'] },
+          { name: 'FreshX-BE', version: '1.5.0', tags: ['java','staging'] },
+        ]},
+        { name: 'FreshX-FE', children: [
+          { name: 'FreshX-FE', version: '2.1.0', tags: ['node','production'] },
+        ]},
+      ]},
+      { name: 'IND',          children: [
+        { name: 'payments-service', version: '3.2.1', tags: ['java','critical-service','production'] },
+        { name: 'auth-gateway',     version: '1.0.4', tags: ['go','internal','production'] },
+      ]},
+    ]},
+    { name: 'Platform', children: [
+      { name: 'api-gateway',          version: '2.3.0', tags: ['go','external','production'] },
+      { name: 'notification-worker',  version: '1.1.7', tags: ['python','internal'] },
+      { name: 'analytics-pipeline',   version: '0.9.1', tags: ['python','staging'] },
+    ]},
+    { name: 'audit-logger',   version: '1.2.0', tags: ['java','internal'] },
+    { name: 'config-server',  version: '3.0.0', tags: ['java','production','critical-service'] },
+    { name: 'fraud-detection',version: '2.0.5', tags: ['python','critical-service','production'] },
+    { name: 'billing-service',version: '4.1.2', tags: ['java','critical-service','production'] },
+    { name: 'email-service',  version: '1.0.9', tags: ['node','internal'] },
+    { name: 'search-indexer', version: '2.2.0', tags: ['go','internal','staging'] },
   ];
 
-  return names.map((name, i) => {
-    const v = `${Math.floor(Math.random()*3)+1}.${Math.floor(Math.random()*9)}.${Math.floor(Math.random()*9)}`;
-    const rnd = (max) => Math.floor(Math.random() * (max + 1));
-    return {
-      uuid: `mock-${i}`,
-      name,
-      version: v,
-      security:   { critical: rnd(3), high: rnd(8), medium: rnd(15), low: rnd(20) },
-      operations: { critical: rnd(2), high: rnd(6), medium: rnd(12), low: rnd(18) },
-      license:    { critical: rnd(1), high: rnd(4), medium: rnd(8),  low: rnd(10) },
+  const rnd = (max) => Math.floor(Math.random() * (max + 1));
+  let idx = 0;
+
+  function makeProject(node, parentUuid, level) {
+    const uuid = `mock-${idx++}`;
+    const hasChildren = Array.isArray(node.children) && node.children.length > 0;
+    const proj = {
+      uuid,
+      name: node.name,
+      version: node.version || '',
+      parentUuid: parentUuid || null,
+      level,
+      tags: node.tags || [],
+      // Groups have aggregated counts; leaves have actual data
+      security:   hasChildren
+        ? { critical: rnd(5), high: rnd(20), medium: rnd(40), low: rnd(60) }
+        : { critical: rnd(3), high: rnd(8),  medium: rnd(15), low: rnd(20) },
+      operations: hasChildren
+        ? { critical: rnd(2), high: rnd(12), medium: rnd(25), low: rnd(30) }
+        : { critical: rnd(1), high: rnd(5),  medium: rnd(10), low: rnd(15) },
+      license: hasChildren
+        ? { critical: rnd(1), high: rnd(8),  medium: rnd(15), low: rnd(20) }
+        : { critical: rnd(1), high: rnd(3),  medium: rnd(6),  low: rnd(8)  },
     };
-  });
+    const result = [proj];
+    if (hasChildren) {
+      node.children.forEach(child => {
+        result.push(...makeProject(child, uuid, level + 1));
+      });
+    }
+    return result;
+  }
+
+  return rawTree.flatMap(node => makeProject(node, null, 1));
 }
+
+// ── Compute hierarchy levels from parent UUIDs (live data) ─────────────────
+function computeLevels(projects) {
+  const byUuid = {};
+  projects.forEach(p => { byUuid[p.uuid] = p; });
+
+  function depth(p, visited) {
+    if (!p.parentUuid) return 1;
+    if (visited.has(p.uuid)) return 1; // cycle guard
+    visited.add(p.uuid);
+    const parent = byUuid[p.parentUuid];
+    return parent ? 1 + depth(parent, visited) : 2;
+  }
+
+  projects.forEach(p => { p.level = depth(p, new Set()); });
+}
+
+// ── Build filter option panels (called after data loads) ───────────────────
+function buildFilterOptions() {
+  // Levels
+  const levels = [...new Set(allProjects.map(p => p.level).filter(l => l != null))].sort((a, b) => a - b);
+  const levelOpts = document.getElementById('levelOptions');
+  if (levels.length === 0) {
+    levelOpts.innerHTML = '<span class="ms-empty">No level data</span>';
+  } else {
+    levelOpts.innerHTML = levels.map(l =>
+      `<label>
+        <input type="checkbox" value="${l}" onchange="onMultiChange('level')">
+        Level ${l}${l === 1 ? ' <span style="color:var(--text-muted);font-size:11px">(Top)</span>' : ''}
+      </label>`
+    ).join('');
+  }
+
+  // Tags
+  const tags = [...new Set(allProjects.flatMap(p => p.tags || []))].sort();
+  const tagOpts = document.getElementById('tagOptions');
+  if (tags.length === 0) {
+    tagOpts.innerHTML = '<span class="ms-empty">No tags found</span>';
+  } else {
+    tagOpts.innerHTML = tags.map(t =>
+      `<label><input type="checkbox" value="${escHtml(t)}" onchange="onMultiChange('tag')"> ${escHtml(t)}</label>`
+    ).join('');
+  }
+
+  selectedLevels.clear();
+  selectedTags.clear();
+  updateBadges();
+}
+
+// ── Multi-select helpers ───────────────────────────────────────────────────
+function toggleDropdown(panelId) {
+  const panel = document.getElementById(panelId);
+  const isOpen = panel.classList.contains('open');
+  // Close all open panels first
+  document.querySelectorAll('.ms-panel.open').forEach(p => p.classList.remove('open'));
+  if (!isOpen) panel.classList.add('open');
+}
+
+function onMultiChange(type) {
+  if (type === 'level') {
+    selectedLevels = new Set(
+      [...document.querySelectorAll('#levelOptions input:checked')].map(i => parseInt(i.value))
+    );
+  } else {
+    selectedTags = new Set(
+      [...document.querySelectorAll('#tagOptions input:checked')].map(i => i.value)
+    );
+  }
+  updateBadges();
+  applyFilters();
+}
+
+function clearFilter(type) {
+  if (type === 'level') {
+    document.querySelectorAll('#levelOptions input').forEach(i => { i.checked = false; });
+    selectedLevels.clear();
+  } else {
+    document.querySelectorAll('#tagOptions input').forEach(i => { i.checked = false; });
+    selectedTags.clear();
+  }
+  updateBadges();
+  applyFilters();
+}
+
+function updateBadges() {
+  const lb = document.getElementById('levelBadge');
+  const tb = document.getElementById('tagBadge');
+  const lBtn = document.getElementById('levelBtn');
+  const tBtn = document.getElementById('tagBtn');
+
+  if (selectedLevels.size > 0) {
+    lb.textContent = selectedLevels.size;
+    lb.style.display = '';
+    lBtn.classList.add('active');
+  } else {
+    lb.style.display = 'none';
+    lBtn.classList.remove('active');
+  }
+
+  if (selectedTags.size > 0) {
+    tb.textContent = selectedTags.size;
+    tb.style.display = '';
+    tBtn.classList.add('active');
+  } else {
+    tb.style.display = 'none';
+    tBtn.classList.remove('active');
+  }
+}
+
+// Close dropdowns when clicking outside
+document.addEventListener('click', e => {
+  if (!e.target.closest('.ms-wrap')) {
+    document.querySelectorAll('.ms-panel.open').forEach(p => p.classList.remove('open'));
+  }
+});
 
 // ── Risk score for sorting/filtering ──────────────────────────────────────
 function riskScore(proj) {
@@ -582,13 +894,6 @@ function buildColHeaders() {
   });
 }
 
-// ── Render pill ────────────────────────────────────────────────────────────
-function pill(n) {
-  if (n === 0) return `<span class="pill pill-zero">—</span>`;
-  let cls = 'ok';
-  return `<span class="pill pill-${cls} pill-${cls}">${n}</span>`;
-}
-
 // Context-aware pill (we pass the level)
 function pillFor(n, level) {
   if (n === 0) return `<span class="pill pill-zero">—</span>`;
@@ -601,13 +906,18 @@ function renderTable() {
   tbody.innerHTML = '';
 
   if (filtered.length === 0) {
-    tbody.innerHTML = `<tr><td colspan="13" style="text-align:center;padding:40px;color:var(--text-muted)">No projects match your filters.</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="14" style="text-align:center;padding:40px;color:var(--text-muted)">No projects match your filters.</td></tr>`;
     return;
   }
 
   filtered.forEach(proj => {
     const tr = document.createElement('tr');
-    let html = `<td class="project-name">${escHtml(proj.name)}<span class="version-badge">v${escHtml(proj.version)}</span></td>`;
+    const tagChips = (proj.tags || []).map(t => `<span class="tag-chip">${escHtml(t)}</span>`).join('');
+    const vBadge = proj.version
+      ? `<span class="version-badge">v${escHtml(proj.version)}</span>`
+      : '';
+    let html = `<td class="project-name">${escHtml(proj.name)}${vBadge}${tagChips}</td>`;
+    html += `<td class="level-cell">${proj.level != null ? proj.level : '—'}</td>`;
 
     CATS.forEach((cat, ci) => {
       LEVELS.forEach((lvl, li) => {
@@ -687,8 +997,17 @@ function applyFilters() {
       }
     }
 
-    // Category filter — no row-level filtering on category alone,
-    // but useful in combination with risk filter above
+    // Hierarchy level filter
+    if (selectedLevels.size > 0 && !selectedLevels.has(proj.level)) return false;
+
+    // Tag filter — project must have ALL selected tags
+    if (selectedTags.size > 0) {
+      const projTags = new Set(proj.tags || []);
+      for (const t of selectedTags) {
+        if (!projTags.has(t)) return false;
+      }
+    }
+
     return true;
   });
 
@@ -697,6 +1016,8 @@ function applyFilters() {
     let va, vb;
     if (sortCol === 'name') {
       va = a.name; vb = b.name;
+    } else if (sortCol === 'level') {
+      va = a.level ?? 999; vb = b.level ?? 999;
     } else if (sortCol === 'risk') {
       va = riskScore(a); vb = riskScore(b);
     } else {
@@ -723,15 +1044,52 @@ function sortBy(col) {
     sortDir = col === 'name' ? 'asc' : 'desc';
   }
 
-  // Update header classes
   document.querySelectorAll('.th-col').forEach(th => {
     th.classList.remove('sort-asc','sort-desc');
-    if (th.dataset.sort === col || (col === 'name' && th.classList.contains('th-project'))) {
+    if (th.dataset.sort === col || (col === 'name' && th.classList.contains('th-project'))
+        || (col === 'level' && th.classList.contains('th-level'))) {
       th.classList.add(sortDir === 'asc' ? 'sort-asc' : 'sort-desc');
     }
   });
 
   applyFilters();
+}
+
+// ── Export CSV ─────────────────────────────────────────────────────────────
+function exportCSV() {
+  if (filtered.length === 0) { alert('No rows to export — adjust your filters.'); return; }
+
+  const headers = [
+    'Project', 'Version', 'Level', 'Tags',
+    'Sec Critical', 'Sec High', 'Sec Medium', 'Sec Low',
+    'Ops Critical', 'Ops High', 'Ops Medium', 'Ops Low',
+    'Lic Critical', 'Lic High', 'Lic Medium', 'Lic Low',
+  ];
+
+  const rows = filtered.map(p => [
+    p.name,
+    p.version || '',
+    p.level != null ? p.level : '',
+    (p.tags || []).join('; '),
+    p.security.critical,   p.security.high,   p.security.medium,   p.security.low,
+    p.operations.critical, p.operations.high, p.operations.medium, p.operations.low,
+    p.license.critical,    p.license.high,    p.license.medium,    p.license.low,
+  ]);
+
+  const csvLines = [headers, ...rows].map(row =>
+    row.map(v => `"${String(v ?? '').replace(/"/g, '""')}"`).join(',')
+  );
+  const csv = csvLines.join('\r\n');
+
+  const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+  const url  = URL.createObjectURL(blob);
+  const a    = document.createElement('a');
+  a.href     = url;
+  a.download = `dependency-track-${new Date().toISOString().slice(0, 10)}.csv`;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
 }
 
 // ── Load mock data ─────────────────────────────────────────────────────────
@@ -743,12 +1101,12 @@ function loadMockData() {
   document.getElementById('dataBanner').className = 'data-banner';
   document.getElementById('apiStatus').innerHTML =
     '<div class="status-dot" style="background:var(--medium)"></div><span>Mock Data</span>';
+  buildFilterOptions();
   renderSummary();
   applyFilters();
 }
 
 // ── Connect to live API ────────────────────────────────────────────────────
-// All requests go through the nginx /api/ proxy (same-origin) — no CORS.
 async function connectLiveApi() {
   apiKey = document.getElementById('apiKeyInput').value.trim();
 
@@ -760,7 +1118,6 @@ async function connectLiveApi() {
     '<div class="status-dot" style="background:var(--medium);animation:pulse 0.5s infinite"></div><span>Connecting…</span>';
 
   try {
-    // Fetch all projects via nginx proxy (/api/ → dtrack-apiserver:8080/api/)
     const res = await fetch('/api/v1/project?pageSize=500&pageNumber=1', {
       headers: { 'X-Api-Key': apiKey }
     });
@@ -782,46 +1139,46 @@ async function connectLiveApi() {
       document.getElementById('apiStatus').innerHTML =
         '<div class="status-dot"></div><span>Live</span>';
       closeModal('apiModal');
+      buildFilterOptions();
       renderSummary();
       applyFilters();
       return;
     }
 
-    // Map to our schema
+    // Map to our schema, capturing parentUuid and tags from the DT response
     allProjects = await Promise.all(projects.map(async (p) => {
+      let sec = { critical:0, high:0, medium:0, low:0 };
+      let ops = { critical:0, high:0, medium:0, low:0 };
+      let lic = { critical:0, high:0, medium:0, low:0 };
       try {
         const mr = await fetch(`/api/v1/metrics/project/${p.uuid}/current`, {
           headers: { 'X-Api-Key': apiKey }
         });
         if (mr.ok) {
           const m = await mr.json();
-          return {
-            uuid: p.uuid,
-            name: p.name,
-            version: p.version || 'latest',
-            security:   {
-              critical: m.critical || 0, high: m.high || 0,
-              medium: m.medium || 0, low: m.low || 0
-            },
-            operations: {
-              critical: 0, high: m.unassigned || 0,
-              medium: m.suppressed || 0, low: 0
-            },
-            license:    {
-              critical: m.policyViolationsFail || 0,
-              high: m.policyViolationsWarn || 0,
-              medium: m.policyViolationsInfo || 0, low: 0
-            }
-          };
+          sec = { critical: m.critical || 0, high: m.high || 0, medium: m.medium || 0, low: m.low || 0 };
+          ops = { critical: 0, high: m.unassigned || 0, medium: m.suppressed || 0, low: 0 };
+          lic = { critical: m.policyViolationsFail || 0, high: m.policyViolationsWarn || 0,
+                  medium: m.policyViolationsInfo || 0, low: 0 };
         }
       } catch(_) {}
+
       return {
-        uuid: p.uuid, name: p.name, version: p.version || 'latest',
-        security:   { critical:0, high:0, medium:0, low:0 },
-        operations: { critical:0, high:0, medium:0, low:0 },
-        license:    { critical:0, high:0, medium:0, low:0 }
+        uuid:       p.uuid,
+        name:       p.name,
+        version:    p.version || '',
+        // parent is {uuid:...} object in DT API response; store just the UUID string
+        parentUuid: p.parent?.uuid || null,
+        // tags is [{name:"..."},...] in DT API response; flatten to string array
+        tags:       (p.tags || []).map(t => t.name || t).filter(Boolean),
+        security:   sec,
+        operations: ops,
+        license:    lic,
       };
     }));
+
+    // Compute hierarchy depth from parent UUID chain
+    computeLevels(allProjects);
 
     liveMode = true;
     document.getElementById('dataBanner').innerHTML =
@@ -831,6 +1188,7 @@ async function connectLiveApi() {
       '<div class="status-dot"></div><span>Live</span>';
 
     closeModal('apiModal');
+    buildFilterOptions();
     renderSummary();
     applyFilters();
   } catch(err) {
@@ -863,8 +1221,6 @@ function escHtml(s) {
 }
 
 // ── Probe proxy target (shown in the Connect modal) ────────────────────────
-// The dashboard never knows the raw DT_API_INTERNAL_URL (it's server-side),
-// but we can show the DT version string which confirms the proxy is working.
 async function probeProxyTarget() {
   const el = document.getElementById('proxyTargetDisplay');
   if (!el) return;
