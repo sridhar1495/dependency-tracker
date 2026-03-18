@@ -298,18 +298,17 @@ upload-sbom:
   stage: deploy
   image: alpine:3.19
   before_script:
-    - apk add --no-cache curl jq python3
+    - apk add --no-cache curl
   script:
     - |
-      ENCODED=$(base64 -w0 < target/bom.json)
+      # Use multipart POST — avoids base64 shell variable size limits on large SBOMs
       curl -sf \
-        -X PUT "${DT_API_URL}/api/v1/bom" \
+        -X POST "${DT_API_URL}/api/v1/bom" \
         -H "X-Api-Key: ${DT_API_KEY}" \
-        -H "Content-Type: application/json" \
-        -d "{\"projectName\":\"${CI_PROJECT_NAME}\",
-             \"projectVersion\":\"${CI_COMMIT_REF_NAME}\",
-             \"autoCreate\":true,
-             \"bom\":\"${ENCODED}\"}"
+        -F "projectName=${CI_PROJECT_NAME}" \
+        -F "projectVersion=${CI_COMMIT_REF_NAME}" \
+        -F "autoCreate=true" \
+        -F "bom=@target/bom.json"
   only:
     - main
 ```
@@ -323,21 +322,28 @@ pipeline {
         stage('Upload SBOM') {
             steps {
                 sh '''
-                ENCODED=$(base64 -w0 < target/bom.json)
+                # Use multipart POST — avoids base64 shell variable size limits on large SBOMs
                 curl -sf \
-                  -X PUT "${DT_API_URL}/api/v1/bom" \
+                  -X POST "${DT_API_URL}/api/v1/bom" \
                   -H "X-Api-Key: ${DT_API_KEY}" \
-                  -H "Content-Type: application/json" \
-                  -d "{\"projectName\":\"${JOB_NAME}\",
-                       \"projectVersion\":\"${BUILD_NUMBER}\",
-                       \"autoCreate\":true,
-                       \"bom\":\"${ENCODED}\"}"
+                  -F "projectName=${JOB_NAME}" \
+                  -F "projectVersion=${BUILD_NUMBER}" \
+                  -F "autoCreate=true" \
+                  -F "bom=@target/bom.json"
                 '''
             }
         }
     }
 }
 ```
+
+> **Why multipart POST?** The older `PUT /api/v1/bom` approach required
+> base64-encoding the SBOM into a shell variable before passing it to curl.
+> For large SBOMs (e.g. container image SBOMs with thousands of components)
+> this exceeds the OS `ARG_MAX` limit and fails with *"Argument list too long"*.
+> The multipart `POST /api/v1/bom` endpoint streams the file directly from disk
+> and is supported by all DependencyTrack versions. `upload-sbom.sh` uses this
+> approach internally.
 
 ---
 
