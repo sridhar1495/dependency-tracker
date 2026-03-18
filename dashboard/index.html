@@ -807,7 +807,7 @@ function renderTree(matchSet) {
 
     const nameInner = escHtml(node.name);
     const navIcon = dtFrontendUrl
-      ? `<a class="nav-icon" href="${escHtml(dtFrontendUrl)}/#/projects/${escHtml(node.uuid)}" target="_blank" rel="noopener" title="Open in DependencyTrack">&#x2197;</a>`
+      ? `<a class="nav-icon" href="${escHtml(dtFrontendUrl)}/projects/${escHtml(node.uuid)}" target="_blank" rel="noopener" title="Open in DependencyTrack">&#x2197;</a>`
       : '';
 
     const vBadge   = node.version ? `<span class="version-badge">v${escHtml(node.version)}</span>` : '';
