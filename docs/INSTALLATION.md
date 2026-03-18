@@ -3,22 +3,25 @@
 ## Table of Contents
 1. [Overview](#1-overview)
 2. [Prerequisites](#2-prerequisites)
-3. [Quick Install (Recommended)](#3-quick-install-recommended)
-4. [Manual Installation](#4-manual-installation)
-5. [Configuration Reference](#5-configuration-reference)
-6. [Verifying Your Installation](#6-verifying-your-installation)
-7. [Accessing the Applications](#7-accessing-the-applications)
-8. [Managing the Stack](#8-managing-the-stack)
-9. [Upgrading](#9-upgrading)
-10. [Uninstall](#10-uninstall)
-11. [Troubleshooting](#11-troubleshooting)
+3. [Quick Install — Full Stack](#3-quick-install--full-stack)
+4. [Quick Install — Dashboard Only](#4-quick-install--dashboard-only)
+5. [Manual Installation](#5-manual-installation)
+6. [Configuration Reference](#6-configuration-reference)
+7. [Verifying Your Installation](#7-verifying-your-installation)
+8. [Accessing the Applications](#8-accessing-the-applications)
+9. [Managing the Stack](#9-managing-the-stack)
+10. [Upgrading](#10-upgrading)
+11. [Uninstall](#11-uninstall)
+12. [Troubleshooting](#12-troubleshooting)
 
 ---
 
 ## 1. Overview
 
 This installer deploys **OWASP Dependency-Track Community Edition** using Docker
-Compose. The stack includes:
+Compose. Two install modes are available:
+
+### Full Stack
 
 | Container        | Role                                        | Default Port |
 |------------------|---------------------------------------------|-------------|
@@ -27,10 +30,11 @@ Compose. The stack includes:
 | `dt-frontend`    | DependencyTrack web UI (Vue.js)             | 8080        |
 | `dt-dashboard`   | Custom risk dashboard (Nginx + static HTML) | 3000        |
 
-**DependencyTrack** is an intelligent Software Composition Analysis (SCA)
-platform that allows organisations to continuously identify and reduce risk from
-the use of third-party and open source components. See
-[docs.dependencytrack.org](https://docs.dependencytrack.org) for upstream docs.
+### Dashboard Only (`--dashboard-only`)
+
+Deploys only the `dt-dashboard` container (Nginx). Use this when DependencyTrack
+is already running on another host or in an existing deployment and you only want
+to add the custom risk dashboard UI.
 
 ---
 
@@ -42,8 +46,11 @@ the use of third-party and open source components. See
 | Docker Compose | Plugin ≥ 2 or standalone ≥ 1.29 | `docker compose version` |
 | curl        | any             | `curl --version`                       |
 | jq          | any             | `jq --version`                         |
-| Free RAM    | 4 GB (8 GB recommended) | `free -h`                    |
-| Free disk   | 10 GB           | `df -h .`                              |
+| Free RAM    | 4 GB (8 GB recommended for full stack) | `free -h`         |
+| Free disk   | 10 GB (full stack) / 200 MB (dashboard only) | `df -h .`  |
+
+> **Dashboard-only mode** needs only Docker, curl, and Docker Compose — `jq` is
+> only required for the admin bootstrap steps of a full install.
 
 ### Installing Docker (Ubuntu / Debian)
 
@@ -76,7 +83,7 @@ brew install jq
 
 ---
 
-## 3. Quick Install (Recommended)
+## 3. Quick Install — Full Stack
 
 ```bash
 # 1. Clone the repository (or download a release archive)
@@ -94,10 +101,11 @@ The installer will:
 - ✅ Validate all prerequisites
 - ✅ Walk you through port and password configuration
 - ✅ Write your settings to `.env`
-- ✅ Pull Docker images
+- ✅ Pull all four Docker images
 - ✅ Start all containers
-- ✅ Wait for the API server to be ready (up to 3 minutes)
+- ✅ Wait for the API server to be ready (up to 15 minutes on first run — the NVD database download can be slow)
 - ✅ Change the default admin password
+- ✅ Retrieve and save the admin API key to `.env`
 - ✅ Print access URLs
 
 ### Non-interactive install
@@ -112,11 +120,47 @@ cp .env.example .env
 
 ---
 
-## 4. Manual Installation
+## 4. Quick Install — Dashboard Only
+
+Use this when DependencyTrack is already running elsewhere and you only want
+to deploy the custom risk dashboard.
+
+```bash
+./install.sh --dashboard-only
+```
+
+The installer will prompt for:
+
+1. **Custom Dashboard port** — default `3000`
+2. **DependencyTrack API URL (nginx proxy target)** — where the dashboard's
+   Nginx will proxy `/api/*` requests to.
+   - Same Docker network (default): `http://dtrack-apiserver:8080`
+   - External instance: `http://10.121.163.69:8081` (your DT host/port)
+
+Only the `dt-dashboard` (Nginx) container is pulled and started. DependencyTrack
+containers are not touched.
+
+### Non-interactive dashboard-only install
+
+```bash
+# Pre-set values in .env, then:
+./install.sh --dashboard-only --non-interactive
+```
+
+Required `.env` values for dashboard-only:
+
+```dotenv
+DT_DASHBOARD_PORT=3000
+DT_API_INTERNAL_URL=http://10.121.163.69:8081   # your existing DT API
+```
+
+---
+
+## 5. Manual Installation
 
 If you prefer to run each step yourself:
 
-### Step 4.1 — Copy and edit the environment file
+### Step 5.1 — Copy and edit the environment file
 
 ```bash
 cp .env.example .env
@@ -133,21 +177,29 @@ Key values to change:
 - `DT_ADMIN_PASS` — admin console password
 - Ports if defaults (8080/8081/3000) clash with existing services
 
-### Step 4.2 — Pull Docker images
+### Step 5.2 — Pull Docker images
 
 ```bash
+# Full stack
 docker compose --env-file .env pull
+
+# Dashboard only
+docker compose --env-file .env pull dt-dashboard
 ```
 
-### Step 4.3 — Start the stack
+### Step 5.3 — Start the stack
 
 ```bash
+# Full stack
 docker compose --env-file .env up -d
+
+# Dashboard only (--no-deps skips dtrack-apiserver and postgres)
+docker compose --env-file .env up -d --no-deps dt-dashboard
 ```
 
-### Step 4.4 — Monitor startup
+### Step 5.4 — Monitor startup (full stack only)
 
-The API server can take **2–5 minutes** on first launch because it:
+The API server can take **2–15 minutes** on first launch because it:
 - Runs Liquibase database migrations
 - Downloads vulnerability databases (NVD, GitHub Advisories, OSS Index)
 
@@ -159,36 +211,32 @@ docker logs -f dt-apiserver
 docker compose ps
 ```
 
-Wait until you see:
-```
-INFO  o.d.c.tasks.LdapSyncTask - Synchronization complete
-INFO  o.dependencytrack.common.ManagedHttpClientFactory - ...
-```
-
-### Step 4.5 — Change the default admin password
+### Step 5.5 — Change the default admin password
 
 Browse to `http://localhost:8080` → log in as `admin` / `admin`
 → you will be prompted to set a new password.
 
 ---
 
-## 5. Configuration Reference
+## 6. Configuration Reference
 
 All configuration is done via the `.env` file.
 
 | Variable              | Default                   | Description                                          |
 |-----------------------|---------------------------|------------------------------------------------------|
 | `DT_VERSION`          | `latest`                  | DependencyTrack Docker image tag (e.g. `4.11.4`)     |
-| `DT_FRONTEND_PORT`    | `8080`                    | Port for the web UI                                  |
-| `DT_API_PORT`         | `8081`                    | Port for the REST API                                |
+| `DT_HOST`             | `localhost`               | Hostname/IP shown in the installer summary           |
+| `DT_FRONTEND_PORT`    | `8080`                    | Port for the DependencyTrack web UI                  |
+| `DT_API_PORT`         | `8081`                    | Port for the DependencyTrack REST API                |
 | `DT_DASHBOARD_PORT`   | `3000`                    | Port for the custom risk dashboard                   |
+| `DT_API_URL`          | `http://localhost:8081`   | API base URL used by helper scripts (upload-sbom, etc.) |
+| `DT_API_INTERNAL_URL` | `http://dtrack-apiserver:8080` | Where the dashboard's Nginx proxies `/api/*` to. Override for external DT instances. |
+| `DT_API_KEY`          | _(auto-populated)_        | Written by install.sh after first login              |
+| `DT_ADMIN_USER`       | `admin`                   | Initial admin username                               |
+| `DT_ADMIN_PASS`       | `admin`                   | Initial admin password — **change immediately!**     |
 | `POSTGRES_DB`         | `dtrack`                  | Database name                                        |
 | `POSTGRES_USER`       | `dtrack`                  | Database user                                        |
 | `POSTGRES_PASSWORD`   | `dtrack_password_change_me` | **Change this before deploying!**                  |
-| `DT_ADMIN_USER`       | `admin`                   | Initial admin username                               |
-| `DT_ADMIN_PASS`       | `admin`                   | Initial admin password — **change immediately!**     |
-| `DT_API_URL`          | `http://localhost:8081`   | API base URL used by helper scripts                  |
-| `DT_API_KEY`          | _(auto-populated)_        | Written by install.sh after first login              |
 
 ### Advanced API Server Options
 
@@ -196,8 +244,6 @@ The API server is configured via environment variables in `docker-compose.yml`.
 Common overrides (add to the `dtrack-apiserver` → `environment` block):
 
 ```yaml
-# Increase memory (default limit is 12g)
-# Reduce if you have less RAM:
 ALPINE_METRICS_ENABLED: "true"            # Enable Prometheus /metrics endpoint
 ALPINE_CORS_ENABLED: "true"               # Allow cross-origin requests
 ALPINE_CORS_ALLOW_ORIGIN: "*"
@@ -208,7 +254,7 @@ https://docs.dependencytrack.org/getting-started/configuration/
 
 ---
 
-## 6. Verifying Your Installation
+## 7. Verifying Your Installation
 
 ```bash
 # Check all containers are running
@@ -230,7 +276,7 @@ docker exec dt-postgres psql -U dtrack -c "SELECT version();"
 
 ---
 
-## 7. Accessing the Applications
+## 8. Accessing the Applications
 
 | Application           | URL                              | Default Credentials   |
 |-----------------------|----------------------------------|-----------------------|
@@ -241,7 +287,7 @@ docker exec dt-postgres psql -U dtrack -c "SELECT version();"
 
 ---
 
-## 8. Managing the Stack
+## 9. Managing the Stack
 
 ```bash
 # Stop all containers (data is preserved)
@@ -252,6 +298,9 @@ docker compose --env-file .env up -d
 
 # Restart a single service
 docker compose restart dtrack-apiserver
+
+# Restart only the dashboard (e.g. after changing DT_API_INTERNAL_URL)
+docker compose --env-file .env up -d --no-deps dt-dashboard
 
 # View logs
 docker logs dt-apiserver -f
@@ -264,7 +313,7 @@ docker stats
 
 ---
 
-## 9. Upgrading
+## 10. Upgrading
 
 ```bash
 # 1. Back up data volumes
@@ -284,7 +333,17 @@ To pin to a specific version, set `DT_VERSION=4.11.4` in `.env`.
 
 ---
 
-## 10. Uninstall
+## 11. Uninstall
+
+```bash
+# Remove containers, volumes, and networks (keeps Docker images)
+./install.sh --uninstall
+
+# Also remove Docker images
+./install.sh --all
+```
+
+Or manually:
 
 ```bash
 # Stop and remove containers + networks (data volumes are preserved)
@@ -297,7 +356,7 @@ docker volume rm dependency-tracker_dependency-track-data dependency-tracker_pos
 
 ---
 
-## 11. Troubleshooting
+## 12. Troubleshooting
 
 ### API server won't start
 
@@ -325,21 +384,32 @@ Log in directly via the UI at `http://localhost:8080`.
 The default credentials are `admin` / `admin`.
 You will be forced to change the password on first login.
 
-### Dashboard shows CORS errors
+### Dashboard shows "proxy target not reachable"
 
-The Nginx reverse proxy in `dt-dashboard` proxies `/api/*` to the API server,
-avoiding CORS issues. If you run the dashboard outside Docker, you need to either:
-1. Enable CORS in the API server (`ALPINE_CORS_ENABLED: "true"`)
-2. Or set the API URL to the direct API server address in the dashboard modal
+The "⚙ Connect API" modal shows the proxy target status. If it says not reachable:
+
+1. Check `DT_API_INTERNAL_URL` in `.env` — it must be the address Nginx inside
+   the Docker container can reach, **not** the browser-facing address.
+2. For same-Docker-network installs: `http://dtrack-apiserver:8080`
+3. For external DT: `http://<host-ip>:<port>` — use the host IP, not `localhost`
+4. Restart the dashboard container after any `.env` change:
+   ```bash
+   docker compose --env-file .env up -d --no-deps dt-dashboard
+   ```
+
+### Dashboard shows "projects.map is not a function"
+
+The DependencyTrack API returned an unexpected response shape (e.g. `{}` when
+no projects exist yet). The dashboard handles this gracefully — it shows
+"Connected — no projects found. Upload an SBOM to get started."
+If you still see the error, check your API key has `VIEW_PORTFOLIO` permission.
 
 ### Vulnerability database not updating
 
 ```bash
-docker exec dt-apiserver wget -qO- http://localhost:8080/api/v1/vulnerability/source/NVD \
-  -H "X-Api-Key: <your-key>"
-```
-
-The initial NVD download can take 30–60 minutes. Check:
-```bash
 docker logs dt-apiserver | grep -i "nvd\|download\|mirror"
 ```
+
+The initial NVD download can take 30–60 minutes. The API server health check
+allows up to 15 minutes (`start_period: 600s`) before marking the container
+unhealthy — this is normal on first run.

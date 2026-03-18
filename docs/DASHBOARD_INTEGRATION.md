@@ -6,10 +6,10 @@
 3. [Switching from Mock Data to Live Data](#3-switching-from-mock-data-to-live-data)
 4. [Generating an API Key](#4-generating-an-api-key)
 5. [Data Mapping Reference](#5-data-mapping-reference)
-6. [Customising the Dashboard](#6-customising-the-dashboard)
-7. [Embedding in Another Application](#7-embedding-in-another-application)
-8. [Automation — Auto-refresh](#8-automation--auto-refresh)
-9. [Exporting Data](#9-exporting-data)
+6. [Filtering and Exporting](#6-filtering-and-exporting)
+7. [Customising the Dashboard](#7-customising-the-dashboard)
+8. [Embedding in Another Application](#8-embedding-in-another-application)
+9. [Automation — Auto-refresh](#9-automation--auto-refresh)
 
 ---
 
@@ -19,14 +19,17 @@ The custom risk dashboard is a **standalone, single-file HTML application**
 served by an Nginx container on port `3000`. It provides:
 
 - A sortable, filterable **risk matrix table** for all your projects
+- **Hierarchy level column** — depth in the DependencyTrack parent/child tree
+- **Tag filtering** — filter by project tags with a multi-select dropdown
+- **CSV export** — one-click export of exactly the filtered rows
 - **KPI summary cards** for total Critical, High, Medium, Low counts
 - **Two data modes**:
-  - **Mock mode** (default) — 56 synthetic projects for immediate preview
+  - **Mock mode** (default) — a realistic hierarchical project tree for immediate preview
   - **Live mode** — pulls real data from your DependencyTrack API
 
 The dashboard communicates with the DependencyTrack API through the Nginx
-reverse proxy (`/api/*` → `http://dtrack-apiserver:8080/api/*`), which
-eliminates CORS issues.
+reverse proxy (`/api/*` → `DT_API_INTERNAL_URL/api/*`), which eliminates CORS
+issues. The browser never makes a direct request to DependencyTrack.
 
 ---
 
@@ -36,13 +39,15 @@ eliminates CORS issues.
 
 Each row represents one project. Columns are:
 
-| Column Group    | Levels                                        |
-|-----------------|-----------------------------------------------|
-| Security Risk   | Critical · High · Medium · Low                |
-| Operational Risk | Critical · High · Medium · Low               |
-| License Risk    | Critical · High · Medium · Low                |
+| Column            | Description                                              |
+|-------------------|----------------------------------------------------------|
+| Project / Version | Project name with version badge and tag chips            |
+| Lvl               | Hierarchy depth (1 = top-level group, 2 = child, …)     |
+| Security Risk     | Critical · High · Medium · Low vulnerability counts      |
+| Operational Risk  | Critical · High · Medium · Low operational risk counts   |
+| License Risk      | Critical · High · Medium · Low policy violation counts   |
 
-**Total: 12 data columns** (3 categories × 4 severity levels).
+**Total: 13 columns** — 1 project name + 1 level + 3 categories × 4 severity levels.
 
 ### Colour coding
 
@@ -54,6 +59,29 @@ Each row represents one project. Columns are:
 | Low      | Blue   |
 | Zero (—) | Grey   |
 
+### Hierarchy levels
+
+DependencyTrack projects can be organised in a parent/child hierarchy. The
+dashboard fetches `parent.uuid` for each project and computes the depth:
+
+```
+Level 1   RET                    ← top-level group (no parent)
+Level 2     FreshX Suite         ← child of RET
+Level 3       FreshX-BE          ← child of FreshX Suite
+Level 4         FreshX-BE v1.4.1 ← leaf (version)
+```
+
+The **Lvl** column shows this depth. Use the **Level** multi-select filter to
+show only projects at specific depths — e.g. select "Level 4" to see only
+versioned leaf projects.
+
+### Tags
+
+Project tags are fetched from the DependencyTrack API and displayed as purple
+chips on each row. The **Tags** multi-select filter shows all unique tags across
+all loaded projects; selecting multiple tags narrows to projects that have
+**all** of the selected tags.
+
 ### Sorting
 
 Click any column header to sort by that value. Click again to reverse.
@@ -62,9 +90,20 @@ Click any column header to sort by that value. Click again to reverse.
 
 ### Filtering
 
-- **Search box** — filter by project name (substring match)
-- **Risk level filter** — show only projects with a specific severity level
-- **Category filter** — narrow to Security, Operational, or License risks
+| Filter | Type | Behaviour |
+|--------|------|-----------|
+| Search box | Text input | Substring match on project name |
+| Risk level | Single-select | Show only projects with a specific severity level |
+| Category | Single-select | Narrow to Security, Operational, or License category |
+| Level | Multi-select dropdown | Show only projects at selected hierarchy depths |
+| Tags | Multi-select dropdown | Show only projects that have ALL selected tags |
+
+All filters combine with AND logic.
+
+### KPI Cards
+
+The six summary cards above the table always reflect **all loaded projects**
+(not the current filter), giving a stable portfolio-level baseline.
 
 ---
 
@@ -73,35 +112,31 @@ Click any column header to sort by that value. Click again to reverse.
 ### Method A — UI (easiest)
 
 1. Open http://localhost:3000
-2. Click the **"⚙ Connect Live API"** button (top right)
-3. Enter:
-   - **API Base URL**: `http://localhost:8081` (default, or your server address)
-   - **API Key**: your DependencyTrack API key (see [Section 4](#4-generating-an-api-key))
-4. Click **Connect**
+2. Click the **"⚙ Connect API"** button (top right)
+3. The modal shows the **proxy target status** — confirm DependencyTrack is reachable
+4. Enter your **API Key** (see [Section 4](#4-generating-an-api-key))
+5. Click **Connect**
 
-The dashboard will fetch all projects and their current metrics in real time.
+The dashboard fetches all projects (`GET /api/v1/project?pageSize=500`) and their
+current metrics (`GET /api/v1/metrics/project/{uuid}/current`) in real time. It
+handles all three response shapes the DependencyTrack API may return:
 
-### Method B — Browser localStorage (persistent)
+- `{ "values": [...] }` — paginated envelope (newer DT versions)
+- `[...]` — bare array (older DT versions)
+- `{}` — empty object when no projects exist yet (shows a friendly message)
+
+### Method B — Browser localStorage (persistent across refreshes)
 
 Open your browser's DevTools console and run:
 
 ```javascript
-// Set credentials (persisted across page refreshes)
-localStorage.setItem('dt_api_url', 'http://localhost:8081');
+// Store credentials
 localStorage.setItem('dt_api_key', 'odt_xxxxxxxxxxxxxxxxxx');
-location.reload();
-```
 
-To add auto-load support, edit `dashboard/index.html` and add to the `// ── Init ──` section:
-
-```javascript
-// Auto-load live data if credentials are stored
-const savedUrl = localStorage.getItem('dt_api_url');
+// To auto-connect on load, add to the // ── Init ── section of index.html:
 const savedKey = localStorage.getItem('dt_api_key');
-if (savedUrl && savedKey) {
-  document.getElementById('apiUrlInput').value = savedUrl;
+if (savedKey) {
   document.getElementById('apiKeyInput').value = savedKey;
-  apiUrl = savedUrl;
   apiKey = savedKey;
   connectLiveApi();
 } else {
@@ -109,19 +144,22 @@ if (savedUrl && savedKey) {
 }
 ```
 
-### Method C — Environment variable (server-side pre-configuration)
+### Method C — Pre-configure the proxy target
 
-Edit `docker-compose.yml` to inject the API key into the Nginx container as a
-rendered config:
+The proxy target (`DT_API_INTERNAL_URL`) is a **server-side** setting — the browser
+always calls `/api/*` on the same origin (the Nginx container), which then proxies
+the request to DependencyTrack. To point the dashboard at a different DT instance:
 
-```yaml
-dt-dashboard:
-  environment:
-    DT_API_KEY: "${DT_API_KEY}"
-    DT_API_URL: "http://dtrack-apiserver:8080"
-```
+1. Edit `.env`:
+   ```dotenv
+   DT_API_INTERNAL_URL=http://10.121.163.69:8081
+   ```
+2. Restart the dashboard container:
+   ```bash
+   docker compose --env-file .env up -d --no-deps dt-dashboard
+   ```
 
-Then add a startup script to inject these values into `index.html` using `envsubst`.
+The "⚙ Connect API" modal will now show the new proxy target automatically.
 
 ---
 
@@ -148,65 +186,75 @@ TOKEN=$(curl -sf \
   --data-urlencode "username=admin" \
   --data-urlencode "password=<your-admin-password>")
 
-# List teams and their keys
+# List teams and extract the first key
 curl -s -H "Authorization: Bearer $TOKEN" \
-  http://localhost:8081/api/v1/team | jq '.[].apiKeys'
+  http://localhost:8081/api/v1/team | jq -r '.[0].apiKeys[0].key'
 
 # The key looks like: odt_xxxxxxxxxxxxxxxxxxxxxxxxxx
 ```
 
 ### Minimum required permissions for the dashboard
 
-The dashboard only **reads** data, so create a dedicated read-only team:
+The dashboard only **reads** data. Create a dedicated read-only team:
 
-| Permission        | Required? |
-|-------------------|-----------|
-| `VIEW_PORTFOLIO`  | ✅ Yes    |
-| `VIEW_VULNERABILITY` | ✅ Yes |
-| All others        | ❌ No     |
+| Permission           | Required? |
+|----------------------|-----------|
+| `VIEW_PORTFOLIO`     | ✅ Yes    |
+| `VIEW_VULNERABILITY` | ✅ Yes    |
+| All others           | ❌ No     |
 
 ---
 
 ## 5. Data Mapping Reference
 
-The dashboard maps DependencyTrack API responses to the three risk categories:
+The dashboard maps DependencyTrack API responses to the three risk categories.
+
+### Project fields
+
+Source: `GET /api/v1/project?pageSize=500&pageNumber=1`
+
+| Dashboard Field | API Field          | Notes                                       |
+|-----------------|--------------------|---------------------------------------------|
+| Project name    | `name`             |                                             |
+| Version         | `version`          |                                             |
+| Hierarchy level | `parent.uuid`      | Computed by walking up the parent chain     |
+| Tags            | `tags[].name`      | DT returns `[{name:"..."}, ...]`; flattened |
 
 ### Security Risk
 
 Source: `GET /api/v1/metrics/project/{uuid}/current`
 
-| Dashboard Column | API Field     |
-|------------------|---------------|
-| Critical         | `critical`    |
-| High             | `high`        |
-| Medium           | `medium`      |
-| Low              | `low`         |
+| Dashboard Column | API Field  |
+|------------------|------------|
+| Critical         | `critical` |
+| High             | `high`     |
+| Medium           | `medium`   |
+| Low              | `low`      |
 
 ### Operational Risk
 
 Source: same metrics endpoint
 
-| Dashboard Column | API Field       | Description                              |
-|------------------|-----------------|------------------------------------------|
-| Critical         | _(none currently)_ | Reserved for policy critical violations |
-| High             | `unassigned`    | Components with unassigned vulnerabilities |
-| Medium           | `suppressed`    | Suppressed findings (audit required)     |
-| Low              | _(none)_        | —                                        |
+| Dashboard Column | API Field     | Description                                |
+|------------------|---------------|--------------------------------------------|
+| Critical         | _(none)_      | Reserved                                   |
+| High             | `unassigned`  | Components with unassigned vulnerabilities |
+| Medium           | `suppressed`  | Suppressed findings (audit required)       |
+| Low              | _(none)_      | —                                          |
 
-> **Note**: The operational risk column is intentionally flexible. Edit the
-> `connectLiveApi()` function in `dashboard/index.html` to map fields that
-> match your organisation's risk definition.
+> Edit `connectLiveApi()` in `dashboard/index.html` to remap these to match
+> your organisation's operational risk definition.
 
 ### License Risk
 
 Source: same metrics endpoint
 
-| Dashboard Column | API Field              | Description                        |
-|------------------|------------------------|------------------------------------|
-| Critical         | `policyViolationsFail` | FAIL policy violations             |
-| High             | `policyViolationsWarn` | WARN policy violations             |
-| Medium           | `policyViolationsInfo` | INFO policy violations             |
-| Low              | _(none)_               | —                                  |
+| Dashboard Column | API Field              | Description              |
+|------------------|------------------------|--------------------------|
+| Critical         | `policyViolationsFail` | FAIL policy violations   |
+| High             | `policyViolationsWarn` | WARN policy violations   |
+| Medium           | `policyViolationsInfo` | INFO policy violations   |
+| Low              | _(none)_               | —                        |
 
 ### Full API response shape
 
@@ -230,24 +278,70 @@ Source: same metrics endpoint
 
 ---
 
-## 6. Customising the Dashboard
+## 6. Filtering and Exporting
 
-### Change the number of projects displayed
+### Using the Level multi-select
 
-The mock data generates exactly **56 projects** by default (matching the 56-item
-`names` array in `dashboard/index.html`). To add or remove mock projects:
+1. Click the **Level** button in the toolbar
+2. A dropdown shows all hierarchy depths that exist in the loaded data
+3. Check one or more levels (e.g. "Level 3", "Level 4")
+4. The table immediately narrows to matching rows
+5. Click **Clear** to reset, or uncheck to deselect individual levels
 
-1. Edit `dashboard/index.html`
-2. Find the `names` array in `generateMockProjects()`
-3. Add or remove entries
+The badge on the button shows how many levels are currently selected.
+
+### Using the Tag multi-select
+
+1. Click the **Tags** button in the toolbar
+2. A dropdown shows all unique tags from all loaded projects
+3. Check one or more tags (e.g. "production", "critical-service")
+4. Only projects that have **all** selected tags are shown (AND logic)
+5. Click **Clear** to reset
+
+### Exporting filtered rows to CSV
+
+1. Apply any combination of filters (search, risk level, category, level, tags)
+2. Click **↓ Export CSV**
+3. The browser downloads `dependency-track-YYYY-MM-DD.csv`
+
+The CSV contains exactly the visible rows with these columns:
+
+```
+Project, Version, Level, Tags, Sec Critical, Sec High, Sec Medium, Sec Low,
+Ops Critical, Ops High, Ops Medium, Ops Low,
+Lic Critical, Lic High, Lic Medium, Lic Low
+```
+
+Tags are semicolon-separated within the Tags cell. All values are
+double-quote-escaped (RFC 4180 compliant).
+
+---
+
+## 7. Customising the Dashboard
+
+### Mock data
+
+The mock data generates a realistic hierarchical project tree (not a flat list).
+The tree is defined in `generateMockProjects()` in `dashboard/index.html`.
+Edit the `rawTree` array to add, remove, or restructure the mock hierarchy.
+
+Each leaf entry has:
+```javascript
+{ name: 'my-service', version: '1.2.3', tags: ['java', 'production'] }
+```
+
+Each group entry has:
+```javascript
+{ name: 'My Group', children: [ /* nested entries */ ] }
+```
 
 ### Add a new risk column
 
-To add an "Unassigned" column to the Operational category:
+To add a column (e.g. "Unassigned" in the Operational category):
 
-1. Change `const LEVELS = ['critical','high','medium','low'];` to include `'unassigned'`
-2. Update the `operationalRisk` mapping in `connectLiveApi()` to populate `unassigned`
-3. The table will automatically render the new column
+1. Change `const LEVELS = ['critical','high','medium','low'];` to add `'unassigned'`
+2. Update the `ops` mapping in `connectLiveApi()` to populate `unassigned`
+3. The table renders the new column automatically
 
 ### Change risk category names
 
@@ -255,11 +349,14 @@ Edit the `CAT_LABELS` constant:
 
 ```javascript
 const CAT_LABELS = {
-  security:   'Vulnerabilities',   // rename Security → Vulnerabilities
-  operations: 'Compliance',        // rename Operational → Compliance
+  security:   'Vulnerabilities',
+  operations: 'Compliance',
   license:    'Licensing',
 };
 ```
+
+> Note: `CAT_LABELS` is available for custom rendering — the column group
+> headers currently use inline strings in the HTML `<th>` elements.
 
 ### Theming
 
@@ -271,13 +368,12 @@ To switch to a light theme, change:
   --bg:      #ffffff;
   --surface: #f8fafc;
   --text:    #1e293b;
-  ...
 }
 ```
 
 ---
 
-## 7. Embedding in Another Application
+## 8. Embedding in Another Application
 
 The dashboard is a **self-contained HTML file** — it can be embedded as an
 `<iframe>` or served from any static file host:
@@ -293,19 +389,24 @@ The dashboard is a **self-contained HTML file** — it can be embedded as an
 </iframe>
 ```
 
-To serve the dashboard without Docker:
+To serve the dashboard without Docker (note: `/api/*` proxy won't work without Nginx):
 
 ```bash
-# Python (for local testing)
+# Python (for local testing with mock data only)
 cd dashboard && python3 -m http.server 3000
 
 # Node.js / npx serve
 npx serve dashboard -p 3000
 ```
 
+For live data without Docker, you need to either:
+- Run your own Nginx with an equivalent proxy config
+- Or enable CORS on the DependencyTrack API server (`ALPINE_CORS_ENABLED: "true"`)
+  and call the API directly (edit `connectLiveApi()` to use a direct URL)
+
 ---
 
-## 8. Automation — Auto-refresh
+## 9. Automation — Auto-refresh
 
 The dashboard has a manual **↻ Refresh** button. To enable **auto-refresh**,
 add this to the `// ── Init ──` section of `dashboard/index.html`:
@@ -315,49 +416,4 @@ add this to the `// ── Init ──` section of `dashboard/index.html`:
 setInterval(() => {
   if (liveMode) refreshData();
 }, 5 * 60 * 1000);
-```
-
----
-
-## 9. Exporting Data
-
-### Export current table view as CSV
-
-Add a button and this function to `dashboard/index.html`:
-
-```javascript
-function exportCSV() {
-  const headers = ['Project','Version',
-    'Sec-Critical','Sec-High','Sec-Medium','Sec-Low',
-    'Ops-Critical','Ops-High','Ops-Medium','Ops-Low',
-    'Lic-Critical','Lic-High','Lic-Medium','Lic-Low'];
-
-  const rows = filtered.map(p => [
-    p.name, p.version,
-    p.security.critical, p.security.high, p.security.medium, p.security.low,
-    p.operations.critical, p.operations.high, p.operations.medium, p.operations.low,
-    p.license.critical, p.license.high, p.license.medium, p.license.low
-  ]);
-
-  const csv = [headers, ...rows].map(r => r.join(',')).join('\n');
-  const blob = new Blob([csv], { type: 'text/csv' });
-  const a = document.createElement('a');
-  a.href = URL.createObjectURL(blob);
-  a.download = `risk-dashboard-${new Date().toISOString().slice(0,10)}.csv`;
-  a.click();
-}
-```
-
-### Export via DependencyTrack API
-
-```bash
-# Export all project metrics as JSON
-curl -s -H "X-Api-Key: $DT_API_KEY" \
-  "http://localhost:8081/api/v1/metrics/project/current?pageSize=500" \
-  | jq '[.[] | {
-      project: .project.name,
-      version: .project.version,
-      critical, high, medium, low,
-      policyViolationsFail, policyViolationsWarn
-    }]' > risk-report.json
 ```

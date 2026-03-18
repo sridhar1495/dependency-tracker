@@ -8,6 +8,9 @@
 # Options:
 #   --non-interactive   Skip all prompts and use defaults / .env values
 #   --skip-docker-check Skip Docker version validation
+#   --dashboard-only    Deploy only the custom dashboard (nginx container).
+#                       Use this when DependencyTrack is already running
+#                       elsewhere and you only want the risk dashboard UI.
 #   --uninstall | -u    Remove containers, volumes, and networks (keep images)
 #   --all       | -a    Remove containers, volumes, networks, AND images
 #   --help              Show this help
@@ -113,15 +116,17 @@ NON_INTERACTIVE=false
 SKIP_DOCKER_CHECK=false
 UNINSTALL=false
 REMOVE_IMAGES=false
+DASHBOARD_ONLY=false
 
 for arg in "$@"; do
   case $arg in
     --non-interactive) NON_INTERACTIVE=true ;;
     --skip-docker-check) SKIP_DOCKER_CHECK=true ;;
+    --dashboard-only) DASHBOARD_ONLY=true ;;
     --uninstall|-u) UNINSTALL=true ;;
     --all|-a) UNINSTALL=true; REMOVE_IMAGES=true ;;
     --help)
-      sed -n '2,20p' "$0"; exit 0 ;;
+      sed -n '2,23p' "$0"; exit 0 ;;
   esac
 done
 
@@ -196,39 +201,58 @@ set -a; source "$ENV_FILE"; set +a
 
 if [[ "$NON_INTERACTIVE" == "false" ]]; then
   echo ""
-  echo -e "${BOLD}Configure your installation (press Enter to keep current value):${RESET}"
-  echo ""
+  if [[ "$DASHBOARD_ONLY" == "true" ]]; then
+    echo -e "${BOLD}Configure the custom dashboard (press Enter to keep current value):${RESET}"
+    echo ""
 
-  # Host (used as browser-side API URL — must be reachable from the user's browser)
-  _default_host="${DT_HOST:-localhost}"
-  read -rp "  Server hostname or IP        [${_default_host}]: " _in
-  [[ -n "$_in" ]] && DT_HOST="$_in" || DT_HOST="$_default_host"
+    read -rp "  Custom Dashboard port        [${DT_DASHBOARD_PORT:-3000}]: " _in
+    [[ -n "$_in" ]] && DT_DASHBOARD_PORT="$_in"
 
-  # Ports
-  read -rp "  DependencyTrack UI port      [${DT_FRONTEND_PORT:-8080}]: " _in
-  [[ -n "$_in" ]] && DT_FRONTEND_PORT="$_in"
+    # In dashboard-only mode the nginx container proxies /api/* to DT.
+    # Default keeps the same-network service name; override for external DT.
+    _default_api="${DT_API_INTERNAL_URL:-http://dtrack-apiserver:8080}"
+    read -rp "  DependencyTrack API URL (nginx proxy target)\n  [${_default_api}]: " _in
+    [[ -n "$_in" ]] && DT_API_INTERNAL_URL="$_in" || DT_API_INTERNAL_URL="$_default_api"
 
-  read -rp "  DependencyTrack API port     [${DT_API_PORT:-8081}]: " _in
-  [[ -n "$_in" ]] && DT_API_PORT="$_in"
+    # Preserve all other existing values; only update the dashboard keys.
+    grep -v "^DT_DASHBOARD_PORT=\|^DT_API_INTERNAL_URL=" "$ENV_FILE" > "${ENV_FILE}.tmp" \
+      && mv "${ENV_FILE}.tmp" "$ENV_FILE"
+    printf 'DT_DASHBOARD_PORT=%s\nDT_API_INTERNAL_URL=%s\n' \
+      "${DT_DASHBOARD_PORT:-3000}" "${DT_API_INTERNAL_URL}" >> "$ENV_FILE"
+  else
+    echo -e "${BOLD}Configure your installation (press Enter to keep current value):${RESET}"
+    echo ""
 
-  read -rp "  Custom Dashboard port        [${DT_DASHBOARD_PORT:-3000}]: " _in
-  [[ -n "$_in" ]] && DT_DASHBOARD_PORT="$_in"
+    # Host (used as browser-side API URL — must be reachable from the user's browser)
+    _default_host="${DT_HOST:-localhost}"
+    read -rp "  Server hostname or IP        [${_default_host}]: " _in
+    [[ -n "$_in" ]] && DT_HOST="$_in" || DT_HOST="$_default_host"
 
-  # Database password
-  read -rsp "  PostgreSQL password          [${POSTGRES_PASSWORD:-dtrack_password_change_me}]: " _in
-  echo ""
-  [[ -n "$_in" ]] && POSTGRES_PASSWORD="$_in"
+    # Ports
+    read -rp "  DependencyTrack UI port      [${DT_FRONTEND_PORT:-8080}]: " _in
+    [[ -n "$_in" ]] && DT_FRONTEND_PORT="$_in"
 
-  # Admin credentials
-  read -rp "  DependencyTrack admin user   [${DT_ADMIN_USER:-admin}]: " _in
-  [[ -n "$_in" ]] && DT_ADMIN_USER="$_in"
+    read -rp "  DependencyTrack API port     [${DT_API_PORT:-8081}]: " _in
+    [[ -n "$_in" ]] && DT_API_PORT="$_in"
 
-  read -rsp "  DependencyTrack admin pass   [${DT_ADMIN_PASS:-admin}]: " _in
-  echo ""
-  [[ -n "$_in" ]] && DT_ADMIN_PASS="$_in"
+    read -rp "  Custom Dashboard port        [${DT_DASHBOARD_PORT:-3000}]: " _in
+    [[ -n "$_in" ]] && DT_DASHBOARD_PORT="$_in"
 
-  # Write back
-  cat > "$ENV_FILE" <<ENVFILE
+    # Database password
+    read -rsp "  PostgreSQL password          [${POSTGRES_PASSWORD:-dtrack_password_change_me}]: " _in
+    echo ""
+    [[ -n "$_in" ]] && POSTGRES_PASSWORD="$_in"
+
+    # Admin credentials
+    read -rp "  DependencyTrack admin user   [${DT_ADMIN_USER:-admin}]: " _in
+    [[ -n "$_in" ]] && DT_ADMIN_USER="$_in"
+
+    read -rsp "  DependencyTrack admin pass   [${DT_ADMIN_PASS:-admin}]: " _in
+    echo ""
+    [[ -n "$_in" ]] && DT_ADMIN_PASS="$_in"
+
+    # Write back
+    cat > "$ENV_FILE" <<ENVFILE
 DT_VERSION=${DT_VERSION:-latest}
 DT_HOST=${DT_HOST:-localhost}
 DT_FRONTEND_PORT=${DT_FRONTEND_PORT:-8080}
@@ -241,11 +265,41 @@ DT_ADMIN_USER=${DT_ADMIN_USER:-admin}
 DT_ADMIN_PASS=${DT_ADMIN_PASS}
 DT_API_URL=http://localhost:${DT_API_PORT:-8081}
 ENVFILE
+  fi
   success ".env saved"
 fi
 
 # Re-load finalized env
 set -a; source "$ENV_FILE"; set +a
+
+# ─── Dashboard-only path ──────────────────────────────────────────────────────
+if [[ "$DASHBOARD_ONLY" == "true" ]]; then
+  step "Step 3 — Pulling Dashboard Image"
+  retry 4 2 \
+    $COMPOSE_CMD -f "$SCRIPT_DIR/docker-compose.yml" --env-file "$ENV_FILE" \
+      pull dt-dashboard
+  success "Image pulled"
+
+  step "Step 4 — Starting Dashboard Container"
+  # --no-deps: do not start dtrack-apiserver/postgres just because of depends_on.
+  retry 3 5 \
+    $COMPOSE_CMD -f "$SCRIPT_DIR/docker-compose.yml" --env-file "$ENV_FILE" \
+      up -d --no-deps dt-dashboard
+  success "Dashboard container started"
+
+  step "Dashboard Deployment Complete!"
+  echo ""
+  echo -e "  ${BOLD}Custom Dashboard${RESET}  → http://localhost:${DT_DASHBOARD_PORT:-3000}"
+  echo -e "  ${BOLD}Proxying API to${RESET}   → ${DT_API_INTERNAL_URL:-http://dtrack-apiserver:8080}"
+  echo ""
+  echo -e "  ${BOLD}Next steps:${RESET}"
+  echo -e "    1. Open the dashboard and enter your DependencyTrack API key"
+  echo -e "    2. Upload SBOMs:   ./scripts/upload-sbom.sh --help"
+  echo -e "    3. Full docs:      ./docs/INSTALLATION.md"
+  echo ""
+  success "Done!"
+  exit 0
+fi
 
 # ─── Step 3 — Pull images ────────────────────────────────────────────────────
 step "Step 3 — Pulling Docker Images"
