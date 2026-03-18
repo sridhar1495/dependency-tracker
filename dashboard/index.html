@@ -639,6 +639,23 @@ function computeAggregates(node) {
   node.aggregated = agg;
 }
 
+// ── Infer parent-child relationships for same-name versioned projects ──────
+// e.g. "cs-bff-graphql" (no version) becomes parent of "cs-bff-graphql" v1.5.0
+function inferParentUuids(projects) {
+  const nameToUuid = new Map();
+  // Index all unversioned projects by name
+  projects.forEach(p => {
+    if (!p.version) nameToUuid.set(p.name, p.uuid);
+  });
+  // Assign parentUuid to versioned projects whose parent name matches
+  projects.forEach(p => {
+    if (p.version && !p.parentUuid) {
+      const parentUuid = nameToUuid.get(p.name);
+      if (parentUuid && parentUuid !== p.uuid) p.parentUuid = parentUuid;
+    }
+  });
+}
+
 // ── Compute hierarchy depth from parent chain (live data) ─────────────────
 function computeLevels(projects) {
   const byUuid = {};
@@ -1044,18 +1061,30 @@ async function fetchProjectMetrics(p, key) {
   let sec = {critical:0,high:0,medium:0,low:0};
   let ops = {critical:0,high:0,medium:0,low:0};
   let lic = {critical:0,high:0,medium:0,low:0};
-  try {
-    const mr = await fetch(`/api/v1/metrics/project/${p.uuid}/current`, {
-      headers: { 'X-Api-Key': key }
-    });
-    if (mr.ok) {
-      const m = await mr.json();
-      sec = { critical: m.critical||0, high: m.high||0, medium: m.medium||0, low: m.low||0 };
-      ops = { critical: 0, high: m.unassigned||0, medium: m.suppressed||0, low: 0 };
-      lic = { critical: m.policyViolationsFail||0, high: m.policyViolationsWarn||0,
-              medium: m.policyViolationsInfo||0, low: 0 };
-    }
-  } catch(_) {}
+
+  // Prefer embedded metrics from the project list response (no extra API call needed)
+  const m = p.metrics || null;
+  if (m) {
+    sec = { critical: m.critical||0, high: m.high||0, medium: m.medium||0, low: m.low||0 };
+    ops = { critical: 0, high: m.unassigned||0, medium: m.suppressed||0, low: 0 };
+    lic = { critical: m.policyViolationsFail||0, high: m.policyViolationsWarn||0,
+            medium: m.policyViolationsInfo||0, low: 0 };
+  } else {
+    // Fall back to separate metrics endpoint for projects without embedded metrics
+    try {
+      const mr = await fetch(`/api/v1/metrics/project/${p.uuid}/current`, {
+        headers: { 'X-Api-Key': key }
+      });
+      if (mr.ok) {
+        const m2 = await mr.json();
+        sec = { critical: m2.critical||0, high: m2.high||0, medium: m2.medium||0, low: m2.low||0 };
+        ops = { critical: 0, high: m2.unassigned||0, medium: m2.suppressed||0, low: 0 };
+        lic = { critical: m2.policyViolationsFail||0, high: m2.policyViolationsWarn||0,
+                medium: m2.policyViolationsInfo||0, low: 0 };
+      }
+    } catch(_) {}
+  }
+
   return {
     uuid:       p.uuid,
     name:       p.name,
@@ -1100,6 +1129,7 @@ async function connectLiveApi() {
     }
     allProjects = enriched;
 
+    inferParentUuids(allProjects);
     computeLevels(allProjects);
     liveMode = true;
     document.getElementById('dataBanner').innerHTML =
