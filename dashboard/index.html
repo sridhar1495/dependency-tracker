@@ -486,6 +486,13 @@
     </p>
     <div class="modal-row">
       <div style="flex:1">
+        <label>DT Frontend URL <span style="font-size:10px;color:var(--text-muted)">(optional — enables clickable project links)</span></label>
+        <input id="dtFrontendUrlInput" class="search-input" style="width:100%"
+          placeholder="http://localhost:8080" />
+      </div>
+    </div>
+    <div class="modal-row">
+      <div style="flex:1">
         <label>API Key</label>
         <input id="apiKeyInput" class="search-input" style="width:100%" type="password" placeholder="odt_xxxxxxxxxxxxxxxxxxxxxxxxxx" />
       </div>
@@ -527,8 +534,8 @@ let sortCol        = 'name';
 let sortDir        = 'asc';
 let liveMode       = false;
 let apiKey         = '';
-let apiBaseUrl     = localStorage.getItem('dt_api_url') || '';  // '' = use nginx proxy
-let dtFrontendUrl  = '';
+let apiBaseUrl     = localStorage.getItem('dt_api_url')      || '';  // '' = use nginx proxy
+let dtFrontendUrl  = localStorage.getItem('dt_frontend_url') || '';  // DT UI base URL for project hyperlinks
 let dtProxyTarget  = '';  // raw DT_API_INTERNAL_URL from /dt-config (informational)
 let autoRefreshTimer   = null;
 let autoRefreshSeconds = 60;
@@ -1168,6 +1175,11 @@ async function connectLiveApi() {
   if (apiBaseUrl) localStorage.setItem('dt_api_url', apiBaseUrl);
   else            localStorage.removeItem('dt_api_url');
 
+  const frontendVal = (document.getElementById('dtFrontendUrlInput').value || '').trim().replace(/\/$/, '');
+  dtFrontendUrl = frontendVal;
+  if (dtFrontendUrl) localStorage.setItem('dt_frontend_url', dtFrontendUrl);
+  else               localStorage.removeItem('dt_frontend_url');
+
   if (!apiKey) { alert('Please enter an API key.'); return; }
 
   document.getElementById('apiStatus').innerHTML =
@@ -1231,15 +1243,15 @@ function openModal(id) {
     const inp = document.getElementById('apiUrlInput');
     if (inp && !inp.value) {
       if (apiBaseUrl) {
-        // Pre-fill with the saved/auto-detected URL
         inp.value = apiBaseUrl;
       } else if (dtProxyTarget) {
-        // URL is Docker-internal; show it as a placeholder so the user can
-        // see what DT_API_INTERNAL_URL is configured to
         inp.placeholder = `${dtProxyTarget}  (nginx proxy — not directly reachable from browser)`;
       }
     }
-    // Also update the proxy-target label in the note
+    // Pre-fill DT Frontend URL from saved value
+    const fInp = document.getElementById('dtFrontendUrlInput');
+    if (fInp && !fInp.value && dtFrontendUrl) fInp.value = dtFrontendUrl;
+    // Update the proxy-target label in the note
     const el = document.getElementById('proxyTargetUrl');
     if (el && dtProxyTarget) el.textContent = dtProxyTarget;
   }
@@ -1269,10 +1281,14 @@ function isBrowserReachable(url) {
 
 // ── Fetch proxy target URL (exposed by nginx via /dt-config) ───────────────
 // Side-effects:
-//   dtProxyTarget  – set to whatever DT_API_INTERNAL_URL nginx was given
-//   dtFrontendUrl  – same (used for project hyperlinks)
+//   dtProxyTarget  – set to whatever DT_API_INTERNAL_URL nginx was given (informational only)
 //   apiBaseUrl     – auto-populated when the proxy target is browser-reachable
 //                    AND the user has not already saved a custom URL in localStorage
+//
+// NOTE: dtFrontendUrl is intentionally NOT set here. The DT_API_INTERNAL_URL is the
+// nginx-to-API backend URL and is almost always different from the DT Frontend URL
+// that users open in their browser. The user configures dtFrontendUrl explicitly via
+// the "DT Frontend URL" field in the Connect modal.
 async function loadDtConfig() {
   try {
     const r = await fetch('/dt-config', { signal: AbortSignal.timeout(3000) });
@@ -1281,32 +1297,29 @@ async function loadDtConfig() {
       if (cfg.proxyTarget) {
         const target = cfg.proxyTarget.replace(/\/$/, '');
         dtProxyTarget = target;
-        dtFrontendUrl = target;
 
         // Show the configured proxy URL in the modal note
         const el = document.getElementById('proxyTargetUrl');
         if (el) el.textContent = target;
 
-        // If the user hasn't manually saved a URL (localStorage empty) and the
-        // proxy target is reachable from the browser, pre-fill it.
-        // This surfaces the DT_API_INTERNAL_URL set during install into the UI.
+        // If the user hasn't manually saved an API URL and the proxy target is
+        // reachable from the browser, pre-fill it (surfaces DT_API_INTERNAL_URL).
         if (!localStorage.getItem('dt_api_url') && isBrowserReachable(target)) {
           apiBaseUrl = target;
         }
 
-        // Populate the modal URL field if it exists and is still blank.
+        // Populate the API URL field if it is still blank
         const inp = document.getElementById('apiUrlInput');
         if (inp && !inp.value) {
           if (apiBaseUrl) {
             inp.value = apiBaseUrl;
           } else {
-            // Docker-internal URL — show as placeholder so the user knows what's configured
             inp.placeholder = `${target}  (nginx proxy — not directly reachable from browser)`;
           }
         }
       }
     }
-  } catch(_) { /* silently ignore — hyperlinks simply won't render */ }
+  } catch(_) { /* silently ignore */ }
 }
 
 // ── Probe the DT API for connectivity (retries every 3s while modal is open) ──

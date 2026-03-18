@@ -140,27 +140,31 @@ and switches to **live data** when you enter an API key.
 
 ### Features
 
-- **Risk matrix table** — Security, Operational, and License risk × Critical / High / Medium / Low (12 columns)
-- **Hierarchy level column** — shows each project's depth in the parent/child tree (Level 1 = top-level group, Level 2 = child, …)
+- **Risk matrix table** — Security (Critical/High/Medium/Low/Unassigned), Operational (Fail/Warn/Info), License (Fail/Warn/Info) — 13 columns total
+- **Hierarchy tree** — parent/child groups with expand/collapse; infers hierarchy from project names when DT API omits `parent` field
+- **Collapsed groups show aggregated totals** for all descendants
+- **Hierarchy level column** — depth in the parent/child tree (Level 1 = top-level group, Level 2 = child, …)
+- **Project hyperlinks** — set a DT Frontend URL in the Connect modal to make project names clickable links into the DependencyTrack UI
 - **Tag chips** — project tags displayed inline; tag multi-select filter in the toolbar
 - **Level multi-select filter** — show only projects at specific hierarchy depths
 - **Risk level filter** — show only projects with a specific severity level
 - **Category filter** — narrow to Security, Operational, or License risks
+- **KPI summary cards** — update live with every filter change; clickable to set the risk filter
 - **Search box** — substring match on project name
-- **CSV export** — exports exactly the filtered rows to `dependency-track-YYYY-MM-DD.csv`
-- **KPI summary cards** — portfolio-level totals
+- **CSV export** — all filtered rows with full column names: `Security Critical`, `Operational Fail`, `License Warn`, etc.
 - **Sortable columns** — click any column header; click again to reverse
+- **Auto-refresh** — configurable interval (30 s / 1 min / 5 min), live mode only
 
 ```
-┌─────────────────────┬─────┬──────────────────────┬──────────────────────┬────────────────────┐
-│ Project / Version   │ Lvl │    Security Risk      │   Operational Risk   │    License Risk    │
-│                     │     │ Crit  High  Med  Low  │ Crit  High  Med  Low │ Crit High Med Low  │
-├─────────────────────┼─────┼──────────────────────┼──────────────────────┼────────────────────┤
-│ FreshX Suite        │  1  │  5    18    35   55   │  1    10    22   28  │  1    7    12   18 │
-│  FreshX-BE          │  2  │  2     8    14   20   │  0     4     9   12  │  0    2     5    7 │
-│   FreshX-BE  v1.4.1 │  3  │  1     3     6    9   │  0     2     4    6  │  0    1     2    3 │
-│   FreshX-BE  v1.5.0 │  3  │  0     2     4    7   │  0     1     2    3  │  0    0     1    2 │
-└─────────────────────┴─────┴──────────────────────┴──────────────────────┴────────────────────┘
+┌─────────────────────┬─────┬──────────────────────────────┬─────────────────┬─────────────────┐
+│ Project / Version   │ Lvl │       Security Risk           │ Operational Risk│  License Risk   │
+│                     │     │ Crit  High  Med  Low  Unassn  │ Fail  Warn  Info│ Fail  Warn  Info│
+├─────────────────────┼─────┼──────────────────────────────┼─────────────────┼─────────────────┤
+│ FreshX Suite        │  1  │  5    18    35   55     8     │  2    12    25  │  1     8    15  │
+│  FreshX-BE          │  2  │  2     8    14   20     3     │  0     5    10  │  0     3     6  │
+│   FreshX-BE  v1.4.1 │  3  │  1     3     6    9     1     │  0     2     4  │  0     1     2  │
+│   FreshX-BE  v1.5.0 │  3  │  0     2     4    7     0     │  0     1     2  │  0     0     1  │
+└─────────────────────┴─────┴──────────────────────────────┴─────────────────┴─────────────────┘
 ```
 
 Dashboard integration guide: [docs/DASHBOARD_INTEGRATION.md](docs/DASHBOARD_INTEGRATION.md)

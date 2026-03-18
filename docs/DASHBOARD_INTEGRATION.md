@@ -29,15 +29,23 @@ served by an Nginx container on port `3000`. It provides:
 - **CSV export** — exports all matching projects regardless of fold state, with a
   Type column (Group / Project)
 - **KPI summary cards** for total Critical, High, Medium, Low counts
-- **Project hyperlinks** — when the DT Frontend URL is configured, project names
-  link directly to that project in the DependencyTrack UI
+- **Project hyperlinks** — when the DT Frontend URL is set in the Connect modal,
+  project names link directly to that project in the DependencyTrack UI
 - **Two data modes**:
   - **Mock mode** (default) — a realistic hierarchical project tree for immediate preview
   - **Live mode** — pulls real data from your DependencyTrack API
 
-The dashboard communicates with the DependencyTrack API through the Nginx
-reverse proxy (`/api/*` → `DT_API_INTERNAL_URL/api/*`), which eliminates CORS
-issues. The browser never makes a direct request to DependencyTrack.
+### How network calls work
+
+The dashboard communicates with the DependencyTrack API in one of two ways:
+
+| Mode | When | How |
+|------|------|-----|
+| **Nginx proxy** (default) | DT API URL field left blank | Browser calls `/api/*` on the dashboard origin; Nginx forwards to `DT_API_INTERNAL_URL` — no CORS |
+| **Direct** | DT API URL filled in the Connect modal | Browser calls the URL you typed directly — requires CORS or same-origin |
+
+The `DT_API_INTERNAL_URL` env var (set at deploy time) controls only the Nginx
+proxy target. It is separate from the URL you type in the UI.
 
 ---
 
@@ -61,29 +69,41 @@ project hierarchy. Each node shows its risk data inline.
 displays the **sum of all descendant risk counts**. When expanded (▼), the row
 shows only its own direct risk data and its children are listed below it.
 
+**Hierarchy inference:** DependencyTrack's project list API does not always return
+a `parent` field. The dashboard uses two strategies to infer the hierarchy:
+
+1. **Exact name match** — a versioned project `name=foo version=1.2` is matched to
+   an unversioned project with `name=foo`.
+2. **Name-suffix match** — a project `name=foo-1.2 version=1.2` is matched to a
+   parent named `foo`.
+
 **Leaf rows:** project rows with no children. Always show their own data.
 
 ### Risk Matrix Columns
 
-| Column            | Description                                              |
-|-------------------|----------------------------------------------------------|
-| Project / Version | Project name with version badge and tag chips            |
-| Lvl               | Hierarchy depth (1 = top-level group, 2 = child, …)     |
-| Security Risk     | Critical · High · Medium · Low vulnerability counts      |
-| Operational Risk  | Critical · High · Medium · Low operational risk counts   |
-| License Risk      | Critical · High · Medium · Low policy violation counts   |
+| Column              | Sub-columns                              | Source                              |
+|---------------------|------------------------------------------|-------------------------------------|
+| Project / Version   | —                                        | `name`, `version`, `tags`           |
+| Lvl                 | —                                        | Computed from parent chain depth    |
+| Security Risk       | Critical · High · Medium · Low · Unassigned | DT vulnerability CVSS severities |
+| Operational Risk    | Fail · Warn · Info                       | `policyViolationsOperational*`      |
+| License Risk        | Fail · Warn · Info                       | `policyViolationsLicense*`          |
 
-**Total: 13 columns** — 1 project name + 1 level + 3 categories × 4 severity levels.
+**Total: 13 columns** — 1 project name + 1 level + 5 security + 3 operational + 3 license.
 
 ### Colour coding
 
-| Level    | Colour |
-|----------|--------|
-| Critical | Red    |
-| High     | Orange |
-| Medium   | Yellow |
-| Low      | Blue   |
-| Zero (—) | Grey   |
+| Level / Severity | Colour |
+|------------------|--------|
+| Critical / Fail  | Red    |
+| High / Warn      | Orange |
+| Medium / Info    | Yellow |
+| Low / Unassigned | Blue   |
+| Zero (—)         | Grey   |
+
+For Operational and License columns, DependencyTrack uses **Fail / Warn / Info**
+severity levels (matching policy violation levels). These are displayed in red /
+orange / yellow respectively, consistent with Critical / High / Medium.
 
 ### Expand / Collapse
 
@@ -94,10 +114,14 @@ shows only its own direct risk data and its children are listed below it.
 
 ### Project Hyperlinks
 
-When a **DT Frontend URL** is configured in the Connect modal (see
-[Section 3](#3-switching-from-mock-data-to-live-data)), every project name
-becomes a clickable link that opens the project directly in the DependencyTrack
-UI (`<DT_FRONTEND_URL>/#/projects/<uuid>`).
+Set the **DT Frontend URL** in the "⚙ Connect API" modal to enable clickable
+project links. Each project name becomes an anchor that opens
+`<DT_FRONTEND_URL>/#/projects/<uuid>` in a new tab.
+
+> **Important:** The DT Frontend URL is the URL users open in their browser to
+> reach the DependencyTrack web UI (typically port `8080`) — this is **different**
+> from the API URL (typically port `8081`). The value is saved in browser
+> `localStorage` so it persists across sessions.
 
 ### Tags
 
@@ -105,6 +129,18 @@ Project tags are fetched from the DependencyTrack API and displayed as purple
 chips on each row. The **Tags** multi-select filter shows all unique tags across
 all loaded projects; selecting multiple tags narrows to projects that have
 **all** of the selected tags.
+
+### KPI Cards
+
+The six summary cards above the table reflect the **currently filtered** project
+set, so totals update as you apply filters.
+
+- **Critical** = Security Critical + Operational Fail + License Fail
+- **High** = Security High + Operational Warn + License Warn
+- **Medium** = Security Medium + Operational Info + License Info
+- **Low** = Security Low + Security Unassigned
+
+Cards are clickable — clicking a card applies the matching risk-level filter.
 
 ### Sorting
 
@@ -118,18 +154,13 @@ Click any column header to sort by that value. Click again to reverse.
 | Filter | Type | Behaviour |
 |--------|------|-----------|
 | Search box | Text input | Substring match on project name |
-| Risk level | Single-select | Show only projects with a specific severity level |
+| Risk level | Single-select | Show projects with the selected severity level |
 | Category | Single-select | Narrow to Security, Operational, or License category |
 | Level | Multi-select dropdown | Show only projects at selected hierarchy depths |
 | Tags | Multi-select dropdown | Show only projects that have ALL selected tags |
 
 All filters combine with AND logic. When a filter matches a child project, its
 ancestor group rows are automatically shown so the tree context is preserved.
-
-### KPI Cards
-
-The six summary cards above the table always reflect **all loaded projects**
-(not the current filter), giving a stable portfolio-level baseline.
 
 ---
 
@@ -140,43 +171,34 @@ The six summary cards above the table always reflect **all loaded projects**
 1. Open http://localhost:3000
 2. Click the **"⚙ Connect API"** button (top right)
 3. The modal shows the **proxy target status** — confirm DependencyTrack is reachable
-4. Enter your **API Key** (see [Section 4](#4-generating-an-api-key))
-5. *(Optional)* Enter the **DependencyTrack Frontend URL** to enable project
-   hyperlinks (e.g. `http://10.121.163.69:8080`)
-6. Click **Connect**
+4. *(Optional)* Enter the **DT API URL** if you want the browser to call DependencyTrack
+   directly (leave blank to route all calls through the Nginx proxy)
+5. *(Optional)* Enter the **DT Frontend URL** to enable project hyperlinks
+   (e.g. `http://localhost:8080` or `https://dtrack.company.com`)
+6. Enter your **API Key** (see [Section 4](#4-generating-an-api-key))
+7. Click **Connect**
 
 The dashboard fetches all projects (`GET /api/v1/project?pageSize=500`) and their
-current metrics (`GET /api/v1/metrics/project/{uuid}/current`) in real time. It
-handles all three response shapes the DependencyTrack API may return:
+current metrics in batches of 20. It handles all three response shapes the
+DependencyTrack API may return:
 
 - `{ "values": [...] }` — paginated envelope (newer DT versions)
 - `[...]` — bare array (older DT versions)
 - `{}` — empty object when no projects exist yet (shows a friendly message)
 
-### Method B — Browser localStorage (persistent across refreshes)
+### Connect modal fields explained
 
-Open your browser's DevTools console and run:
+| Field | Required | Description |
+|-------|----------|-------------|
+| DT API URL | No | The URL the **browser** uses to reach the DT API. Leave blank to route via the Nginx proxy (recommended for Docker deployments). If `DT_API_INTERNAL_URL` is set to a browser-reachable address, it is pre-filled automatically. |
+| DT Frontend URL | No | The URL users open to access the DependencyTrack web UI. Used only for project hyperlinks. Must be browser-accessible. Example: `http://localhost:8080`. Saved in `localStorage`. |
+| API Key | Yes | Your DependencyTrack API key (masked as password). |
 
-```javascript
-// Store credentials
-localStorage.setItem('dt_api_key', 'odt_xxxxxxxxxxxxxxxxxx');
+### Method B — Pre-configure the proxy target
 
-// To auto-connect on load, add to the // ── Init ── section of index.html:
-const savedKey = localStorage.getItem('dt_api_key');
-if (savedKey) {
-  document.getElementById('apiKeyInput').value = savedKey;
-  apiKey = savedKey;
-  connectLiveApi();
-} else {
-  loadMockData();
-}
-```
-
-### Method C — Pre-configure the proxy target
-
-The proxy target (`DT_API_INTERNAL_URL`) is a **server-side** setting — the browser
-always calls `/api/*` on the same origin (the Nginx container), which then proxies
-the request to DependencyTrack. To point the dashboard at a different DT instance:
+The proxy target (`DT_API_INTERNAL_URL`) is a **server-side** setting — the
+browser always calls `/api/*` on the dashboard origin, and Nginx forwards it.
+To point the dashboard at a different DT instance:
 
 1. Edit `.env`:
    ```dotenv
@@ -187,7 +209,7 @@ the request to DependencyTrack. To point the dashboard at a different DT instanc
    docker compose --env-file .env up -d --no-deps dt-dashboard
    ```
 
-The "⚙ Connect API" modal will now show the new proxy target automatically.
+The "⚙ Connect API" modal will now show the new proxy target URL automatically.
 
 ---
 
@@ -235,56 +257,63 @@ The dashboard only **reads** data. Create a dedicated read-only team:
 
 ## 5. Data Mapping Reference
 
-The dashboard maps DependencyTrack API responses to the three risk categories.
+The dashboard maps DependencyTrack API responses to three risk categories.
+Data comes from the `metrics` object embedded in the project list response
+(`GET /api/v1/project`), falling back to the per-project metrics endpoint
+(`GET /api/v1/metrics/project/{uuid}/current`) when the embedded object is absent.
 
 ### Project fields
 
 Source: `GET /api/v1/project?pageSize=500&pageNumber=1`
 
-| Dashboard Field | API Field          | Notes                                       |
-|-----------------|--------------------|---------------------------------------------|
-| Project name    | `name`             |                                             |
-| Version         | `version`          |                                             |
-| Hierarchy level | `parent.uuid`      | Computed by walking up the parent chain     |
-| Tags            | `tags[].name`      | DT returns `[{name:"..."}, ...]`; flattened |
+| Dashboard Field | API Field          | Notes                                         |
+|-----------------|--------------------|-----------------------------------------------|
+| Project name    | `name`             |                                               |
+| Version         | `version`          |                                               |
+| Hierarchy level | `parent.uuid`      | Computed by walking up the parent chain; also inferred from name patterns when `parent` is absent |
+| Tags            | `tags[].name`      | DT returns `[{name:"..."}, ...]`; flattened   |
 
 ### Security Risk
 
-Source: `GET /api/v1/metrics/project/{uuid}/current`
+Maps to DependencyTrack **vulnerability CVSS severity** counts.
 
-| Dashboard Column | API Field  |
-|------------------|------------|
-| Critical         | `critical` |
-| High             | `high`     |
-| Medium           | `medium`   |
-| Low              | `low`      |
+| Dashboard Column | API Field    | Description                          |
+|------------------|--------------|--------------------------------------|
+| Critical         | `critical`   | Vulnerabilities with CVSS ≥ 9.0      |
+| High             | `high`       | Vulnerabilities with CVSS 7.0–8.9    |
+| Medium           | `medium`     | Vulnerabilities with CVSS 4.0–6.9    |
+| Low              | `low`        | Vulnerabilities with CVSS 0.1–3.9    |
+| Unassigned       | `unassigned` | Vulnerabilities with no CVSS score   |
 
 ### Operational Risk
 
-Source: same metrics endpoint
+Maps to DependencyTrack **operational policy violation** levels.
 
-| Dashboard Column | API Field     | Description                                |
-|------------------|---------------|--------------------------------------------|
-| Critical         | _(none)_      | Reserved                                   |
-| High             | `unassigned`  | Components with unassigned vulnerabilities |
-| Medium           | `suppressed`  | Suppressed findings (audit required)       |
-| Low              | _(none)_      | —                                          |
-
-> Edit `connectLiveApi()` in `dashboard/index.html` to remap these to match
-> your organisation's operational risk definition.
+| Dashboard Column | API Field                           | Description                     |
+|------------------|-------------------------------------|---------------------------------|
+| Fail             | `policyViolationsOperationalFail`   | Highest-severity operational violations |
+| Warn             | `policyViolationsOperationalWarn`   | Warning-level operational violations    |
+| Info             | `policyViolationsOperationalInfo`   | Informational operational violations    |
 
 ### License Risk
 
-Source: same metrics endpoint
+Maps to DependencyTrack **license policy violation** levels.
 
-| Dashboard Column | API Field              | Description              |
-|------------------|------------------------|--------------------------|
-| Critical         | `policyViolationsFail` | FAIL policy violations   |
-| High             | `policyViolationsWarn` | WARN policy violations   |
-| Medium           | `policyViolationsInfo` | INFO policy violations   |
-| Low              | _(none)_               | —                        |
+| Dashboard Column | API Field                      | Description                        |
+|------------------|--------------------------------|------------------------------------|
+| Fail             | `policyViolationsLicenseFail`  | Highest-severity license violations |
+| Warn             | `policyViolationsLicenseWarn`  | Warning-level license violations    |
+| Info             | `policyViolationsLicenseInfo`  | Informational license violations    |
 
-### Full API response shape
+### What is not mapped (not available in DependencyTrack)
+
+| Black Duck field  | DT equivalent | Status   |
+|-------------------|---------------|----------|
+| Version Risk      | —             | Not available — DT does not track component version freshness |
+| Activity Risk     | —             | Not available — DT does not track component activity metrics |
+| Policy violation severities (Blocker / Critical / Major / Minor / Trivial) | Fail / Warn / Info | DT uses a 3-level system; not a 1:1 mapping |
+
+### Full embedded metrics API response shape
 
 ```json
 {
@@ -296,9 +325,19 @@ Source: same metrics endpoint
   "suppressed": 1,
   "vulnerabilities": 47,
   "components": 158,
+  "policyViolationsTotal": 5,
   "policyViolationsFail": 1,
   "policyViolationsWarn": 4,
   "policyViolationsInfo": 0,
+  "policyViolationsSecurityFail": 0,
+  "policyViolationsSecurityWarn": 1,
+  "policyViolationsSecurityInfo": 0,
+  "policyViolationsLicenseFail": 1,
+  "policyViolationsLicenseWarn": 2,
+  "policyViolationsLicenseInfo": 0,
+  "policyViolationsOperationalFail": 0,
+  "policyViolationsOperationalWarn": 1,
+  "policyViolationsOperationalInfo": 0,
   "firstOccurrence": 1710000000000,
   "lastOccurrence": 1710086400000
 }
@@ -337,11 +376,13 @@ The CSV always exports **all matching projects regardless of fold state** — if
 group is collapsed but its children match the active filters, the children appear
 in the CSV. A **Type** column identifies each row as `Group` or `Project`.
 
+CSV column layout:
+
 ```
 Project, Version, Level, Tags, Type,
-Sec Critical, Sec High, Sec Medium, Sec Low,
-Ops Critical, Ops High, Ops Medium, Ops Low,
-Lic Critical, Lic High, Lic Medium, Lic Low
+Security Critical, Security High, Security Medium, Security Low, Security Unassigned,
+Operational Fail, Operational Warn, Operational Info,
+License Fail, License Warn, License Info
 ```
 
 Tags are semicolon-separated within the Tags cell. All values are
@@ -367,28 +408,23 @@ Each group entry has:
 { name: 'My Group', children: [ /* nested entries */ ] }
 ```
 
-### Add a new risk column
+### Risk data structure
 
-To add a column (e.g. "Unassigned" in the Operational category):
-
-1. Change `const LEVELS = ['critical','high','medium','low'];` to add `'unassigned'`
-2. Update the `ops` mapping in `connectLiveApi()` to populate `unassigned`
-3. The table renders the new column automatically
-
-### Change risk category names
-
-Edit the `CAT_LABELS` constant:
+Each project object in the dashboard has:
 
 ```javascript
-const CAT_LABELS = {
-  security:   'Vulnerabilities',
-  operations: 'Compliance',
-  license:    'Licensing',
-};
+{
+  security: {
+    critical: 0, high: 0, medium: 0, low: 0, unassigned: 0
+  },
+  operations: {
+    fail: 0, warn: 0, info: 0     // policyViolationsOperational*
+  },
+  license: {
+    fail: 0, warn: 0, info: 0     // policyViolationsLicense*
+  }
+}
 ```
-
-> Note: `CAT_LABELS` is available for custom rendering — the column group
-> headers currently use inline strings in the HTML `<th>` elements.
 
 ### Theming
 
@@ -434,7 +470,7 @@ npx serve dashboard -p 3000
 For live data without Docker, you need to either:
 - Run your own Nginx with an equivalent proxy config
 - Or enable CORS on the DependencyTrack API server (`ALPINE_CORS_ENABLED: "true"`)
-  and call the API directly (edit `connectLiveApi()` to use a direct URL)
+  and fill in the DT API URL in the Connect modal (direct browser → DT API calls)
 
 ---
 

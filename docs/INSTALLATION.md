@@ -388,14 +388,32 @@ You will be forced to change the password on first login.
 
 The "⚙ Connect API" modal shows the proxy target status. If it says not reachable:
 
-1. Check `DT_API_INTERNAL_URL` in `.env` — it must be the address Nginx inside
-   the Docker container can reach, **not** the browser-facing address.
+1. Check `DT_API_INTERNAL_URL` in `.env` — it must be the address **Nginx inside
+   the Docker container** can reach, not the browser-facing address.
 2. For same-Docker-network installs: `http://dtrack-apiserver:8080`
 3. For external DT: `http://<host-ip>:<port>` — use the host IP, not `localhost`
 4. Restart the dashboard container after any `.env` change:
    ```bash
    docker compose --env-file .env up -d --no-deps dt-dashboard
    ```
+
+### Project hyperlinks open the wrong URL or don't appear
+
+Project names only become hyperlinks when a **DT Frontend URL** is set. This is
+configured in the "⚙ Connect API" modal — it is the URL you open in your browser
+to access the DependencyTrack web UI (typically port `8080`), for example
+`http://localhost:8080` or `https://dtrack.company.com`.
+
+This field is separate from the DT API URL because the frontend and API run on
+different ports by default:
+
+| Service            | Default URL              |
+|--------------------|--------------------------|
+| DependencyTrack UI | http://localhost:**8080** |
+| DependencyTrack API| http://localhost:**8081** |
+| Custom Dashboard   | http://localhost:**3000** |
+
+The DT Frontend URL is saved in browser `localStorage` and persists across sessions.
 
 ### Dashboard shows "projects.map is not a function"
 
