@@ -472,14 +472,22 @@
     <button class="modal-close" onclick="closeModal('apiModal')">&times;</button>
     <h2>⚙ Connect to Live DependencyTrack API</h2>
     <p>Requests go through the <strong>server-side nginx proxy</strong> — no CORS issues.</p>
+    <div class="modal-row">
+      <div style="flex:1">
+        <label>DT API URL <span style="font-size:10px;color:var(--text-muted)">(leave blank to route through the nginx proxy)</span></label>
+        <input id="apiUrlInput" class="search-input" style="width:100%"
+          placeholder="https://dtrack.company.com  or  http://localhost:8081"
+          oninput="scheduleProbe()" />
+      </div>
+    </div>
     <p id="proxyTargetNote" style="font-size:12px;background:var(--surface2);border:1px solid var(--border);border-radius:6px;padding:8px 12px;margin-bottom:14px">
-      Proxy target: <strong id="proxyTargetDisplay">loading…</strong><br/>
-      <span style="color:var(--text-muted)">Change via <code style="display:inline;background:none;border:none;padding:0;color:inherit">DT_API_INTERNAL_URL</code> in <code style="display:inline;background:none;border:none;padding:0;color:inherit">.env</code></span>
+      API status: <strong id="proxyTargetDisplay">checking…</strong><br/>
+      <span style="color:var(--text-muted)">Nginx proxy target (<code style="display:inline;background:none;border:none;padding:0;color:inherit">DT_API_INTERNAL_URL</code>) is used when the field above is blank.</span>
     </p>
     <div class="modal-row">
       <div style="flex:1">
         <label>API Key</label>
-        <input id="apiKeyInput" class="search-input" style="width:100%" placeholder="odt_xxxxxxxxxxxxxxxxxxxxxxxxxx" />
+        <input id="apiKeyInput" class="search-input" style="width:100%" type="password" placeholder="odt_xxxxxxxxxxxxxxxxxxxxxxxxxx" />
       </div>
     </div>
     <div style="display:flex;gap:8px;margin-top:4px">
@@ -511,6 +519,7 @@ let sortCol        = 'name';
 let sortDir        = 'asc';
 let liveMode       = false;
 let apiKey         = '';
+let apiBaseUrl     = localStorage.getItem('dt_api_url') || '';  // '' = use nginx proxy
 let dtFrontendUrl  = '';
 let autoRefreshTimer   = null;
 let autoRefreshSeconds = 60;
@@ -1056,7 +1065,7 @@ async function fetchAllProjects(key) {
   let page = 1, all = [];
   while (true) {
     const res = await fetch(
-      `/api/v1/project?pageSize=${pageSize}&pageNumber=${page}&excludeInactive=false`,
+      `${apiBaseUrl}/api/v1/project?pageSize=${pageSize}&pageNumber=${page}&excludeInactive=false`,
       { headers: { 'X-Api-Key': key } }
     );
     if (!res.ok) throw new Error(`HTTP ${res.status} — check your API key`);
@@ -1089,7 +1098,7 @@ async function fetchProjectMetrics(p, key) {
   } else {
     // Fall back to separate metrics endpoint for projects without embedded metrics
     try {
-      const mr = await fetch(`/api/v1/metrics/project/${p.uuid}/current`, {
+      const mr = await fetch(`${apiBaseUrl}/api/v1/metrics/project/${p.uuid}/current`, {
         headers: { 'X-Api-Key': key }
       });
       if (mr.ok) {
@@ -1115,6 +1124,10 @@ async function fetchProjectMetrics(p, key) {
 // ── Connect to live API ────────────────────────────────────────────────────
 async function connectLiveApi() {
   apiKey = document.getElementById('apiKeyInput').value.trim();
+  const urlVal = (document.getElementById('apiUrlInput').value || '').trim().replace(/\/$/, '');
+  apiBaseUrl = urlVal;
+  if (apiBaseUrl) localStorage.setItem('dt_api_url', apiBaseUrl);
+  else            localStorage.removeItem('dt_api_url');
 
   if (!apiKey) { alert('Please enter an API key.'); return; }
 
@@ -1173,7 +1186,14 @@ async function refreshData() {
 }
 
 // ── Modal helpers ──────────────────────────────────────────────────────────
-function openModal(id)  { document.getElementById(id).classList.add('open'); }
+function openModal(id) {
+  document.getElementById(id).classList.add('open');
+  if (id === 'apiModal') {
+    // Restore saved URL so the user can see/edit it
+    const inp = document.getElementById('apiUrlInput');
+    if (inp && !inp.value) inp.value = apiBaseUrl;
+  }
+}
 function closeModal(id) { document.getElementById(id).classList.remove('open'); }
 document.querySelectorAll('.modal-overlay').forEach(el => {
   el.addEventListener('click', e => { if (e.target === el) el.classList.remove('open'); });
@@ -1196,26 +1216,37 @@ async function loadDtConfig() {
   } catch(_) { /* silently ignore — hyperlinks simply won't render */ }
 }
 
-// ── Probe proxy target (retries every 3s while modal is open) ──────────────
-let _probeRetry = null;
+// ── Probe the DT API for connectivity (retries every 3s while modal is open) ──
+let _probeRetry   = null;
+let _probeDebounce = null;
+function scheduleProbe() {
+  if (_probeDebounce) clearTimeout(_probeDebounce);
+  _probeDebounce = setTimeout(probeProxyTarget, 500);
+}
 async function probeProxyTarget() {
   if (_probeRetry) { clearTimeout(_probeRetry); _probeRetry = null; }
   const modal = document.getElementById('apiModal');
   const el    = document.getElementById('proxyTargetDisplay');
   if (!el || !modal.classList.contains('open')) return;
 
+  // Use the URL currently typed in the field, or fall back to stored apiBaseUrl
+  const urlField = document.getElementById('apiUrlInput');
+  const base = (urlField ? urlField.value.trim().replace(/\/$/, '') : '') || apiBaseUrl;
+
   el.style.color = '';
   el.textContent = 'checking…';
   try {
-    const r = await fetch('/api/version', { signal: AbortSignal.timeout(4000) });
+    const r = await fetch(`${base}/api/version`, { signal: AbortSignal.timeout(4000) });
     if (r.ok) {
       const v = await r.json();
       el.textContent = `DependencyTrack ${v.application||''} ${v.version||'(connected)'}`.trim();
       return; // success — stop retrying
     }
-    el.textContent = 'proxy reachable — DT not responding yet';
+    el.textContent = base ? 'reachable but DT not responding yet' : 'proxy reachable — DT not responding yet';
   } catch(_) {
-    el.textContent = 'not reachable — check DT_API_INTERNAL_URL in .env';
+    el.textContent = base
+      ? `not reachable — check the URL above`
+      : 'not reachable — check DT_API_INTERNAL_URL in .env';
     el.style.color = 'var(--critical)';
   }
   // Retry in 3 s if the modal is still open
