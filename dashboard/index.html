@@ -498,7 +498,7 @@
       </div>
     </div>
     <div style="display:flex;gap:8px;margin-top:4px">
-      <button class="btn primary" onclick="connectLiveApi()">Connect</button>
+      <button class="btn primary" onclick="connectLiveApi(true)">Connect</button>
       <button class="btn" onclick="loadMockData(); closeModal('apiModal')">Use Mock Data</button>
     </div>
     <p style="margin-top:16px;font-size:12px">Generate an API key:</p>
@@ -1168,17 +1168,19 @@ async function fetchProjectMetrics(p, key) {
 }
 
 // ── Connect to live API ────────────────────────────────────────────────────
-async function connectLiveApi() {
-  apiKey = document.getElementById('apiKeyInput').value.trim();
-  const urlVal = (document.getElementById('apiUrlInput').value || '').trim().replace(/\/$/, '');
-  apiBaseUrl = urlVal;
-  if (apiBaseUrl) localStorage.setItem('dt_api_url', apiBaseUrl);
-  else            localStorage.removeItem('dt_api_url');
+async function connectLiveApi(fromModal = false) {
+  if (fromModal) {
+    apiKey = document.getElementById('apiKeyInput').value.trim();
+    const urlVal = (document.getElementById('apiUrlInput').value || '').trim().replace(/\/$/, '');
+    apiBaseUrl = urlVal;
+    if (apiBaseUrl) localStorage.setItem('dt_api_url', apiBaseUrl);
+    else            localStorage.removeItem('dt_api_url');
 
-  const frontendVal = (document.getElementById('dtFrontendUrlInput').value || '').trim().replace(/\/$/, '');
-  dtFrontendUrl = frontendVal;
-  if (dtFrontendUrl) localStorage.setItem('dt_frontend_url', dtFrontendUrl);
-  else               localStorage.removeItem('dt_frontend_url');
+    const frontendVal = (document.getElementById('dtFrontendUrlInput').value || '').trim().replace(/\/$/, '');
+    dtFrontendUrl = frontendVal;
+    if (dtFrontendUrl) localStorage.setItem('dt_frontend_url', dtFrontendUrl);
+    else               localStorage.removeItem('dt_frontend_url');
+  }
 
   if (!apiKey) { alert('Please enter an API key.'); return; }
 
