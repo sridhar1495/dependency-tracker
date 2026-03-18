@@ -280,6 +280,14 @@
     }
     a.project-link { color: inherit; text-decoration: none; }
     a.project-link:hover { color: var(--accent); text-decoration: underline; }
+    a.nav-icon {
+      display: inline-flex; align-items: center; justify-content: center;
+      margin-left: 5px; padding: 1px 3px; border-radius: 3px;
+      color: var(--text-muted); text-decoration: none; font-size: 11px;
+      vertical-align: middle; opacity: 0.6;
+      transition: opacity 0.15s, color 0.15s;
+    }
+    a.nav-icon:hover { opacity: 1; color: var(--accent); }
 
     /* ── Pills ────────────────────────────────────────────────────────────── */
     .pill {
@@ -798,14 +806,14 @@ function renderTree(matchSet) {
       : `<span class="tree-indent"></span>`;
 
     const nameInner = escHtml(node.name);
-    const nameEl = dtFrontendUrl
-      ? `<a class="project-link" href="${escHtml(dtFrontendUrl)}/#/projects/${escHtml(node.uuid)}" target="_blank" rel="noopener">${nameInner}</a>`
-      : nameInner;
+    const navIcon = dtFrontendUrl
+      ? `<a class="nav-icon" href="${escHtml(dtFrontendUrl)}/#/projects/${escHtml(node.uuid)}" target="_blank" rel="noopener" title="Open in DependencyTrack">&#x2197;</a>`
+      : '';
 
     const vBadge   = node.version ? `<span class="version-badge">v${escHtml(node.version)}</span>` : '';
     const tagChips = (node.tags || []).map(t => `<span class="tag-chip">${escHtml(t)}</span>`).join('');
 
-    let html = `<td class="project-name" style="padding-left:${indent + 10}px">${toggle}${nameEl}${vBadge}${tagChips}</td>`;
+    let html = `<td class="project-name" style="padding-left:${indent + 10}px">${toggle}${nameInner}${navIcon}${vBadge}${tagChips}</td>`;
     html += `<td class="level-cell">${node.level}</td>`;
 
     CATS.forEach((cat, ci) => {
@@ -1131,31 +1139,40 @@ async function fetchAllProjects(key) {
 }
 
 // ── Fetch metrics for one project ─────────────────────────────────────────
+// The project list endpoint (/api/v1/project) embeds a metrics snapshot that
+// contains security counts (critical/high/medium/low/unassigned) but does NOT
+// include the per-category policy violation breakdown needed for Operational and
+// License columns (policyViolationsOperationalFail etc.). Those fields only exist
+// on the dedicated /api/v1/metrics/project/{uuid}/current endpoint.
+// Strategy: use embedded data for security (saves a round-trip), always call the
+// dedicated endpoint for policy violations.
 async function fetchProjectMetrics(p, key) {
   let sec = {critical:0,high:0,medium:0,low:0,unassigned:0};
   let ops = {fail:0,warn:0,info:0};
   let lic = {fail:0,warn:0,info:0};
 
-  // Prefer embedded metrics from the project list response (no extra API call needed)
+  // Seed security counts from embedded metrics if present
   const m = p.metrics || null;
   if (m) {
     sec = { critical: m.critical||0, high: m.high||0, medium: m.medium||0, low: m.low||0, unassigned: m.unassigned||0 };
-    ops = { fail: m.policyViolationsOperationalFail||0, warn: m.policyViolationsOperationalWarn||0, info: m.policyViolationsOperationalInfo||0 };
-    lic = { fail: m.policyViolationsLicenseFail||0, warn: m.policyViolationsLicenseWarn||0, info: m.policyViolationsLicenseInfo||0 };
-  } else {
-    // Fall back to separate metrics endpoint for projects without embedded metrics
-    try {
-      const mr = await fetch(`${apiBaseUrl}/api/v1/metrics/project/${p.uuid}/current`, {
-        headers: { 'X-Api-Key': key }
-      });
-      if (mr.ok) {
-        const m2 = await mr.json();
-        sec = { critical: m2.critical||0, high: m2.high||0, medium: m2.medium||0, low: m2.low||0, unassigned: m2.unassigned||0 };
-        ops = { fail: m2.policyViolationsOperationalFail||0, warn: m2.policyViolationsOperationalWarn||0, info: m2.policyViolationsOperationalInfo||0 };
-        lic = { fail: m2.policyViolationsLicenseFail||0, warn: m2.policyViolationsLicenseWarn||0, info: m2.policyViolationsLicenseInfo||0 };
-      }
-    } catch(_) {}
   }
+
+  // Always fetch the dedicated metrics endpoint — it is the only source for the
+  // per-category policy violation breakdown (Operational + License columns).
+  try {
+    const mr = await fetch(`${apiBaseUrl}/api/v1/metrics/project/${p.uuid}/current`, {
+      headers: { 'X-Api-Key': key }
+    });
+    if (mr.ok) {
+      const m2 = await mr.json();
+      // Also update security from here when no embedded data was available
+      if (!m) {
+        sec = { critical: m2.critical||0, high: m2.high||0, medium: m2.medium||0, low: m2.low||0, unassigned: m2.unassigned||0 };
+      }
+      ops = { fail: m2.policyViolationsOperationalFail||0, warn: m2.policyViolationsOperationalWarn||0, info: m2.policyViolationsOperationalInfo||0 };
+      lic = { fail: m2.policyViolationsLicenseFail||0, warn: m2.policyViolationsLicenseWarn||0, info: m2.policyViolationsLicenseInfo||0 };
+    }
+  } catch(_) {}
 
   return {
     uuid:       p.uuid,
