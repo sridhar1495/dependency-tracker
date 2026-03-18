@@ -482,7 +482,7 @@
     </div>
     <p id="proxyTargetNote" style="font-size:12px;background:var(--surface2);border:1px solid var(--border);border-radius:6px;padding:8px 12px;margin-bottom:14px">
       API status: <strong id="proxyTargetDisplay">checking…</strong><br/>
-      <span style="color:var(--text-muted)">Nginx proxy target (<code style="display:inline;background:none;border:none;padding:0;color:inherit">DT_API_INTERNAL_URL</code>) is used when the field above is blank.</span>
+      <span style="color:var(--text-muted)">Nginx proxy (<code style="display:inline;background:none;border:none;padding:0;color:inherit">DT_API_INTERNAL_URL</code>): <span id="proxyTargetUrl" style="color:var(--text)">—</span></span>
     </p>
     <div class="modal-row">
       <div style="flex:1">
@@ -521,6 +521,7 @@ let liveMode       = false;
 let apiKey         = '';
 let apiBaseUrl     = localStorage.getItem('dt_api_url') || '';  // '' = use nginx proxy
 let dtFrontendUrl  = '';
+let dtProxyTarget  = '';  // raw DT_API_INTERNAL_URL from /dt-config (informational)
 let autoRefreshTimer   = null;
 let autoRefreshSeconds = 60;
 
@@ -1189,9 +1190,20 @@ async function refreshData() {
 function openModal(id) {
   document.getElementById(id).classList.add('open');
   if (id === 'apiModal') {
-    // Restore saved URL so the user can see/edit it
     const inp = document.getElementById('apiUrlInput');
-    if (inp && !inp.value) inp.value = apiBaseUrl;
+    if (inp && !inp.value) {
+      if (apiBaseUrl) {
+        // Pre-fill with the saved/auto-detected URL
+        inp.value = apiBaseUrl;
+      } else if (dtProxyTarget) {
+        // URL is Docker-internal; show it as a placeholder so the user can
+        // see what DT_API_INTERNAL_URL is configured to
+        inp.placeholder = `${dtProxyTarget}  (nginx proxy — not directly reachable from browser)`;
+      }
+    }
+    // Also update the proxy-target label in the note
+    const el = document.getElementById('proxyTargetUrl');
+    if (el && dtProxyTarget) el.textContent = dtProxyTarget;
   }
 }
 function closeModal(id) { document.getElementById(id).classList.remove('open'); }
@@ -1205,13 +1217,56 @@ function escHtml(s) {
     .replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 }
 
+// ── Returns true when a URL's hostname can be resolved by the browser ──────
+// Docker-internal service names (e.g. "dtrack-apiserver") have no dots and
+// are not localhost/IPs, so the browser can't reach them directly.
+function isBrowserReachable(url) {
+  try {
+    const { hostname } = new URL(url);
+    return hostname === 'localhost'
+        || /^\d+\.\d+\.\d+\.\d+$/.test(hostname)   // plain IPv4
+        || hostname.includes('.');                   // any domain name
+  } catch(_) { return false; }
+}
+
 // ── Fetch proxy target URL (exposed by nginx via /dt-config) ───────────────
+// Side-effects:
+//   dtProxyTarget  – set to whatever DT_API_INTERNAL_URL nginx was given
+//   dtFrontendUrl  – same (used for project hyperlinks)
+//   apiBaseUrl     – auto-populated when the proxy target is browser-reachable
+//                    AND the user has not already saved a custom URL in localStorage
 async function loadDtConfig() {
   try {
     const r = await fetch('/dt-config', { signal: AbortSignal.timeout(3000) });
     if (r.ok) {
       const cfg = await r.json();
-      if (cfg.proxyTarget) dtFrontendUrl = cfg.proxyTarget.replace(/\/$/, '');
+      if (cfg.proxyTarget) {
+        const target = cfg.proxyTarget.replace(/\/$/, '');
+        dtProxyTarget = target;
+        dtFrontendUrl = target;
+
+        // Show the configured proxy URL in the modal note
+        const el = document.getElementById('proxyTargetUrl');
+        if (el) el.textContent = target;
+
+        // If the user hasn't manually saved a URL (localStorage empty) and the
+        // proxy target is reachable from the browser, pre-fill it.
+        // This surfaces the DT_API_INTERNAL_URL set during install into the UI.
+        if (!localStorage.getItem('dt_api_url') && isBrowserReachable(target)) {
+          apiBaseUrl = target;
+        }
+
+        // Populate the modal URL field if it exists and is still blank.
+        const inp = document.getElementById('apiUrlInput');
+        if (inp && !inp.value) {
+          if (apiBaseUrl) {
+            inp.value = apiBaseUrl;
+          } else {
+            // Docker-internal URL — show as placeholder so the user knows what's configured
+            inp.placeholder = `${target}  (nginx proxy — not directly reachable from browser)`;
+          }
+        }
+      }
     }
   } catch(_) { /* silently ignore — hyperlinks simply won't render */ }
 }
