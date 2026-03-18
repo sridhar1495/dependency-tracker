@@ -9,6 +9,13 @@ server {
         try_files $uri $uri/ /index.html;
     }
 
+    # Expose the server-side proxy target URL to the browser (used for project hyperlinks).
+    location = /dt-config {
+        default_type application/json;
+        return 200 '{"proxyTarget":"${DT_API_INTERNAL_URL}"}';
+        add_header Cache-Control "no-store";
+    }
+
     # Proxy API calls to DependencyTrack.
     # Target is set by DT_API_INTERNAL_URL (injected at container start via envsubst).
     #   Local Docker:  http://dtrack-apiserver:8080   (default)
