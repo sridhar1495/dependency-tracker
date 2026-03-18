@@ -212,7 +212,7 @@
       border-radius: var(--radius); overflow: auto;
       max-height: calc(100vh - 320px);
     }
-    table { width: 100%; border-collapse: collapse; min-width: 1100px; }
+    table { width: 100%; border-collapse: collapse; min-width: 900px; }
     thead tr { position: sticky; top: 0; z-index: 10; }
 
     .th-group {
@@ -235,8 +235,8 @@
     .th-col:hover { color: var(--text); }
     .th-col.sort-asc::after  { content: ' ↑'; color: var(--accent); }
     .th-col.sort-desc::after { content: ' ↓'; color: var(--accent); }
-    .th-project { text-align: left; padding-left: 12px; min-width: 280px; }
-    .th-level   { min-width: 54px; }
+    .th-project { text-align: left; padding-left: 12px; min-width: 220px; max-width: 320px; }
+    .th-level   { min-width: 44px; }
 
     tbody tr { border-bottom: 1px solid rgba(46,51,82,0.6); transition: background 0.1s; }
     tbody tr:last-child { border-bottom: none; }
@@ -252,7 +252,7 @@
       text-align: center; vertical-align: middle;
       font-variant-numeric: tabular-nums;
     }
-    td.project-name { text-align: left; padding-left: 0; white-space: nowrap; }
+    td.project-name { text-align: left; padding-left: 0; white-space: nowrap; max-width: 320px; overflow: hidden; }
     td.level-cell { color: var(--text-muted); font-size: 12px; font-weight: 600; }
 
     /* ── Tree controls ────────────────────────────────────────────────────── */
@@ -639,20 +639,34 @@ function computeAggregates(node) {
   node.aggregated = agg;
 }
 
-// ── Infer parent-child relationships for same-name versioned projects ──────
-// e.g. "cs-bff-graphql" (no version) becomes parent of "cs-bff-graphql" v1.5.0
+// ── Infer parent-child relationships from project list data ────────────────
+// Called on the raw project array (before enrichment) so parentUuid is available
+// during fetchProjectMetrics. Two strategies:
+//   1. Exact name match:   "cs-bff-graphql" (no ver) ← "cs-bff-graphql" v1.5.0
+//   2. Name-suffix match:  "FreshX-Common"           ← "FreshX-Common-1.4.1" v1.4.1
+//      (project whose name == parent + "-" + version)
 function inferParentUuids(projects) {
   const nameToUuid = new Map();
-  // Index all unversioned projects by name
   projects.forEach(p => {
     if (!p.version) nameToUuid.set(p.name, p.uuid);
   });
-  // Assign parentUuid to versioned projects whose parent name matches
+
   projects.forEach(p => {
-    if (p.version && !p.parentUuid) {
-      const parentUuid = nameToUuid.get(p.name);
-      if (parentUuid && parentUuid !== p.uuid) p.parentUuid = parentUuid;
+    // Skip if parent is already known (from DT API field or previous pass)
+    if (p.parentUuid || p.parent?.uuid) return;
+    if (!p.version) return;
+
+    // Strategy 1 – exact name match
+    let parentUuid = nameToUuid.get(p.name);
+
+    // Strategy 2 – name-suffix match: strip "-<version>" or ".<version>" from name
+    if (!parentUuid) {
+      const escapedVer = p.version.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const baseName = p.name.replace(new RegExp(`[\\-\\.]${escapedVer}$`), '');
+      if (baseName !== p.name) parentUuid = nameToUuid.get(baseName);
     }
+
+    if (parentUuid && parentUuid !== p.uuid) p.parentUuid = parentUuid;
   });
 }
 
@@ -676,8 +690,7 @@ function afterLoad() {
   treeRoots.forEach(computeAggregates);
   expandedUuids = new Set(allProjects.map(p => p.uuid));
   buildFilterOptions();
-  renderSummary();
-  applyFilters();
+  applyFilters(); // sets filtered, then calls renderSummary + renderTree
 }
 
 // ── hasMatch: does this node or any descendant match the set? ──────────────
@@ -784,12 +797,13 @@ function renderTree(matchSet) {
 }
 
 // ── KPI summary cards ──────────────────────────────────────────────────────
+// Always reflects the current filtered set so numbers update with every filter change.
 function renderSummary() {
   const totals = { critical:0, high:0, medium:0, low:0 };
-  allProjects.forEach(p => {
-    CATS.forEach(c => LEVELS.forEach(l => { totals[l] += (p[c][l] || 0); }));
+  filtered.forEach(p => {
+    CATS.forEach(c => LEVELS.forEach(l => { totals[l] += (p[c]?.[l] || 0); }));
   });
-  const risky = allProjects.filter(p => riskScore(p) > 0).length;
+  const risky = filtered.filter(p => riskScore(p) > 0).length;
   const activeRisk = document.getElementById('riskFilter').value;
 
   function card(label, valueHtml, sub, filterVal) {
@@ -800,13 +814,16 @@ function renderSummary() {
     return `<div class="summary-card${active}" ${click}><div class="label">${label}</div><div class="value">${valueHtml}</div><div class="sub">${sub}</div></div>`;
   }
 
+  const total   = filtered.length;
+  const allCount = allProjects.length;
+  const sub     = total < allCount ? `of ${allCount} total` : `${risky} with risks`;
   document.getElementById('summaryGrid').innerHTML =
-    card('Total Projects',  `<span style="color:var(--accent)">${allProjects.length}</span>`, `${risky} with risks`, 'all') +
+    card('Projects',        `<span style="color:var(--accent)">${total}</span>`,        sub,             'all') +
     card('Critical Issues', `<span class="c-critical">${totals.critical}</span>`, 'click to filter', 'critical') +
     card('High Issues',     `<span class="c-high">${totals.high}</span>`,     'click to filter', 'high') +
     card('Medium Issues',   `<span class="c-medium">${totals.medium}</span>`, 'click to filter', 'medium') +
     card('Low Issues',      `<span class="c-low">${totals.low}</span>`,       'click to filter', 'low') +
-    card('Clean Projects',  `<span class="c-ok">${allProjects.length - risky}</span>`, 'click to filter', 'ok');
+    card('Clean',           `<span class="c-ok">${total - risky}</span>`,     'click to filter', 'ok');
 }
 
 function setRiskFilter(val) {
@@ -1120,6 +1137,10 @@ async function connectLiveApi() {
       return;
     }
 
+    // Infer parent-child hierarchy from project names BEFORE enrichment so
+    // fetchProjectMetrics can pass the parentUuid through to the enriched object
+    inferParentUuids(projects);
+
     // Fetch metrics in batches of 20 to avoid overwhelming DT
     const BATCH = 20;
     const enriched = [];
@@ -1129,7 +1150,6 @@ async function connectLiveApi() {
     }
     allProjects = enriched;
 
-    inferParentUuids(allProjects);
     computeLevels(allProjects);
     liveMode = true;
     document.getElementById('dataBanner').innerHTML =
