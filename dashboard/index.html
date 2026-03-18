@@ -115,7 +115,10 @@
       border: 1px solid var(--border);
       border-radius: var(--radius);
       padding: 18px 20px;
+      transition: border-color 0.15s, background 0.15s;
     }
+    .summary-card[onclick]:hover { border-color: var(--accent); background: var(--surface2); }
+    .summary-card.active { border-color: var(--accent); background: var(--surface2); }
     .summary-card .label {
       font-size: 12px; color: var(--text-muted);
       text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 8px;
@@ -770,14 +773,30 @@ function renderSummary() {
     CATS.forEach(c => LEVELS.forEach(l => { totals[l] += (p[c][l] || 0); }));
   });
   const risky = allProjects.filter(p => riskScore(p) > 0).length;
-  document.getElementById('summaryGrid').innerHTML = `
-    <div class="summary-card"><div class="label">Total Projects</div><div class="value" style="color:var(--accent)">${allProjects.length}</div><div class="sub">${risky} with risks</div></div>
-    <div class="summary-card"><div class="label">Critical Issues</div><div class="value c-critical">${totals.critical}</div><div class="sub">across all categories</div></div>
-    <div class="summary-card"><div class="label">High Issues</div><div class="value c-high">${totals.high}</div><div class="sub">across all categories</div></div>
-    <div class="summary-card"><div class="label">Medium Issues</div><div class="value c-medium">${totals.medium}</div><div class="sub">across all categories</div></div>
-    <div class="summary-card"><div class="label">Low Issues</div><div class="value c-low">${totals.low}</div><div class="sub">across all categories</div></div>
-    <div class="summary-card"><div class="label">Clean Projects</div><div class="value c-ok">${allProjects.length - risky}</div><div class="sub">no known risks</div></div>
-  `;
+  const activeRisk = document.getElementById('riskFilter').value;
+
+  function card(label, valueHtml, sub, filterVal) {
+    const active = activeRisk === filterVal ? ' active' : '';
+    const click  = filterVal
+      ? `onclick="setRiskFilter('${filterVal}')" style="cursor:pointer"`
+      : '';
+    return `<div class="summary-card${active}" ${click}><div class="label">${label}</div><div class="value">${valueHtml}</div><div class="sub">${sub}</div></div>`;
+  }
+
+  document.getElementById('summaryGrid').innerHTML =
+    card('Total Projects',  `<span style="color:var(--accent)">${allProjects.length}</span>`, `${risky} with risks`, 'all') +
+    card('Critical Issues', `<span class="c-critical">${totals.critical}</span>`, 'click to filter', 'critical') +
+    card('High Issues',     `<span class="c-high">${totals.high}</span>`,     'click to filter', 'high') +
+    card('Medium Issues',   `<span class="c-medium">${totals.medium}</span>`, 'click to filter', 'medium') +
+    card('Low Issues',      `<span class="c-low">${totals.low}</span>`,       'click to filter', 'low') +
+    card('Clean Projects',  `<span class="c-ok">${allProjects.length - risky}</span>`, 'click to filter', 'ok');
+}
+
+function setRiskFilter(val) {
+  const sel = document.getElementById('riskFilter');
+  // Toggle off if already active
+  sel.value = (sel.value === val) ? 'all' : val;
+  applyFilters();
 }
 
 // ── Build filter option panels ─────────────────────────────────────────────
@@ -828,6 +847,7 @@ function applyFilters() {
   const matchSet  = hasFilter ? new Set(filtered.map(p => p.uuid)) : null;
 
   document.getElementById('projectCount').textContent = `(${filtered.length} of ${allProjects.length})`;
+  renderSummary();
   renderTree(matchSet);
 }
 
@@ -996,6 +1016,56 @@ function loadMockData() {
   afterLoad();
 }
 
+// ── Fetch all pages of projects ────────────────────────────────────────────
+async function fetchAllProjects(key) {
+  const pageSize = 500;
+  let page = 1, all = [];
+  while (true) {
+    const res = await fetch(
+      `/api/v1/project?pageSize=${pageSize}&pageNumber=${page}&excludeInactive=false`,
+      { headers: { 'X-Api-Key': key } }
+    );
+    if (!res.ok) throw new Error(`HTTP ${res.status} — check your API key`);
+    const data = await res.json();
+    const batch = Array.isArray(data.values) ? data.values
+                : Array.isArray(data)        ? data
+                : [];
+    all = all.concat(batch);
+    // Stop when we've received all projects (check X-Total-Count or short page)
+    const total = parseInt(res.headers.get('X-Total-Count') || '0', 10);
+    if ((total && all.length >= total) || batch.length < pageSize) break;
+    page++;
+  }
+  return all;
+}
+
+// ── Fetch metrics for one project ─────────────────────────────────────────
+async function fetchProjectMetrics(p, key) {
+  let sec = {critical:0,high:0,medium:0,low:0};
+  let ops = {critical:0,high:0,medium:0,low:0};
+  let lic = {critical:0,high:0,medium:0,low:0};
+  try {
+    const mr = await fetch(`/api/v1/metrics/project/${p.uuid}/current`, {
+      headers: { 'X-Api-Key': key }
+    });
+    if (mr.ok) {
+      const m = await mr.json();
+      sec = { critical: m.critical||0, high: m.high||0, medium: m.medium||0, low: m.low||0 };
+      ops = { critical: 0, high: m.unassigned||0, medium: m.suppressed||0, low: 0 };
+      lic = { critical: m.policyViolationsFail||0, high: m.policyViolationsWarn||0,
+              medium: m.policyViolationsInfo||0, low: 0 };
+    }
+  } catch(_) {}
+  return {
+    uuid:       p.uuid,
+    name:       p.name,
+    version:    p.version || '',
+    parentUuid: p.parent?.uuid || p.parentUuid || null,
+    tags:       (p.tags || []).map(t => t.name || t).filter(Boolean),
+    security: sec, operations: ops, license: lic,
+  };
+}
+
 // ── Connect to live API ────────────────────────────────────────────────────
 async function connectLiveApi() {
   apiKey = document.getElementById('apiKeyInput').value.trim();
@@ -1006,15 +1076,7 @@ async function connectLiveApi() {
     '<div class="status-dot" style="background:var(--medium);animation:pulse 0.5s infinite"></div><span>Connecting…</span>';
 
   try {
-    const res = await fetch('/api/v1/project?pageSize=500&pageNumber=1', {
-      headers: { 'X-Api-Key': apiKey }
-    });
-    if (!res.ok) throw new Error(`HTTP ${res.status} — check your API key`);
-
-    const data = await res.json();
-    const projects = Array.isArray(data.values) ? data.values
-                   : Array.isArray(data)         ? data
-                   : [];
+    const projects = await fetchAllProjects(apiKey);
 
     if (projects.length === 0) {
       liveMode = true;
@@ -1029,32 +1091,14 @@ async function connectLiveApi() {
       return;
     }
 
-    // Fetch metrics for every project concurrently
-    allProjects = await Promise.all(projects.map(async (p) => {
-      let sec = {critical:0,high:0,medium:0,low:0};
-      let ops = {critical:0,high:0,medium:0,low:0};
-      let lic = {critical:0,high:0,medium:0,low:0};
-      try {
-        const mr = await fetch(`/api/v1/metrics/project/${p.uuid}/current`, {
-          headers: { 'X-Api-Key': apiKey }
-        });
-        if (mr.ok) {
-          const m = await mr.json();
-          sec = { critical: m.critical||0, high: m.high||0, medium: m.medium||0, low: m.low||0 };
-          ops = { critical: 0, high: m.unassigned||0, medium: m.suppressed||0, low: 0 };
-          lic = { critical: m.policyViolationsFail||0, high: m.policyViolationsWarn||0,
-                  medium: m.policyViolationsInfo||0, low: 0 };
-        }
-      } catch(_) {}
-      return {
-        uuid:       p.uuid,
-        name:       p.name,
-        version:    p.version || '',
-        parentUuid: p.parent?.uuid || null,
-        tags:       (p.tags || []).map(t => t.name || t).filter(Boolean),
-        security: sec, operations: ops, license: lic,
-      };
-    }));
+    // Fetch metrics in batches of 20 to avoid overwhelming DT
+    const BATCH = 20;
+    const enriched = [];
+    for (let i = 0; i < projects.length; i += BATCH) {
+      const slice = projects.slice(i, i + BATCH);
+      enriched.push(...await Promise.all(slice.map(p => fetchProjectMetrics(p, apiKey))));
+    }
+    allProjects = enriched;
 
     computeLevels(allProjects);
     liveMode = true;
@@ -1102,25 +1146,37 @@ async function loadDtConfig() {
   } catch(_) { /* silently ignore — hyperlinks simply won't render */ }
 }
 
-// ── Probe proxy target ─────────────────────────────────────────────────────
+// ── Probe proxy target (retries every 3s while modal is open) ──────────────
+let _probeRetry = null;
 async function probeProxyTarget() {
-  const el = document.getElementById('proxyTargetDisplay');
-  if (!el) return;
+  if (_probeRetry) { clearTimeout(_probeRetry); _probeRetry = null; }
+  const modal = document.getElementById('apiModal');
+  const el    = document.getElementById('proxyTargetDisplay');
+  if (!el || !modal.classList.contains('open')) return;
+
+  el.style.color = '';
+  el.textContent = 'checking…';
   try {
     const r = await fetch('/api/version', { signal: AbortSignal.timeout(4000) });
     if (r.ok) {
       const v = await r.json();
       el.textContent = `DependencyTrack ${v.application||''} ${v.version||'(connected)'}`.trim();
-    } else {
-      el.textContent = 'proxy reachable — DT not responding yet';
+      return; // success — stop retrying
     }
+    el.textContent = 'proxy reachable — DT not responding yet';
   } catch(_) {
-    el.textContent = 'proxy target not reachable — check DT_API_INTERNAL_URL in .env';
+    el.textContent = 'not reachable — check DT_API_INTERNAL_URL in .env';
     el.style.color = 'var(--critical)';
   }
+  // Retry in 3 s if the modal is still open
+  _probeRetry = setTimeout(probeProxyTarget, 3000);
 }
 document.getElementById('apiModal').addEventListener('transitionend', () => {
-  if (document.getElementById('apiModal').classList.contains('open')) probeProxyTarget();
+  if (document.getElementById('apiModal').classList.contains('open')) {
+    probeProxyTarget();
+  } else {
+    if (_probeRetry) { clearTimeout(_probeRetry); _probeRetry = null; }
+  }
 });
 
 // ── Init ───────────────────────────────────────────────────────────────────
