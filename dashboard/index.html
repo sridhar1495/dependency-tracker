@@ -479,12 +479,6 @@
         <input id="apiKeyInput" class="search-input" style="width:100%" placeholder="odt_xxxxxxxxxxxxxxxxxxxxxxxxxx" />
       </div>
     </div>
-    <div class="modal-row">
-      <div style="flex:1">
-        <label>DependencyTrack Frontend URL <span style="color:var(--text-muted)">(optional — enables project hyperlinks)</span></label>
-        <input id="dtFrontendUrlInput" class="search-input" style="width:100%" placeholder="http://10.121.163.69:8080" />
-      </div>
-    </div>
     <div style="display:flex;gap:8px;margin-top:4px">
       <button class="btn primary" onclick="connectLiveApi()">Connect</button>
       <button class="btn" onclick="loadMockData(); closeModal('apiModal')">Use Mock Data</button>
@@ -1004,8 +998,7 @@ function loadMockData() {
 
 // ── Connect to live API ────────────────────────────────────────────────────
 async function connectLiveApi() {
-  apiKey        = document.getElementById('apiKeyInput').value.trim();
-  dtFrontendUrl = document.getElementById('dtFrontendUrlInput').value.trim().replace(/\/$/, '');
+  apiKey = document.getElementById('apiKeyInput').value.trim();
 
   if (!apiKey) { alert('Please enter an API key.'); return; }
 
@@ -1098,6 +1091,17 @@ function escHtml(s) {
     .replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 }
 
+// ── Fetch proxy target URL (exposed by nginx via /dt-config) ───────────────
+async function loadDtConfig() {
+  try {
+    const r = await fetch('/dt-config', { signal: AbortSignal.timeout(3000) });
+    if (r.ok) {
+      const cfg = await r.json();
+      if (cfg.proxyTarget) dtFrontendUrl = cfg.proxyTarget.replace(/\/$/, '');
+    }
+  } catch(_) { /* silently ignore — hyperlinks simply won't render */ }
+}
+
 // ── Probe proxy target ─────────────────────────────────────────────────────
 async function probeProxyTarget() {
   const el = document.getElementById('proxyTargetDisplay');
@@ -1121,6 +1125,7 @@ document.getElementById('apiModal').addEventListener('transitionend', () => {
 
 // ── Init ───────────────────────────────────────────────────────────────────
 buildColHeaders();
+loadDtConfig();
 loadMockData();
 </script>
 </body>
