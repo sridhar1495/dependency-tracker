@@ -252,7 +252,9 @@
       text-align: center; vertical-align: middle;
       font-variant-numeric: tabular-nums;
     }
-    td.project-name { text-align: left; padding-left: 0; white-space: nowrap; max-width: 320px; overflow: hidden; }
+    td.project-name { text-align: left; padding-left: 0; white-space: nowrap; max-width: 320px; overflow: visible; position: relative; }
+    /* Truncate only the name text so the tag tooltip can escape the cell */
+    .proj-name-text { display: inline-block; max-width: 200px; overflow: hidden; text-overflow: ellipsis; vertical-align: middle; }
     td.level-cell { color: var(--text-muted); font-size: 12px; font-weight: 600; }
 
     /* ── Tree controls ────────────────────────────────────────────────────── */
@@ -278,6 +280,21 @@
       background: rgba(167,139,250,0.1); border: 1px solid rgba(167,139,250,0.25);
       border-radius: 4px; padding: 1px 5px;
     }
+    /* "+N more" tag overflow badge with hover tooltip */
+    .tag-more {
+      display: inline-block; margin-left: 4px; position: relative;
+      font-size: 10px; color: var(--text-muted);
+      background: var(--surface2); border: 1px solid var(--border);
+      border-radius: 4px; padding: 1px 5px; cursor: default; vertical-align: middle;
+    }
+    .tag-more .tag-tooltip {
+      display: none; position: absolute; top: calc(100% + 4px); left: 0; z-index: 300;
+      background: var(--surface); border: 1px solid var(--border);
+      border-radius: 6px; padding: 8px; white-space: nowrap;
+      box-shadow: 0 4px 16px rgba(0,0,0,0.45);
+      flex-wrap: wrap; gap: 4px; min-width: max-content;
+    }
+    .tag-more:hover .tag-tooltip { display: flex; }
     a.project-link { color: inherit; text-decoration: none; }
     a.project-link:hover { color: var(--accent); text-decoration: underline; }
     a.nav-icon {
@@ -375,6 +392,12 @@
       <div class="status-dot"></div><span>Mock Data</span>
     </div>
     <button class="btn" onclick="openModal('apiModal')">⚙ Connect API</button>
+    <button class="btn" id="arBtn" onclick="toggleAutoRefresh()" title="Toggle auto-refresh">↺ Auto: Off</button>
+    <select class="filter-select" id="arInterval" style="display:none" onchange="changeArInterval()" title="Auto-refresh interval">
+      <option value="30">30 sec</option>
+      <option value="60" selected>1 min</option>
+      <option value="300">5 min</option>
+    </select>
     <button class="btn primary" onclick="refreshData()">↻ Refresh</button>
   </header>
 
@@ -390,14 +413,7 @@
     <!-- Controls row 1: title + tree actions + auto-refresh + export -->
     <div class="controls">
       <h1 class="ctrl-title">Projects <span id="projectCount"></span></h1>
-      <button class="btn" onclick="expandAll()" title="Expand all groups">▼ Expand All</button>
-      <button class="btn" onclick="collapseAll()" title="Collapse all groups">▶ Collapse All</button>
-      <button class="btn" id="arBtn" onclick="toggleAutoRefresh()" title="Toggle auto-refresh">↺ Auto: Off</button>
-      <select class="filter-select" id="arInterval" style="display:none" onchange="changeArInterval()" title="Auto-refresh interval">
-        <option value="30">30 sec</option>
-        <option value="60" selected>1 min</option>
-        <option value="300">5 min</option>
-      </select>
+      <button class="btn" id="expandCollapseBtn" onclick="toggleExpandCollapse()" title="Expand all groups">▼ Expand All</button>
       <button class="btn export" onclick="exportCSV()">↓ Export CSV</button>
     </div>
 
@@ -471,6 +487,7 @@
   <footer class="footer">
     Dependency-Track Community Edition &nbsp;·&nbsp; Custom Risk Dashboard &nbsp;·&nbsp;
     <a href="https://docs.dependencytrack.org" target="_blank" style="color:var(--accent)">docs.dependencytrack.org</a>
+    &nbsp;·&nbsp; <a href="https://opensource.org/licenses/MIT" target="_blank" style="color:var(--accent)">MIT License</a>
   </footer>
 </div>
 
@@ -757,7 +774,7 @@ function afterLoad() {
   treeRoots.forEach(computeAggregates);
   expandedUuids = new Set(allProjects.map(p => p.uuid));
   buildFilterOptions();
-  applyFilters(); // sets filtered, then calls renderSummary + renderTree
+  applyFilters(); // sets filtered, then calls renderSummary + renderTree + updateExpandCollapseBtn
 }
 
 // ── hasMatch: does this node or any descendant match the set? ──────────────
@@ -805,14 +822,22 @@ function toggleNode(uuid) {
   applyFilters();
 }
 
-function expandAll() {
-  allProjects.forEach(p => expandedUuids.add(p.uuid));
+// Single button that expands when any group is collapsed, collapses when all are expanded.
+function toggleExpandCollapse() {
+  const groups = allProjects.filter(p => { const n = nodeMap.get(p.uuid); return n && n.children.length > 0; });
+  const allExpanded = groups.length > 0 && groups.every(p => expandedUuids.has(p.uuid));
+  if (allExpanded) expandedUuids.clear();
+  else allProjects.forEach(p => expandedUuids.add(p.uuid));
   applyFilters();
 }
 
-function collapseAll() {
-  expandedUuids.clear();
-  applyFilters();
+function updateExpandCollapseBtn() {
+  const btn = document.getElementById('expandCollapseBtn');
+  if (!btn) return;
+  const groups = allProjects.filter(p => { const n = nodeMap.get(p.uuid); return n && n.children.length > 0; });
+  const allExpanded = groups.length > 0 && groups.every(p => expandedUuids.has(p.uuid));
+  btn.textContent = allExpanded ? '▶ Collapse All' : '▼ Expand All';
+  btn.title       = allExpanded ? 'Collapse all groups' : 'Expand all groups';
 }
 
 // ── Render tree ────────────────────────────────────────────────────────────
@@ -830,8 +855,11 @@ function renderTree(matchSet) {
   visibleNodes.forEach(node => {
     const isGroup    = node.children.length > 0;
     const isExpanded = expandedUuids.has(node.uuid);
-    // Collapsed groups show aggregate; expanded groups and leaves show own data
-    const data = (isGroup && !isExpanded) ? node.aggregated : node;
+    // Always show the cumulative aggregated total for every row so the
+    // number on a parent never changes when it is expanded or collapsed.
+    // For leaves, aggregated == own data.  For groups, it is own + all
+    // descendants — consistent with renderSummary and the Black Duck view.
+    const data = node.aggregated || node;
 
     const indent = (node.level - 1) * 22;
     const toggle = isGroup
@@ -843,10 +871,20 @@ function renderTree(matchSet) {
       ? `<a class="nav-icon" href="${escHtml(dtFrontendUrl)}/projects/${escHtml(node.uuid)}" target="_blank" rel="noopener" title="Open in DependencyTrack">&#x2197;</a>`
       : '';
 
-    const vBadge   = node.version ? `<span class="version-badge">v${escHtml(node.version)}</span>` : '';
-    const tagChips = (node.tags || []).map(t => `<span class="tag-chip">${escHtml(t)}</span>`).join('');
+    const vBadge = node.version ? `<span class="version-badge">v${escHtml(node.version)}</span>` : '';
 
-    let html = `<td class="project-name" style="padding-left:${indent + 10}px">${toggle}${nameInner}${navIcon}${vBadge}${tagChips}</td>`;
+    // Show first tag as a chip; overflow tags become a "+N more" badge with hover tooltip
+    const tags = node.tags || [];
+    let tagHtml = '';
+    if (tags.length > 0) {
+      tagHtml = `<span class="tag-chip">${escHtml(tags[0])}</span>`;
+      if (tags.length > 1) {
+        const rest = tags.slice(1).map(t => `<span class="tag-chip">${escHtml(t)}</span>`).join('');
+        tagHtml += `<span class="tag-more">+${tags.length - 1}<span class="tag-tooltip">${rest}</span></span>`;
+      }
+    }
+
+    let html = `<td class="project-name" style="padding-left:${indent + 10}px">${toggle}<span class="proj-name-text" title="${nameInner}">${nameInner}</span>${navIcon}${vBadge}${tagHtml}</td>`;
     html += `<td class="level-cell">${node.level}</td>`;
 
     CATS.forEach((cat, ci) => {
@@ -983,6 +1021,7 @@ function applyFilters() {
   document.getElementById('projectCount').textContent = `(${filtered.length} of ${allProjects.length})`;
   renderSummary();
   renderTree(matchSet);
+  updateExpandCollapseBtn();
 }
 
 function sortBy(col) {
@@ -1239,6 +1278,11 @@ async function fetchAllProjects(key) {
 // on the dedicated /api/v1/metrics/project/{uuid}/current endpoint.
 // Strategy: use embedded data for security (saves a round-trip), always call the
 // dedicated endpoint for policy violations.
+// NOTE: Operational and License counts are driven by DependencyTrack's Policy
+// Engine.  They will be 0 for every project until policies are defined in the
+// DT "Policy Management" section and violations are triggered.  Security counts
+// (critical/high/medium/low) come from automated SBOM component analysis and do
+// not require any policy configuration.
 async function fetchProjectMetrics(p, key) {
   let sec = {critical:0,high:0,medium:0,low:0,unassigned:0};
   let ops = {fail:0,warn:0,info:0};
