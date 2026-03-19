@@ -108,6 +108,10 @@ services:
       # Production:      set to your external DT URL, e.g.
       #                    DT_API_INTERNAL_URL=https://dtrack.company.com
       DT_API_INTERNAL_URL: "${DT_API_INTERNAL_URL:-http://dtrack-apiserver:8080}"
+      # Optional: pre-configure the DT API key so the dashboard loads live data
+      # automatically on page open (no manual "Connect API" step needed).
+      # Leave blank to keep the default manual-connect behaviour.
+      DT_API_KEY: "${DT_API_KEY:-}"
     volumes:
       - ./dashboard:/usr/share/nginx/html:ro
       # nginx:alpine's entrypoint runs envsubst on *.template files in this dir
