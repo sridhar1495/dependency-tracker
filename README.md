@@ -73,7 +73,7 @@ dependency-tracker/
 │   └── bulk-upload-sbom.sh      # Batch upload all SBOMs in a directory
 │
 ├── dashboard/
-│   ├── index.html               # Custom risk matrix dashboard
+│   ├── index.html               # Custom risk matrix dashboard (single-file app)
 │   └── nginx.conf.template      # Nginx config with API proxy (envsubst rendered)
 │
 └── docs/
@@ -85,7 +85,65 @@ dependency-tracker/
 
 ---
 
-## Stack
+## Technology Stack
+
+### Dashboard (`dashboard/index.html`)
+
+The dashboard is a **zero-dependency, single-file HTML application** — no npm, no
+build step, no external libraries. Everything runs natively in the browser.
+
+| Technology | Version / Notes | Purpose |
+|------------|-----------------|---------|
+| **HTML5** | Semantic markup | Structure |
+| **CSS3** | Custom properties, Grid, Flexbox, `position: relative/absolute` | Layout & theming |
+| **Vanilla JavaScript (ES2020+)** | `async/await`, optional chaining (`?.`), `Map`, `Set` | All application logic |
+| **Fetch API** | Native browser | DependencyTrack REST API calls |
+| **localStorage** | Native browser | Persist API URL and Frontend URL across sessions |
+| **CSS Custom Properties** | `var(--bg)`, `var(--accent)`, etc. | Dark-theme colour tokens |
+
+No frameworks (React, Vue, Angular), no bundler (Webpack, Vite), no package manager.
+
+### Infrastructure
+
+| Component | Technology | Image / Version | Purpose |
+|-----------|-----------|-----------------|---------|
+| **DT API Server** | OWASP DependencyTrack | `dependencytrack/apiserver` (latest) | SBOM analysis engine + REST API |
+| **DT Frontend** | OWASP DependencyTrack | `dependencytrack/frontend` (latest) | Official DT web UI |
+| **Database** | PostgreSQL | `postgres:15-alpine` | Persistent project/vulnerability storage |
+| **Dashboard server** | Nginx | `nginx:alpine` | Serves `index.html` + proxies `/api/*` to DT |
+| **Orchestration** | Docker Compose v2 | `docker compose` (plugin) | Multi-container lifecycle management |
+
+### SBOM Format
+
+| Standard | Supported formats |
+|----------|------------------|
+| **CycloneDX** | JSON (`.json`), XML (`.xml`) |
+| **SPDX** | JSON (`.spdx.json`) — via DT native support |
+
+### DependencyTrack REST API (consumed by dashboard)
+
+All dashboard data comes from the DependencyTrack REST API v1:
+
+| Endpoint | Used for |
+|----------|----------|
+| `GET /api/v1/project?onlyRoot=true` | Fetch root-level projects (BFS level 0) |
+| `GET /api/v1/project/{uuid}/children` | Fetch direct children of a project (BFS levels 1…N) |
+| `GET /api/v1/metrics/project/{uuid}/current` | Per-project risk metrics (security + policy violations) |
+| `GET /dt-config` | Read proxy target URL for display in the Connect modal |
+
+### Shell Scripts
+
+| Tool | Used in |
+|------|---------|
+| **bash** (4+) | `install.sh`, all scripts |
+| **curl** | DT API calls from scripts |
+| **jq** | JSON parsing in scripts |
+| **Docker CLI** | Container management in install script |
+| **envsubst** | Template rendering for `nginx.conf` |
+
+---
+
+## Docker Stack
 
 | Container        | Image                            | Purpose                     |
 |------------------|----------------------------------|-----------------------------|
@@ -147,19 +205,20 @@ and switches to **live data** when you enter an API key.
 ### Features
 
 - **Risk matrix table** — Security (Critical/High/Medium/Low/Unassigned), Operational (Fail/Warn/Info), License (Fail/Warn/Info) — 13 columns total
-- **Hierarchy tree** — parent/child groups with expand/collapse; infers hierarchy from project names when DT API omits `parent` field
-- **Collapsed groups show aggregated totals** for all descendants
-- **Hierarchy level column** — depth in the parent/child tree (Level 1 = top-level group, Level 2 = child, …)
+- **Hierarchical tree** — mirrors DependencyTrack parent/child structure; fetched top-down via BFS (`onlyRoot=true` → `/children` per level)
+- **Always-aggregated rows** — every row (group or leaf) shows cumulative own + all descendants totals; collapsing hides children without changing the parent's displayed count
+- **Hierarchy level column** — depth in the parent/child tree (Level 1 = root, Level 2 = child, …)
 - **Project hyperlinks** — set a DT Frontend URL in the Connect modal to make project names clickable links into the DependencyTrack UI
-- **Tag chips** — project tags displayed inline; tag multi-select filter in the toolbar
+- **Tag chips** — first tag shown inline; "+N more" badge with hover tooltip for additional tags
 - **Level multi-select filter** — show only projects at specific hierarchy depths
-- **Risk level filter** — show only projects with a specific severity level
+- **Risk level filter** — filters by aggregated risk (parent shown if any descendant has the risk)
 - **Category filter** — narrow to Security, Operational, or License risks
-- **KPI summary cards** — update live with every filter change; clickable to set the risk filter
+- **KPI summary cards** — always show API-sourced total count; risk totals aggregated from topmost visible nodes; clickable to set risk filter
 - **Search box** — substring match on project name
-- **CSV export** — all filtered rows with full column names: `Security Critical`, `Operational Fail`, `License Warn`, etc.
+- **CSV export** — all filtered rows with full column names
 - **Sortable columns** — click any column header; click again to reverse
-- **Auto-refresh** — configurable interval (30 s / 1 min / 5 min), live mode only
+- **Single expand/collapse toggle** — dynamically switches between "Expand All" and "Collapse All"
+- **Auto-refresh** — configurable interval (30 s / 1 min / 5 min) in the top bar, live mode only
 
 ```
 ┌─────────────────────┬─────┬──────────────────────────────┬─────────────────┬─────────────────┐

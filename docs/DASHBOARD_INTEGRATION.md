@@ -20,15 +20,17 @@ served by an Nginx container on port `3000`. It provides:
 
 - A sortable, filterable **hierarchical tree view** mirroring the DependencyTrack
   parent/child project structure
-- **Expand/collapse** per group row — collapsed groups show **aggregated totals**
-  for all descendants
-- **Open All / Collapse All** buttons for bulk expand/collapse
-- **Auto-refresh** toggle with selectable interval (30 s / 1 min / 5 min)
+- **Expand/collapse** per group row — all rows always show **aggregated totals**
+  for themselves and all descendants, whether expanded or collapsed
+- **Single Expand All / Collapse All toggle button** that dynamically switches
+  label based on the current state of the tree
+- **Auto-refresh** toggle (in the top bar) with selectable interval (30 s / 1 min / 5 min)
 - **Tag filtering** — filter by project tags with a multi-select dropdown
 - **Level filtering** — filter by hierarchy depth with a multi-select dropdown
 - **CSV export** — exports all matching projects regardless of fold state, with a
   Type column (Group / Project)
-- **KPI summary cards** for total Critical, High, Medium, Low counts
+- **KPI summary cards** for total Critical, High, Medium, Low counts (aggregated
+  from topmost visible nodes — no double-counting)
 - **Project hyperlinks** — when the DT Frontend URL is set in the Connect modal,
   project names link directly to that project in the DependencyTrack UI
 - **Two data modes**:
@@ -53,29 +55,30 @@ proxy target. It is separate from the URL you type in the UI.
 
 ### Hierarchical Tree View
 
-Projects are displayed in a parent/child tree that mirrors DependencyTrack's
-project hierarchy. Each node shows its risk data inline.
+Projects are fetched using a **BFS (breadth-first) traversal** of the
+DependencyTrack project hierarchy:
+
+1. Root projects are fetched first using `GET /api/v1/project?onlyRoot=true`
+2. For each root, children are fetched via `GET /api/v1/project/{uuid}/children`
+3. Each level of children is batched 10 at a time, and the process repeats until
+   no further children exist at any level
+4. Each child has its `parent.uuid` stamped during fetch, guaranteeing accurate
+   hierarchy regardless of DependencyTrack version
+
+This produces a fully accurate multi-level tree displayed as:
 
 ```
 ▶ RET                               (collapsed group — shows aggregated totals)
-▼ FreshX Suite                      (expanded group)
-    ▶ FreshX-BE                     (collapsed sub-group)
-    ▼ FreshX.BE.Containers          (expanded sub-group)
+▼ FreshX Suite                      (expanded group — shows aggregated totals)
+    ▶ FreshX-BE                     (collapsed sub-group — shows aggregated totals)
+    ▼ FreshX.BE.Containers          (expanded sub-group — shows aggregated totals)
           FreshX-BE v1.4.1          (leaf project)
           FreshX-BE v1.3.0          (leaf project)
 ```
 
-**Group rows (▶ / ▼):** rows that have children. When collapsed (▶), the row
-displays the **sum of all descendant risk counts**. When expanded (▼), the row
-shows only its own direct risk data and its children are listed below it.
-
-**Hierarchy inference:** DependencyTrack's project list API does not always return
-a `parent` field. The dashboard uses two strategies to infer the hierarchy:
-
-1. **Exact name match** — a versioned project `name=foo version=1.2` is matched to
-   an unversioned project with `name=foo`.
-2. **Name-suffix match** — a project `name=foo-1.2 version=1.2` is matched to a
-   parent named `foo`.
+**Group rows (▶ / ▼):** rows that have children. Whether collapsed or expanded,
+the row **always displays the aggregated sum of its own risk data plus all
+descendants** — counts never change when you expand or collapse a group.
 
 **Leaf rows:** project rows with no children. Always show their own data.
 
@@ -105,12 +108,19 @@ For Operational and License columns, DependencyTrack uses **Fail / Warn / Info**
 severity levels (matching policy violation levels). These are displayed in red /
 orange / yellow respectively, consistent with Critical / High / Medium.
 
+> **Note:** Operational and License counts come from the DependencyTrack **Policy
+> Engine**. They will always be zero until you configure policies in DependencyTrack
+> (Administration → Policy Management). This is expected behaviour — vulnerability
+> scanning alone does not produce policy violations.
+
 ### Expand / Collapse
 
 - Click the **▶** or **▼** triangle on any group row to toggle that group.
-- Click **▼ Expand All** to open every group in the tree.
-- Click **▶ Collapse All** to fold every group (top-level groups then show their
-  fully aggregated portfolio totals).
+- A single **▼ Expand All** / **▶ Collapse All** button in the toolbar performs
+  bulk expand/collapse. The label automatically switches based on whether all
+  groups are currently expanded.
+- Expanding or collapsing a group does **not** change the displayed counts —
+  all rows always show aggregated totals.
 
 ### Project Hyperlinks
 
@@ -125,22 +135,33 @@ project links. Each project name becomes an anchor that opens
 
 ### Tags
 
-Project tags are fetched from the DependencyTrack API and displayed as purple
-chips on each row. The **Tags** multi-select filter shows all unique tags across
-all loaded projects; selecting multiple tags narrows to projects that have
-**all** of the selected tags.
+Project tags are fetched from the DependencyTrack API and displayed as chips on
+each row. When a project has multiple tags:
+
+- The **first tag** is shown inline as a chip
+- A **`+N more`** badge appears next to it; hovering the badge reveals a tooltip
+  showing all remaining tags
+
+The **Tags** multi-select filter shows all unique tags across all loaded projects;
+selecting multiple tags narrows to projects that have **all** of the selected tags.
 
 ### KPI Cards
 
-The six summary cards above the table reflect the **currently filtered** project
-set, so totals update as you apply filters.
+The summary cards above the table reflect the **currently filtered** project set,
+computing totals from the **topmost visible nodes only** (no double-counting of
+parent + child values).
 
+- **Projects** — total count from the API (`allProjects.length`), shown as-is.
+  When a filter is active, shown as `N matching of M`.
 - **Critical** = Security Critical + Operational Fail + License Fail
 - **High** = Security High + Operational Warn + License Warn
 - **Medium** = Security Medium + Operational Info + License Info
 - **Low** = Security Low + Security Unassigned
 
 Cards are clickable — clicking a card applies the matching risk-level filter.
+The filter checks each project's **aggregated** risk data (including all
+descendants), so parent groups appear in results when any descendant carries
+the chosen risk level.
 
 ### Sorting
 
@@ -154,7 +175,7 @@ Click any column header to sort by that value. Click again to reverse.
 | Filter | Type | Behaviour |
 |--------|------|-----------|
 | Search box | Text input | Substring match on project name |
-| Risk level | Single-select | Show projects with the selected severity level |
+| Risk level | Single-select | Show projects with the selected severity level (checks aggregated data) |
 | Category | Single-select | Narrow to Security, Operational, or License category |
 | Level | Multi-select dropdown | Show only projects at selected hierarchy depths |
 | Tags | Multi-select dropdown | Show only projects that have ALL selected tags |
@@ -178,9 +199,16 @@ ancestor group rows are automatically shown so the tree context is preserved.
 6. Enter your **API Key** (see [Section 4](#4-generating-an-api-key))
 7. Click **Connect**
 
-The dashboard fetches all projects (`GET /api/v1/project?pageSize=500`) and their
-current metrics in batches of 20. It handles all three response shapes the
-DependencyTrack API may return:
+The dashboard fetches projects using a **BFS traversal**:
+
+1. `GET /api/v1/project?onlyRoot=true` — fetches all root-level projects
+2. `GET /api/v1/project/{uuid}/children` — fetches children for each project,
+   repeated level by level until no children remain
+3. `GET /api/v1/metrics/project/{uuid}/current` — fetches metrics for any
+   project whose metrics are not embedded in the project response
+
+Each API call handles pagination automatically using `X-Total-Count` headers
+and supports all three response shapes DependencyTrack may return:
 
 - `{ "values": [...] }` — paginated envelope (newer DT versions)
 - `[...]` — bare array (older DT versions)
@@ -258,19 +286,25 @@ The dashboard only **reads** data. Create a dedicated read-only team:
 ## 5. Data Mapping Reference
 
 The dashboard maps DependencyTrack API responses to three risk categories.
-Data comes from the `metrics` object embedded in the project list response
-(`GET /api/v1/project`), falling back to the per-project metrics endpoint
-(`GET /api/v1/metrics/project/{uuid}/current`) when the embedded object is absent.
+
+### API Endpoints Used
+
+| Section | Endpoint | Purpose |
+|---------|----------|---------|
+| Hierarchy (roots) | `GET /api/v1/project?onlyRoot=true` | Fetch all root-level projects (paginated) |
+| Hierarchy (children) | `GET /api/v1/project/{uuid}/children` | Fetch children for each project (paginated) |
+| Metrics | `GET /api/v1/metrics/project/{uuid}/current` | Per-project risk metrics (fallback when not embedded) |
+| Config | `GET /dt-config` | Reads `DT_API_INTERNAL_URL` to pre-fill the API URL field |
 
 ### Project fields
 
-Source: `GET /api/v1/project?pageSize=500&pageNumber=1`
+Source: `GET /api/v1/project?onlyRoot=true` and `GET /api/v1/project/{uuid}/children`
 
 | Dashboard Field | API Field          | Notes                                         |
 |-----------------|--------------------|-----------------------------------------------|
 | Project name    | `name`             |                                               |
 | Version         | `version`          |                                               |
-| Hierarchy level | `parent.uuid`      | Computed by walking up the parent chain; also inferred from name patterns when `parent` is absent |
+| Hierarchy level | `parent.uuid`      | Stamped during BFS fetch; guaranteed accurate |
 | Tags            | `tags[].name`      | DT returns `[{name:"..."}, ...]`; flattened   |
 
 ### Security Risk
@@ -289,6 +323,9 @@ Maps to DependencyTrack **vulnerability CVSS severity** counts.
 
 Maps to DependencyTrack **operational policy violation** levels.
 
+> Requires policies configured in DependencyTrack (Administration → Policy
+> Management). Values are always 0 until policies are set up.
+
 | Dashboard Column | API Field                           | Description                     |
 |------------------|-------------------------------------|---------------------------------|
 | Fail             | `policyViolationsOperationalFail`   | Highest-severity operational violations |
@@ -298,6 +335,9 @@ Maps to DependencyTrack **operational policy violation** levels.
 ### License Risk
 
 Maps to DependencyTrack **license policy violation** levels.
+
+> Requires policies configured in DependencyTrack (Administration → Policy
+> Management). Values are always 0 until policies are set up.
 
 | Dashboard Column | API Field                      | Description                        |
 |------------------|--------------------------------|------------------------------------|
@@ -422,9 +462,17 @@ Each project object in the dashboard has:
   },
   license: {
     fail: 0, warn: 0, info: 0     // policyViolationsLicense*
+  },
+  aggregated: {                   // bottom-up sum: own data + all descendants
+    security: { critical: 0, high: 0, medium: 0, low: 0, unassigned: 0 },
+    operations: { fail: 0, warn: 0, info: 0 },
+    license: { fail: 0, warn: 0, info: 0 }
   }
 }
 ```
+
+The `aggregated` object is computed by `computeAggregates()` after the tree is
+built — it is what the table rows, KPI cards, and risk filters all use.
 
 ### Theming
 
@@ -476,13 +524,14 @@ For live data without Docker, you need to either:
 
 ## 9. Auto-refresh
 
-The dashboard includes a built-in **auto-refresh** control in the toolbar.
-Auto-refresh only runs in **live mode** (when connected to the DependencyTrack API).
+The dashboard includes a built-in **auto-refresh** control in the **top bar**
+(next to the ⚙ Connect API and ↻ Refresh buttons). Auto-refresh only runs in
+**live mode** (when connected to the DependencyTrack API).
 
 ### Using auto-refresh
 
 1. Connect to the API (see [Section 3](#3-switching-from-mock-data-to-live-data))
-2. Click **↺ Auto: Off** in the top toolbar — the button turns green and displays
+2. Click **↺ Auto: Off** in the top bar — the button turns green and displays
    **↺ Auto: On**
 3. An interval selector appears next to the button — choose **30 sec**, **1 min**,
    or **5 min**
