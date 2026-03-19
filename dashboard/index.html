@@ -674,33 +674,66 @@ function computeAggregates(node) {
 }
 
 // ── Infer parent-child relationships from project list data ────────────────
+// Fallback when DT does not supply parent.uuid via the API.
 // Called on the raw project array (before enrichment) so parentUuid is available
-// during fetchProjectMetrics. Two strategies:
-//   1. Exact name match:   "cs-bff-graphql" (no ver) ← "cs-bff-graphql" v1.5.0
-//   2. Name-suffix match:  "FreshX-Common"           ← "FreshX-Common-1.4.1" v1.4.1
+// during fetchProjectMetrics. Three strategies, applied to ALL projects
+// (not just versioned ones) so that non-versioned intermediate nodes also
+// get wired into the hierarchy:
+//   1. Exact name match:   "cs-bff-graphql" (any ver) ← "cs-bff-graphql" vX.Y
+//   2. Name-suffix match:  "FreshX-Common"            ← "FreshX-Common-1.4.1" v1.4.1
 //      (project whose name == parent + "-" + version)
+//   3. Prefix match:       "backend"                  ← "backend-api", "backend-db"
+//      (longest matching prefix among known project names)
 function inferParentUuids(projects) {
+  // Build a name→uuid map from ALL projects (versioned and non-versioned).
+  // Prefer the version-less entry when names collide, as it is more likely
+  // to be the group/root representative.
   const nameToUuid = new Map();
   projects.forEach(p => {
-    if (!p.version) nameToUuid.set(p.name, p.uuid);
+    if (!p.version) nameToUuid.set(p.name, p.uuid);          // version-less first
+  });
+  projects.forEach(p => {
+    if (p.version && !nameToUuid.has(p.name)) nameToUuid.set(p.name, p.uuid);
   });
 
+  // Sort project names longest-first for prefix matching (strategy 3).
+  const sortedNames = [...nameToUuid.keys()].sort((a, b) => b.length - a.length);
+
   projects.forEach(p => {
-    // Skip if parent is already known (from DT API field or previous pass)
+    // Skip if parent is already known (from DT API field or a previous pass)
     if (p.parentUuid || p.parent?.uuid) return;
-    if (!p.version) return;
 
-    // Strategy 1 – exact name match
+    // Strategy 1 – exact name match (catches versioned children of same-named group)
     let parentUuid = nameToUuid.get(p.name);
+    if (parentUuid === p.uuid) parentUuid = null;   // don't self-reference
 
-    // Strategy 2 – name-suffix match: strip "-<version>" or ".<version>" from name
-    if (!parentUuid) {
+    // Strategy 2 – name-suffix match: "FreshX-Common-1.4.1" → parent "FreshX-Common"
+    if (!parentUuid && p.version) {
       const escapedVer = p.version.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
       const baseName = p.name.replace(new RegExp(`[\\-\\.]${escapedVer}$`), '');
-      if (baseName !== p.name) parentUuid = nameToUuid.get(baseName);
+      if (baseName !== p.name) {
+        const candidate = nameToUuid.get(baseName);
+        if (candidate && candidate !== p.uuid) parentUuid = candidate;
+      }
     }
 
-    if (parentUuid && parentUuid !== p.uuid) p.parentUuid = parentUuid;
+    // Strategy 3 – longest-prefix match: "backend-api" → parent "backend"
+    // Only runs when strategies 1 & 2 found nothing.
+    if (!parentUuid) {
+      for (const candidateName of sortedNames) {
+        const candidateUuid = nameToUuid.get(candidateName);
+        if (candidateUuid === p.uuid) continue;            // skip self
+        if (candidateName === p.name) continue;            // skip exact (strategy 1)
+        // Require the project name to start with candidateName + separator
+        const sep = p.name.charAt(candidateName.length);
+        if (p.name.startsWith(candidateName) && (sep === '-' || sep === '.' || sep === '_' || sep === '/')) {
+          parentUuid = candidateUuid;
+          break;
+        }
+      }
+    }
+
+    if (parentUuid) p.parentUuid = parentUuid;
   });
 }
 
@@ -831,19 +864,30 @@ function renderTree(matchSet) {
 }
 
 // ── KPI summary cards ──────────────────────────────────────────────────────
-// Always reflects the current filtered set so numbers update with every filter change.
-// Ops/license Fail→critical, Warn→high, Info→medium for unified summary totals.
+// Totals are derived from the topmost visible nodes in the filtered set
+// (nodes whose parent is not also in filtered). Each such node contributes
+// its `aggregated` value — own data + all descendants rolled up bottom-up —
+// so the numbers match exactly what the collapsed tree rows show and no
+// project is counted twice regardless of how deep the hierarchy goes.
 function renderSummary() {
+  const filteredUuids = new Set(filtered.map(p => p.uuid));
   const totals = { critical:0, high:0, medium:0, low:0 };
+
   filtered.forEach(p => {
-    const s = p.security   || {};
-    const o = p.operations || {};
-    const l = p.license    || {};
+    // If this node's parent is also in the filtered set, skip it — the
+    // parent's aggregated already rolls up this node's contribution.
+    if (p.parentUuid && filteredUuids.has(p.parentUuid)) return;
+
+    const agg = p.aggregated || p;   // aggregated always present after afterLoad()
+    const s = agg.security   || {};
+    const o = agg.operations || {};
+    const l = agg.license    || {};
     totals.critical += (s.critical||0) + (o.fail||0)  + (l.fail||0);
     totals.high     += (s.high||0)     + (o.warn||0)  + (l.warn||0);
     totals.medium   += (s.medium||0)   + (o.info||0)  + (l.info||0);
     totals.low      += (s.low||0)      + (s.unassigned||0);
   });
+
   const risky = filtered.filter(p => riskScore(p) > 0).length;
   const activeRisk = document.getElementById('riskFilter').value;
 
@@ -1115,26 +1159,75 @@ function loadMockData() {
   afterLoad();
 }
 
-// ── Fetch all pages of projects ────────────────────────────────────────────
+// ── Fetch all projects via BFS (roots → children → grandchildren …) ────────
+// Step 1: GET /api/v1/project?onlyRoot=true  — returns only top-level projects.
+// Step 2: For every project fetched, GET /api/v1/project/{uuid}/children to
+//         get its direct children; stamp p.parent = {uuid} on each child so
+//         the rest of the pipeline can read p.parent?.uuid without any extra
+//         resolution step.
+// Step 3: Repeat step 2 with the child level until a level returns no results.
+// This guarantees the hierarchy mirrors exactly what DependencyTrack knows,
+// regardless of whether the flat list endpoint includes the parent field.
 async function fetchAllProjects(key) {
   const pageSize = 500;
-  let page = 1, all = [];
-  while (true) {
-    const res = await fetch(
-      `${apiBaseUrl}/api/v1/project?pageSize=${pageSize}&pageNumber=${page}&excludeInactive=false`,
-      { headers: { 'X-Api-Key': key } }
-    );
-    if (!res.ok) throw new Error(`HTTP ${res.status} — check your API key`);
-    const data = await res.json();
-    const batch = Array.isArray(data.values) ? data.values
-                : Array.isArray(data)        ? data
-                : [];
-    all = all.concat(batch);
-    // Stop when we've received all projects (check X-Total-Count or short page)
-    const total = parseInt(res.headers.get('X-Total-Count') || '0', 10);
-    if ((total && all.length >= total) || batch.length < pageSize) break;
-    page++;
+
+  // Fetch every page of any paginated DT endpoint, return the combined array.
+  async function fetchAllPages(url) {
+    let page = 1, all = [];
+    while (true) {
+      const sep = url.includes('?') ? '&' : '?';
+      const res = await fetch(
+        `${url}${sep}pageSize=${pageSize}&pageNumber=${page}&excludeInactive=false`,
+        { headers: { 'X-Api-Key': key } }
+      );
+      if (!res.ok) throw new Error(`HTTP ${res.status} — check your API key`);
+      const data = await res.json();
+      const batch = Array.isArray(data.values) ? data.values
+                  : Array.isArray(data)        ? data
+                  : [];
+      all = all.concat(batch);
+      const total = parseInt(res.headers.get('X-Total-Count') || '0', 10);
+      if ((total && all.length >= total) || batch.length < pageSize) break;
+      page++;
+    }
+    return all;
   }
+
+  // Level 0 — root projects only
+  const roots = await fetchAllPages(`${apiBaseUrl}/api/v1/project?onlyRoot=true`);
+  const all = [...roots];
+
+  // BFS — fetch each level's children before moving to the next level.
+  // Batched 10 at a time to avoid hammering DT with parallel requests.
+  let currentLevel = roots;
+  const CHILD_BATCH = 10;
+
+  while (currentLevel.length > 0) {
+    const nextLevel = [];
+    for (let i = 0; i < currentLevel.length; i += CHILD_BATCH) {
+      const slice = currentLevel.slice(i, i + CHILD_BATCH);
+      const batches = await Promise.all(slice.map(async parentProj => {
+        try {
+          const children = await fetchAllPages(
+            `${apiBaseUrl}/api/v1/project/${parentProj.uuid}/children`
+          );
+          // Stamp parent reference on each child so fetchProjectMetrics
+          // reads p.parent?.uuid correctly without any extra resolution.
+          children.forEach(c => {
+            if (!c.parent) c.parent = { uuid: parentProj.uuid };
+          });
+          return children;
+        } catch(_) {
+          return [];   // /children endpoint absent on older DT — skip silently
+        }
+      }));
+      batches.forEach(children => nextLevel.push(...children));
+    }
+    if (nextLevel.length === 0) break;
+    all.push(...nextLevel);
+    currentLevel = nextLevel;
+  }
+
   return all;
 }
 
@@ -1220,8 +1313,9 @@ async function connectLiveApi(fromModal = false) {
       return;
     }
 
-    // Infer parent-child hierarchy from project names BEFORE enrichment so
-    // fetchProjectMetrics can pass the parentUuid through to the enriched object
+    // fetchAllProjects already stamped p.parent.uuid on every child via the
+    // BFS children fetch, so hierarchy is resolved. inferParentUuids runs as
+    // a name-based fallback for projects whose hierarchy is not set up in DT.
     inferParentUuids(projects);
 
     // Fetch metrics in batches of 20 to avoid overwhelming DT
