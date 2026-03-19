@@ -363,9 +363,11 @@
 
     /* ── Footer ───────────────────────────────────────────────────────────── */
     .footer {
-      text-align: center; padding: 16px; font-size: 11px;
+      display: flex; flex-direction: column; align-items: center; gap: 4px;
+      padding: 14px 16px; font-size: 11px;
       color: var(--text-muted); border-top: 1px solid var(--border);
     }
+    .footer-brand { font-size: 12px; font-weight: 600; color: var(--text); letter-spacing: 0.01em; }
 
     /* ── Scrollbar ────────────────────────────────────────────────────────── */
     ::-webkit-scrollbar { width: 6px; height: 6px; }
@@ -485,9 +487,13 @@
   </main>
 
   <footer class="footer">
-    Dependency-Track Community Edition &nbsp;·&nbsp; Custom Risk Dashboard &nbsp;·&nbsp;
-    <a href="https://docs.dependencytrack.org" target="_blank" style="color:var(--accent)">docs.dependencytrack.org</a>
-    &nbsp;·&nbsp; <a href="https://opensource.org/licenses/MIT" target="_blank" style="color:var(--accent)">MIT License</a>
+    <div class="footer-brand">Mettler-Toledo&reg; International Inc. &mdash; Internal Security Dashboard</div>
+    <div>
+      Powered by OWASP Dependency-Track Community Edition &nbsp;&middot;&nbsp;
+      <a href="https://docs.dependencytrack.org" target="_blank" style="color:var(--accent)">docs.dependencytrack.org</a>
+      &nbsp;&middot;&nbsp;
+      <a href="https://opensource.org/licenses/MIT" target="_blank" style="color:var(--accent)">MIT License</a>
+    </div>
   </footer>
 </div>
 
@@ -926,7 +932,12 @@ function renderSummary() {
     totals.low      += (s.low||0)      + (s.unassigned||0);
   });
 
-  const risky = filtered.filter(p => riskScore(p) > 0).length;
+  // Count "risky" against aggregated so Clean/risky labels align with the
+  // tree display (which always shows aggregated values).
+  const risky = filtered.filter(p => {
+    const node = nodeMap.get(p.uuid);
+    return riskScore((node && node.aggregated) || p) > 0;
+  }).length;
   const activeRisk = document.getElementById('riskFilter').value;
 
   function card(label, valueHtml, sub, filterVal) {
@@ -937,11 +948,12 @@ function renderSummary() {
     return `<div class="summary-card${active}" ${click}><div class="label">${label}</div><div class="value">${valueHtml}</div><div class="sub">${sub}</div></div>`;
   }
 
-  const total   = filtered.length;
+  // Always show the raw API count in the Projects tile; derived filtered
+  // counts are shown in the table header, not here.
   const allCount = allProjects.length;
-  const sub     = total < allCount ? `of ${allCount} total` : `${risky} with risks`;
+  const sub      = `${risky} with risks`;
   document.getElementById('summaryGrid').innerHTML =
-    card('Projects',        `<span style="color:var(--accent)">${total}</span>`,        sub,             'all') +
+    card('Projects',        `<span style="color:var(--accent)">${allCount}</span>`,       sub,             'all') +
     card('Critical Issues', `<span class="c-critical">${totals.critical}</span>`, 'click to filter', 'critical') +
     card('High Issues',     `<span class="c-high">${totals.high}</span>`,     'click to filter', 'high') +
     card('Medium Issues',   `<span class="c-medium">${totals.medium}</span>`, 'click to filter', 'medium') +
@@ -985,12 +997,17 @@ function applyFilters() {
   filtered = allProjects.filter(proj => {
     if (q && !proj.name.toLowerCase().includes(q)) return false;
     if (risk !== 'all') {
-      if (risk === 'ok') { if (riskScore(proj) !== 0) return false; }
+      // Use the node's aggregated totals (own + all descendants) so that
+      // a parent group is included whenever any child carries the chosen
+      // risk level — matching what every tree row now visually displays.
+      const node = nodeMap.get(proj.uuid);
+      const agg  = (node && node.aggregated) || proj;
+      if (risk === 'ok') { if (riskScore(agg) !== 0) return false; }
       else {
         const catsToCheck = cat === 'all' ? CATS : [cat];
         // ops/license use fail/warn/info — map filter levels accordingly
         const hasRisk = catsToCheck.some(c => {
-          const d = proj[c] || {};
+          const d = agg[c] || {};
           if (c === 'security') {
             if (risk === 'critical') return (d.critical||0) > 0;
             if (risk === 'high')     return (d.high||0) > 0;
@@ -1018,7 +1035,10 @@ function applyFilters() {
   const hasFilter = q || risk !== 'all' || selectedLevels.size > 0 || selectedTags.size > 0;
   const matchSet  = hasFilter ? new Set(filtered.map(p => p.uuid)) : null;
 
-  document.getElementById('projectCount').textContent = `(${filtered.length} of ${allProjects.length})`;
+  // Project count in header: always the raw API total, never a derived count
+  const isFiltered = q || risk !== 'all' || selectedLevels.size > 0 || selectedTags.size > 0;
+  document.getElementById('projectCount').textContent =
+    isFiltered ? `(${filtered.length} matching of ${allProjects.length})` : `(${allProjects.length})`;
   renderSummary();
   renderTree(matchSet);
   updateExpandCollapseBtn();
