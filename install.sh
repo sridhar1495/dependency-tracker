@@ -229,11 +229,17 @@ if [[ "$NON_INTERACTIVE" == "false" ]]; then
       fi
     fi
 
+    # API key — pre-configure so the dashboard loads live data on first open
+    DT_API_KEY="${DT_API_KEY:-}"
+    read -rsp "  DependencyTrack API key      [${DT_API_KEY:-(none)}]: " _in
+    echo ""
+    [[ -n "$_in" ]] && DT_API_KEY="$_in"
+
     # Preserve all other existing values; only update the dashboard keys.
-    grep -v "^DT_DASHBOARD_PORT=\|^DT_API_INTERNAL_URL=\|^DT_FRONTEND_URL=" "$ENV_FILE" > "${ENV_FILE}.tmp" \
+    grep -v "^DT_DASHBOARD_PORT=\|^DT_API_INTERNAL_URL=\|^DT_FRONTEND_URL=\|^DT_API_KEY=" "$ENV_FILE" > "${ENV_FILE}.tmp" \
       && mv "${ENV_FILE}.tmp" "$ENV_FILE"
-    printf 'DT_DASHBOARD_PORT=%s\nDT_API_INTERNAL_URL=%s\nDT_FRONTEND_URL=%s\n' \
-      "${DT_DASHBOARD_PORT:-3000}" "${DT_API_INTERNAL_URL}" "${DT_FRONTEND_URL:-}" >> "$ENV_FILE"
+    printf 'DT_DASHBOARD_PORT=%s\nDT_API_INTERNAL_URL=%s\nDT_FRONTEND_URL=%s\nDT_API_KEY=%s\n' \
+      "${DT_DASHBOARD_PORT:-3000}" "${DT_API_INTERNAL_URL}" "${DT_FRONTEND_URL:-}" "${DT_API_KEY:-}" >> "$ENV_FILE"
   else
     echo -e "${BOLD}Configure your installation (press Enter to keep current value):${RESET}"
     echo ""
@@ -426,7 +432,25 @@ if retry 4 2 _fetch_key; then
   echo "DT_API_KEY=${API_KEY}" >> "$ENV_FILE"
   success "API key saved to .env"
 else
-  warn "Could not retrieve API key automatically. Log in to the UI and create one manually."
+  warn "Could not retrieve API key automatically."
+  if [[ "$NON_INTERACTIVE" == "false" ]]; then
+    echo ""
+    echo -e "  You can find your API key in the DependencyTrack UI:"
+    echo -e "  Administration → Access Management → Teams → Automation → API Keys"
+    echo ""
+    read -rsp "  Enter API key manually (or press Enter to skip): " _manual_key
+    echo ""
+    if [[ -n "$_manual_key" ]]; then
+      grep -v "^DT_API_KEY=" "$ENV_FILE" > "${ENV_FILE}.tmp" && mv "${ENV_FILE}.tmp" "$ENV_FILE"
+      echo "DT_API_KEY=${_manual_key}" >> "$ENV_FILE"
+      success "API key saved to .env"
+    else
+      warn "No API key saved. The dashboard will start in mock-data mode."
+      warn "You can add DT_API_KEY to .env and restart the dashboard container later."
+    fi
+  else
+    warn "Run in interactive mode to enter the key manually, or add DT_API_KEY to .env."
+  fi
 fi
 
 # ─── Step 8 — Print Summary ──────────────────────────────────────────────────
