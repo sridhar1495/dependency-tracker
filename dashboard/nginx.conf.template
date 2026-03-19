@@ -20,10 +20,13 @@ server {
         try_files $uri $uri/ /index.html;
     }
 
-    # Expose the server-side proxy target URL to the browser (used for project hyperlinks).
+    # Expose server-side config to the browser.
+    # proxyTarget: the nginx proxy target URL (informational, used to pre-fill the modal)
+    # apiKey:      optional pre-configured DT API key (set DT_API_KEY in .env to enable
+    #              automatic data load on page open without requiring manual Connect step)
     location = /dt-config {
         default_type application/json;
-        return 200 '{"proxyTarget":"${DT_API_INTERNAL_URL}"}';
+        return 200 '{"proxyTarget":"${DT_API_INTERNAL_URL}","apiKey":"${DT_API_KEY}"}';
         add_header Cache-Control "no-store";
     }
 

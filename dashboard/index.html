@@ -522,6 +522,10 @@
           placeholder="http://localhost:8080" />
       </div>
     </div>
+    <div id="preConfiguredKeyNote" style="display:none;font-size:12px;background:var(--surface2);border:1px solid var(--border);border-radius:6px;padding:8px 12px;margin-bottom:14px">
+      ✓ <strong>Auto-connected:</strong> API key is pre-configured via the <code style="display:inline;background:none;border:none;padding:0;color:inherit">DT_API_KEY</code> environment variable.
+      Enter a different key below to override for this session.
+    </div>
     <div class="modal-row">
       <div style="flex:1">
         <label>API Key</label>
@@ -568,6 +572,7 @@ let apiKey         = '';
 let apiBaseUrl     = localStorage.getItem('dt_api_url')      || '';  // '' = use nginx proxy
 let dtFrontendUrl  = localStorage.getItem('dt_frontend_url') || '';  // DT UI base URL for project hyperlinks
 let dtProxyTarget  = '';  // raw DT_API_INTERNAL_URL from /dt-config (informational)
+let preconfiguredKey = false;  // true when apiKey came from DT_API_KEY env var (auto-connect)
 let autoRefreshTimer   = null;
 let autoRefreshSeconds = 60;
 
@@ -958,7 +963,7 @@ function renderSummary() {
     card('High Issues',     `<span class="c-high">${totals.high}</span>`,     'click to filter', 'high') +
     card('Medium Issues',   `<span class="c-medium">${totals.medium}</span>`, 'click to filter', 'medium') +
     card('Low Issues',      `<span class="c-low">${totals.low}</span>`,       'click to filter', 'low') +
-    card('Clean',           `<span class="c-ok">${total - risky}</span>`,     'click to filter', 'ok');
+    card('Clean',           `<span class="c-ok">${allCount - risky}</span>`,  'click to filter', 'ok');
 }
 
 function setRiskFilter(val) {
@@ -1344,7 +1349,13 @@ async function fetchProjectMetrics(p, key) {
 // ── Connect to live API ────────────────────────────────────────────────────
 async function connectLiveApi(fromModal = false) {
   if (fromModal) {
-    apiKey = document.getElementById('apiKeyInput').value.trim();
+    const inputKey = document.getElementById('apiKeyInput').value.trim();
+    if (inputKey) {
+      // User explicitly typed a key — override the pre-configured one
+      apiKey = inputKey;
+      preconfiguredKey = false;
+    }
+    // else: keep existing apiKey (pre-configured or previously connected)
     const urlVal = (document.getElementById('apiUrlInput').value || '').trim().replace(/\/$/, '');
     apiBaseUrl = urlVal;
     if (apiBaseUrl) localStorage.setItem('dt_api_url', apiBaseUrl);
@@ -1431,6 +1442,15 @@ function openModal(id) {
     // Update the proxy-target label in the note
     const el = document.getElementById('proxyTargetUrl');
     if (el && dtProxyTarget) el.textContent = dtProxyTarget;
+    // Show pre-configured key note and update placeholder
+    const note = document.getElementById('preConfiguredKeyNote');
+    if (note) note.style.display = preconfiguredKey ? '' : 'none';
+    const keyInp = document.getElementById('apiKeyInput');
+    if (keyInp) {
+      keyInp.placeholder = preconfiguredKey
+        ? 'Pre-configured via DT_API_KEY — enter a new key to override'
+        : 'odt_xxxxxxxxxxxxxxxxxxxxxxxxxx';
+    }
   }
 }
 function closeModal(id) { document.getElementById(id).classList.remove('open'); }
@@ -1456,13 +1476,14 @@ function isBrowserReachable(url) {
   } catch(_) { return false; }
 }
 
-// ── Fetch proxy target URL (exposed by nginx via /dt-config) ───────────────
-// Side-effects:
-//   dtProxyTarget  – set to whatever DT_API_INTERNAL_URL nginx was given (informational only)
-//   apiBaseUrl     – auto-populated when the proxy target is browser-reachable
-//                    AND the user has not already saved a custom URL in localStorage
+// ── Fetch config from nginx /dt-config ─────────────────────────────────────
+// Reads:
+//   proxyTarget – DT_API_INTERNAL_URL (informational; used to pre-fill modal)
+//   apiKey      – DT_API_KEY (optional; triggers auto-connect when set)
 //
-// NOTE: dtFrontendUrl is intentionally NOT set here. The DT_API_INTERNAL_URL is the
+// Returns true if an auto-connect was triggered (caller should skip loadMockData).
+//
+// NOTE: dtFrontendUrl is intentionally NOT set here. DT_API_INTERNAL_URL is the
 // nginx-to-API backend URL and is almost always different from the DT Frontend URL
 // that users open in their browser. The user configures dtFrontendUrl explicitly via
 // the "DT Frontend URL" field in the Connect modal.
@@ -1495,8 +1516,17 @@ async function loadDtConfig() {
           }
         }
       }
+
+      // Auto-connect when DT_API_KEY is pre-configured in the environment
+      if (cfg.apiKey) {
+        apiKey = cfg.apiKey;
+        preconfiguredKey = true;
+        await connectLiveApi();  // silent — no modal, uses the key we just set
+        return true;
+      }
     }
   } catch(_) { /* silently ignore */ }
+  return false;
 }
 
 // ── Probe the DT API for connectivity (retries every 3s while modal is open) ──
@@ -1545,8 +1575,11 @@ document.getElementById('apiModal').addEventListener('transitionend', () => {
 
 // ── Init ───────────────────────────────────────────────────────────────────
 buildColHeaders();
-loadDtConfig();
-loadMockData();
+// loadDtConfig returns true when DT_API_KEY is set and auto-connect fires.
+// In that case skip loadMockData — the live data load replaces it.
+loadDtConfig().then(autoConnected => {
+  if (!autoConnected) loadMockData();
+});
 </script>
 </body>
 </html>
