@@ -887,19 +887,30 @@ function renderTree(matchSet) {
 }
 
 // ── KPI summary cards ──────────────────────────────────────────────────────
-// Always reflects the current filtered set so numbers update with every filter change.
-// Ops/license Fail→critical, Warn→high, Info→medium for unified summary totals.
+// Totals are derived from the topmost visible nodes in the filtered set
+// (nodes whose parent is not also in filtered). Each such node contributes
+// its `aggregated` value — own data + all descendants rolled up bottom-up —
+// so the numbers match exactly what the collapsed tree rows show and no
+// project is counted twice regardless of how deep the hierarchy goes.
 function renderSummary() {
+  const filteredUuids = new Set(filtered.map(p => p.uuid));
   const totals = { critical:0, high:0, medium:0, low:0 };
+
   filtered.forEach(p => {
-    const s = p.security   || {};
-    const o = p.operations || {};
-    const l = p.license    || {};
+    // If this node's parent is also in the filtered set, skip it — the
+    // parent's aggregated already rolls up this node's contribution.
+    if (p.parentUuid && filteredUuids.has(p.parentUuid)) return;
+
+    const agg = p.aggregated || p;   // aggregated always present after afterLoad()
+    const s = agg.security   || {};
+    const o = agg.operations || {};
+    const l = agg.license    || {};
     totals.critical += (s.critical||0) + (o.fail||0)  + (l.fail||0);
     totals.high     += (s.high||0)     + (o.warn||0)  + (l.warn||0);
     totals.medium   += (s.medium||0)   + (o.info||0)  + (l.info||0);
     totals.low      += (s.low||0)      + (s.unassigned||0);
   });
+
   const risky = filtered.filter(p => riskScore(p) > 0).length;
   const activeRisk = document.getElementById('riskFilter').value;
 
