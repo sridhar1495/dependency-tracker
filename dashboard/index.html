@@ -359,6 +359,14 @@
     }
     .modal-close:hover { color: var(--text); }
     .modal-row { display: flex; gap: 8px; margin-bottom: 12px; }
+    .wizard-step { display: none; }
+    .wizard-step.active { display: block; }
+    .wizard-step-indicator { display: flex; gap: 6px; margin-bottom: 20px; }
+    .wizard-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--border); transition: background 0.2s; }
+    .wizard-dot.done { background: var(--accent); }
+    .wizard-question { font-size: 15px; font-weight: 600; margin-bottom: 8px; color: var(--text); }
+    .wizard-sub { font-size: 13px; color: var(--text-muted); margin-bottom: 18px; line-height: 1.5; }
+    .wizard-btn-row { display: flex; gap: 8px; flex-wrap: wrap; }
     .modal-row .search-input { flex: 1; }
 
     /* ── Footer ───────────────────────────────────────────────────────────── */
@@ -393,6 +401,7 @@
     <div class="topbar-status" id="apiStatus">
       <div class="status-dot"></div><span>Mock Data</span>
     </div>
+    <button class="btn" onclick="openConfigWizard()">⚡ Quick Setup</button>
     <button class="btn" onclick="openModal('apiModal')">⚙ Connect API</button>
     <button class="btn" id="arBtn" onclick="toggleAutoRefresh()" title="Toggle auto-refresh">↺ Auto: Off</button>
     <select class="filter-select" id="arInterval" style="display:none" onchange="changeArInterval()" title="Auto-refresh interval">
@@ -541,6 +550,72 @@
   -d 'username=admin&password=YOUR_PASS') \
 && curl -sf -H "Authorization: Bearer $TOKEN" \
   http://&lt;DT-HOST&gt;:8081/api/v1/team | jq -r '.[0].apiKeys[0].key'</code>
+  </div>
+</div>
+
+<!-- ── Config Wizard Modal ───────────────────────────────────────────────── -->
+<div class="modal-overlay" id="configWizardModal">
+  <div class="modal">
+    <button class="modal-close" onclick="closeModal('configWizardModal')">&times;</button>
+    <h2>⚡ Quick Setup</h2>
+
+    <div class="wizard-step-indicator">
+      <div class="wizard-dot" id="wdot1"></div>
+      <div class="wizard-dot" id="wdot2"></div>
+      <div class="wizard-dot" id="wdot3"></div>
+    </div>
+
+    <!-- Step 1: Ask about DT URL -->
+    <div class="wizard-step active" id="wstep1">
+      <div class="wizard-question">Configure DT URL for project links?</div>
+      <div class="wizard-sub">
+        The DT UI URL lets the dashboard show clickable links that open projects
+        directly in your DependencyTrack instance.
+      </div>
+      <div class="wizard-btn-row">
+        <button class="btn primary" onclick="wizardStep1('yes')">Yes, configure URL</button>
+        <button class="btn" onclick="wizardStep1('skip')">Skip</button>
+      </div>
+    </div>
+
+    <!-- Step 2: DT UI URL -->
+    <div class="wizard-step" id="wstep2">
+      <div class="wizard-question">Enter your DependencyTrack UI URL</div>
+      <div class="wizard-sub">This is the URL you open in your browser to access DependencyTrack (not the API endpoint).</div>
+      <div class="modal-row">
+        <div style="flex:1">
+          <label>DT Frontend URL</label>
+          <input id="wizardFrontendUrl" class="search-input" style="width:100%"
+            placeholder="http://localhost:8080  or  https://dtrack.company.com" />
+        </div>
+      </div>
+      <div class="wizard-btn-row">
+        <button class="btn primary" onclick="wizardGoTo(3)">Next →</button>
+        <button class="btn" onclick="wizardGoTo(1)">← Back</button>
+      </div>
+    </div>
+
+    <!-- Step 3: API Key -->
+    <div class="wizard-step" id="wstep3">
+      <div class="wizard-question">Enter your API Key</div>
+      <div class="wizard-sub">
+        Found in DependencyTrack → <strong>Administration → Access Management → Teams</strong>.
+        Leave blank to use the pre-configured key (if set via <code style="background:var(--surface2);padding:1px 4px;border-radius:3px">DT_API_KEY</code>).
+      </div>
+      <div class="modal-row">
+        <div style="flex:1">
+          <label>API Key</label>
+          <input id="wizardApiKey" class="search-input" style="width:100%" type="password"
+            placeholder="odt_xxxxxxxxxxxxxxxxxxxxxxxxxx" />
+        </div>
+      </div>
+      <div class="wizard-btn-row">
+        <button class="btn primary" onclick="wizardConnect()">Connect</button>
+        <button class="btn" onclick="wizardUseMock()">Use Mock Data</button>
+        <button class="btn" id="wizardBackBtn" onclick="wizardGoTo(2)">← Back</button>
+      </div>
+      <div id="wizardStatus" style="margin-top:12px;font-size:13px;color:var(--text-muted)"></div>
+    </div>
   </div>
 </div>
 
@@ -919,30 +994,23 @@ function renderTree(matchSet) {
 // so the numbers match exactly what the collapsed tree rows show and no
 // project is counted twice regardless of how deep the hierarchy goes.
 function renderSummary() {
-  const filteredUuids = new Set(filtered.map(p => p.uuid));
   const totals = { critical:0, high:0, medium:0, low:0 };
 
+  // Use raw values directly from the loaded data — no re-computation or
+  // parent aggregation.  Each project's own security/operations/license
+  // fields are summed as-loaded from the API (or mock data).
   filtered.forEach(p => {
-    // If this node's parent is also in the filtered set, skip it — the
-    // parent's aggregated already rolls up this node's contribution.
-    if (p.parentUuid && filteredUuids.has(p.parentUuid)) return;
-
-    const agg = p.aggregated || p;   // aggregated always present after afterLoad()
-    const s = agg.security   || {};
-    const o = agg.operations || {};
-    const l = agg.license    || {};
+    const s = p.security   || {};
+    const o = p.operations || {};
+    const l = p.license    || {};
     totals.critical += (s.critical||0) + (o.fail||0)  + (l.fail||0);
     totals.high     += (s.high||0)     + (o.warn||0)  + (l.warn||0);
     totals.medium   += (s.medium||0)   + (o.info||0)  + (l.info||0);
     totals.low      += (s.low||0)      + (s.unassigned||0);
   });
 
-  // Count "risky" against aggregated so Clean/risky labels align with the
-  // tree display (which always shows aggregated values).
-  const risky = filtered.filter(p => {
-    const node = nodeMap.get(p.uuid);
-    return riskScore((node && node.aggregated) || p) > 0;
-  }).length;
+  // Count "risky" using each project's own raw values (not aggregated).
+  const risky = filtered.filter(p => riskScore(p) > 0).length;
   const activeRisk = document.getElementById('riskFilter').value;
 
   function card(label, valueHtml, sub, filterVal) {
@@ -1454,6 +1522,89 @@ function openModal(id) {
   }
 }
 function closeModal(id) { document.getElementById(id).classList.remove('open'); }
+
+// ── Config Wizard ──────────────────────────────────────────────────────────
+let _wizardSkippedUrl = false;
+
+function openConfigWizard() {
+  _wizardSkippedUrl = false;
+  wizardGoTo(1);
+  // Pre-fill saved values
+  const fu = document.getElementById('wizardFrontendUrl');
+  if (fu) fu.value = dtFrontendUrl || '';
+  const ak = document.getElementById('wizardApiKey');
+  if (ak) ak.value = '';
+  document.getElementById('wizardStatus').textContent = '';
+  openModal('configWizardModal');
+}
+
+function wizardGoTo(step) {
+  [1, 2, 3].forEach(n => {
+    document.getElementById('wstep' + n).classList.toggle('active', n === step);
+    const dot = document.getElementById('wdot' + n);
+    dot.classList.toggle('done', n < step);
+    dot.style.background = n === step ? 'var(--accent)' : (n < step ? 'var(--accent)' : '');
+  });
+}
+
+function wizardStep1(answer) {
+  if (answer === 'yes') {
+    _wizardSkippedUrl = false;
+    wizardGoTo(2);
+  } else {
+    _wizardSkippedUrl = true;
+    // Show/hide back button depending on whether URL step was skipped
+    document.getElementById('wizardBackBtn').onclick = () => wizardGoTo(1);
+    wizardGoTo(3);
+  }
+}
+
+async function wizardConnect() {
+  const keyVal = (document.getElementById('wizardApiKey').value || '').trim();
+  const status = document.getElementById('wizardStatus');
+
+  if (!_wizardSkippedUrl) {
+    const urlVal = (document.getElementById('wizardFrontendUrl').value || '').trim().replace(/\/$/, '');
+    if (urlVal) {
+      dtFrontendUrl = urlVal;
+      localStorage.setItem('dt_frontend_url', urlVal);
+      // Also sync into the advanced modal field
+      const fInp = document.getElementById('dtFrontendUrlInput');
+      if (fInp) fInp.value = urlVal;
+    }
+  }
+
+  if (keyVal) {
+    apiKey = keyVal;
+    preconfiguredKey = false;
+    // Sync into advanced modal field
+    const kInp = document.getElementById('apiKeyInput');
+    if (kInp) kInp.value = keyVal;
+  }
+
+  if (!apiKey) { status.textContent = 'Please enter an API key.'; status.style.color = 'var(--critical)'; return; }
+
+  status.style.color = 'var(--text-muted)';
+  status.textContent = 'Connecting…';
+  closeModal('configWizardModal');
+  await connectLiveApi();
+}
+
+function wizardUseMock() {
+  // Persist URL if provided before switching to mock
+  if (!_wizardSkippedUrl) {
+    const urlVal = (document.getElementById('wizardFrontendUrl').value || '').trim().replace(/\/$/, '');
+    if (urlVal) {
+      dtFrontendUrl = urlVal;
+      localStorage.setItem('dt_frontend_url', urlVal);
+      const fInp = document.getElementById('dtFrontendUrlInput');
+      if (fInp) fInp.value = urlVal;
+    }
+  }
+  closeModal('configWizardModal');
+  loadMockData();
+}
+
 document.querySelectorAll('.modal-overlay').forEach(el => {
   el.addEventListener('click', e => { if (e.target === el) el.classList.remove('open'); });
 });
