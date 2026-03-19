@@ -214,11 +214,26 @@ if [[ "$NON_INTERACTIVE" == "false" ]]; then
     read -rp "  DependencyTrack API URL (nginx proxy target)\n  [${_default_api}]: " _in
     [[ -n "$_in" ]] && DT_API_INTERNAL_URL="$_in" || DT_API_INTERNAL_URL="$_default_api"
 
+    # Frontend URL for dashboard project links
+    DT_FRONTEND_URL="${DT_FRONTEND_URL:-}"
+    read -rp "  Configure DT URL for project links? [y/N]: " _in
+    if [[ "$_in" == "y" || "$_in" == "Y" || "$_in" == "yes" ]]; then
+      _derived_api="${DT_API_INTERNAL_URL:-http://dtrack-apiserver:8080}"
+      read -rp "  Is the Frontend URL the same as the API URL? [y/N]: " _same
+      if [[ "$_same" == "y" || "$_same" == "Y" || "$_same" == "yes" ]]; then
+        DT_FRONTEND_URL="$_derived_api"
+        info "Using API URL as Frontend URL: $DT_FRONTEND_URL"
+      else
+        read -rp "  DT Frontend URL              [${DT_FRONTEND_URL:-}]: " _in
+        [[ -n "$_in" ]] && DT_FRONTEND_URL="$_in"
+      fi
+    fi
+
     # Preserve all other existing values; only update the dashboard keys.
-    grep -v "^DT_DASHBOARD_PORT=\|^DT_API_INTERNAL_URL=" "$ENV_FILE" > "${ENV_FILE}.tmp" \
+    grep -v "^DT_DASHBOARD_PORT=\|^DT_API_INTERNAL_URL=\|^DT_FRONTEND_URL=" "$ENV_FILE" > "${ENV_FILE}.tmp" \
       && mv "${ENV_FILE}.tmp" "$ENV_FILE"
-    printf 'DT_DASHBOARD_PORT=%s\nDT_API_INTERNAL_URL=%s\n' \
-      "${DT_DASHBOARD_PORT:-3000}" "${DT_API_INTERNAL_URL}" >> "$ENV_FILE"
+    printf 'DT_DASHBOARD_PORT=%s\nDT_API_INTERNAL_URL=%s\nDT_FRONTEND_URL=%s\n' \
+      "${DT_DASHBOARD_PORT:-3000}" "${DT_API_INTERNAL_URL}" "${DT_FRONTEND_URL:-}" >> "$ENV_FILE"
   else
     echo -e "${BOLD}Configure your installation (press Enter to keep current value):${RESET}"
     echo ""
@@ -251,6 +266,22 @@ if [[ "$NON_INTERACTIVE" == "false" ]]; then
     echo ""
     [[ -n "$_in" ]] && DT_ADMIN_PASS="$_in"
 
+    # Frontend URL for dashboard project links
+    DT_FRONTEND_URL="${DT_FRONTEND_URL:-}"
+    read -rp "  Configure DT URL for project links? [y/N]: " _in
+    if [[ "$_in" == "y" || "$_in" == "Y" || "$_in" == "yes" ]]; then
+      _derived_api="http://${DT_HOST:-localhost}:${DT_API_PORT:-8081}"
+      read -rp "  Is the Frontend URL the same as the API URL? [y/N]: " _same
+      if [[ "$_same" == "y" || "$_same" == "Y" || "$_same" == "yes" ]]; then
+        DT_FRONTEND_URL="$_derived_api"
+        info "Using API URL as Frontend URL: $DT_FRONTEND_URL"
+      else
+        _default_fe="http://${DT_HOST:-localhost}:${DT_FRONTEND_PORT:-8080}"
+        read -rp "  DT Frontend URL              [${_default_fe}]: " _in
+        [[ -n "$_in" ]] && DT_FRONTEND_URL="$_in" || DT_FRONTEND_URL="$_default_fe"
+      fi
+    fi
+
     # Write back
     cat > "$ENV_FILE" <<ENVFILE
 DT_VERSION=${DT_VERSION:-latest}
@@ -264,6 +295,7 @@ POSTGRES_PASSWORD=${POSTGRES_PASSWORD}
 DT_ADMIN_USER=${DT_ADMIN_USER:-admin}
 DT_ADMIN_PASS=${DT_ADMIN_PASS}
 DT_API_URL=http://localhost:${DT_API_PORT:-8081}
+DT_FRONTEND_URL=${DT_FRONTEND_URL:-}
 ENVFILE
   fi
   success ".env saved"

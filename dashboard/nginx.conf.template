@@ -26,7 +26,7 @@ server {
     #              automatic data load on page open without requiring manual Connect step)
     location = /dt-config {
         default_type application/json;
-        return 200 '{"proxyTarget":"${DT_API_INTERNAL_URL}","apiKey":"${DT_API_KEY}"}';
+        return 200 '{"proxyTarget":"${DT_API_INTERNAL_URL}","apiKey":"${DT_API_KEY}","frontendUrl":"${DT_FRONTEND_URL}"}';
         add_header Cache-Control "no-store";
     }
 

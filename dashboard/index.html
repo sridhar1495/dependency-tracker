@@ -1701,6 +1701,16 @@ async function loadDtConfig() {
         }
       }
 
+      // Apply pre-configured frontend URL (DT_FRONTEND_URL env var) only when
+      // the user has not already saved a value in localStorage.
+      if (cfg.frontendUrl && !localStorage.getItem('dt_frontend_url')) {
+        dtFrontendUrl = cfg.frontendUrl.replace(/\/$/, '');
+        const fInp = document.getElementById('dtFrontendUrlInput');
+        if (fInp && !fInp.value) fInp.value = dtFrontendUrl;
+        const wInp = document.getElementById('wizardFrontendUrl');
+        if (wInp && !wInp.value) wInp.value = dtFrontendUrl;
+      }
+
       // Auto-connect when DT_API_KEY is pre-configured in the environment
       if (cfg.apiKey) {
         apiKey = cfg.apiKey;
