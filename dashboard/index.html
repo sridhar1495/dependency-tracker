@@ -673,29 +673,6 @@ function computeAggregates(node) {
   node.aggregated = agg;
 }
 
-// ── Resolve parent UUIDs from DT individual project endpoint ───────────────
-// Called when the project LIST response does not include the `parent` field
-// (common in older DependencyTrack versions). Fetches each project's detail
-// page which always includes the full parent reference, then patches p.parent
-// so the rest of the pipeline can read p.parent?.uuid normally.
-async function resolveParentUuidsFromApi(projects, key) {
-  const BATCH = 20;
-  for (let i = 0; i < projects.length; i += BATCH) {
-    const slice = projects.slice(i, i + BATCH);
-    await Promise.all(slice.map(async p => {
-      try {
-        const r = await fetch(`${apiBaseUrl}/api/v1/project/${p.uuid}`, {
-          headers: { 'X-Api-Key': key }
-        });
-        if (r.ok) {
-          const detail = await r.json();
-          if (detail.parent?.uuid) p.parent = { uuid: detail.parent.uuid };
-        }
-      } catch(_) {}
-    }));
-  }
-}
-
 // ── Infer parent-child relationships from project list data ────────────────
 // Fallback when DT does not supply parent.uuid via the API.
 // Called on the raw project array (before enrichment) so parentUuid is available
@@ -1182,26 +1159,75 @@ function loadMockData() {
   afterLoad();
 }
 
-// ── Fetch all pages of projects ────────────────────────────────────────────
+// ── Fetch all projects via BFS (roots → children → grandchildren …) ────────
+// Step 1: GET /api/v1/project?onlyRoot=true  — returns only top-level projects.
+// Step 2: For every project fetched, GET /api/v1/project/{uuid}/children to
+//         get its direct children; stamp p.parent = {uuid} on each child so
+//         the rest of the pipeline can read p.parent?.uuid without any extra
+//         resolution step.
+// Step 3: Repeat step 2 with the child level until a level returns no results.
+// This guarantees the hierarchy mirrors exactly what DependencyTrack knows,
+// regardless of whether the flat list endpoint includes the parent field.
 async function fetchAllProjects(key) {
   const pageSize = 500;
-  let page = 1, all = [];
-  while (true) {
-    const res = await fetch(
-      `${apiBaseUrl}/api/v1/project?pageSize=${pageSize}&pageNumber=${page}&excludeInactive=false`,
-      { headers: { 'X-Api-Key': key } }
-    );
-    if (!res.ok) throw new Error(`HTTP ${res.status} — check your API key`);
-    const data = await res.json();
-    const batch = Array.isArray(data.values) ? data.values
-                : Array.isArray(data)        ? data
-                : [];
-    all = all.concat(batch);
-    // Stop when we've received all projects (check X-Total-Count or short page)
-    const total = parseInt(res.headers.get('X-Total-Count') || '0', 10);
-    if ((total && all.length >= total) || batch.length < pageSize) break;
-    page++;
+
+  // Fetch every page of any paginated DT endpoint, return the combined array.
+  async function fetchAllPages(url) {
+    let page = 1, all = [];
+    while (true) {
+      const sep = url.includes('?') ? '&' : '?';
+      const res = await fetch(
+        `${url}${sep}pageSize=${pageSize}&pageNumber=${page}&excludeInactive=false`,
+        { headers: { 'X-Api-Key': key } }
+      );
+      if (!res.ok) throw new Error(`HTTP ${res.status} — check your API key`);
+      const data = await res.json();
+      const batch = Array.isArray(data.values) ? data.values
+                  : Array.isArray(data)        ? data
+                  : [];
+      all = all.concat(batch);
+      const total = parseInt(res.headers.get('X-Total-Count') || '0', 10);
+      if ((total && all.length >= total) || batch.length < pageSize) break;
+      page++;
+    }
+    return all;
   }
+
+  // Level 0 — root projects only
+  const roots = await fetchAllPages(`${apiBaseUrl}/api/v1/project?onlyRoot=true`);
+  const all = [...roots];
+
+  // BFS — fetch each level's children before moving to the next level.
+  // Batched 10 at a time to avoid hammering DT with parallel requests.
+  let currentLevel = roots;
+  const CHILD_BATCH = 10;
+
+  while (currentLevel.length > 0) {
+    const nextLevel = [];
+    for (let i = 0; i < currentLevel.length; i += CHILD_BATCH) {
+      const slice = currentLevel.slice(i, i + CHILD_BATCH);
+      const batches = await Promise.all(slice.map(async parentProj => {
+        try {
+          const children = await fetchAllPages(
+            `${apiBaseUrl}/api/v1/project/${parentProj.uuid}/children`
+          );
+          // Stamp parent reference on each child so fetchProjectMetrics
+          // reads p.parent?.uuid correctly without any extra resolution.
+          children.forEach(c => {
+            if (!c.parent) c.parent = { uuid: parentProj.uuid };
+          });
+          return children;
+        } catch(_) {
+          return [];   // /children endpoint absent on older DT — skip silently
+        }
+      }));
+      batches.forEach(children => nextLevel.push(...children));
+    }
+    if (nextLevel.length === 0) break;
+    all.push(...nextLevel);
+    currentLevel = nextLevel;
+  }
+
   return all;
 }
 
@@ -1287,19 +1313,9 @@ async function connectLiveApi(fromModal = false) {
       return;
     }
 
-    // ── Resolve parent-child hierarchy ──────────────────────────────────────
-    // Primary source: DependencyTrack's own parent.uuid association on each project.
-    // Some DT versions omit this from the list endpoint; detect that and fall back
-    // to fetching each project's detail page which always includes parent info.
-    const dtListHasParentInfo = projects.some(p => p.parent?.uuid);
-    if (!dtListHasParentInfo) {
-      document.getElementById('apiStatus').innerHTML =
-        '<div class="status-dot" style="background:var(--medium);animation:pulse 0.5s infinite"></div><span>Resolving hierarchy…</span>';
-      await resolveParentUuidsFromApi(projects, apiKey);
-    }
-
-    // Fallback: name-based inference for any remaining projects whose parent
-    // was not supplied by the DT API (e.g. hierarchy not configured in DT).
+    // fetchAllProjects already stamped p.parent.uuid on every child via the
+    // BFS children fetch, so hierarchy is resolved. inferParentUuids runs as
+    // a name-based fallback for projects whose hierarchy is not set up in DT.
     inferParentUuids(projects);
 
     // Fetch metrics in batches of 20 to avoid overwhelming DT
