@@ -112,6 +112,8 @@ services:
       # automatically on page open (no manual "Connect API" step needed).
       # Leave blank to keep the default manual-connect behaviour.
       DT_API_KEY: "${DT_API_KEY:-}"
+      # Optional: DependencyTrack UI URL used by the dashboard for clickable project links.
+      DT_FRONTEND_URL: "${DT_FRONTEND_URL:-}"
     volumes:
       - ./dashboard:/usr/share/nginx/html:ro
       # nginx:alpine's entrypoint runs envsubst on *.template files in this dir
