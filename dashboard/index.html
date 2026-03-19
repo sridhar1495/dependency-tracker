@@ -580,18 +580,31 @@
 
     <!-- Step 2: DT UI URL -->
     <div class="wizard-step" id="wstep2">
-      <div class="wizard-question">Enter your DependencyTrack UI URL</div>
-      <div class="wizard-sub">This is the URL you open in your browser to access DependencyTrack (not the API endpoint).</div>
-      <div class="modal-row">
-        <div style="flex:1">
-          <label>DT Frontend URL</label>
-          <input id="wizardFrontendUrl" class="search-input" style="width:100%"
-            placeholder="http://localhost:8080  or  https://dtrack.company.com" />
+      <!-- 2a: Ask if same as API URL -->
+      <div id="wstep2a">
+        <div class="wizard-question">Is the Frontend URL the same as the API URL?</div>
+        <div class="wizard-sub">If your DT UI and API are on the same host you can reuse the URL.</div>
+        <div class="wizard-btn-row">
+          <button class="btn primary" onclick="wizardStep2Same()">Yes, same URL</button>
+          <button class="btn" onclick="wizardStep2Different()">No, different URL</button>
+          <button class="btn" onclick="wizardGoTo(1)">← Back</button>
         </div>
       </div>
-      <div class="wizard-btn-row">
-        <button class="btn primary" onclick="wizardGoTo(3)">Next →</button>
-        <button class="btn" onclick="wizardGoTo(1)">← Back</button>
+      <!-- 2b: Manual URL input (shown when different) -->
+      <div id="wstep2b" style="display:none">
+        <div class="wizard-question">Enter your DependencyTrack UI URL</div>
+        <div class="wizard-sub">The URL you open in your browser to access DependencyTrack.</div>
+        <div class="modal-row">
+          <div style="flex:1">
+            <label>DT Frontend URL</label>
+            <input id="wizardFrontendUrl" class="search-input" style="width:100%"
+              placeholder="http://localhost:8080  or  https://dtrack.company.com" />
+          </div>
+        </div>
+        <div class="wizard-btn-row">
+          <button class="btn primary" onclick="wizardGoTo(3)">Next →</button>
+          <button class="btn" onclick="wizardStep2Back()">← Back</button>
+        </div>
       </div>
     </div>
 
@@ -1550,13 +1563,33 @@ function wizardGoTo(step) {
 function wizardStep1(answer) {
   if (answer === 'yes') {
     _wizardSkippedUrl = false;
+    // Reset step 2 to the sub-question view
+    document.getElementById('wstep2a').style.display = '';
+    document.getElementById('wstep2b').style.display = 'none';
     wizardGoTo(2);
   } else {
     _wizardSkippedUrl = true;
-    // Show/hide back button depending on whether URL step was skipped
     document.getElementById('wizardBackBtn').onclick = () => wizardGoTo(1);
     wizardGoTo(3);
   }
+}
+
+function wizardStep2Same() {
+  // Use the currently configured API URL as the frontend URL
+  const url = (apiBaseUrl || '').replace(/\/$/, '');
+  const inp = document.getElementById('wizardFrontendUrl');
+  if (inp) inp.value = url;
+  wizardGoTo(3);
+}
+
+function wizardStep2Different() {
+  document.getElementById('wstep2a').style.display = 'none';
+  document.getElementById('wstep2b').style.display = '';
+}
+
+function wizardStep2Back() {
+  document.getElementById('wstep2a').style.display = '';
+  document.getElementById('wstep2b').style.display = 'none';
 }
 
 async function wizardConnect() {
