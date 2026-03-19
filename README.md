@@ -1,13 +1,19 @@
-# Dependency-Track CE — Docker Installer & Custom Dashboard
+# Dependency-Track — Custom Risk Dashboard
 
-A complete **Docker-based installer** for
-[OWASP Dependency-Track Community Edition](https://dependencytrack.org/) with:
+A **Black Duck-style cumulative risk dashboard** for
+[OWASP Dependency-Track Community Edition](https://dependencytrack.org/).
 
-- One-command installation with interactive configuration
-- **Dashboard-only** mode for connecting to an existing DependencyTrack instance
+The core focus of this project is the **custom dashboard** — a portfolio-level risk
+view that aggregates Security, Operational, and License risk counts across all your
+projects in a single hierarchical report, similar to the executive summary views in
+Black Duck. DependencyTrack provides the analysis engine; this dashboard gives you
+the consolidated visibility on top of it.
+
+Also included:
+
+- One-command Docker installer (full stack or dashboard-only mode)
 - User creation scripts
 - SBOM project upload scripts (single & bulk) with large-file support
-- A custom **risk matrix dashboard** with hierarchy filtering, tag filtering, and CSV export
 
 ---
 
