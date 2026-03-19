@@ -963,7 +963,7 @@ function renderSummary() {
     card('High Issues',     `<span class="c-high">${totals.high}</span>`,     'click to filter', 'high') +
     card('Medium Issues',   `<span class="c-medium">${totals.medium}</span>`, 'click to filter', 'medium') +
     card('Low Issues',      `<span class="c-low">${totals.low}</span>`,       'click to filter', 'low') +
-    card('Clean',           `<span class="c-ok">${total - risky}</span>`,     'click to filter', 'ok');
+    card('Clean',           `<span class="c-ok">${allCount - risky}</span>`,  'click to filter', 'ok');
 }
 
 function setRiskFilter(val) {
