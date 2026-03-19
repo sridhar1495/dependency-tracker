@@ -555,6 +555,7 @@ let treeRoots      = [];   // root TreeNode[]
 let nodeMap        = new Map(); // uuid → TreeNode
 let expandedUuids  = new Set();
 let selectedTags   = new Set();
+let summaryTotals  = null; // computed once after data load; never recalculated
 let sortCol        = 'name';
 let sortDir        = 'asc';
 let liveMode       = false;
@@ -743,9 +744,32 @@ function computeLevels(projects) {
   projects.forEach(p => { p.level = depth(p, new Set()); });
 }
 
-// ── After data load: build tree + compute aggregates + set all expanded ────
+// ── Compute KPI card totals once after data loads ─────────────────────────
+// Sums only the true root projects (no parent in the dataset) so that
+// parent=7, child-a=5, child-b=2 → shows 7, not 14.
+// Called once per data load; result stored in summaryTotals and never
+// recalculated — tile clicks and filter changes do not alter these values.
+function computeSummaryTotals() {
+  const allUuids = new Set(allProjects.map(p => p.uuid));
+  const roots = allProjects.filter(p => !p.parentUuid || !allUuids.has(p.parentUuid));
+  const t = { critical:0, high:0, medium:0, low:0 };
+  roots.forEach(p => {
+    const s = p.security   || {};
+    const o = p.operations || {};
+    const l = p.license    || {};
+    t.critical += (s.critical||0) + (o.fail||0)  + (l.fail||0);
+    t.high     += (s.high||0)     + (o.warn||0)  + (l.warn||0);
+    t.medium   += (s.medium||0)   + (o.info||0)  + (l.info||0);
+    t.low      += (s.low||0)      + (s.unassigned||0);
+  });
+  t.risky = allProjects.filter(p => riskScore(p) > 0).length;
+  summaryTotals = t;
+}
+
+// ── After data load: build tree + set all expanded ─────────────────────────
 function afterLoad() {
   treeRoots = buildTree(allProjects);
+  computeSummaryTotals();
   expandedUuids = new Set(allProjects.map(p => p.uuid));
   buildFilterOptions();
   applyFilters(); // sets filtered, then calls renderSummary + renderTree + updateExpandCollapseBtn
@@ -875,29 +899,12 @@ function renderTree(matchSet) {
 }
 
 // ── KPI summary cards ──────────────────────────────────────────────────────
-// Totals are derived from the topmost nodes in the filtered set only —
-// i.e. nodes whose parent is not also in filtered.
-// This prevents double-counting: if DependencyTrack reports parent=7,
-// child-a=5, child-b=2, the card shows 7 (the root), not 7+5+2=14.
-// Works for any hierarchy depth and any number of root projects.
+// Values come from summaryTotals, computed once after data load.
+// Tile clicks and filter changes do not alter these numbers.
+// Only the active-highlight on the clicked tile updates dynamically.
 function renderSummary() {
-  const totals = { critical:0, high:0, medium:0, low:0 };
-
-  const filteredUuids = new Set(filtered.map(p => p.uuid));
-  const topmost = filtered.filter(p => !p.parentUuid || !filteredUuids.has(p.parentUuid));
-
-  topmost.forEach(p => {
-    const s = p.security   || {};
-    const o = p.operations || {};
-    const l = p.license    || {};
-    totals.critical += (s.critical||0) + (o.fail||0)  + (l.fail||0);
-    totals.high     += (s.high||0)     + (o.warn||0)  + (l.warn||0);
-    totals.medium   += (s.medium||0)   + (o.info||0)  + (l.info||0);
-    totals.low      += (s.low||0)      + (s.unassigned||0);
-  });
-
-  // Count "risky" using each project's own raw values (not aggregated).
-  const risky = filtered.filter(p => riskScore(p) > 0).length;
+  const { critical, high, medium, low, risky } = summaryTotals;
+  const allCount   = allProjects.length;
   const activeRisk = document.getElementById('riskFilter').value;
 
   function card(label, valueHtml, sub, filterVal) {
@@ -908,17 +915,13 @@ function renderSummary() {
     return `<div class="summary-card${active}" ${click}><div class="label">${label}</div><div class="value">${valueHtml}</div><div class="sub">${sub}</div></div>`;
   }
 
-  // Always show the raw API count in the Projects tile; derived filtered
-  // counts are shown in the table header, not here.
-  const allCount = allProjects.length;
-  const sub      = `${risky} with risks`;
   document.getElementById('summaryGrid').innerHTML =
-    card('Projects',        `<span style="color:var(--accent)">${allCount}</span>`,       sub,             'all') +
-    card('Critical Issues', `<span class="c-critical">${totals.critical}</span>`, 'click to filter', 'critical') +
-    card('High Issues',     `<span class="c-high">${totals.high}</span>`,     'click to filter', 'high') +
-    card('Medium Issues',   `<span class="c-medium">${totals.medium}</span>`, 'click to filter', 'medium') +
-    card('Low Issues',      `<span class="c-low">${totals.low}</span>`,       'click to filter', 'low') +
-    card('Clean',           `<span class="c-ok">${allCount - risky}</span>`,  'click to filter', 'ok');
+    card('Projects',        `<span style="color:var(--accent)">${allCount}</span>`, `${risky} with risks`, 'all') +
+    card('Critical Issues', `<span class="c-critical">${critical}</span>`, 'click to filter', 'critical') +
+    card('High Issues',     `<span class="c-high">${high}</span>`,         'click to filter', 'high') +
+    card('Medium Issues',   `<span class="c-medium">${medium}</span>`,     'click to filter', 'medium') +
+    card('Low Issues',      `<span class="c-low">${low}</span>`,           'click to filter', 'low') +
+    card('Clean',           `<span class="c-ok">${allCount - risky}</span>`, 'click to filter', 'ok');
 }
 
 function setRiskFilter(val) {
