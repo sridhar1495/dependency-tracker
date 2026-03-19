@@ -136,6 +136,12 @@ The installer will prompt for:
    Nginx will proxy `/api/*` requests to.
    - Same Docker network (default): `http://dtrack-apiserver:8080`
    - External instance: `http://10.121.163.69:8081` (your DT host/port)
+3. **DT Frontend URL** *(optional)* — the URL users open in their browser to
+   reach the DependencyTrack UI (e.g. `http://localhost:8080`). Enables
+   clickable project links in the dashboard.
+4. **DependencyTrack API key** *(optional)* — written to `.env` as `DT_API_KEY`
+   so the dashboard auto-connects and loads live data on first open. Leave
+   blank to start in mock-data mode and connect later via the UI.
 
 Only the `dt-dashboard` (Nginx) container is pulled and started. DependencyTrack
 containers are not touched.
