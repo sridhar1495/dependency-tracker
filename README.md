@@ -1,13 +1,14 @@
 # Dependency-Track — Custom Risk Dashboard
 
-A **Black Duck-style cumulative risk dashboard** for
+A **portfolio-level risk dashboard** for
 [OWASP Dependency-Track Community Edition](https://dependencytrack.org/).
 
-The core focus of this project is the **custom dashboard** — a portfolio-level risk
-view that aggregates Security, Operational, and License risk counts across all your
-projects in a single hierarchical report, similar to the executive summary views in
-Black Duck. DependencyTrack provides the analysis engine; this dashboard gives you
-the consolidated visibility on top of it.
+The core focus of this project is the **custom dashboard** — a single-page view
+that surfaces Security, Operational, and License risk counts across all your
+projects in a hierarchical report. Every row (parent or leaf) displays the counts
+exactly as returned by the DependencyTrack API — no in-code aggregation.
+DependencyTrack provides the analysis engine; this dashboard gives you the
+consolidated visibility on top of it.
 
 Also included:
 
@@ -214,7 +215,7 @@ dashboard then loads live data on first open with no manual configuration requir
 - **Level single-select filter** — show only projects at a specific hierarchy depth
 - **Risk level filter** — filters each project's own API-returned risk data
 - **Category filter** — narrow to Security, Operational, or License risks
-- **KPI summary cards** — total project count from API; risk totals summed from each project's own API data; clickable to set risk filter
+- **KPI summary cards** — risk totals computed once at load from root-level projects (no double-counting of parent + child); fixed values regardless of filter state; clickable to set risk filter
 - **Search box** — substring match on project name
 - **CSV export** — all filtered rows with full column names
 - **Sortable columns** — click any column header; click again to reverse

@@ -29,8 +29,9 @@ served by an Nginx container on port `3000`. It provides:
 - **Level filtering** — filter by hierarchy depth with a single-select dropdown (like Category)
 - **CSV export** — exports all matching projects regardless of fold state, with a
   Type column (Group / Project). The **Export CSV** button is right-aligned in the filter row.
-- **KPI summary cards** for total Critical, High, Medium, Low counts (summed from
-  each project's own API-reported values in the filtered set)
+- **KPI summary cards** for total Critical, High, Medium, Low counts — computed
+  once at load from root-level projects only; fixed for the lifetime of the data
+  load regardless of which filters or tiles are active
 - **Project hyperlinks** — when the DT Frontend URL is set in the Connect modal,
   project names link directly to that project in the DependencyTrack UI
 - **Two data modes**:
@@ -148,19 +149,24 @@ selecting multiple tags narrows to projects that have **all** of the selected ta
 
 ### KPI Cards
 
-The summary cards above the table reflect the **currently filtered** project set,
-computing totals from the **topmost visible nodes only** (no double-counting of
-parent + child values).
+The summary cards above the table show **fixed totals computed once** immediately
+after data loads. Applying filters or clicking a tile does not change the numbers —
+only the active-highlight border updates to show which filter is selected.
 
-- **Projects** — total count from the API (`allProjects.length`), shown as-is.
-  When a filter is active, shown as `N matching of M`.
+Totals are derived from **root-level projects only** (projects with no parent in
+the dataset). This prevents double-counting: if DependencyTrack reports parent=7,
+child-a=5, child-b=2, the card shows 7 — not 14.
+
+- **Projects** — `allProjects.length`: total project count returned by the API.
+  The sub-text "N with risks" is also fixed at load time.
 - **Critical** = Security Critical + Operational Fail + License Fail
 - **High** = Security High + Operational Warn + License Warn
 - **Medium** = Security Medium + Operational Info + License Info
 - **Low** = Security Low + Security Unassigned
+- **Clean** = Projects − risky (both fixed at load time)
 
-Totals are summed from each project's own API-returned values in the currently
-filtered set. Cards are clickable — clicking applies the matching risk-level filter.
+Cards are clickable — clicking sets the risk-level filter on the table (which
+narrows the rows) but does not alter the card values themselves.
 
 ### Sorting
 
@@ -186,7 +192,17 @@ ancestor group rows are automatically shown so the tree context is preserved.
 
 ## 3. Switching from Mock Data to Live Data
 
-### Method A — UI (easiest)
+### Method A — Installer (recommended for new installs)
+
+When you run `./install.sh` (full stack) or `./install.sh --dashboard-only`, the
+installer prompts for an API key and writes it to `.env` as `DT_API_KEY`.
+Docker Compose passes this to the dashboard container, so the dashboard
+**auto-connects and loads live data on first open** — no UI steps needed.
+
+If the auto-fetch fails during a full install, the installer falls back to an
+interactive prompt so you can paste the key manually.
+
+### Method B — UI
 
 1. Open http://localhost:3000
 2. Click the **"⚙ Connect API"** button (top right)
@@ -221,7 +237,7 @@ and supports all three response shapes DependencyTrack may return:
 | DT Frontend URL | No | The URL users open to access the DependencyTrack web UI. Used only for project hyperlinks. Must be browser-accessible. Example: `http://localhost:8080`. Saved in `localStorage`. |
 | API Key | Yes | Your DependencyTrack API key (masked as password). |
 
-### Method B — Pre-configure the proxy target
+### Method C — Pre-configure the proxy target
 
 The proxy target (`DT_API_INTERNAL_URL`) is a **server-side** setting — the
 browser always calls `/api/*` on the dashboard origin, and Nginx forwards it.
