@@ -359,14 +359,6 @@
     }
     .modal-close:hover { color: var(--text); }
     .modal-row { display: flex; gap: 8px; margin-bottom: 12px; }
-    .wizard-step { display: none; }
-    .wizard-step.active { display: block; }
-    .wizard-step-indicator { display: flex; gap: 6px; margin-bottom: 20px; }
-    .wizard-dot { width: 8px; height: 8px; border-radius: 50%; background: var(--border); transition: background 0.2s; }
-    .wizard-dot.done { background: var(--accent); }
-    .wizard-question { font-size: 15px; font-weight: 600; margin-bottom: 8px; color: var(--text); }
-    .wizard-sub { font-size: 13px; color: var(--text-muted); margin-bottom: 18px; line-height: 1.5; }
-    .wizard-btn-row { display: flex; gap: 8px; flex-wrap: wrap; }
     .modal-row .search-input { flex: 1; }
 
     /* ── Footer ───────────────────────────────────────────────────────────── */
@@ -401,7 +393,6 @@
     <div class="topbar-status" id="apiStatus">
       <div class="status-dot"></div><span>Mock Data</span>
     </div>
-    <button class="btn" onclick="openConfigWizard()">⚡ Quick Setup</button>
     <button class="btn" onclick="openModal('apiModal')">⚙ Connect API</button>
     <button class="btn" id="arBtn" onclick="toggleAutoRefresh()" title="Toggle auto-refresh">↺ Auto: Off</button>
     <select class="filter-select" id="arInterval" style="display:none" onchange="changeArInterval()" title="Auto-refresh interval">
@@ -421,14 +412,12 @@
 
     <div class="summary-grid" id="summaryGrid"></div>
 
-    <!-- Controls row 1: title + tree actions + auto-refresh + export -->
+    <!-- Controls row 1: title -->
     <div class="controls">
       <h1 class="ctrl-title">Projects <span id="projectCount"></span></h1>
-      <button class="btn" id="expandCollapseBtn" onclick="toggleExpandCollapse()" title="Expand all groups">▼ Expand All</button>
-      <button class="btn export" onclick="exportCSV()">↓ Export CSV</button>
     </div>
 
-    <!-- Controls row 2: filters -->
+    <!-- Controls row 2: filters + tree actions + export -->
     <div class="controls filters">
       <input class="search-input" id="searchInput" placeholder="Search projects…" oninput="applyFilters()" />
       <select class="filter-select" id="riskFilter" onchange="applyFilters()">
@@ -475,6 +464,8 @@
           <div id="tagOptions"><span class="ms-empty">Load data first</span></div>
         </div>
       </div>
+      <button class="btn" id="expandCollapseBtn" onclick="toggleExpandCollapse()" title="Expand all groups">▼ Expand All</button>
+      <button class="btn export" onclick="exportCSV()">↓ Export CSV</button>
     </div>
 
     <!-- Table -->
@@ -550,85 +541,6 @@
   -d 'username=admin&password=YOUR_PASS') \
 && curl -sf -H "Authorization: Bearer $TOKEN" \
   http://&lt;DT-HOST&gt;:8081/api/v1/team | jq -r '.[0].apiKeys[0].key'</code>
-  </div>
-</div>
-
-<!-- ── Config Wizard Modal ───────────────────────────────────────────────── -->
-<div class="modal-overlay" id="configWizardModal">
-  <div class="modal">
-    <button class="modal-close" onclick="closeModal('configWizardModal')">&times;</button>
-    <h2>⚡ Quick Setup</h2>
-
-    <div class="wizard-step-indicator">
-      <div class="wizard-dot" id="wdot1"></div>
-      <div class="wizard-dot" id="wdot2"></div>
-      <div class="wizard-dot" id="wdot3"></div>
-    </div>
-
-    <!-- Step 1: Ask about DT URL -->
-    <div class="wizard-step active" id="wstep1">
-      <div class="wizard-question">Configure DT URL for project links?</div>
-      <div class="wizard-sub">
-        The DT UI URL lets the dashboard show clickable links that open projects
-        directly in your DependencyTrack instance.
-      </div>
-      <div class="wizard-btn-row">
-        <button class="btn primary" onclick="wizardStep1('yes')">Yes, configure URL</button>
-        <button class="btn" onclick="wizardStep1('skip')">Skip</button>
-      </div>
-    </div>
-
-    <!-- Step 2: DT UI URL -->
-    <div class="wizard-step" id="wstep2">
-      <!-- 2a: Ask if same as API URL -->
-      <div id="wstep2a">
-        <div class="wizard-question">Is the Frontend URL the same as the API URL?</div>
-        <div class="wizard-sub">If your DT UI and API are on the same host you can reuse the URL.</div>
-        <div class="wizard-btn-row">
-          <button class="btn primary" onclick="wizardStep2Same()">Yes, same URL</button>
-          <button class="btn" onclick="wizardStep2Different()">No, different URL</button>
-          <button class="btn" onclick="wizardGoTo(1)">← Back</button>
-        </div>
-      </div>
-      <!-- 2b: Manual URL input (shown when different) -->
-      <div id="wstep2b" style="display:none">
-        <div class="wizard-question">Enter your DependencyTrack UI URL</div>
-        <div class="wizard-sub">The URL you open in your browser to access DependencyTrack.</div>
-        <div class="modal-row">
-          <div style="flex:1">
-            <label>DT Frontend URL</label>
-            <input id="wizardFrontendUrl" class="search-input" style="width:100%"
-              placeholder="http://localhost:8080  or  https://dtrack.company.com" />
-          </div>
-        </div>
-        <div class="wizard-btn-row">
-          <button class="btn primary" onclick="wizardGoTo(3)">Next →</button>
-          <button class="btn" onclick="wizardStep2Back()">← Back</button>
-        </div>
-      </div>
-    </div>
-
-    <!-- Step 3: API Key -->
-    <div class="wizard-step" id="wstep3">
-      <div class="wizard-question">Enter your API Key</div>
-      <div class="wizard-sub">
-        Found in DependencyTrack → <strong>Administration → Access Management → Teams</strong>.
-        Leave blank to use the pre-configured key (if set via <code style="background:var(--surface2);padding:1px 4px;border-radius:3px">DT_API_KEY</code>).
-      </div>
-      <div class="modal-row">
-        <div style="flex:1">
-          <label>API Key</label>
-          <input id="wizardApiKey" class="search-input" style="width:100%" type="password"
-            placeholder="odt_xxxxxxxxxxxxxxxxxxxxxxxxxx" />
-        </div>
-      </div>
-      <div class="wizard-btn-row">
-        <button class="btn primary" onclick="wizardConnect()">Connect</button>
-        <button class="btn" onclick="wizardUseMock()">Use Mock Data</button>
-        <button class="btn" id="wizardBackBtn" onclick="wizardGoTo(2)">← Back</button>
-      </div>
-      <div id="wizardStatus" style="margin-top:12px;font-size:13px;color:var(--text-muted)"></div>
-    </div>
   </div>
 </div>
 
@@ -1538,108 +1450,6 @@ function openModal(id) {
 }
 function closeModal(id) { document.getElementById(id).classList.remove('open'); }
 
-// ── Config Wizard ──────────────────────────────────────────────────────────
-let _wizardSkippedUrl = false;
-
-function openConfigWizard() {
-  _wizardSkippedUrl = false;
-  wizardGoTo(1);
-  // Pre-fill saved values
-  const fu = document.getElementById('wizardFrontendUrl');
-  if (fu) fu.value = dtFrontendUrl || '';
-  const ak = document.getElementById('wizardApiKey');
-  if (ak) ak.value = '';
-  document.getElementById('wizardStatus').textContent = '';
-  openModal('configWizardModal');
-}
-
-function wizardGoTo(step) {
-  [1, 2, 3].forEach(n => {
-    document.getElementById('wstep' + n).classList.toggle('active', n === step);
-    const dot = document.getElementById('wdot' + n);
-    dot.classList.toggle('done', n < step);
-    dot.style.background = n === step ? 'var(--accent)' : (n < step ? 'var(--accent)' : '');
-  });
-}
-
-function wizardStep1(answer) {
-  if (answer === 'yes') {
-    _wizardSkippedUrl = false;
-    // Reset step 2 to the sub-question view
-    document.getElementById('wstep2a').style.display = '';
-    document.getElementById('wstep2b').style.display = 'none';
-    wizardGoTo(2);
-  } else {
-    _wizardSkippedUrl = true;
-    document.getElementById('wizardBackBtn').onclick = () => wizardGoTo(1);
-    wizardGoTo(3);
-  }
-}
-
-function wizardStep2Same() {
-  // Use the currently configured API URL as the frontend URL
-  const url = (apiBaseUrl || '').replace(/\/$/, '');
-  const inp = document.getElementById('wizardFrontendUrl');
-  if (inp) inp.value = url;
-  wizardGoTo(3);
-}
-
-function wizardStep2Different() {
-  document.getElementById('wstep2a').style.display = 'none';
-  document.getElementById('wstep2b').style.display = '';
-}
-
-function wizardStep2Back() {
-  document.getElementById('wstep2a').style.display = '';
-  document.getElementById('wstep2b').style.display = 'none';
-}
-
-async function wizardConnect() {
-  const keyVal = (document.getElementById('wizardApiKey').value || '').trim();
-  const status = document.getElementById('wizardStatus');
-
-  if (!_wizardSkippedUrl) {
-    const urlVal = (document.getElementById('wizardFrontendUrl').value || '').trim().replace(/\/$/, '');
-    if (urlVal) {
-      dtFrontendUrl = urlVal;
-      localStorage.setItem('dt_frontend_url', urlVal);
-      // Also sync into the advanced modal field
-      const fInp = document.getElementById('dtFrontendUrlInput');
-      if (fInp) fInp.value = urlVal;
-    }
-  }
-
-  if (keyVal) {
-    apiKey = keyVal;
-    preconfiguredKey = false;
-    // Sync into advanced modal field
-    const kInp = document.getElementById('apiKeyInput');
-    if (kInp) kInp.value = keyVal;
-  }
-
-  if (!apiKey) { status.textContent = 'Please enter an API key.'; status.style.color = 'var(--critical)'; return; }
-
-  status.style.color = 'var(--text-muted)';
-  status.textContent = 'Connecting…';
-  closeModal('configWizardModal');
-  await connectLiveApi();
-}
-
-function wizardUseMock() {
-  // Persist URL if provided before switching to mock
-  if (!_wizardSkippedUrl) {
-    const urlVal = (document.getElementById('wizardFrontendUrl').value || '').trim().replace(/\/$/, '');
-    if (urlVal) {
-      dtFrontendUrl = urlVal;
-      localStorage.setItem('dt_frontend_url', urlVal);
-      const fInp = document.getElementById('dtFrontendUrlInput');
-      if (fInp) fInp.value = urlVal;
-    }
-  }
-  closeModal('configWizardModal');
-  loadMockData();
-}
-
 document.querySelectorAll('.modal-overlay').forEach(el => {
   el.addEventListener('click', e => { if (e.target === el) el.classList.remove('open'); });
 });
@@ -1709,9 +1519,7 @@ async function loadDtConfig() {
         dtFrontendUrl = cfg.frontendUrl.replace(/\/$/, '');
         const fInp = document.getElementById('dtFrontendUrlInput');
         if (fInp && !fInp.value) fInp.value = dtFrontendUrl;
-        const wInp = document.getElementById('wizardFrontendUrl');
-        if (wInp && !wInp.value) wInp.value = dtFrontendUrl;
-      }
+}
 
       // Auto-connect when DT_API_KEY is pre-configured in the environment
       if (cfg.apiKey) {
