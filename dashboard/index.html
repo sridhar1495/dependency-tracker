@@ -875,18 +875,18 @@ function renderTree(matchSet) {
 }
 
 // ── KPI summary cards ──────────────────────────────────────────────────────
-// Totals are derived from the topmost visible nodes in the filtered set
-// (nodes whose parent is not also in filtered). Each such node contributes
-// its `aggregated` value — own data + all descendants rolled up bottom-up —
-// so the numbers match exactly what the collapsed tree rows show and no
-// project is counted twice regardless of how deep the hierarchy goes.
+// Totals are derived from the topmost nodes in the filtered set only —
+// i.e. nodes whose parent is not also in filtered.
+// This prevents double-counting: if DependencyTrack reports parent=7,
+// child-a=5, child-b=2, the card shows 7 (the root), not 7+5+2=14.
+// Works for any hierarchy depth and any number of root projects.
 function renderSummary() {
   const totals = { critical:0, high:0, medium:0, low:0 };
 
-  // Use raw values directly from the loaded data — no re-computation or
-  // parent aggregation.  Each project's own security/operations/license
-  // fields are summed as-loaded from the API (or mock data).
-  filtered.forEach(p => {
+  const filteredUuids = new Set(filtered.map(p => p.uuid));
+  const topmost = filtered.filter(p => !p.parentUuid || !filteredUuids.has(p.parentUuid));
+
+  topmost.forEach(p => {
     const s = p.security   || {};
     const o = p.operations || {};
     const l = p.license    || {};
