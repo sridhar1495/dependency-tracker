@@ -20,17 +20,17 @@ served by an Nginx container on port `3000`. It provides:
 
 - A sortable, filterable **hierarchical tree view** mirroring the DependencyTrack
   parent/child project structure
-- **Expand/collapse** per group row — all rows always show **aggregated totals**
-  for themselves and all descendants, whether expanded or collapsed
-- **Single Expand All / Collapse All toggle button** that dynamically switches
-  label based on the current state of the tree
+- **Expand/collapse** per group row — each row always shows its own API-returned
+  counts; collapsing a group hides its children but does not change the parent's numbers
+- **Single Expand All / Collapse All toggle button** (right side of the filter row)
+  that dynamically switches label based on the current state of the tree
 - **Auto-refresh** toggle (in the top bar) with selectable interval (30 s / 1 min / 5 min)
 - **Tag filtering** — filter by project tags with a multi-select dropdown
-- **Level filtering** — filter by hierarchy depth with a multi-select dropdown
+- **Level filtering** — filter by hierarchy depth with a single-select dropdown (like Category)
 - **CSV export** — exports all matching projects regardless of fold state, with a
-  Type column (Group / Project)
-- **KPI summary cards** for total Critical, High, Medium, Low counts (aggregated
-  from topmost visible nodes — no double-counting)
+  Type column (Group / Project). The **Export CSV** button is right-aligned in the filter row.
+- **KPI summary cards** for total Critical, High, Medium, Low counts (summed from
+  each project's own API-reported values in the filtered set)
 - **Project hyperlinks** — when the DT Frontend URL is set in the Connect modal,
   project names link directly to that project in the DependencyTrack UI
 - **Two data modes**:
@@ -68,19 +68,20 @@ DependencyTrack project hierarchy:
 This produces a fully accurate multi-level tree displayed as:
 
 ```
-▶ RET                               (collapsed group — shows aggregated totals)
-▼ FreshX Suite                      (expanded group — shows aggregated totals)
-    ▶ FreshX-BE                     (collapsed sub-group — shows aggregated totals)
-    ▼ FreshX.BE.Containers          (expanded sub-group — shows aggregated totals)
+▶ RET                               (collapsed group — shows its own API-returned counts)
+▼ FreshX Suite                      (expanded group — shows its own API-returned counts)
+    ▶ FreshX-BE                     (collapsed sub-group — shows its own API-returned counts)
+    ▼ FreshX.BE.Containers          (expanded sub-group — shows its own API-returned counts)
           FreshX-BE v1.4.1          (leaf project)
           FreshX-BE v1.3.0          (leaf project)
 ```
 
-**Group rows (▶ / ▼):** rows that have children. Whether collapsed or expanded,
-the row **always displays the aggregated sum of its own risk data plus all
-descendants** — counts never change when you expand or collapse a group.
+**Group rows (▶ / ▼):** rows that have children. Every row — whether a group or leaf —
+displays the counts **exactly as returned by the DependencyTrack API** for that project.
+No child-aggregation is performed in the dashboard. Expanding or collapsing a group
+only shows/hides children; it does not alter any displayed number.
 
-**Leaf rows:** project rows with no children. Always show their own data.
+**Leaf rows:** project rows with no children. Show their own API-returned data.
 
 ### Risk Matrix Columns
 
@@ -116,11 +117,11 @@ orange / yellow respectively, consistent with Critical / High / Medium.
 ### Expand / Collapse
 
 - Click the **▶** or **▼** triangle on any group row to toggle that group.
-- A single **▼ Expand All** / **▶ Collapse All** button in the toolbar performs
-  bulk expand/collapse. The label automatically switches based on whether all
-  groups are currently expanded.
-- Expanding or collapsing a group does **not** change the displayed counts —
-  all rows always show aggregated totals.
+- A single **▼ Expand All** / **▶ Collapse All** button, **right-aligned** in the
+  filter row, performs bulk expand/collapse. The label automatically switches based
+  on whether all groups are currently expanded.
+- Expanding or collapsing a group does **not** change any displayed counts — every
+  row always shows its own API-returned data regardless of tree state.
 
 ### Project Hyperlinks
 
@@ -158,10 +159,8 @@ parent + child values).
 - **Medium** = Security Medium + Operational Info + License Info
 - **Low** = Security Low + Security Unassigned
 
-Cards are clickable — clicking a card applies the matching risk-level filter.
-The filter checks each project's **aggregated** risk data (including all
-descendants), so parent groups appear in results when any descendant carries
-the chosen risk level.
+Totals are summed from each project's own API-returned values in the currently
+filtered set. Cards are clickable — clicking applies the matching risk-level filter.
 
 ### Sorting
 
@@ -175,9 +174,9 @@ Click any column header to sort by that value. Click again to reverse.
 | Filter | Type | Behaviour |
 |--------|------|-----------|
 | Search box | Text input | Substring match on project name |
-| Risk level | Single-select | Show projects with the selected severity level (checks aggregated data) |
+| Risk level | Single-select | Show projects whose own API-returned data contains the selected severity |
 | Category | Single-select | Narrow to Security, Operational, or License category |
-| Level | Multi-select dropdown | Show only projects at selected hierarchy depths |
+| Level | Single-select | Show only projects at the selected hierarchy depth |
 | Tags | Multi-select dropdown | Show only projects that have ALL selected tags |
 
 All filters combine with AND logic. When a filter matches a child project, its
@@ -387,16 +386,13 @@ Maps to DependencyTrack **license policy violation** levels.
 
 ## 6. Filtering and Exporting
 
-### Using the Level multi-select
+### Using the Level filter
 
-1. Click the **Level** button in the toolbar
-2. A dropdown shows all hierarchy depths that exist in the loaded data
-3. Check one or more levels (e.g. "Level 3", "Level 4")
-4. The table immediately narrows to matching rows (ancestor groups are shown
-   automatically to preserve tree context)
-5. Click **Clear** to reset, or uncheck to deselect individual levels
-
-The badge on the button shows how many levels are currently selected.
+1. Click the **Level** dropdown in the filter row (behaves like the Category dropdown)
+2. The dropdown lists all hierarchy depths that exist in the loaded data
+3. Select a level (e.g. "Level 3") — the table narrows to projects at that depth
+   (ancestor groups are shown automatically to preserve tree context)
+4. Select **All levels** to reset
 
 ### Using the Tag multi-select
 
@@ -462,17 +458,12 @@ Each project object in the dashboard has:
   },
   license: {
     fail: 0, warn: 0, info: 0     // policyViolationsLicense*
-  },
-  aggregated: {                   // bottom-up sum: own data + all descendants
-    security: { critical: 0, high: 0, medium: 0, low: 0, unassigned: 0 },
-    operations: { fail: 0, warn: 0, info: 0 },
-    license: { fail: 0, warn: 0, info: 0 }
   }
 }
 ```
 
-The `aggregated` object is computed by `computeAggregates()` after the tree is
-built — it is what the table rows, KPI cards, and risk filters all use.
+These values come directly from the DependencyTrack API and are displayed
+as-is in every table row (parent or leaf). No in-code child aggregation is done.
 
 ### Theming
 

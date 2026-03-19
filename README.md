@@ -199,21 +199,22 @@ Full guide: [docs/SBOM_PROJECTS.md](docs/SBOM_PROJECTS.md)
 ## Custom Risk Dashboard
 
 The dashboard at **http://localhost:3000** shows all projects in a risk matrix.
-It works with **mock data** out of the box (no DependencyTrack connection needed)
-and switches to **live data** when you enter an API key.
+It works with **mock data** out of the box (no DependencyTrack connection needed).
+When the installer completes, it automatically saves an API key to `.env` — the
+dashboard then loads live data on first open with no manual configuration required.
 
 ### Features
 
 - **Risk matrix table** — Security (Critical/High/Medium/Low/Unassigned), Operational (Fail/Warn/Info), License (Fail/Warn/Info) — 13 columns total
 - **Hierarchical tree** — mirrors DependencyTrack parent/child structure; fetched top-down via BFS (`onlyRoot=true` → `/children` per level)
-- **Always-aggregated rows** — every row (group or leaf) shows cumulative own + all descendants totals; collapsing hides children without changing the parent's displayed count
+- **Raw API counts per row** — every row (group or leaf) displays the counts exactly as returned by the DependencyTrack API; no in-code child aggregation is performed
 - **Hierarchy level column** — depth in the parent/child tree (Level 1 = root, Level 2 = child, …)
 - **Project hyperlinks** — set a DT Frontend URL in the Connect modal to make project names clickable links into the DependencyTrack UI
 - **Tag chips** — first tag shown inline; "+N more" badge with hover tooltip for additional tags
-- **Level multi-select filter** — show only projects at specific hierarchy depths
-- **Risk level filter** — filters by aggregated risk (parent shown if any descendant has the risk)
+- **Level single-select filter** — show only projects at a specific hierarchy depth
+- **Risk level filter** — filters each project's own API-returned risk data
 - **Category filter** — narrow to Security, Operational, or License risks
-- **KPI summary cards** — always show API-sourced total count; risk totals aggregated from topmost visible nodes; clickable to set risk filter
+- **KPI summary cards** — total project count from API; risk totals summed from each project's own API data; clickable to set risk filter
 - **Search box** — substring match on project name
 - **CSV export** — all filtered rows with full column names
 - **Sortable columns** — click any column header; click again to reverse
@@ -225,10 +226,10 @@ and switches to **live data** when you enter an API key.
 │ Project / Version   │ Lvl │       Security Risk           │ Operational Risk│  License Risk   │
 │                     │     │ Crit  High  Med  Low  Unassn  │ Fail  Warn  Info│ Fail  Warn  Info│
 ├─────────────────────┼─────┼──────────────────────────────┼─────────────────┼─────────────────┤
-│ FreshX Suite        │  1  │  5    18    35   55     8     │  2    12    25  │  1     8    15  │
-│  FreshX-BE          │  2  │  2     8    14   20     3     │  0     5    10  │  0     3     6  │
-│   FreshX-BE  v1.4.1 │  3  │  1     3     6    9     1     │  0     2     4  │  0     1     2  │
-│   FreshX-BE  v1.5.0 │  3  │  0     2     4    7     0     │  0     1     2  │  0     0     1  │
+│ FreshX Suite        │  1  │  2     8    14   20     3     │  0     5    10  │  0     3     6  │ ← own API data
+│  FreshX-BE          │  2  │  1     3     6    9     1     │  0     2     4  │  0     1     2  │ ← own API data
+│   FreshX-BE  v1.4.1 │  3  │  0     2     4    7     0     │  0     1     2  │  0     0     1  │
+│   FreshX-BE  v1.5.0 │  3  │  1     3     6    9     1     │  0     2     4  │  0     1     2  │
 └─────────────────────┴─────┴──────────────────────────────┴─────────────────┴─────────────────┘
 ```
 

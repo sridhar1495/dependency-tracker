@@ -435,20 +435,10 @@
         <option value="license">License</option>
       </select>
 
-      <!-- Level multi-select -->
-      <div class="ms-wrap" id="levelWrap">
-        <div class="ms-btn" id="levelBtn" onclick="toggleDropdown('levelPanel')">
-          Level <span class="ms-badge" id="levelBadge" style="display:none"></span>
-          <span class="ms-caret">▾</span>
-        </div>
-        <div class="ms-panel" id="levelPanel">
-          <div class="ms-panel-header">
-            <span style="font-size:11px;color:var(--text-muted)">Hierarchy depth</span>
-            <button onclick="clearFilter('level')">Clear</button>
-          </div>
-          <div id="levelOptions"><span class="ms-empty">Load data first</span></div>
-        </div>
-      </div>
+      <!-- Level single-select -->
+      <select class="filter-select" id="levelFilter" onchange="applyFilters()">
+        <option value="all">All levels</option>
+      </select>
 
       <!-- Tags multi-select -->
       <div class="ms-wrap" id="tagWrap">
@@ -464,6 +454,7 @@
           <div id="tagOptions"><span class="ms-empty">Load data first</span></div>
         </div>
       </div>
+      <div style="flex:1"></div>
       <button class="btn" id="expandCollapseBtn" onclick="toggleExpandCollapse()" title="Expand all groups">▼ Expand All</button>
       <button class="btn export" onclick="exportCSV()">↓ Export CSV</button>
     </div>
@@ -563,7 +554,6 @@ let filtered       = [];   // flat array matching current filters (for CSV + cou
 let treeRoots      = [];   // root TreeNode[]
 let nodeMap        = new Map(); // uuid → TreeNode
 let expandedUuids  = new Set();
-let selectedLevels = new Set();
 let selectedTags   = new Set();
 let sortCol        = 'name';
 let sortDir        = 'asc';
@@ -675,32 +665,6 @@ function buildTree(projects) {
   return roots;
 }
 
-// ── Compute aggregated totals (bottom-up, sum of self + all descendants) ──
-function computeAggregates(node) {
-  if (node.children.length === 0) {
-    node.aggregated = {
-      security:   { ...node.security },
-      operations: { ...node.operations },
-      license:    { ...node.license },
-    };
-    return;
-  }
-  node.children.forEach(computeAggregates);
-
-  const agg = {
-    security:   { critical:0, high:0, medium:0, low:0, unassigned:0 },
-    operations: { fail:0, warn:0, info:0 },
-    license:    { fail:0, warn:0, info:0 },
-  };
-  // Include this node's own data
-  CATS.forEach(c => CAT_LEVELS[c].forEach(l => { agg[c][l] += node[c][l] || 0; }));
-  // Include all children recursively
-  node.children.forEach(child => {
-    CATS.forEach(c => CAT_LEVELS[c].forEach(l => { agg[c][l] += child.aggregated[c][l] || 0; }));
-  });
-  node.aggregated = agg;
-}
-
 // ── Infer parent-child relationships from project list data ────────────────
 // Fallback when DT does not supply parent.uuid via the API.
 // Called on the raw project array (before enrichment) so parentUuid is available
@@ -782,7 +746,6 @@ function computeLevels(projects) {
 // ── After data load: build tree + compute aggregates + set all expanded ────
 function afterLoad() {
   treeRoots = buildTree(allProjects);
-  treeRoots.forEach(computeAggregates);
   expandedUuids = new Set(allProjects.map(p => p.uuid));
   buildFilterOptions();
   applyFilters(); // sets filtered, then calls renderSummary + renderTree + updateExpandCollapseBtn
@@ -866,11 +829,10 @@ function renderTree(matchSet) {
   visibleNodes.forEach(node => {
     const isGroup    = node.children.length > 0;
     const isExpanded = expandedUuids.has(node.uuid);
-    // Always show the cumulative aggregated total for every row so the
-    // number on a parent never changes when it is expanded or collapsed.
-    // For leaves, aggregated == own data.  For groups, it is own + all
-    // descendants — consistent with renderSummary and the Black Duck view.
-    const data = node.aggregated || node;
+    // Always display the raw API-returned counts for every row (parent or leaf).
+    // Parent rows show exactly what DependencyTrack reported for that project;
+    // no in-code aggregation of children is performed.
+    const data = node;
 
     const indent = (node.level - 1) * 22;
     const toggle = isGroup
@@ -969,10 +931,9 @@ function setRiskFilter(val) {
 // ── Build filter option panels ─────────────────────────────────────────────
 function buildFilterOptions() {
   const levels = [...new Set(allProjects.map(p => p.level).filter(l => l != null))].sort((a,b)=>a-b);
-  const lo = document.getElementById('levelOptions');
-  lo.innerHTML = levels.length === 0
-    ? '<span class="ms-empty">No level data</span>'
-    : levels.map(l => `<label><input type="checkbox" value="${l}" onchange="onMultiChange('level')"> Level ${l}${l===1?' <span style="color:var(--text-muted);font-size:11px">(Top)</span>':''}</label>`).join('');
+  const lf = document.getElementById('levelFilter');
+  lf.innerHTML = '<option value="all">All levels</option>' +
+    levels.map(l => `<option value="${l}">Level ${l}${l===1?' (Top)':''}</option>`).join('');
 
   const tags = [...new Set(allProjects.flatMap(p => p.tags || []))].sort();
   const to = document.getElementById('tagOptions');
@@ -980,32 +941,26 @@ function buildFilterOptions() {
     ? '<span class="ms-empty">No tags found</span>'
     : tags.map(t => `<label><input type="checkbox" value="${escHtml(t)}" onchange="onMultiChange('tag')"> ${escHtml(t)}</label>`).join('');
 
-  selectedLevels.clear();
   selectedTags.clear();
   updateBadges();
 }
 
 // ── Filters ────────────────────────────────────────────────────────────────
 function applyFilters() {
-  const q    = document.getElementById('searchInput').value.toLowerCase();
-  const risk = document.getElementById('riskFilter').value;
-  const cat  = document.getElementById('categoryFilter').value;
+  const q        = document.getElementById('searchInput').value.toLowerCase();
+  const risk     = document.getElementById('riskFilter').value;
+  const cat      = document.getElementById('categoryFilter').value;
+  const levelVal = document.getElementById('levelFilter').value;
 
-  // flat filtered array: nodes that directly match (for CSV + count)
+  // flat filtered array: each project's own (API-returned) data is used directly
   filtered = allProjects.filter(proj => {
     if (q && !proj.name.toLowerCase().includes(q)) return false;
     if (risk !== 'all') {
-      // Use the node's aggregated totals (own + all descendants) so that
-      // a parent group is included whenever any child carries the chosen
-      // risk level — matching what every tree row now visually displays.
-      const node = nodeMap.get(proj.uuid);
-      const agg  = (node && node.aggregated) || proj;
-      if (risk === 'ok') { if (riskScore(agg) !== 0) return false; }
+      if (risk === 'ok') { if (riskScore(proj) !== 0) return false; }
       else {
         const catsToCheck = cat === 'all' ? CATS : [cat];
-        // ops/license use fail/warn/info — map filter levels accordingly
         const hasRisk = catsToCheck.some(c => {
-          const d = agg[c] || {};
+          const d = proj[c] || {};
           if (c === 'security') {
             if (risk === 'critical') return (d.critical||0) > 0;
             if (risk === 'high')     return (d.high||0) > 0;
@@ -1021,7 +976,7 @@ function applyFilters() {
         if (!hasRisk) return false;
       }
     }
-    if (selectedLevels.size > 0 && !selectedLevels.has(proj.level)) return false;
+    if (levelVal !== 'all' && proj.level !== parseInt(levelVal)) return false;
     if (selectedTags.size > 0) {
       const pt = new Set(proj.tags || []);
       for (const t of selectedTags) { if (!pt.has(t)) return false; }
@@ -1029,14 +984,11 @@ function applyFilters() {
     return true;
   });
 
-  // matchSet for tree visibility (null = no filter active = show all)
-  const hasFilter = q || risk !== 'all' || selectedLevels.size > 0 || selectedTags.size > 0;
+  const hasFilter = q || risk !== 'all' || levelVal !== 'all' || selectedTags.size > 0;
   const matchSet  = hasFilter ? new Set(filtered.map(p => p.uuid)) : null;
 
-  // Project count in header: always the raw API total, never a derived count
-  const isFiltered = q || risk !== 'all' || selectedLevels.size > 0 || selectedTags.size > 0;
   document.getElementById('projectCount').textContent =
-    isFiltered ? `(${filtered.length} matching of ${allProjects.length})` : `(${allProjects.length})`;
+    hasFilter ? `(${filtered.length} matching of ${allProjects.length})` : `(${allProjects.length})`;
   renderSummary();
   renderTree(matchSet);
   updateExpandCollapseBtn();
@@ -1069,32 +1021,20 @@ document.addEventListener('click', e => {
   }
 });
 function onMultiChange(type) {
-  if (type === 'level') {
-    selectedLevels = new Set([...document.querySelectorAll('#levelOptions input:checked')].map(i => parseInt(i.value)));
-  } else {
-    selectedTags = new Set([...document.querySelectorAll('#tagOptions input:checked')].map(i => i.value));
-  }
+  selectedTags = new Set([...document.querySelectorAll('#tagOptions input:checked')].map(i => i.value));
   updateBadges();
   applyFilters();
 }
 function clearFilter(type) {
-  if (type === 'level') {
-    document.querySelectorAll('#levelOptions input').forEach(i => { i.checked = false; });
-    selectedLevels.clear();
-  } else {
-    document.querySelectorAll('#tagOptions input').forEach(i => { i.checked = false; });
-    selectedTags.clear();
-  }
+  document.querySelectorAll('#tagOptions input').forEach(i => { i.checked = false; });
+  selectedTags.clear();
   updateBadges();
   applyFilters();
 }
 function updateBadges() {
-  const lb = document.getElementById('levelBadge'), lBtn = document.getElementById('levelBtn');
-  const tb = document.getElementById('tagBadge'),   tBtn = document.getElementById('tagBtn');
-  if (selectedLevels.size > 0) { lb.textContent = selectedLevels.size; lb.style.display = ''; lBtn.classList.add('active'); }
-  else                         { lb.style.display = 'none'; lBtn.classList.remove('active'); }
-  if (selectedTags.size > 0)   { tb.textContent = selectedTags.size;   tb.style.display = ''; tBtn.classList.add('active'); }
-  else                         { tb.style.display = 'none'; tBtn.classList.remove('active'); }
+  const tb = document.getElementById('tagBadge'), tBtn = document.getElementById('tagBtn');
+  if (selectedTags.size > 0) { tb.textContent = selectedTags.size; tb.style.display = ''; tBtn.classList.add('active'); }
+  else                       { tb.style.display = 'none'; tBtn.classList.remove('active'); }
 }
 
 // ── Auto-refresh ───────────────────────────────────────────────────────────
