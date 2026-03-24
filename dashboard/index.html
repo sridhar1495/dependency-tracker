@@ -457,7 +457,7 @@
   </main>
 
   <footer class="footer">
-    <div class="footer-brand">Mettler-Toledo&reg; International Inc. &mdash; Internal Security Dashboard</div>
+    <div class="footer-brand">Internal Security Dashboard</div>
     <div>
       Powered by OWASP Dependency-Track Community Edition &nbsp;&middot;&nbsp;
       <a href="https://docs.dependencytrack.org" target="_blank" style="color:var(--accent)">docs.dependencytrack.org</a>
@@ -599,7 +599,6 @@ function generateMockProjects() {
       version:    node.version || '',
       parentUuid: parentUuid || null,
       level,
-      tags:       node.tags || [],
       isLatest:   !hasChildren && !!node.version && (Math.random() > 0.5),
       security:   hasChildren ? mkSec(5,20,40,60,10) : mkSec(3,8,15,20,5),
       operations: hasChildren ? mkPol(2,12,25) : mkPol(1,5,10),
@@ -730,6 +729,9 @@ function computeLevels(projects) {
 // recalculated — tile clicks and filter changes do not alter these values.
 function computeSummaryTotals() {
   const allUuids = new Set(allProjects.map(p => p.uuid));
+
+  // Violation totals: summed from root projects only to avoid double-counting
+  // (parent + children counts would inflate the numbers).
   const roots = allProjects.filter(p => !p.parentUuid || !allUuids.has(p.parentUuid));
   const t = { critical:0, high:0, medium:0, low:0 };
   roots.forEach(p => {
@@ -741,7 +743,18 @@ function computeSummaryTotals() {
     t.medium   += (s.medium||0)   + (o.info||0)  + (l.info||0);
     t.low      += (s.low||0)      + (s.unassigned||0);
   });
-  t.risky = allProjects.filter(p => riskScore(p) > 0).length;
+
+  // Project counts: leaf projects only (parents are organisational containers,
+  // not actual codebases). A leaf is a project that no other project lists as its parent.
+  const parentUuids = new Set(allProjects.map(p => p.parentUuid).filter(Boolean));
+  const leaves = allProjects.filter(p => !parentUuids.has(p.uuid));
+  t.leafCount        = leaves.length;
+  t.risky            = leaves.filter(p => riskScore(p) > 0).length;
+  t.criticalProjects = leaves.filter(p => (p.security.critical||0)+(p.operations.fail||0)+(p.license.fail||0) > 0).length;
+  t.highProjects     = leaves.filter(p => (p.security.high||0)+(p.operations.warn||0)+(p.license.warn||0) > 0).length;
+  t.mediumProjects   = leaves.filter(p => (p.security.medium||0)+(p.operations.info||0)+(p.license.info||0) > 0).length;
+  t.lowProjects      = leaves.filter(p => (p.security.low||0)+(p.security.unassigned||0) > 0).length;
+
   summaryTotals = t;
 }
 
@@ -856,8 +869,9 @@ function renderTree(matchSet) {
 // Tile clicks and filter changes do not alter these numbers.
 // Only the active-highlight on the clicked tile updates dynamically.
 function renderSummary() {
-  const { critical, high, medium, low, risky } = summaryTotals;
-  const allCount   = allProjects.length;
+  const { critical, high, medium, low, risky, leafCount,
+          criticalProjects, highProjects, mediumProjects, lowProjects } = summaryTotals;
+  const allCount   = leafCount;   // leaf projects only
   const activeRisk = document.getElementById('riskFilter').value;
 
   function card(label, valueHtml, sub, filterVal) {
@@ -869,12 +883,12 @@ function renderSummary() {
   }
 
   document.getElementById('summaryGrid').innerHTML =
-    card('Projects',        `<span style="color:var(--accent)">${allCount}</span>`, `${risky} with risks`, 'all') +
-    card('Critical Issues', `<span class="c-critical">${critical}</span>`, 'click to filter', 'critical') +
-    card('High Issues',     `<span class="c-high">${high}</span>`,         'click to filter', 'high') +
-    card('Medium Issues',   `<span class="c-medium">${medium}</span>`,     'click to filter', 'medium') +
-    card('Low Issues',      `<span class="c-low">${low}</span>`,           'click to filter', 'low') +
-    card('Clean',           `<span class="c-ok">${allCount - risky}</span>`, 'click to filter', 'ok');
+    card('Projects',        `<span style="color:var(--accent)">${allCount}</span>`,   `${risky} with risks`, 'all') +
+    card('Critical Issues', `<span class="c-critical">${critical}</span>`, `${criticalProjects} projects · click to filter`, 'critical') +
+    card('High Issues',     `<span class="c-high">${high}</span>`,         `${highProjects} projects · click to filter`,     'high') +
+    card('Medium Issues',   `<span class="c-medium">${medium}</span>`,     `${mediumProjects} projects · click to filter`,   'medium') +
+    card('Low Issues',      `<span class="c-low">${low}</span>`,           `${lowProjects} projects · click to filter`,      'low') +
+    card('Clean',           `<span class="c-ok">${allCount - risky}</span>`, `${allCount - risky} projects · click to filter`, 'ok');
 }
 
 function setRiskFilter(val) {
@@ -1261,7 +1275,6 @@ async function fetchProjectMetrics(p, key) {
     name:       p.name,
     version:    p.version || '',
     parentUuid: p.parent?.uuid || p.parentUuid || null,
-    tags:       (p.tags || []).map(t => t.name || t).filter(Boolean),
     isLatest:   p.isLatest === true,
     security: sec, operations: ops, license: lic,
   };
