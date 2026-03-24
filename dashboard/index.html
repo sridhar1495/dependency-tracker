@@ -272,27 +272,6 @@
       background: var(--surface2); border: 1px solid var(--border);
       border-radius: 4px; padding: 1px 5px;
     }
-    .tag-chip {
-      display: inline-block; margin-left: 4px;
-      font-size: 10px; color: #a78bfa;
-      background: rgba(167,139,250,0.1); border: 1px solid rgba(167,139,250,0.25);
-      border-radius: 4px; padding: 1px 5px;
-    }
-    /* "+N more" tag overflow badge with hover tooltip */
-    .tag-more {
-      display: inline-block; margin-left: 4px; position: relative;
-      font-size: 10px; color: var(--text-muted);
-      background: var(--surface2); border: 1px solid var(--border);
-      border-radius: 4px; padding: 1px 5px; cursor: default; vertical-align: middle;
-    }
-    .tag-more .tag-tooltip {
-      display: none; position: absolute; top: calc(100% + 4px); left: 0; z-index: 300;
-      background: var(--surface); border: 1px solid var(--border);
-      border-radius: 6px; padding: 8px; white-space: nowrap;
-      box-shadow: 0 4px 16px rgba(0,0,0,0.45);
-      flex-wrap: wrap; gap: 4px; min-width: max-content;
-    }
-    .tag-more:hover .tag-tooltip { display: flex; }
     a.project-link { color: inherit; text-decoration: none; }
     a.project-link:hover { color: var(--accent); text-decoration: underline; }
     a.nav-icon {
@@ -438,18 +417,18 @@
         <option value="all">All levels</option>
       </select>
 
-      <!-- Tags multi-select -->
-      <div class="ms-wrap" id="tagWrap">
-        <div class="ms-btn" id="tagBtn" onclick="toggleDropdown('tagPanel')">
-          Tags <span class="ms-badge" id="tagBadge" style="display:none"></span>
+      <!-- Version multi-select (OR logic: show projects matching any selected version) -->
+      <div class="ms-wrap" id="versionWrap">
+        <div class="ms-btn" id="versionBtn" onclick="toggleDropdown('versionPanel')">
+          Version <span class="ms-badge" id="versionBadge" style="display:none"></span>
           <span class="ms-caret">▾</span>
         </div>
-        <div class="ms-panel" id="tagPanel">
+        <div class="ms-panel" id="versionPanel">
           <div class="ms-panel-header">
-            <span style="font-size:11px;color:var(--text-muted)">Project tags</span>
-            <button onclick="clearFilter('tag')">Clear</button>
+            <span style="font-size:11px;color:var(--text-muted)">Project versions</span>
+            <button onclick="clearFilter('version')">Clear</button>
           </div>
-          <div id="tagOptions"><span class="ms-empty">Load data first</span></div>
+          <div id="versionOptions"><span class="ms-empty">Load data first</span></div>
         </div>
       </div>
       <button class="btn" id="latestFilterBtn" onclick="toggleLatestFilter()" title="Show only projects marked as Latest version (+ their parent groups)">★ Latest Only</button>
@@ -553,8 +532,8 @@ let allProjects      = [];   // flat array (source of truth)
 let filtered         = [];   // flat array matching current filters (for CSV + count)
 let treeRoots        = [];   // root TreeNode[]
 let nodeMap          = new Map(); // uuid → TreeNode
-let expandedUuids    = new Set();
-let selectedTags     = new Set();
+let expandedUuids      = new Set();
+let selectedVersions   = new Set(); // OR logic: show projects whose version is in this set
 let summaryTotals    = null; // computed once after data load; never recalculated
 let filterLatestOnly = false; // when true: show only isLatest=true projects + ancestors
 let liveMode         = false;
@@ -854,18 +833,7 @@ function renderTree(matchSet) {
 
     const vBadge = node.version ? `<span class="version-badge">v${escHtml(node.version)}</span>` : '';
 
-    // Show first tag as a chip; overflow tags become a "+N more" badge with hover tooltip
-    const tags = node.tags || [];
-    let tagHtml = '';
-    if (tags.length > 0) {
-      tagHtml = `<span class="tag-chip">${escHtml(tags[0])}</span>`;
-      if (tags.length > 1) {
-        const rest = tags.slice(1).map(t => `<span class="tag-chip">${escHtml(t)}</span>`).join('');
-        tagHtml += `<span class="tag-more">+${tags.length - 1}<span class="tag-tooltip">${rest}</span></span>`;
-      }
-    }
-
-    let html = `<td class="project-name" style="padding-left:${indent + 10}px">${toggle}<span class="proj-name-text" title="${nameInner}">${nameInner}</span>${navIcon}${vBadge}${tagHtml}</td>`;
+    let html = `<td class="project-name" style="padding-left:${indent + 10}px">${toggle}<span class="proj-name-text" title="${nameInner}">${nameInner}</span>${navIcon}${vBadge}</td>`;
     html += `<td class="level-cell">${node.level}</td>`;
     html += `<td>${node.isLatest ? '<input type="checkbox" disabled checked title="Latest version">' : ''}</td>`;
 
@@ -923,13 +891,13 @@ function buildFilterOptions() {
   lf.innerHTML = '<option value="all">All levels</option>' +
     levels.map(l => `<option value="${l}">Level ${l}${l===1?' (Top)':''}</option>`).join('');
 
-  const tags = [...new Set(allProjects.flatMap(p => p.tags || []))].sort();
-  const to = document.getElementById('tagOptions');
-  to.innerHTML = tags.length === 0
-    ? '<span class="ms-empty">No tags found</span>'
-    : tags.map(t => `<label><input type="checkbox" value="${escHtml(t)}" onchange="onMultiChange('tag')"> ${escHtml(t)}</label>`).join('');
+  const versions = [...new Set(allProjects.map(p => p.version).filter(Boolean))].sort();
+  const vo = document.getElementById('versionOptions');
+  vo.innerHTML = versions.length === 0
+    ? '<span class="ms-empty">No versions found</span>'
+    : versions.map(v => `<label><input type="checkbox" value="${escHtml(v)}" onchange="onMultiChange('version')"> ${escHtml(v)}</label>`).join('');
 
-  selectedTags.clear();
+  selectedVersions.clear();
   updateBadges();
 }
 
@@ -965,10 +933,9 @@ function applyFilters() {
       }
     }
     if (levelVal !== 'all' && proj.level !== parseInt(levelVal)) return false;
-    if (selectedTags.size > 0) {
-      const pt = new Set(proj.tags || []);
-      for (const t of selectedTags) { if (!pt.has(t)) return false; }
-    }
+    // Version filter uses OR logic: show projects whose version matches any selected value.
+    // (A project has exactly one version, so AND across multiple selections would always be empty.)
+    if (selectedVersions.size > 0 && !selectedVersions.has(proj.version || '')) return false;
     return true;
   });
 
@@ -991,7 +958,7 @@ function applyFilters() {
     filtered = allProjects.filter(p => toInclude.has(p.uuid));
   }
 
-  const hasFilter = q || risk !== 'all' || levelVal !== 'all' || selectedTags.size > 0 || filterLatestOnly;
+  const hasFilter = q || risk !== 'all' || levelVal !== 'all' || selectedVersions.size > 0 || filterLatestOnly;
   const matchSet  = hasFilter ? new Set(filtered.map(p => p.uuid)) : null;
 
   document.getElementById('projectCount').textContent =
@@ -1016,25 +983,25 @@ function toggleDropdown(panelId) {
   if (!isOpen) p.classList.add('open');
 }
 document.addEventListener('click', e => {
-  if (!e.target.closest('.ms-wrap')) {
+  if (!e.target.closest('.ms-wrap') && !e.target.closest('.ms-btn')) {
     document.querySelectorAll('.ms-panel.open').forEach(p => p.classList.remove('open'));
   }
 });
 function onMultiChange(type) {
-  selectedTags = new Set([...document.querySelectorAll('#tagOptions input:checked')].map(i => i.value));
+  selectedVersions = new Set([...document.querySelectorAll('#versionOptions input:checked')].map(i => i.value));
   updateBadges();
   applyFilters();
 }
 function clearFilter(type) {
-  document.querySelectorAll('#tagOptions input').forEach(i => { i.checked = false; });
-  selectedTags.clear();
+  document.querySelectorAll('#versionOptions input').forEach(i => { i.checked = false; });
+  selectedVersions.clear();
   updateBadges();
   applyFilters();
 }
 function updateBadges() {
-  const tb = document.getElementById('tagBadge'), tBtn = document.getElementById('tagBtn');
-  if (selectedTags.size > 0) { tb.textContent = selectedTags.size; tb.style.display = ''; tBtn.classList.add('active'); }
-  else                       { tb.style.display = 'none'; tBtn.classList.remove('active'); }
+  const vb = document.getElementById('versionBadge'), vBtn = document.getElementById('versionBtn');
+  if (selectedVersions.size > 0) { vb.textContent = selectedVersions.size; vb.style.display = ''; vBtn.classList.add('active'); }
+  else                           { vb.style.display = 'none'; vBtn.classList.remove('active'); }
 }
 
 // ── Auto-refresh ───────────────────────────────────────────────────────────
@@ -1071,7 +1038,7 @@ function exportCSV() {
   if (filtered.length === 0) { alert('No rows to export — adjust your filters.'); return; }
 
   const headers = [
-    'Project','Version','Level','Tags','Type','Latest',
+    'Project','Version','Level','Type','Latest',
     'Security Critical','Security High','Security Medium','Security Low','Security Unassigned',
     'Operational Fail','Operational Warn','Operational Info',
     'License Fail','License Warn','License Info',
@@ -1081,7 +1048,7 @@ function exportCSV() {
     const node = nodeMap.get(p.uuid);
     const type = (node && node.children.length > 0) ? 'Group' : 'Project';
     return [
-      p.name, p.version || '', p.level ?? '', (p.tags || []).join('; '), type, p.isLatest ? 'Yes' : '',
+      p.name, p.version || '', p.level ?? '', type, p.isLatest ? 'Yes' : '',
       p.security.critical,    p.security.high,    p.security.medium,    p.security.low,    p.security.unassigned,
       p.operations.fail,      p.operations.warn,  p.operations.info,
       p.license.fail,         p.license.warn,     p.license.info,
