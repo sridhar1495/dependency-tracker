@@ -1264,6 +1264,28 @@ async function fetchProjectMetrics(p, key) {
       }
       ops = { fail: m2.policyViolationsOperationalFail||0, warn: m2.policyViolationsOperationalWarn||0, info: m2.policyViolationsOperationalInfo||0 };
       lic = { fail: m2.policyViolationsLicenseFail||0, warn: m2.policyViolationsLicenseWarn||0, info: m2.policyViolationsLicenseInfo||0 };
+
+      // Fallback: some DependencyTrack versions return only the category Total
+      // (policyViolationsLicenseTotal / policyViolationsOperationalTotal) without
+      // the per-severity breakdown (LicenseFail/Warn/Info etc.).  When that
+      // happens all three parsed fields are 0 even though violations exist.
+      // Distribute the missing category total using the overall Fail/Warn/Info
+      // proportions (policyViolationsFail/Warn/Info are always present).
+      const _oFail = m2.policyViolationsFail || 0;
+      const _oWarn = m2.policyViolationsWarn || 0;
+      const _oInfo = m2.policyViolationsInfo || 0;
+      function _spread(catTotal) {
+        if (catTotal === 0) return { fail: 0, warn: 0, info: 0 };
+        const tot = _oFail + _oWarn + _oInfo;
+        if (tot === 0) return { fail: 0, warn: 0, info: catTotal };
+        const f = Math.round(catTotal * _oFail / tot);
+        const w = Math.round(catTotal * _oWarn / tot);
+        return { fail: f, warn: w, info: catTotal - f - w };
+      }
+      const licTotal = m2.policyViolationsLicenseTotal || 0;
+      if (licTotal > 0 && lic.fail + lic.warn + lic.info === 0) lic = _spread(licTotal);
+      const opsTotal = m2.policyViolationsOperationalTotal || 0;
+      if (opsTotal > 0 && ops.fail + ops.warn + ops.info === 0) ops = _spread(opsTotal);
     }
   } catch(_) {}
 
