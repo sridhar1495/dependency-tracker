@@ -15,10 +15,15 @@
 
 ## 1. Overview
 
+> **Screenshots:** Place dashboard screenshots in `docs/images/` and reference
+> them below. Suggested captures: full dashboard view, KPI cards area, filter row
+> with ★ Latest Only active, tree with a collapsed group, Connect API modal.
+> Example reference: `![Dashboard overview](images/dashboard-overview.png)`
+
 The custom risk dashboard is a **standalone, single-file HTML application**
 served by an Nginx container on port `3000`. It provides:
 
-- A sortable, filterable **hierarchical tree view** mirroring the DependencyTrack
+- A filterable **hierarchical tree view** mirroring the DependencyTrack
   parent/child project structure
 - **Expand/collapse** per group row — each row always shows its own API-returned
   counts; collapsing a group hides its children but does not change the parent's numbers
@@ -90,11 +95,12 @@ only shows/hides children; it does not alter any displayed number.
 |---------------------|------------------------------------------|-------------------------------------|
 | Project / Version   | —                                        | `name`, `version`, `tags`           |
 | Lvl                 | —                                        | Computed from parent chain depth    |
+| Latest              | —                                        | `isLatest` field from DT API; shown as a disabled checked checkbox when `true`, blank when `false` |
 | Security Risk       | Critical · High · Medium · Low · Unassigned | DT vulnerability CVSS severities |
 | Operational Risk    | Fail · Warn · Info                       | `policyViolationsOperational*`      |
 | License Risk        | Fail · Warn · Info                       | `policyViolationsLicense*`          |
 
-**Total: 13 columns** — 1 project name + 1 level + 5 security + 3 operational + 3 license.
+**Total: 14 columns** — 1 project name + 1 level + 1 latest + 5 security + 3 operational + 3 license.
 
 ### Colour coding
 
@@ -168,13 +174,6 @@ child-a=5, child-b=2, the card shows 7 — not 14.
 Cards are clickable — clicking sets the risk-level filter on the table (which
 narrows the rows) but does not alter the card values themselves.
 
-### Sorting
-
-Click any column header to sort by that value. Click again to reverse.
-- Default sort: project name A–Z
-- Numeric columns: highest values first when clicking
-- Sort is applied within each sibling group, preserving the tree hierarchy.
-
 ### Filtering
 
 | Filter | Type | Behaviour |
@@ -184,9 +183,18 @@ Click any column header to sort by that value. Click again to reverse.
 | Category | Single-select | Narrow to Security, Operational, or License category |
 | Level | Single-select | Show only projects at the selected hierarchy depth |
 | Tags | Multi-select dropdown | Show only projects that have ALL selected tags |
+| ★ Latest Only | Toggle button | Show only projects marked `isLatest = true` in DependencyTrack, plus their full ancestor chain up to the root |
 
 All filters combine with AND logic. When a filter matches a child project, its
 ancestor group rows are automatically shown so the tree context is preserved.
+
+The **★ Latest Only** toggle is applied after all other filters: it first narrows
+the working set to `isLatest = true` projects that also pass all other filters,
+then re-adds every ancestor of those projects (even if the ancestor would not
+have passed the other filters) so the tree hierarchy is always intact.
+
+> **Note:** The sibling order within each group is alphabetical (A–Z), set once
+> when the tree is built. There are no sortable column headers.
 
 ---
 
@@ -321,6 +329,7 @@ Source: `GET /api/v1/project?onlyRoot=true` and `GET /api/v1/project/{uuid}/chil
 | Version         | `version`          |                                               |
 | Hierarchy level | `parent.uuid`      | Stamped during BFS fetch; guaranteed accurate |
 | Tags            | `tags[].name`      | DT returns `[{name:"..."}, ...]`; flattened   |
+| Latest          | `isLatest`         | `true` when DependencyTrack marks this as the latest version of the project |
 
 ### Security Risk
 
@@ -431,11 +440,13 @@ in the CSV. A **Type** column identifies each row as `Group` or `Project`.
 CSV column layout:
 
 ```
-Project, Version, Level, Tags, Type,
+Project, Version, Level, Tags, Type, Latest,
 Security Critical, Security High, Security Medium, Security Low, Security Unassigned,
 Operational Fail, Operational Warn, Operational Info,
 License Fail, License Warn, License Info
 ```
+
+The **Latest** column contains `Yes` for projects where `isLatest = true`, and blank otherwise.
 
 Tags are semicolon-separated within the Tags cell. All values are
 double-quote-escaped (RFC 4180 compliant).
@@ -466,6 +477,13 @@ Each project object in the dashboard has:
 
 ```javascript
 {
+  uuid:       'string',
+  name:       'string',
+  version:    'string',
+  parentUuid: 'string | null',
+  level:      1,            // hierarchy depth (1 = root)
+  isLatest:   true,         // from DT's isLatest field; false for group/intermediate nodes
+  tags:       ['string'],
   security: {
     critical: 0, high: 0, medium: 0, low: 0, unassigned: 0
   },

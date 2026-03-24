@@ -230,11 +230,9 @@
       font-size: 11px; font-weight: 600;
       text-transform: uppercase; letter-spacing: 0.5px;
       color: var(--text-muted); border-bottom: 2px solid var(--border);
-      white-space: nowrap; cursor: pointer; user-select: none; text-align: center;
+      white-space: nowrap; cursor: default; user-select: none; text-align: center;
     }
-    .th-col:hover { color: var(--text); }
-    .th-col.sort-asc::after  { content: ' ↑'; color: var(--accent); }
-    .th-col.sort-desc::after { content: ' ↓'; color: var(--accent); }
+    .th-latest { min-width: 54px; }
     .th-project { text-align: left; padding-left: 12px; min-width: 220px; max-width: 320px; }
     .th-level   { min-width: 44px; }
 
@@ -454,6 +452,7 @@
           <div id="tagOptions"><span class="ms-empty">Load data first</span></div>
         </div>
       </div>
+      <button class="btn" id="latestFilterBtn" onclick="toggleLatestFilter()" title="Show only projects marked as Latest version (+ their parent groups)">★ Latest Only</button>
       <div style="flex:1"></div>
       <button class="btn" id="expandCollapseBtn" onclick="toggleExpandCollapse()" title="Expand all groups">▼ Expand All</button>
       <button class="btn export" onclick="exportCSV()">↓ Export CSV</button>
@@ -464,8 +463,9 @@
       <table id="riskTable">
         <thead>
           <tr>
-            <th class="th-col th-project" rowspan="2" onclick="sortBy('name')">Project / Version</th>
-            <th class="th-col th-level"   rowspan="2" onclick="sortBy('level')" title="Hierarchy depth">Lvl</th>
+            <th class="th-col th-project" rowspan="2">Project / Version</th>
+            <th class="th-col th-level"   rowspan="2" title="Hierarchy depth">Lvl</th>
+            <th class="th-col th-latest"  rowspan="2" title="Marked as latest version in DependencyTrack">Latest</th>
             <th class="th-group security"   colspan="5">Security Risk</th>
             <th class="th-group operations" colspan="3">Operational Risk</th>
             <th class="th-group license"    colspan="3">License Risk</th>
@@ -549,16 +549,15 @@ const CAT_LEVELS = {
 const CATS = ['security','operations','license'];
 
 // ── State ─────────────────────────────────────────────────────────────────
-let allProjects    = [];   // flat array (source of truth)
-let filtered       = [];   // flat array matching current filters (for CSV + count)
-let treeRoots      = [];   // root TreeNode[]
-let nodeMap        = new Map(); // uuid → TreeNode
-let expandedUuids  = new Set();
-let selectedTags   = new Set();
-let summaryTotals  = null; // computed once after data load; never recalculated
-let sortCol        = 'name';
-let sortDir        = 'asc';
-let liveMode       = false;
+let allProjects      = [];   // flat array (source of truth)
+let filtered         = [];   // flat array matching current filters (for CSV + count)
+let treeRoots        = [];   // root TreeNode[]
+let nodeMap          = new Map(); // uuid → TreeNode
+let expandedUuids    = new Set();
+let selectedTags     = new Set();
+let summaryTotals    = null; // computed once after data load; never recalculated
+let filterLatestOnly = false; // when true: show only isLatest=true projects + ancestors
+let liveMode         = false;
 let apiKey         = '';
 let apiBaseUrl     = localStorage.getItem('dt_api_url')      || '';  // '' = use nginx proxy
 let dtFrontendUrl  = localStorage.getItem('dt_frontend_url') || '';  // DT UI base URL for project hyperlinks
@@ -622,6 +621,7 @@ function generateMockProjects() {
       parentUuid: parentUuid || null,
       level,
       tags:       node.tags || [],
+      isLatest:   !hasChildren && !!node.version && (Math.random() > 0.5),
       security:   hasChildren ? mkSec(5,20,40,60,10) : mkSec(3,8,15,20,5),
       operations: hasChildren ? mkPol(2,12,25) : mkPol(1,5,10),
       license:    hasChildren ? mkPol(1,8,15)  : mkPol(1,3,6),
@@ -782,27 +782,11 @@ function hasMatch(node, matchSet) {
 }
 
 // ── collectVisible: nodes to render (respects expand state + filter) ───────
+// Siblings are in the alphabetical order established by buildTree(); no dynamic
+// re-sort is applied (column sorting has been removed).
 function collectVisible(nodes, matchSet) {
-  // Sort siblings by current sort key
-  const sorted = [...nodes].sort((a, b) => {
-    let va, vb;
-    if (sortCol === 'name')  { va = a.name;        vb = b.name; }
-    else if (sortCol === 'level') { va = a.level ?? 99; vb = b.level ?? 99; }
-    else {
-      const [cat, lvl] = sortCol.split('.');
-      // For sorting, use aggregated data for groups
-      const da = a.children.length > 0 ? a.aggregated : a;
-      const db = b.children.length > 0 ? b.aggregated : b;
-      va = (da[cat]?.[lvl] || 0);
-      vb = (db[cat]?.[lvl] || 0);
-    }
-    if (va < vb) return sortDir === 'asc' ? -1 : 1;
-    if (va > vb) return sortDir === 'asc' ?  1 : -1;
-    return 0;
-  });
-
   const result = [];
-  for (const node of sorted) {
+  for (const node of nodes) {
     const visible = matchSet === null || hasMatch(node, matchSet);
     if (!visible) continue;
     result.push(node);
@@ -846,7 +830,7 @@ function renderTree(matchSet) {
   const visibleNodes = collectVisible(treeRoots, matchSet);
 
   if (visibleNodes.length === 0) {
-    tbody.innerHTML = `<tr><td colspan="13" style="text-align:center;padding:40px;color:var(--text-muted)">No projects match your filters.</td></tr>`;
+    tbody.innerHTML = `<tr><td colspan="14" style="text-align:center;padding:40px;color:var(--text-muted)">No projects match your filters.</td></tr>`;
     return;
   }
 
@@ -883,6 +867,7 @@ function renderTree(matchSet) {
 
     let html = `<td class="project-name" style="padding-left:${indent + 10}px">${toggle}<span class="proj-name-text" title="${nameInner}">${nameInner}</span>${navIcon}${vBadge}${tagHtml}</td>`;
     html += `<td class="level-cell">${node.level}</td>`;
+    html += `<td>${node.isLatest ? '<input type="checkbox" disabled checked title="Latest version">' : ''}</td>`;
 
     CATS.forEach((cat, ci) => {
       CAT_LEVELS[cat].forEach((lvl, li) => {
@@ -987,7 +972,26 @@ function applyFilters() {
     return true;
   });
 
-  const hasFilter = q || risk !== 'all' || levelVal !== 'all' || selectedTags.size > 0;
+  // Latest-only filter: keep only isLatest=true projects from current filtered,
+  // then walk each one's ancestor chain and include those parents as well so
+  // the tree path from leaf up to root is always visible.
+  if (filterLatestOnly) {
+    const uuidToProj = new Map(allProjects.map(p => [p.uuid, p]));
+    const latestItems = filtered.filter(p => p.isLatest);
+    const toInclude   = new Set(latestItems.map(p => p.uuid));
+    for (const p of latestItems) {
+      let cur = p;
+      while (cur && cur.parentUuid) {
+        if (toInclude.has(cur.parentUuid)) break;
+        toInclude.add(cur.parentUuid);
+        cur = uuidToProj.get(cur.parentUuid);
+      }
+    }
+    // Rebuild filtered: isLatest items that passed other filters + their ancestors
+    filtered = allProjects.filter(p => toInclude.has(p.uuid));
+  }
+
+  const hasFilter = q || risk !== 'all' || levelVal !== 'all' || selectedTags.size > 0 || filterLatestOnly;
   const matchSet  = hasFilter ? new Set(filtered.map(p => p.uuid)) : null;
 
   document.getElementById('projectCount').textContent =
@@ -997,17 +1001,10 @@ function applyFilters() {
   updateExpandCollapseBtn();
 }
 
-function sortBy(col) {
-  sortDir = (sortCol === col) ? (sortDir === 'asc' ? 'desc' : 'asc') : (col === 'name' ? 'asc' : 'desc');
-  sortCol = col;
-  document.querySelectorAll('.th-col').forEach(th => {
-    th.classList.remove('sort-asc','sort-desc');
-    if (th.dataset.sort === col
-     || (col === 'name'  && th.classList.contains('th-project'))
-     || (col === 'level' && th.classList.contains('th-level'))) {
-      th.classList.add(sortDir === 'asc' ? 'sort-asc' : 'sort-desc');
-    }
-  });
+// ── Latest-only toggle ─────────────────────────────────────────────────────
+function toggleLatestFilter() {
+  filterLatestOnly = !filterLatestOnly;
+  document.getElementById('latestFilterBtn').classList.toggle('ar-on', filterLatestOnly);
   applyFilters();
 }
 
@@ -1074,7 +1071,7 @@ function exportCSV() {
   if (filtered.length === 0) { alert('No rows to export — adjust your filters.'); return; }
 
   const headers = [
-    'Project','Version','Level','Tags','Type',
+    'Project','Version','Level','Tags','Type','Latest',
     'Security Critical','Security High','Security Medium','Security Low','Security Unassigned',
     'Operational Fail','Operational Warn','Operational Info',
     'License Fail','License Warn','License Info',
@@ -1084,7 +1081,7 @@ function exportCSV() {
     const node = nodeMap.get(p.uuid);
     const type = (node && node.children.length > 0) ? 'Group' : 'Project';
     return [
-      p.name, p.version || '', p.level ?? '', (p.tags || []).join('; '), type,
+      p.name, p.version || '', p.level ?? '', (p.tags || []).join('; '), type, p.isLatest ? 'Yes' : '',
       p.security.critical,    p.security.high,    p.security.medium,    p.security.low,    p.security.unassigned,
       p.operations.fail,      p.operations.warn,  p.operations.info,
       p.license.fail,         p.license.warn,     p.license.info,
@@ -1140,8 +1137,6 @@ function buildColHeaders() {
       const th = document.createElement('th');
       th.className = 'th-col' + (li === 0 && ci > 0 ? ' sep-left' : '');
       th.textContent = displayName[lvl] || lvl;
-      th.onclick = () => sortBy(`${cat}.${lvl}`);
-      th.dataset.sort = `${cat}.${lvl}`;
       row.appendChild(th);
     });
   });
@@ -1278,6 +1273,7 @@ async function fetchProjectMetrics(p, key) {
     version:    p.version || '',
     parentUuid: p.parent?.uuid || p.parentUuid || null,
     tags:       (p.tags || []).map(t => t.name || t).filter(Boolean),
+    isLatest:   p.isLatest === true,
     security: sec, operations: ops, license: lic,
   };
 }
