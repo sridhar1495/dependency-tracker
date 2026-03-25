@@ -126,10 +126,16 @@
     .summary-card .value { font-size: 28px; font-weight: 700; line-height: 1; }
     .summary-card .sub { font-size: 11px; color: var(--text-muted); margin-top: 4px; }
     .summary-card .hover-detail {
-      display: none; font-size: 11px; color: var(--text-muted);
-      margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--border);
-      line-height: 1.7;
+      display: none;
+      position: absolute; top: calc(100% + 6px); left: 0; right: 0;
+      background: var(--surface2); border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 10px 14px; font-size: 11px; color: var(--text-muted);
+      line-height: 1.8; white-space: nowrap;
+      box-shadow: 0 6px 20px rgba(0,0,0,0.35);
+      z-index: 50; pointer-events: none;
     }
+    .summary-card { position: relative; }
     .summary-card:hover .hover-detail { display: block; }
     .c-critical { color: var(--critical); }
     .c-high     { color: var(--high); }
