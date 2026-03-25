@@ -130,7 +130,7 @@
       background: var(--surface2); border: 1px solid var(--border);
       border-radius: var(--radius);
       padding: 10px 14px; font-size: 11px; color: var(--text-muted);
-      line-height: 1.8; white-space: nowrap;
+      line-height: 1.8; white-space: normal; word-break: break-word;
       box-shadow: 0 6px 20px rgba(0,0,0,0.35);
       z-index: 50; pointer-events: none;
     }
@@ -270,8 +270,8 @@
       text-align: center; vertical-align: middle;
       font-variant-numeric: tabular-nums;
     }
-    td.project-name { text-align: left; padding-left: 0; white-space: nowrap; max-width: 320px; overflow: visible; position: relative; }
-    /* Truncate only the name text so the tag tooltip can escape the cell */
+    td.project-name { text-align: left; padding-left: 0; white-space: nowrap; max-width: 320px; overflow: hidden; position: relative; }
+    /* Name text truncates with ellipsis; native title= tooltip still works regardless of parent overflow */
     .proj-name-text { display: inline-block; max-width: 200px; overflow: hidden; text-overflow: ellipsis; vertical-align: middle; }
     td.level-cell { color: var(--text-muted); font-size: 12px; font-weight: 600; }
 
@@ -394,9 +394,9 @@
     <button class="btn" onclick="openModal('apiModal')">⚙ Connect API</button>
     <button class="btn" id="arBtn" onclick="toggleAutoRefresh()" title="Toggle auto-refresh">↺ Auto: Off</button>
     <select class="filter-select" id="arInterval" style="display:none" onchange="changeArInterval()" title="Auto-refresh interval">
-      <option value="30">30 sec</option>
-      <option value="60" selected>1 min</option>
-      <option value="300">5 min</option>
+      <option value="300" selected>5 min</option>
+      <option value="900">15 min</option>
+      <option value="1800">30 min</option>
     </select>
     <button class="btn primary" onclick="refreshData()">↻ Refresh</button>
   </header>
@@ -575,7 +575,7 @@ let dtFrontendUrl  = localStorage.getItem('dt_frontend_url') || '';  // DT UI ba
 let dtProxyTarget  = '';  // raw DT_API_INTERNAL_URL from /dt-config (informational)
 let preconfiguredKey = false;  // true when apiKey came from DT_API_KEY env var (auto-connect)
 let autoRefreshTimer   = null;
-let autoRefreshSeconds = 60;
+let autoRefreshSeconds = 300;
 let flatView           = false;  // when true: leaf-only flat list, no hierarchy
 
 // ── Mock Data ─────────────────────────────────────────────────────────────
