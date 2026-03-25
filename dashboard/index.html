@@ -125,6 +125,12 @@
     }
     .summary-card .value { font-size: 28px; font-weight: 700; line-height: 1; }
     .summary-card .sub { font-size: 11px; color: var(--text-muted); margin-top: 4px; }
+    .summary-card .hover-detail {
+      display: none; font-size: 11px; color: var(--text-muted);
+      margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--border);
+      line-height: 1.7;
+    }
+    .summary-card:hover .hover-detail { display: block; }
     .c-critical { color: var(--critical); }
     .c-high     { color: var(--high); }
     .c-medium   { color: var(--medium); }
@@ -432,6 +438,7 @@
         </div>
       </div>
       <button class="btn" id="latestFilterBtn" onclick="toggleLatestFilter()" title="Show only projects marked as Latest version (+ their parent groups)">★ Latest Only</button>
+      <button class="btn" id="flatViewBtn" onclick="toggleFlatView()" title="Show only leaf projects in a flat list (no hierarchy)">⊟ Flat View</button>
       <div style="flex:1"></div>
       <button class="btn" id="expandCollapseBtn" onclick="toggleExpandCollapse()" title="Expand all groups">▼ Expand All</button>
       <button class="btn export" onclick="exportCSV()">↓ Export CSV</button>
@@ -544,6 +551,7 @@ let dtProxyTarget  = '';  // raw DT_API_INTERNAL_URL from /dt-config (informatio
 let preconfiguredKey = false;  // true when apiKey came from DT_API_KEY env var (auto-connect)
 let autoRefreshTimer   = null;
 let autoRefreshSeconds = 60;
+let flatView           = false;  // when true: leaf-only flat list, no hierarchy
 
 // ── Mock Data ─────────────────────────────────────────────────────────────
 function generateMockProjects() {
@@ -734,6 +742,7 @@ function computeSummaryTotals() {
   // (parent + children counts would inflate the numbers).
   const roots = allProjects.filter(p => !p.parentUuid || !allUuids.has(p.parentUuid));
   const t = { critical:0, high:0, medium:0, low:0 };
+  let _sCrit=0,_oFail=0,_lFail=0, _sHigh=0,_oWarn=0,_lWarn=0, _sMed=0,_oInfo=0,_lInfo=0, _sLow=0,_sUn=0;
   roots.forEach(p => {
     const s = p.security   || {};
     const o = p.operations || {};
@@ -742,7 +751,17 @@ function computeSummaryTotals() {
     t.high     += (s.high||0)     + (o.warn||0)  + (l.warn||0);
     t.medium   += (s.medium||0)   + (o.info||0)  + (l.info||0);
     t.low      += (s.low||0)      + (s.unassigned||0);
+    _sCrit+=(s.critical||0); _oFail+=(o.fail||0); _lFail+=(l.fail||0);
+    _sHigh+=(s.high||0);     _oWarn+=(o.warn||0); _lWarn+=(l.warn||0);
+    _sMed+=(s.medium||0);    _oInfo+=(o.info||0); _lInfo+=(l.info||0);
+    _sLow+=(s.low||0);       _sUn+=(s.unassigned||0);
   });
+  t.breakdown = {
+    critical: { sec: _sCrit, ops: _oFail, lic: _lFail },
+    high:     { sec: _sHigh, ops: _oWarn, lic: _lWarn },
+    medium:   { sec: _sMed,  ops: _oInfo, lic: _lInfo },
+    low:      { sec: _sLow,  unassigned: _sUn },
+  };
 
   // Project counts: leaf projects only (parents are organisational containers,
   // not actual codebases). A leaf is a project that no other project lists as its parent.
@@ -864,31 +883,68 @@ function renderTree(matchSet) {
   });
 }
 
+// ── Render flat list (leaf projects only, no hierarchy) ────────────────────
+function renderFlatList() {
+  const tbody = document.getElementById('tableBody');
+  tbody.innerHTML = '';
+  if (filtered.length === 0) {
+    tbody.innerHTML = `<tr><td colspan="14" style="text-align:center;padding:40px;color:var(--text-muted)">No projects match your filters.</td></tr>`;
+    return;
+  }
+  filtered.forEach(node => {
+    const nameInner = escHtml(node.name);
+    const navIcon = dtFrontendUrl
+      ? `<a class="nav-icon" href="${escHtml(dtFrontendUrl)}/projects/${escHtml(node.uuid)}" target="_blank" rel="noopener" title="Open in DependencyTrack">&#x2197;</a>`
+      : '';
+    const vBadge = node.version ? `<span class="version-badge">v${escHtml(node.version)}</span>` : '';
+    let html = `<td class="project-name" style="padding-left:10px"><span class="tree-indent"></span><span class="proj-name-text" title="${nameInner}">${nameInner}</span>${navIcon}${vBadge}</td>`;
+    html += `<td class="level-cell">${node.level}</td>`;
+    html += `<td>${node.isLatest ? '<input type="checkbox" disabled checked title="Latest version">' : ''}</td>`;
+    CATS.forEach((cat, ci) => {
+      CAT_LEVELS[cat].forEach((lvl, li) => {
+        const val = (node[cat] || {})[lvl] || 0;
+        html += `<td class="${li === 0 && ci > 0 ? 'sep-left' : ''}">${pillFor(val, lvl)}</td>`;
+      });
+    });
+    const tr = document.createElement('tr');
+    tr.innerHTML = html;
+    tbody.appendChild(tr);
+  });
+}
+
 // ── KPI summary cards ──────────────────────────────────────────────────────
 // Values come from summaryTotals, computed once after data load.
 // Tile clicks and filter changes do not alter these numbers.
 // Only the active-highlight on the clicked tile updates dynamically.
 function renderSummary() {
   const { critical, high, medium, low, risky, leafCount,
-          criticalProjects, highProjects, mediumProjects, lowProjects } = summaryTotals;
+          criticalProjects, highProjects, mediumProjects, lowProjects, breakdown } = summaryTotals;
   const allCount   = leafCount;   // leaf projects only
   const activeRisk = document.getElementById('riskFilter').value;
+  const bd = breakdown;
 
-  function card(label, valueHtml, sub, filterVal) {
+  function card(label, valueHtml, sub, filterVal, hoverDetail) {
     const active = activeRisk === filterVal ? ' active' : '';
     const click  = filterVal
       ? `onclick="setRiskFilter('${filterVal}')" style="cursor:pointer"`
       : '';
-    return `<div class="summary-card${active}" ${click}><div class="label">${label}</div><div class="value">${valueHtml}</div><div class="sub">${sub}</div></div>`;
+    const detail = hoverDetail ? `<div class="hover-detail">${hoverDetail}</div>` : '';
+    return `<div class="summary-card${active}" ${click}><div class="label">${label}</div><div class="value">${valueHtml}</div><div class="sub">${sub}</div>${detail}</div>`;
   }
 
   document.getElementById('summaryGrid').innerHTML =
-    card('Projects',        `<span style="color:var(--accent)">${allCount}</span>`,   `${risky} with risks`, 'all') +
-    card('Critical Issues', `<span class="c-critical">${critical}</span>`, `${criticalProjects} projects · click to filter`, 'critical') +
-    card('High Issues',     `<span class="c-high">${high}</span>`,         `${highProjects} projects · click to filter`,     'high') +
-    card('Medium Issues',   `<span class="c-medium">${medium}</span>`,     `${mediumProjects} projects · click to filter`,   'medium') +
-    card('Low Issues',      `<span class="c-low">${low}</span>`,           `${lowProjects} projects · click to filter`,      'low') +
-    card('Clean',           `<span class="c-ok">${allCount - risky}</span>`, `${allCount - risky} projects · click to filter`, 'ok');
+    card('Projects',        `<span style="color:var(--accent)">${allCount}</span>`,   `${risky} with risks`, 'all',
+         `Total leaf projects: ${allCount}<br>With at least one issue: ${risky}`) +
+    card('Critical Issues', `<span class="c-critical">${critical}</span>`, `${criticalProjects} projects · click to filter`, 'critical',
+         `Security Critical: ${bd.critical.sec}<br>Operational Fail: ${bd.critical.ops}<br>License Fail: ${bd.critical.lic}`) +
+    card('High Issues',     `<span class="c-high">${high}</span>`,         `${highProjects} projects · click to filter`,     'high',
+         `Security High: ${bd.high.sec}<br>Operational Warn: ${bd.high.ops}<br>License Warn: ${bd.high.lic}`) +
+    card('Medium Issues',   `<span class="c-medium">${medium}</span>`,     `${mediumProjects} projects · click to filter`,   'medium',
+         `Security Medium: ${bd.medium.sec}<br>Operational Info: ${bd.medium.ops}<br>License Info: ${bd.medium.lic}`) +
+    card('Low Issues',      `<span class="c-low">${low}</span>`,           `${lowProjects} projects · click to filter`,      'low',
+         `Security Low: ${bd.low.sec}<br>Security Unassigned: ${bd.low.unassigned}`) +
+    card('Clean',           `<span class="c-ok">${allCount - risky}</span>`, `no known risks · click to filter`, 'ok',
+         `Projects with zero issues across all categories`);
 }
 
 function setRiskFilter(val) {
@@ -922,41 +978,54 @@ function applyFilters() {
   const cat      = document.getElementById('categoryFilter').value;
   const levelVal = document.getElementById('levelFilter').value;
 
+  const _parentUuids = new Set(allProjects.map(p => p.parentUuid).filter(Boolean));
+  // In flat view use only leaf projects as the base set
+  const sourceProjects = flatView ? allProjects.filter(p => !_parentUuids.has(p.uuid)) : allProjects;
+
   // flat filtered array: each project's own (API-returned) data is used directly
-  filtered = allProjects.filter(proj => {
+  filtered = sourceProjects.filter(proj => {
     if (q && !proj.name.toLowerCase().includes(q)) return false;
-    if (risk !== 'all') {
-      if (risk === 'ok') { if (riskScore(proj) !== 0) return false; }
-      else {
-        const catsToCheck = cat === 'all' ? CATS : [cat];
-        const hasRisk = catsToCheck.some(c => {
-          const d = proj[c] || {};
-          if (c === 'security') {
-            if (risk === 'critical') return (d.critical||0) > 0;
-            if (risk === 'high')     return (d.high||0) > 0;
-            if (risk === 'medium')   return (d.medium||0) > 0;
-            if (risk === 'low')      return (d.low||0) > 0 || (d.unassigned||0) > 0;
-          } else {
-            if (risk === 'critical') return (d.fail||0) > 0;
-            if (risk === 'high')     return (d.warn||0) > 0;
-            if (risk === 'medium')   return (d.info||0) > 0;
-          }
-          return false;
-        });
-        if (!hasRisk) return false;
+    if (risk === 'ok') {
+      // Clean filter: check only the selected category (or all)
+      if (cat !== 'all') {
+        const d = proj[cat] || {};
+        if (Object.values(d).some(v => v > 0)) return false;
+      } else {
+        if (riskScore(proj) !== 0) return false;
       }
+    } else if (risk !== 'all') {
+      const catsToCheck = cat === 'all' ? CATS : [cat];
+      const hasRisk = catsToCheck.some(c => {
+        const d = proj[c] || {};
+        if (c === 'security') {
+          if (risk === 'critical') return (d.critical||0) > 0;
+          if (risk === 'high')     return (d.high||0) > 0;
+          if (risk === 'medium')   return (d.medium||0) > 0;
+          if (risk === 'low')      return (d.low||0) > 0 || (d.unassigned||0) > 0;
+        } else {
+          if (risk === 'critical') return (d.fail||0) > 0;
+          if (risk === 'high')     return (d.warn||0) > 0;
+          if (risk === 'medium')   return (d.info||0) > 0;
+        }
+        return false;
+      });
+      if (!hasRisk) return false;
+    } else if (cat !== 'all') {
+      // Category filter with no risk level: show only projects with any issue in that category
+      const d = proj[cat] || {};
+      if (!Object.values(d).some(v => v > 0)) return false;
     }
-    if (levelVal !== 'all' && proj.level !== parseInt(levelVal)) return false;
+    // Level filter is disabled in flat view (level select is hidden)
+    if (!flatView && levelVal !== 'all' && proj.level !== parseInt(levelVal)) return false;
     // Version filter uses OR logic: show projects whose version matches any selected value.
     // (A project has exactly one version, so AND across multiple selections would always be empty.)
     if (selectedVersions.size > 0 && !selectedVersions.has(proj.version || '')) return false;
     return true;
   });
 
-  // Latest-only filter: keep only isLatest=true projects from current filtered,
-  // then walk each one's ancestor chain and include those parents as well so
-  // the tree path from leaf up to root is always visible.
-  if (filterLatestOnly) {
+  // Latest-only filter: in hierarchy mode walk ancestor chain for tree visibility;
+  // in flat view simply keep only isLatest=true leaves.
+  if (filterLatestOnly && !flatView) {
     const uuidToProj = new Map(allProjects.map(p => [p.uuid, p]));
     const latestItems = filtered.filter(p => p.isLatest);
     const toInclude   = new Set(latestItems.map(p => p.uuid));
@@ -970,15 +1039,27 @@ function applyFilters() {
     }
     // Rebuild filtered: isLatest items that passed other filters + their ancestors
     filtered = allProjects.filter(p => toInclude.has(p.uuid));
+  } else if (filterLatestOnly && flatView) {
+    filtered = filtered.filter(p => p.isLatest);
   }
 
-  const hasFilter = q || risk !== 'all' || levelVal !== 'all' || selectedVersions.size > 0 || filterLatestOnly;
-  const matchSet  = hasFilter ? new Set(filtered.map(p => p.uuid)) : null;
+  const hasFilter = q || risk !== 'all' || cat !== 'all' || (!flatView && levelVal !== 'all') || selectedVersions.size > 0 || filterLatestOnly;
+
+  // Count only leaf projects for the display (issues 2 & 4):
+  // In flat view filtered is already all leaves; in hierarchy mode exclude parents.
+  const filteredLeafCount = flatView
+    ? filtered.length
+    : filtered.filter(p => !_parentUuids.has(p.uuid)).length;
 
   document.getElementById('projectCount').textContent =
-    hasFilter ? `(${filtered.length} matching of ${allProjects.length})` : `(${allProjects.length})`;
+    hasFilter ? `(${filteredLeafCount} of ${summaryTotals.leafCount} projects)` : `(${summaryTotals.leafCount} projects)`;
   renderSummary();
-  renderTree(matchSet);
+  if (flatView) {
+    renderFlatList();
+  } else {
+    const matchSet = hasFilter ? new Set(filtered.map(p => p.uuid)) : null;
+    renderTree(matchSet);
+  }
   updateExpandCollapseBtn();
 }
 
@@ -986,6 +1067,26 @@ function applyFilters() {
 function toggleLatestFilter() {
   filterLatestOnly = !filterLatestOnly;
   document.getElementById('latestFilterBtn').classList.toggle('ar-on', filterLatestOnly);
+  applyFilters();
+}
+
+// ── Flat view toggle ───────────────────────────────────────────────────────
+function toggleFlatView() {
+  flatView = !flatView;
+  document.getElementById('flatViewBtn').classList.toggle('ar-on', flatView);
+  // Hide level filter and expand/collapse button — not applicable in flat view
+  document.getElementById('levelFilter').style.display        = flatView ? 'none' : '';
+  document.getElementById('expandCollapseBtn').style.display  = flatView ? 'none' : '';
+  if (flatView) {
+    // Reset all filters when entering flat view
+    document.getElementById('searchInput').value    = '';
+    document.getElementById('riskFilter').value     = 'all';
+    document.getElementById('categoryFilter').value = 'all';
+    document.getElementById('levelFilter').value    = 'all';
+    clearFilter('version');
+    filterLatestOnly = false;
+    document.getElementById('latestFilterBtn').classList.remove('ar-on');
+  }
   applyFilters();
 }
 
