@@ -71,7 +71,6 @@
     .status-dot {
       width: 8px; height: 8px; border-radius: 50%;
       background: var(--ok);
-      animation: pulse 2s ease-in-out infinite;
     }
     @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:0.4} }
 
@@ -169,6 +168,14 @@
       border-radius: var(--radius); color: var(--text); font-size: 13px;
       padding: 7px 12px; outline: none; cursor: pointer;
     }
+
+    /* ── Fixed widths — prevent layout shift when text/options change ──────── */
+    #riskFilter       { width: 142px; }
+    #categoryFilter   { width: 150px; }
+    #levelFilter      { width: 110px; }
+    #latestFilterBtn,
+    #flatViewBtn      { min-width: 110px; justify-content: center; }
+    #expandCollapseBtn { min-width: 122px; justify-content: center; }
 
     /* ── Multi-select dropdown ────────────────────────────────────────────── */
     .ms-wrap { position: relative; }
@@ -307,7 +314,7 @@
     .pill-medium   { background: var(--medium-bg);   color: var(--medium); }
     .pill-low      { background: var(--low-bg);      color: var(--low); }
     .pill-zero       { color: var(--text-muted); font-size: 11px; }
-    .pill-unassigned { background: rgba(136,146,164,0.12); color: var(--text-muted); }
+    .pill-unassigned { background: rgba(255,255,255,0.08); color: var(--text); }
     .sep-left        { border-left: 2px solid var(--border); }
 
     /* ── Data mode banner ─────────────────────────────────────────────────── */
@@ -411,6 +418,12 @@
     <!-- Controls row 2: filters + tree actions + export -->
     <div class="controls filters">
       <input class="search-input" id="searchInput" placeholder="Search projects…" oninput="applyFilters()" />
+
+      <!-- Toggle buttons immediately after search -->
+      <button class="btn" id="latestFilterBtn" onclick="toggleLatestFilter()" title="Show only projects marked as Latest version (+ their parent groups)">★ Latest Only</button>
+      <button class="btn" id="flatViewBtn" onclick="toggleFlatView()" title="Show only leaf projects in a flat list (no hierarchy)">⊟ Flat View</button>
+
+      <!-- Dropdowns: Risk → Category → Version → Level (last, hidden in flat view) -->
       <select class="filter-select" id="riskFilter" onchange="applyFilters()">
         <option value="all">All risk levels</option>
         <option value="critical">Has Critical</option>
@@ -427,11 +440,6 @@
         <option value="secpolicy">Security Policy</option>
       </select>
 
-      <!-- Level single-select -->
-      <select class="filter-select" id="levelFilter" onchange="applyFilters()">
-        <option value="all">All levels</option>
-      </select>
-
       <!-- Version multi-select (OR logic: show projects matching any selected version) -->
       <div class="ms-wrap" id="versionWrap">
         <div class="ms-btn" id="versionBtn" onclick="toggleDropdown('versionPanel')">
@@ -446,8 +454,12 @@
           <div id="versionOptions"><span class="ms-empty">Load data first</span></div>
         </div>
       </div>
-      <button class="btn" id="latestFilterBtn" onclick="toggleLatestFilter()" title="Show only projects marked as Latest version (+ their parent groups)">★ Latest Only</button>
-      <button class="btn" id="flatViewBtn" onclick="toggleFlatView()" title="Show only leaf projects in a flat list (no hierarchy)">⊟ Flat View</button>
+
+      <!-- Level filter last — hidden in flat view so it doesn't shift the layout -->
+      <select class="filter-select" id="levelFilter" onchange="applyFilters()">
+        <option value="all">All levels</option>
+      </select>
+
       <div style="flex:1"></div>
       <button class="btn" id="expandCollapseBtn" onclick="toggleExpandCollapse()" title="Expand all groups">▼ Expand All</button>
       <button class="btn export" onclick="exportCSV()">↓ Export CSV</button>
@@ -1223,8 +1235,8 @@ function riskScore(proj) {
 function pillFor(n, level) {
   if (n === 0) return `<span class="pill pill-zero">—</span>`;
   const cls = level === 'fail' ? 'critical'
-            : level === 'warn' ? 'high'
-            : level === 'info' ? 'medium'
+            : level === 'warn' ? 'medium'
+            : level === 'info' ? 'low'
             : level;
   return `<span class="pill pill-${cls}">${n}</span>`;
 }
