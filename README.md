@@ -232,10 +232,10 @@ dashboard then loads live data on first open with no manual configuration requir
 │ Project / Version   │ Lvl │ Latest │       Security Risk           │ Operational Risk│  License Risk   │
 │                     │     │        │ Crit  High  Med  Low  Unassn  │ Fail  Warn  Info│ Fail  Warn  Info│
 ├─────────────────────┼─────┼────────┼──────────────────────────────┼─────────────────┼─────────────────┤
-│ FreshX Suite        │  1  │        │  2     8    14   20     3     │  0     5    10  │  0     3     6  │
-│  FreshX-BE          │  2  │        │  1     3     6    9     1     │  0     2     4  │  0     1     2  │
-│   FreshX-BE  v1.4.1 │  3  │  [✓]  │  0     2     4    7     0     │  0     1     2  │  0     0     1  │
-│   FreshX-BE  v1.5.0 │  3  │        │  1     3     6    9     1     │  0     2     4  │  0     1     2  │
+│ Commerce Suite      │  1  │        │  2     8    14   20     3     │  0     5    10  │  0     3     6  │
+│  commerce-be        │  2  │        │  1     3     6    9     1     │  0     2     4  │  0     1     2  │
+│   commerce-be v1.4.1│  3  │  [✓]  │  0     2     4    7     0     │  0     1     2  │  0     0     1  │
+│   commerce-be v1.5.0│  3  │        │  1     3     6    9     1     │  0     2     4  │  0     1     2  │
 └─────────────────────┴─────┴────────┴──────────────────────────────┴─────────────────┴─────────────────┘
   [✓] = disabled checked checkbox (isLatest = true)
 ```
