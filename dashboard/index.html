@@ -583,33 +583,33 @@ function generateMockProjects() {
   const rnd = (max) => Math.floor(Math.random() * (max + 1));
   let idx = 0;
 
-  // Realistic hierarchy matching the DependencyTrack screenshots
+  // Generic sample hierarchy demonstrating multi-level parent/child structure
   const rawTree = [
-    { name: 'Fresh_X_Suite_Dev', tags: ['production'] },
-    { name: 'IND', tags: ['internal'] },
-    { name: 'LAB', tags: ['staging'] },
-    { name: 'LXC_SEC_Test', tags: ['container'] },
-    { name: 'LXC_Test_1.4', version: '1.4', tags: ['container','production'] },
-    { name: 'RET', children: [
-      { name: 'FreshX Suite', children: [
-        { name: 'FreshX-BE', children: [
-          { name: 'FreshX-BE', version: '1.4.1', tags: ['java','production'] },
-          { name: 'FreshX-BE', version: '1.4.2', tags: ['java','production'] },
-          { name: 'FreshX-BE', version: '1.5.0', tags: ['java','staging'] },
+    { name: 'Standalone-App', tags: ['production'] },
+    { name: 'SVC', tags: ['internal'] },
+    { name: 'QA', tags: ['staging'] },
+    { name: 'Infra-Test', tags: ['container'] },
+    { name: 'Core-Lib', version: '1.4', tags: ['container','production'] },
+    { name: 'Retail', children: [
+      { name: 'Commerce Suite', children: [
+        { name: 'commerce-backend', children: [
+          { name: 'commerce-backend', version: '1.4.1', tags: ['java','production'] },
+          { name: 'commerce-backend', version: '1.4.2', tags: ['java','production'] },
+          { name: 'commerce-backend', version: '1.5.0', tags: ['java','staging'] },
         ]},
-        { name: 'FreshX.BE.Containers', children: [
-          { name: 'cs-websocket-proxy', children: [
-            { name: 'cs-websocket-proxy', version: '1.4.1', tags: ['container','production'] },
+        { name: 'Commerce.Containers', children: [
+          { name: 'ws-proxy', children: [
+            { name: 'ws-proxy', version: '1.4.1', tags: ['container','production'] },
           ]},
-          { name: 'freshx-hub-poc',             tags: ['container','staging'] },
-          { name: 'freshx-transform-poc',        tags: ['container','staging'] },
-          { name: 'freshx-workflow-poc',          tags: ['container','staging'] },
-          { name: 'fs-alert-notification-management-service', tags: ['container','production'] },
-          { name: 'fs-application-configuration-service',     tags: ['container','production'] },
-          { name: 'fs-certification-management-service',      tags: ['container','production'] },
-          { name: 'fs-custom-iam-service',                    tags: ['container','production'] },
+          { name: 'hub-poc',               tags: ['container','staging'] },
+          { name: 'transform-poc',         tags: ['container','staging'] },
+          { name: 'workflow-poc',          tags: ['container','staging'] },
+          { name: 'alert-notification-svc',tags: ['container','production'] },
+          { name: 'app-configuration-svc', tags: ['container','production'] },
+          { name: 'cert-management-svc',   tags: ['container','production'] },
+          { name: 'iam-svc',               tags: ['container','production'] },
         ]},
-        { name: 'FreshX-Common', tags: ['java','production'] },
+        { name: 'Commerce-Common', tags: ['java','production'] },
       ]},
     ]},
     { name: 'Platform', children: [
