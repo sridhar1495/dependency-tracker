@@ -74,12 +74,12 @@ DependencyTrack project hierarchy:
 This produces a fully accurate multi-level tree displayed as:
 
 ```
-▶ RET                               (collapsed group — shows its own API-returned counts)
-▼ FreshX Suite                      (expanded group — shows its own API-returned counts)
-    ▶ FreshX-BE                     (collapsed sub-group — shows its own API-returned counts)
-    ▼ FreshX.BE.Containers          (expanded sub-group — shows its own API-returned counts)
-          FreshX-BE v1.4.1          (leaf project)
-          FreshX-BE v1.3.0          (leaf project)
+▶ Retail                            (collapsed group — shows its own API-returned counts)
+▼ Commerce Suite                    (expanded group — shows its own API-returned counts)
+    ▶ commerce-be                   (collapsed sub-group — shows its own API-returned counts)
+    ▼ Commerce.Containers           (expanded sub-group — shows its own API-returned counts)
+          commerce-be v1.4.1        (leaf project)
+          commerce-be v1.3.0        (leaf project)
 ```
 
 **Group rows (▶ / ▼):** rows that have children. Every row — whether a group or leaf —
