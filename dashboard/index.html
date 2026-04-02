@@ -33,15 +33,17 @@
       --radius:       8px;
     }
 
+    html, body { height: 100%; }
     body {
       background: var(--bg);
       color: var(--text);
       font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
       font-size: 14px;
-      min-height: 100vh;
+      overflow: hidden;
     }
 
-    .app { display: flex; flex-direction: column; min-height: 100vh; }
+    /* Full-viewport flex column — topbar + main + footer fill 100vh exactly */
+    .app { display: flex; flex-direction: column; height: 100vh; overflow: hidden; }
 
     /* ── Top Bar ──────────────────────────────────────────────────────────── */
     .topbar {
@@ -52,8 +54,7 @@
       align-items: center;
       padding: 0 24px;
       gap: 16px;
-      position: sticky;
-      top: 0;
+      flex-shrink: 0;
       z-index: 100;
     }
     .topbar-logo {
@@ -98,16 +99,22 @@
       background: rgba(34,197,94,0.12); border-color: rgba(34,197,94,0.35); color: var(--ok);
     }
     .btn.ar-on:hover { background: rgba(34,197,94,0.22); border-color: var(--ok); }
+    /* Visually disabled state for auto-refresh in mock mode */
+    .btn.mock-only { opacity: 0.5; }
 
     /* ── Main ─────────────────────────────────────────────────────────────── */
-    .main { flex: 1; padding: 24px; }
+    /* flex:1 + min-height:0 absorbs remaining space between topbar and footer.
+       overflow:hidden ensures only .table-wrap scrolls, not the whole page.
+       display:flex + flex-direction:column lets .table-wrap use flex:1. */
+    .main { flex: 1; min-height: 0; padding: 20px 24px 0; display: flex; flex-direction: column; overflow: hidden; }
 
     /* ── Summary cards ────────────────────────────────────────────────────── */
     .summary-grid {
       display: grid;
       grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
       gap: 16px;
-      margin-bottom: 24px;
+      margin-bottom: 16px;
+      flex-shrink: 0;
     }
     .summary-card {
       background: var(--surface);
@@ -132,8 +139,10 @@
       padding: 10px 14px; font-size: 11px; color: var(--text-muted);
       line-height: 1.8; white-space: normal; word-break: break-word;
       box-shadow: 0 6px 20px rgba(0,0,0,0.35);
-      z-index: 50; pointer-events: none;
+      z-index: 50; pointer-events: none; min-width: 200px;
     }
+    /* Last 2 cards (Low, Clean) — anchor tooltip to right edge to avoid viewport overflow */
+    .summary-card:nth-last-child(-n+2) .hover-detail { left: auto; right: 0; }
     .summary-card { position: relative; }
     .summary-card:hover .hover-detail { display: block; }
     .c-critical { color: var(--critical); }
@@ -146,8 +155,9 @@
     .controls {
       display: flex; align-items: center; gap: 8px;
       flex-wrap: wrap; margin-bottom: 8px;
+      flex-shrink: 0;
     }
-    .controls.filters { margin-bottom: 14px; }
+    .controls.filters { margin-bottom: 10px; }
     .ctrl-title {
       font-size: 18px; font-weight: 600;
       flex: 1; min-width: 160px;
@@ -226,10 +236,25 @@
     .ms-empty { padding: 6px 8px; font-size: 12px; color: var(--text-muted); font-style: italic; }
 
     /* ── Table wrapper ────────────────────────────────────────────────────── */
+    /* flex:1 + min-height:0 fills remaining space in .main column without overflow.
+       Scroll shadow: 4-layer background-attachment trick — the first two (local)
+       cover/hide the shadows at scroll boundaries; the last two (scroll) stay fixed
+       and show a shadow only when content extends past the visible edge. */
     .table-wrap {
-      background: var(--surface); border: 1px solid var(--border);
+      flex: 1; min-height: 0;
+      border: 1px solid var(--border);
       border-radius: var(--radius); overflow: auto;
-      max-height: calc(100vh - 320px);
+      margin-bottom: 8px;
+      background-color: var(--surface);
+      background-image:
+        linear-gradient(to right, var(--surface) 20%, transparent),
+        linear-gradient(to left,  var(--surface) 20%, transparent),
+        linear-gradient(to right, rgba(0,0,0,0.28), transparent),
+        linear-gradient(to left,  rgba(0,0,0,0.28), transparent);
+      background-position: left, right, left, right;
+      background-size: 24px 100%, 24px 100%, 20px 100%, 20px 100%;
+      background-repeat: no-repeat;
+      background-attachment: local, local, scroll, scroll;
     }
     table { width: 100%; border-collapse: collapse; min-width: 900px; }
     thead tr { position: sticky; top: 0; z-index: 10; }
@@ -322,11 +347,14 @@
       display: flex; align-items: center; gap: 10px;
       background: rgba(234,179,8,0.08); border: 1px solid rgba(234,179,8,0.25);
       border-radius: var(--radius); padding: 10px 16px;
-      margin-bottom: 16px; font-size: 13px; color: var(--medium);
+      margin-bottom: 12px; font-size: 13px; color: var(--medium);
+      flex-shrink: 0;
     }
     .data-banner.live {
       background: rgba(34,197,94,0.06); border-color: rgba(34,197,94,0.2); color: var(--ok);
     }
+    /* Inline warning appended to live banner when partial data failures occur */
+    .banner-warn { color: var(--medium); margin-left: 8px; }
 
     /* ── Modal ────────────────────────────────────────────────────────────── */
     .modal-overlay {
@@ -362,8 +390,9 @@
     /* ── Footer ───────────────────────────────────────────────────────────── */
     .footer {
       display: flex; flex-direction: column; align-items: center; gap: 4px;
-      padding: 14px 16px; font-size: 11px;
+      padding: 10px 16px; font-size: 11px;
       color: var(--text-muted); border-top: 1px solid var(--border);
+      flex-shrink: 0;
     }
     .footer-brand { font-size: 12px; font-weight: 600; color: var(--text); letter-spacing: 0.01em; }
 
@@ -372,6 +401,30 @@
     ::-webkit-scrollbar-track { background: transparent; }
     ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
     ::-webkit-scrollbar-thumb:hover { background: #3e4462; }
+
+    /* ── Responsive breakpoints ───────────────────────────────────────────── */
+    /* 1200px: enforce 3-column summary grid */
+    @media (max-width: 1200px) {
+      .summary-grid { grid-template-columns: repeat(3, 1fr); }
+    }
+    /* 900px: 2-column grid, smaller cards */
+    @media (max-width: 900px) {
+      .summary-grid { grid-template-columns: repeat(2, 1fr); gap: 10px; }
+      .summary-card { padding: 14px 16px; }
+      .summary-card .value { font-size: 22px; }
+    }
+    /* 768px: revert to natural page scroll so all content is reachable on mobile */
+    @media (max-width: 768px) {
+      body { overflow: auto; }
+      .app  { height: auto; min-height: 100vh; overflow: visible; }
+      .main { overflow: visible; padding: 12px 12px 0; }
+      .table-wrap { flex: none; max-height: 60vh; margin-bottom: 12px; }
+      .topbar { padding: 0 12px; gap: 8px; }
+      .topbar-subtitle { display: none; }
+      .summary-grid { grid-template-columns: repeat(2, 1fr); gap: 8px; margin-bottom: 10px; }
+      .search-input { width: 140px; }
+      .ctrl-title { font-size: 15px; }
+    }
   </style>
 </head>
 <body>
@@ -417,7 +470,7 @@
 
     <!-- Controls row 2: filters + tree actions + export -->
     <div class="controls filters">
-      <input class="search-input" id="searchInput" placeholder="Search projects…" oninput="applyFilters()" />
+      <input class="search-input" id="searchInput" placeholder="Search projects…" oninput="debouncedFilter()" />
 
       <!-- Toggle buttons immediately after search -->
       <button class="btn" id="latestFilterBtn" onclick="toggleLatestFilter()" title="Show only projects marked as Latest version (+ their parent groups)">★ Latest Only</button>
@@ -544,6 +597,8 @@
 </div>
 
 <script>
+(function () {
+'use strict';
 // ── Constants ─────────────────────────────────────────────────────────────
 // Each category has its own severity levels matching DependencyTrack's data model:
 //   security:   vulnerability CVSS severities
@@ -564,19 +619,23 @@ let allProjects      = [];   // flat array (source of truth)
 let filtered         = [];   // flat array matching current filters (for CSV + count)
 let treeRoots        = [];   // root TreeNode[]
 let nodeMap          = new Map(); // uuid → TreeNode
-let expandedUuids      = new Set();
-let selectedVersions   = new Set(); // OR logic: show projects whose version is in this set
+let expandedUuids    = new Set();
+let selectedVersions = new Set(); // OR logic: show projects whose version is in this set
 let summaryTotals    = null; // computed once after data load; never recalculated
+let parentUuids      = new Set(); // cached in afterLoad(); never recomputed during filtering
+let currentMatchSet  = null;      // last filter match set; reused by lighter expand/collapse render
 let filterLatestOnly = false; // when true: show only isLatest=true projects + ancestors
 let liveMode         = false;
-let apiKey         = '';
-let apiBaseUrl     = localStorage.getItem('dt_api_url')      || '';  // '' = use nginx proxy
-let dtFrontendUrl  = localStorage.getItem('dt_frontend_url') || '';  // DT UI base URL for project hyperlinks
-let dtProxyTarget  = '';  // raw DT_API_INTERNAL_URL from /dt-config (informational)
+let apiKey           = '';
+let apiBaseUrl       = localStorage.getItem('dt_api_url')      || '';  // '' = use nginx proxy
+let dtFrontendUrl    = localStorage.getItem('dt_frontend_url') || '';  // DT UI base URL for project hyperlinks
+let dtProxyTarget    = '';  // raw DT_API_INTERNAL_URL from /dt-config (informational)
 let preconfiguredKey = false;  // true when apiKey came from DT_API_KEY env var (auto-connect)
 let autoRefreshTimer   = null;
 let autoRefreshSeconds = 300;
 let flatView           = false;  // when true: leaf-only flat list, no hierarchy
+let _searchDebounce    = null;   // timer id for search input debounce (200 ms)
+let _fetchController   = null;   // AbortController — cancelled on every new connect/refresh
 
 // ── Mock Data ─────────────────────────────────────────────────────────────
 function generateMockProjects() {
@@ -742,38 +801,53 @@ function inferParentUuids(projects) {
   });
 }
 
-// ── Compute hierarchy depth from parent chain (live data) ─────────────────
+// ── Compute hierarchy depth — iterative with memoisation ──────────────────
+// Walks the parent chain iteratively (no stack overflow on deep trees).
+// Results are cached in a Map so each project's level is computed only once,
+// even when multiple children share the same ancestor path.
 function computeLevels(projects) {
-  const byUuid = {};
-  projects.forEach(p => { byUuid[p.uuid] = p; });
-  function depth(p, visited) {
-    if (!p.parentUuid) return 1;
-    if (visited.has(p.uuid)) return 1;
-    visited.add(p.uuid);
-    const parent = byUuid[p.parentUuid];
-    return parent ? 1 + depth(parent, visited) : 2;
+  const byUuid = new Map(projects.map(p => [p.uuid, p]));
+  const cache  = new Map();
+
+  function getLevel(startProject) {
+    if (cache.has(startProject.uuid)) return cache.get(startProject.uuid);
+    // Collect the uncached chain from this node up to the first cached ancestor
+    const chain = [];
+    let cur = startProject;
+    while (cur && !cache.has(cur.uuid)) {
+      chain.push(cur);
+      cur = cur.parentUuid ? byUuid.get(cur.parentUuid) : null;
+    }
+    // Base level: cached ancestor depth, or 0 if we reached the true root
+    let level = cur ? cache.get(cur.uuid) : 0;
+    // Fill the chain back-to-front (deepest ancestor first)
+    for (let i = chain.length - 1; i >= 0; i--) {
+      level++;
+      cache.set(chain[i].uuid, level);
+    }
+    return cache.get(startProject.uuid);
   }
-  projects.forEach(p => { p.level = depth(p, new Set()); });
+
+  projects.forEach(p => { p.level = getLevel(p); });
 }
 
 // ── Compute KPI card totals once after data loads ─────────────────────────
-// Sums only the true root projects (no parent in the dataset) so that
-// parent=7, child-a=5, child-b=2 → shows 7, not 14.
-// Called once per data load; result stored in summaryTotals and never
-// recalculated — tile clicks and filter changes do not alter these values.
+// Violation totals: summed from root projects only (no parent in the dataset)
+// so parent=7, child-a=5, child-b=2 → shows 7, not 14.
+// Project counts: single-pass over leaves (uses cached module-level parentUuids).
+// Called once per data load; stored in summaryTotals and never recalculated.
 function computeSummaryTotals() {
+  // parentUuids is set by afterLoad() before this is called — no recomputation needed.
   const allUuids = new Set(allProjects.map(p => p.uuid));
-
-  // Violation totals: summed from root projects only to avoid double-counting
-  // (parent + children counts would inflate the numbers).
   const roots = allProjects.filter(p => !p.parentUuid || !allUuids.has(p.parentUuid));
+
   const t = { critical:0, high:0, medium:0, low:0 };
   let _sCrit=0,_oFail=0,_lFail=0,_spFail=0,
       _sHigh=0,_oWarn=0,_lWarn=0,_spWarn=0,
       _sMed=0, _oInfo=0,_lInfo=0,_spInfo=0,
       _sLow=0,_sUn=0;
   roots.forEach(p => {
-    const s  = p.security  || {};
+    const s  = p.security   || {};
     const o  = p.operations || {};
     const l  = p.license    || {};
     const sp = p.secpolicy  || {};
@@ -793,27 +867,38 @@ function computeSummaryTotals() {
     low:      { sec: _sLow,  unassigned: _sUn },
   };
 
-  // Project counts: leaf projects only (parents are organisational containers,
-  // not actual codebases). A leaf is a project that no other project lists as its parent.
-  const parentUuids = new Set(allProjects.map(p => p.parentUuid).filter(Boolean));
-  const leaves = allProjects.filter(p => !parentUuids.has(p.uuid));
-  t.leafCount        = leaves.length;
-  t.risky            = leaves.filter(p => riskScore(p) > 0).length;
-  t.criticalProjects = leaves.filter(p => (p.security.critical||0)+(p.operations.fail||0)+(p.license.fail||0)+(p.secpolicy?.fail||0) > 0).length;
-  t.highProjects     = leaves.filter(p => (p.security.high||0)+(p.operations.warn||0)+(p.license.warn||0)+(p.secpolicy?.warn||0) > 0).length;
-  t.mediumProjects   = leaves.filter(p => (p.security.medium||0)+(p.operations.info||0)+(p.license.info||0)+(p.secpolicy?.info||0) > 0).length;
-  t.lowProjects      = leaves.filter(p => (p.security.low||0)+(p.security.unassigned||0) > 0).length;
+  // Single-pass over all projects — skip non-leaves via parentUuids cache.
+  // Replaces 6 separate .filter() passes on the leaves array.
+  let leafCount=0, risky=0, criticalProjects=0, highProjects=0, mediumProjects=0, lowProjects=0;
+  allProjects.forEach(p => {
+    if (parentUuids.has(p.uuid)) return; // not a leaf
+    leafCount++;
+    if (riskScore(p) > 0) risky++;
+    if ((p.security.critical||0)+(p.operations.fail||0)+(p.license.fail||0)+(p.secpolicy?.fail||0) > 0) criticalProjects++;
+    if ((p.security.high||0)+(p.operations.warn||0)+(p.license.warn||0)+(p.secpolicy?.warn||0) > 0) highProjects++;
+    if ((p.security.medium||0)+(p.operations.info||0)+(p.license.info||0)+(p.secpolicy?.info||0) > 0) mediumProjects++;
+    if ((p.security.low||0)+(p.security.unassigned||0) > 0) lowProjects++;
+  });
+  t.leafCount        = leafCount;
+  t.risky            = risky;
+  t.criticalProjects = criticalProjects;
+  t.highProjects     = highProjects;
+  t.mediumProjects   = mediumProjects;
+  t.lowProjects      = lowProjects;
 
   summaryTotals = t;
 }
 
-// ── After data load: build tree + set all expanded ─────────────────────────
+// ── After data load: build tree + populate caches ─────────────────────────
 function afterLoad() {
   treeRoots = buildTree(allProjects);
+  // Cache parentUuids once — used by applyFilters() and computeSummaryTotals()
+  // throughout the session without recomputation.
+  parentUuids = new Set(allProjects.map(p => p.parentUuid).filter(Boolean));
   computeSummaryTotals();
   expandedUuids = new Set(allProjects.map(p => p.uuid));
   buildFilterOptions();
-  applyFilters(); // sets filtered, then calls renderSummary + renderTree + updateExpandCollapseBtn
+  applyFilters(); // sets filtered + currentMatchSet, then renders summary + tree
 }
 
 // ── hasMatch: does this node or any descendant match the set? ──────────────
@@ -839,19 +924,22 @@ function collectVisible(nodes, matchSet) {
 }
 
 // ── Tree expand / collapse ─────────────────────────────────────────────────
+// Lighter render path: only expand state changed, filters/summary are unchanged.
+// Uses currentMatchSet cached by the last applyFilters() call — no re-filtering.
 function toggleNode(uuid) {
-  if (expandedUuids.has(uuid)) { expandedUuids.delete(uuid); }
-  else                         { expandedUuids.add(uuid); }
-  applyFilters();
+  if (expandedUuids.has(uuid)) expandedUuids.delete(uuid);
+  else                         expandedUuids.add(uuid);
+  renderTree(currentMatchSet);      // skip applyFilters + renderSummary — not needed
+  updateExpandCollapseBtn();
 }
 
-// Single button that expands when any group is collapsed, collapses when all are expanded.
 function toggleExpandCollapse() {
   const groups = allProjects.filter(p => { const n = nodeMap.get(p.uuid); return n && n.children.length > 0; });
   const allExpanded = groups.length > 0 && groups.every(p => expandedUuids.has(p.uuid));
   if (allExpanded) expandedUuids.clear();
-  else allProjects.forEach(p => expandedUuids.add(p.uuid));
-  applyFilters();
+  else             allProjects.forEach(p => expandedUuids.add(p.uuid));
+  renderTree(currentMatchSet);      // skip applyFilters + renderSummary — not needed
+  updateExpandCollapseBtn();
 }
 
 function updateExpandCollapseBtn() {
@@ -875,13 +963,12 @@ function renderTree(matchSet) {
     return;
   }
 
+  // Build all rows off-DOM in a DocumentFragment then append once — reduces
+  // browser reflow to a single paint instead of one per row.
+  const frag = document.createDocumentFragment();
   visibleNodes.forEach(node => {
     const isGroup    = node.children.length > 0;
     const isExpanded = expandedUuids.has(node.uuid);
-    // Always display the raw API-returned counts for every row (parent or leaf).
-    // Parent rows show exactly what DependencyTrack reported for that project;
-    // no in-code aggregation of children is performed.
-    const data = node;
 
     const indent = (node.level - 1) * 22;
     const toggle = isGroup
@@ -901,7 +988,7 @@ function renderTree(matchSet) {
 
     CATS.forEach((cat, ci) => {
       CAT_LEVELS[cat].forEach((lvl, li) => {
-        const val = (data[cat] || {})[lvl] || 0;
+        const val = (node[cat] || {})[lvl] || 0;
         html += `<td class="${li === 0 && ci > 0 ? 'sep-left' : ''}">${pillFor(val, lvl)}</td>`;
       });
     });
@@ -909,8 +996,9 @@ function renderTree(matchSet) {
     const tr = document.createElement('tr');
     tr.innerHTML = html;
     if (isGroup) tr.classList.add('group-row');
-    tbody.appendChild(tr);
+    frag.appendChild(tr);
   });
+  tbody.appendChild(frag);
 }
 
 // ── Render flat list (leaf projects only, no hierarchy) ────────────────────
@@ -921,6 +1009,7 @@ function renderFlatList() {
     tbody.innerHTML = `<tr><td colspan="20" style="text-align:center;padding:40px;color:var(--text-muted)">No projects match your filters.</td></tr>`;
     return;
   }
+  const frag = document.createDocumentFragment();
   filtered.forEach(node => {
     const nameInner = escHtml(node.name);
     const navIcon = dtFrontendUrl
@@ -938,8 +1027,9 @@ function renderFlatList() {
     });
     const tr = document.createElement('tr');
     tr.innerHTML = html;
-    tbody.appendChild(tr);
+    frag.appendChild(tr);
   });
+  tbody.appendChild(frag);
 }
 
 // ── KPI summary cards ──────────────────────────────────────────────────────
@@ -1001,6 +1091,12 @@ function buildFilterOptions() {
   updateBadges();
 }
 
+// ── Search debounce ────────────────────────────────────────────────────────
+function debouncedFilter() {
+  clearTimeout(_searchDebounce);
+  _searchDebounce = setTimeout(applyFilters, 200);
+}
+
 // ── Filters ────────────────────────────────────────────────────────────────
 function applyFilters() {
   const q        = document.getElementById('searchInput').value.toLowerCase();
@@ -1008,9 +1104,8 @@ function applyFilters() {
   const cat      = document.getElementById('categoryFilter').value;
   const levelVal = document.getElementById('levelFilter').value;
 
-  const _parentUuids = new Set(allProjects.map(p => p.parentUuid).filter(Boolean));
-  // In flat view use only leaf projects as the base set
-  const sourceProjects = flatView ? allProjects.filter(p => !_parentUuids.has(p.uuid)) : allProjects;
+  // Use the module-level parentUuids cache (set once in afterLoad) — no per-call rebuild.
+  const sourceProjects = flatView ? allProjects.filter(p => !parentUuids.has(p.uuid)) : allProjects;
 
   // flat filtered array: each project's own (API-returned) data is used directly
   filtered = sourceProjects.filter(proj => {
@@ -1079,16 +1174,19 @@ function applyFilters() {
   // In flat view filtered is already all leaves; in hierarchy mode exclude parents.
   const filteredLeafCount = flatView
     ? filtered.length
-    : filtered.filter(p => !_parentUuids.has(p.uuid)).length;
+    : filtered.filter(p => !parentUuids.has(p.uuid)).length;
 
   document.getElementById('projectCount').textContent =
     hasFilter ? `(${filteredLeafCount} of ${summaryTotals.leafCount} projects)` : `(${summaryTotals.leafCount} projects)`;
   renderSummary();
+
+  // Cache match set for lighter expand/collapse render paths (toggleNode, toggleExpandCollapse).
+  currentMatchSet = hasFilter ? new Set(filtered.map(p => p.uuid)) : null;
+
   if (flatView) {
     renderFlatList();
   } else {
-    const matchSet = hasFilter ? new Set(filtered.map(p => p.uuid)) : null;
-    renderTree(matchSet);
+    renderTree(currentMatchSet);
   }
   updateExpandCollapseBtn();
 }
@@ -1149,8 +1247,55 @@ function updateBadges() {
   else                           { vb.style.display = 'none'; vBtn.classList.remove('active'); }
 }
 
+// ── Status dot helper ──────────────────────────────────────────────────────
+function setStatus(text, color, pulsing) {
+  const anim = pulsing ? 'animation:pulse 0.8s infinite' : '';
+  document.getElementById('apiStatus').innerHTML =
+    `<div class="status-dot" style="background:${color};${anim}"></div><span>${escHtml(text)}</span>`;
+}
+
+// ── localStorage cache ─────────────────────────────────────────────────────
+const CACHE_KEY    = 'dt_projects_cache';
+const CACHE_TS_KEY = 'dt_projects_ts';
+
+function saveToCache() {
+  try {
+    localStorage.setItem(CACHE_KEY,    JSON.stringify(allProjects));
+    localStorage.setItem(CACHE_TS_KEY, Date.now().toString());
+  } catch(_) { /* storage quota exceeded — skip silently */ }
+}
+
+// Loads the last successful live dataset from localStorage and renders it.
+// Returns true when valid cache was found so the caller can skip loadMockData().
+function tryLoadCache() {
+  try {
+    const raw = localStorage.getItem(CACHE_KEY);
+    const ts  = localStorage.getItem(CACHE_TS_KEY);
+    if (!raw) return false;
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed) || parsed.length === 0) return false;
+    allProjects = parsed;
+    liveMode = true;
+    const ageMin = ts ? Math.round((Date.now() - parseInt(ts, 10)) / 60000) : null;
+    document.getElementById('dataBanner').innerHTML =
+      `↺ Showing cached data${ageMin !== null ? ` (${ageMin} min old)` : ''} — connecting to live API…`;
+    document.getElementById('dataBanner').className = 'data-banner';
+    setStatus('Cached', 'var(--medium)', false);
+    afterLoad();
+    return true;
+  } catch(_) { return false; }
+}
+
 // ── Auto-refresh ───────────────────────────────────────────────────────────
 function toggleAutoRefresh() {
+  if (!liveMode) {
+    // Not connected — show a brief hint on the button instead of silently doing nothing
+    const btn = document.getElementById('arBtn');
+    const orig = btn.textContent;
+    btn.textContent = '⚠ Connect API first';
+    setTimeout(() => { btn.textContent = orig; }, 2000);
+    return;
+  }
   if (autoRefreshTimer) {
     clearInterval(autoRefreshTimer);
     autoRefreshTimer = null;
@@ -1266,8 +1411,15 @@ function loadMockData() {
   document.getElementById('dataBanner').innerHTML =
     '⚠ Showing <strong>mock data</strong> — click "Connect Live API" to pull real project risks.';
   document.getElementById('dataBanner').className = 'data-banner';
-  document.getElementById('apiStatus').innerHTML =
-    '<div class="status-dot" style="background:var(--medium)"></div><span>Mock Data</span>';
+  setStatus('Mock Data', 'var(--medium)', false);
+  // Stop auto-refresh when switching to mock mode — it can't do anything useful
+  if (autoRefreshTimer) {
+    clearInterval(autoRefreshTimer);
+    autoRefreshTimer = null;
+    const btn = document.getElementById('arBtn');
+    if (btn) { btn.textContent = '↺ Auto: Off'; btn.classList.remove('ar-on'); }
+    document.getElementById('arInterval').style.display = 'none';
+  }
   afterLoad();
 }
 
@@ -1282,15 +1434,15 @@ function loadMockData() {
 // regardless of whether the flat list endpoint includes the parent field.
 async function fetchAllProjects(key) {
   const pageSize = 500;
+  const signal   = _fetchController ? _fetchController.signal : undefined;
 
-  // Fetch every page of any paginated DT endpoint, return the combined array.
   async function fetchAllPages(url) {
     let page = 1, all = [];
     while (true) {
       const sep = url.includes('?') ? '&' : '?';
       const res = await fetch(
         `${url}${sep}pageSize=${pageSize}&pageNumber=${page}&excludeInactive=false`,
-        { headers: { 'X-Api-Key': key } }
+        { headers: { 'X-Api-Key': key }, signal }
       );
       if (!res.ok) throw new Error(`HTTP ${res.status} — check your API key`);
       const data = await res.json();
@@ -1357,49 +1509,52 @@ async function fetchAllProjects(key) {
 // (critical/high/medium/low) come from automated SBOM component analysis and do
 // not require any policy configuration.
 async function fetchProjectMetrics(p, key, violationMap) {
+  const signal = _fetchController ? _fetchController.signal : undefined;
   let sec = {critical:0,high:0,medium:0,low:0,unassigned:0};
   const emptyV = () => ({fail:0,warn:0,info:0,unassigned:0});
-  let ops = emptyV();
-  let lic = emptyV();
-  let secpol = emptyV();
+  let ops = emptyV(), lic = emptyV(), secpol = emptyV();
 
-  // Seed security counts from embedded metrics if present
   const m = p.metrics || null;
   if (m) {
     sec = { critical: m.critical||0, high: m.high||0, medium: m.medium||0, low: m.low||0, unassigned: m.unassigned||0 };
   }
 
-  // Fetch the dedicated metrics endpoint for CVSS security counts (when not embedded).
-  // When violationMap is null (violations fetch failed entirely) also use it as a
-  // fallback to estimate ops/lic via proportional spread.
-  try {
-    const mr = await fetch(`${apiBaseUrl}/api/v1/metrics/project/${p.uuid}/current`, {
-      headers: { 'X-Api-Key': key }
-    });
-    if (mr.ok) {
-      const m2 = await mr.json();
-      if (!m) {
-        sec = { critical: m2.critical||0, high: m2.high||0, medium: m2.medium||0, low: m2.low||0, unassigned: m2.unassigned||0 };
-      }
-      // Fallback estimation only when the violation endpoint was unreachable
-      if (violationMap === null) {
-        const _oFail = m2.policyViolationsFail || 0;
-        const _oWarn = m2.policyViolationsWarn || 0;
-        const _oInfo = m2.policyViolationsInfo || 0;
-        function _spread(catTotal) {
-          if (catTotal === 0) return emptyV();
-          const tot = _oFail + _oWarn + _oInfo;
-          if (tot === 0) return { fail:0, warn:0, info:catTotal, unassigned:0 };
-          const f = Math.round(catTotal * _oFail / tot);
-          const w = Math.round(catTotal * _oWarn / tot);
-          return { fail:f, warn:w, info:catTotal-f-w, unassigned:0 };
+  // Skip the dedicated metrics endpoint when embedded data + violationMap are both
+  // available — that eliminates one HTTP round-trip per project (up to 500 saved calls).
+  const needsMetricsFetch = !m || violationMap === null;
+  if (needsMetricsFetch) {
+    try {
+      const mr = await fetch(`${apiBaseUrl}/api/v1/metrics/project/${p.uuid}/current`, {
+        headers: { 'X-Api-Key': key }, signal
+      });
+      if (mr.ok) {
+        const m2 = await mr.json();
+        if (!m) {
+          sec = { critical: m2.critical||0, high: m2.high||0, medium: m2.medium||0, low: m2.low||0, unassigned: m2.unassigned||0 };
         }
-        ops = _spread(m2.policyViolationsOperationalTotal || 0);
-        lic = _spread(m2.policyViolationsLicenseTotal || 0);
-        // secpol stays zero — no way to estimate security policy without violation data
+        // Proportional fallback only when the violation endpoint was entirely unreachable
+        if (violationMap === null) {
+          const _oFail = m2.policyViolationsFail || 0;
+          const _oWarn = m2.policyViolationsWarn || 0;
+          const _oInfo = m2.policyViolationsInfo || 0;
+          function _spread(catTotal) {
+            if (catTotal === 0) return emptyV();
+            const tot = _oFail + _oWarn + _oInfo;
+            if (tot === 0) return { fail:0, warn:0, info:catTotal, unassigned:0 };
+            const f = Math.round(catTotal * _oFail / tot);
+            const w = Math.round(catTotal * _oWarn / tot);
+            return { fail:f, warn:w, info:catTotal-f-w, unassigned:0 };
+          }
+          ops = _spread(m2.policyViolationsOperationalTotal || 0);
+          lic = _spread(m2.policyViolationsLicenseTotal || 0);
+          // secpol stays zero — no way to estimate security policy without violation data
+        }
       }
+    } catch(err) {
+      if (err.name === 'AbortError') throw err; // propagate cancellation
+      // individual project metrics fetch failed — leave sec/ops/lic at zero
     }
-  } catch(_) {}
+  }
 
   // Use exact counts from the violations sweep when available.
   // A project absent from the map simply has zero violations.
@@ -1428,12 +1583,13 @@ async function fetchProjectMetrics(p, key, violationMap) {
 //      Unrecognised types are skipped; null/unknown violationState → 'unassigned' column.
 async function fetchAllViolations(key) {
   const pageSize = 500;
-  const emptyV = () => ({ fail:0, warn:0, info:0, unassigned:0 });
+  const signal   = _fetchController ? _fetchController.signal : undefined;
+  const emptyV   = () => ({ fail:0, warn:0, info:0, unassigned:0 });
 
   async function fetchPage(page) {
     const r = await fetch(
       `${apiBaseUrl}/api/v1/violation?pageSize=${pageSize}&pageNumber=${page}`,
-      { headers: { 'X-Api-Key': key } }
+      { headers: { 'X-Api-Key': key }, signal }
     );
     if (!r.ok) throw new Error(`Violations page ${page}: HTTP ${r.status}`);
     const data  = await r.json();
@@ -1493,14 +1649,13 @@ async function fetchAllViolations(key) {
 
 // ── Connect to live API ────────────────────────────────────────────────────
 async function connectLiveApi(fromModal = false) {
+  // Cancel any in-flight load from a previous connect/refresh — prevents races.
+  if (_fetchController) _fetchController.abort();
+  _fetchController = new AbortController();
+
   if (fromModal) {
     const inputKey = document.getElementById('apiKeyInput').value.trim();
-    if (inputKey) {
-      // User explicitly typed a key — override the pre-configured one
-      apiKey = inputKey;
-      preconfiguredKey = false;
-    }
-    // else: keep existing apiKey (pre-configured or previously connected)
+    if (inputKey) { apiKey = inputKey; preconfiguredKey = false; }
     const urlVal = (document.getElementById('apiUrlInput').value || '').trim().replace(/\/$/, '');
     apiBaseUrl = urlVal;
     if (apiBaseUrl) localStorage.setItem('dt_api_url', apiBaseUrl);
@@ -1514,10 +1669,11 @@ async function connectLiveApi(fromModal = false) {
 
   if (!apiKey) { alert('Please enter an API key.'); return; }
 
-  document.getElementById('apiStatus').innerHTML =
-    '<div class="status-dot" style="background:var(--medium);animation:pulse 0.5s infinite"></div><span>Connecting…</span>';
+  const warnings = [];  // collects non-fatal errors shown in the banner after load
 
   try {
+    // Phase 1 — project hierarchy
+    setStatus('Fetching projects…', 'var(--medium)', true);
     const projects = await fetchAllProjects(apiKey);
 
     if (projects.length === 0) {
@@ -1526,46 +1682,57 @@ async function connectLiveApi(fromModal = false) {
       document.getElementById('dataBanner').innerHTML =
         '✓ Connected — no projects found. Upload an SBOM to get started.';
       document.getElementById('dataBanner').className = 'data-banner live';
-      document.getElementById('apiStatus').innerHTML =
-        '<div class="status-dot"></div><span>Live</span>';
+      setStatus('Live', 'var(--ok)', false);
       closeModal('apiModal');
       afterLoad();
       return true;
     }
 
-    // fetchAllProjects already stamped p.parent.uuid on every child via the
-    // BFS children fetch, so hierarchy is resolved. inferParentUuids runs as
-    // a name-based fallback for projects whose hierarchy is not set up in DT.
     inferParentUuids(projects);
 
-    // Fetch all policy violations in parallel for exact ops/lic/secpolicy counts.
-    // violationMap stays null on failure → fetchProjectMetrics falls back to estimation.
+    // Phase 2 — policy violations (parallel pages for exact ops/lic/secpolicy counts)
+    setStatus('Loading violations…', 'var(--medium)', true);
     let violationMap = null;
-    try { violationMap = await fetchAllViolations(apiKey); } catch(_) {}
+    try {
+      violationMap = await fetchAllViolations(apiKey);
+    } catch(err) {
+      if (err.name === 'AbortError') throw err;
+      warnings.push('Policy violation data unavailable — security counts only');
+    }
 
-    // Fetch CVSS security metrics in batches of 20; pass violationMap for policy counts
+    // Phase 3 — security metrics (per-project endpoint skipped when embedded data
+    // + violationMap are both present, saving up to N round-trips)
     const BATCH = 20;
     const enriched = [];
+    let loaded = 0;
     for (let i = 0; i < projects.length; i += BATCH) {
       const slice = projects.slice(i, i + BATCH);
       enriched.push(...await Promise.all(slice.map(p => fetchProjectMetrics(p, apiKey, violationMap))));
+      loaded += slice.length;
+      setStatus(`Metrics ${Math.min(loaded, projects.length)}/${projects.length}`, 'var(--medium)', true);
     }
     allProjects = enriched;
 
     computeLevels(allProjects);
     liveMode = true;
-    document.getElementById('dataBanner').innerHTML =
-      `✓ Live data — ${allProjects.length} projects loaded.`;
-    document.getElementById('dataBanner').className = 'data-banner live';
-    document.getElementById('apiStatus').innerHTML =
-      '<div class="status-dot"></div><span>Live</span>';
+
+    // Persist to localStorage so next page load can show data immediately
+    saveToCache();
+
+    let bannerHtml = `✓ Live data — ${allProjects.length} projects loaded.`;
+    if (warnings.length) {
+      bannerHtml += `<span class="banner-warn"> ⚠ ${warnings.join(' · ')}</span>`;
+    }
+    document.getElementById('dataBanner').innerHTML = bannerHtml;
+    document.getElementById('dataBanner').className = warnings.length ? 'data-banner' : 'data-banner live';
+    setStatus('Live', 'var(--ok)', false);
 
     closeModal('apiModal');
     afterLoad();
     return true;
   } catch(err) {
-    document.getElementById('apiStatus').innerHTML =
-      '<div class="status-dot" style="background:var(--critical)"></div><span>Error</span>';
+    if (err.name === 'AbortError') return false; // silently cancelled — a new load is starting
+    setStatus('Error', 'var(--critical)', false);
     if (fromModal) alert('Connection failed: ' + err.message);
     return false;
   }
@@ -1734,13 +1901,40 @@ document.getElementById('apiModal').addEventListener('transitionend', () => {
   }
 });
 
+// ── Expose functions required by inline HTML event handlers ───────────────
+// The IIFE scope is not window-global; onclick="fn()" attributes need explicit exposure.
+window.openModal            = openModal;
+window.closeModal           = closeModal;
+window.toggleAutoRefresh    = toggleAutoRefresh;
+window.changeArInterval     = changeArInterval;
+window.refreshData          = refreshData;
+window.debouncedFilter      = debouncedFilter;
+window.applyFilters         = applyFilters;
+window.toggleLatestFilter   = toggleLatestFilter;
+window.toggleFlatView       = toggleFlatView;
+window.toggleDropdown       = toggleDropdown;
+window.clearFilter          = clearFilter;
+window.onMultiChange        = onMultiChange;
+window.toggleNode           = toggleNode;
+window.toggleExpandCollapse = toggleExpandCollapse;
+window.setRiskFilter        = setRiskFilter;
+window.connectLiveApi       = connectLiveApi;
+window.loadMockData         = loadMockData;
+window.exportCSV            = exportCSV;
+window.scheduleProbe        = scheduleProbe;
+
 // ── Init ───────────────────────────────────────────────────────────────────
 buildColHeaders();
-// loadDtConfig returns true when DT_API_KEY is set and auto-connect fires.
-// In that case skip loadMockData — the live data load replaces it.
+// tryLoadCache() renders the last successful live dataset immediately so the
+// page is never blank while loadDtConfig() probes the API.
+// loadDtConfig() auto-connects when DT_API_KEY is configured in the environment.
+// Only fall back to mock data when both the cache and live auto-connect are absent.
+const _hadCache = tryLoadCache();
 loadDtConfig().then(autoConnected => {
-  if (!autoConnected) loadMockData();
+  if (!autoConnected && !_hadCache) loadMockData();
 });
+
+})(); // end module IIFE
 </script>
 </body>
 </html>
