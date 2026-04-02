@@ -33,6 +33,30 @@
       --radius:       8px;
     }
 
+    /* ── Light theme overrides ───────────────────────────────────────────────
+       Applied when <html data-theme="light"> is set.
+       Warm-neutral palette — pleasant on white backgrounds. */
+    [data-theme="light"] {
+      --bg:           #f0f2f8;
+      --surface:      #ffffff;
+      --surface2:     #e8ecf5;
+      --border:       #c8d0e0;
+      --text:         #1a2035;
+      --text-muted:   #5c6a85;
+      --accent:       #4f52d9;
+
+      --critical:     #dc2626;
+      --critical-bg:  rgba(220,38,38,0.10);
+      --high:         #ea6500;
+      --high-bg:      rgba(234,101,0,0.10);
+      --medium:       #b45309;
+      --medium-bg:    rgba(180,83,9,0.10);
+      --low:          #1d4ed8;
+      --low-bg:       rgba(29,78,216,0.10);
+      --ok:           #15803d;
+      --ok-bg:        rgba(21,128,61,0.08);
+    }
+
     html, body { height: 100%; }
     body {
       background: var(--bg);
@@ -106,7 +130,7 @@
     /* flex:1 + min-height:0 absorbs remaining space between topbar and footer.
        overflow:hidden ensures only .table-wrap scrolls, not the whole page.
        display:flex + flex-direction:column lets .table-wrap use flex:1. */
-    .main { flex: 1; min-height: 0; padding: 20px 24px 0; display: flex; flex-direction: column; overflow: hidden; }
+    .main { flex: 1; min-height: 0; padding: 20px 24px 0; display: flex; flex-direction: column; overflow-y: auto; }
 
     /* ── Summary cards ────────────────────────────────────────────────────── */
     .summary-grid {
@@ -241,7 +265,7 @@
        cover/hide the shadows at scroll boundaries; the last two (scroll) stay fixed
        and show a shadow only when content extends past the visible edge. */
     .table-wrap {
-      flex: 1; min-height: 0;
+      flex: 1; min-height: 480px;
       border: 1px solid var(--border);
       border-radius: var(--radius); overflow: auto;
       margin-bottom: 8px;
@@ -406,11 +430,25 @@
     }
     .footer-brand { font-size: 12px; font-weight: 600; color: var(--text); letter-spacing: 0.01em; }
 
+    /* ── Theme toggle button ──────────────────────────────────────────────── */
+    .btn-theme {
+      display: inline-flex; align-items: center; justify-content: center;
+      width: 34px; height: 34px; padding: 0; font-size: 16px;
+      border-radius: var(--radius); border: 1px solid var(--border);
+      background: var(--surface2); color: var(--text);
+      cursor: pointer; transition: background 0.15s, border-color 0.15s;
+      flex-shrink: 0;
+    }
+    .btn-theme:hover { background: var(--border); border-color: var(--accent); }
+
     /* ── Scrollbar ────────────────────────────────────────────────────────── */
     ::-webkit-scrollbar { width: 6px; height: 6px; }
     ::-webkit-scrollbar-track { background: transparent; }
     ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
-    ::-webkit-scrollbar-thumb:hover { background: #3e4462; }
+    ::-webkit-scrollbar-thumb:hover { background: var(--text-muted); }
+
+    /* ── Modal code block — adapt for light theme ────────────────────────── */
+    [data-theme="light"] .modal code { color: #1d4ed8; }
 
     /* ── Responsive breakpoints ───────────────────────────────────────────── */
     /* 1200px: enforce 3-column summary grid */
@@ -454,6 +492,7 @@
     <div class="topbar-status" id="apiStatus">
       <div class="status-dot"></div><span>Mock Data</span>
     </div>
+    <button class="btn-theme" id="themeBtn" onclick="toggleTheme()" title="Toggle dark/light mode">🌙</button>
     <button class="btn" onclick="openModal('apiModal')">⚙ Connect API</button>
     <button class="btn" id="arBtn" onclick="toggleAutoRefresh()" title="Toggle auto-refresh">↺ Auto: Off</button>
     <select class="filter-select" id="arInterval" style="display:none" onchange="changeArInterval()" title="Auto-refresh interval">
@@ -1441,14 +1480,18 @@ function loadMockData() {
 }
 
 // ── Fetch all projects via BFS (roots → children → grandchildren …) ────────
-// Step 1: GET /api/v1/project?onlyRoot=true  — returns only top-level projects.
-// Step 2: For every project fetched, GET /api/v1/project/{uuid}/children to
-//         get its direct children; stamp p.parent = {uuid} on each child so
-//         the rest of the pipeline can read p.parent?.uuid without any extra
-//         resolution step.
-// Step 3: Repeat step 2 with the child level until a level returns no results.
-// This guarantees the hierarchy mirrors exactly what DependencyTrack knows,
-// regardless of whether the flat list endpoint includes the parent field.
+// Step 1: GET /api/v1/project?onlyRoot=true&excludeInactive=true
+//         Returns top-level active projects; each object embeds metrics{} and
+//         children[] (direct child summaries with uuid/name but no metrics).
+// Step 2: For every project whose embedded children[] is NON-EMPTY, issue a
+//         single GET /api/v1/project/{uuid}/children call to fetch full child
+//         objects (including their own metrics{} and children[]).
+//         If children[] is empty the project is a leaf — skip the call entirely.
+// Step 3: All same-level /children calls fire in full parallel (Promise.all).
+//         Repeat until a level produces no non-leaf projects.
+// This minimises API round-trips: leaf projects (≈ 80-90% of the tree) never
+// trigger a /children fetch; metrics are embedded in every response object so
+// the separate /metrics per-project loop in Phase 3 is no longer needed.
 async function fetchAllProjects(key) {
   const pageSize = 500;
   const signal   = _fetchController ? _fetchController.signal : undefined;
@@ -1458,7 +1501,7 @@ async function fetchAllProjects(key) {
     while (true) {
       const sep = url.includes('?') ? '&' : '?';
       const res = await fetch(
-        `${url}${sep}pageSize=${pageSize}&pageNumber=${page}&excludeInactive=false`,
+        `${url}${sep}pageSize=${pageSize}&pageNumber=${page}&excludeInactive=true`,
         { headers: { 'X-Api-Key': key }, signal }
       );
       if (!res.ok) throw new Error(`HTTP ${res.status} — check your API key`);
@@ -1478,32 +1521,34 @@ async function fetchAllProjects(key) {
   const roots = await fetchAllPages(`${apiBaseUrl}/api/v1/project?onlyRoot=true`);
   const all = [...roots];
 
-  // BFS — fetch each level's children before moving to the next level.
-  // Batched 10 at a time to avoid hammering DT with parallel requests.
+  // BFS — fire ALL same-level /children calls in full parallel.
+  // Only fetch children for projects whose embedded children[] is non-empty
+  // (leaf projects are skipped entirely — no wasted round-trip).
   let currentLevel = roots;
-  const CHILD_BATCH = 10;
 
   while (currentLevel.length > 0) {
-    const nextLevel = [];
-    for (let i = 0; i < currentLevel.length; i += CHILD_BATCH) {
-      const slice = currentLevel.slice(i, i + CHILD_BATCH);
-      const batches = await Promise.all(slice.map(async parentProj => {
-        try {
-          const children = await fetchAllPages(
-            `${apiBaseUrl}/api/v1/project/${parentProj.uuid}/children`
-          );
-          // Stamp parent reference on each child so fetchProjectMetrics
-          // reads p.parent?.uuid correctly without any extra resolution.
-          children.forEach(c => {
-            if (!c.parent) c.parent = { uuid: parentProj.uuid };
-          });
-          return children;
-        } catch(_) {
-          return [];   // /children endpoint absent on older DT — skip silently
-        }
-      }));
-      batches.forEach(children => nextLevel.push(...children));
-    }
+    // Select only projects that have at least one child according to the
+    // embedded children[] array returned by the DependencyTrack API.
+    const parents = currentLevel.filter(p => Array.isArray(p.children) && p.children.length > 0);
+    if (parents.length === 0) break;
+
+    const results = await Promise.all(parents.map(async parentProj => {
+      try {
+        const children = await fetchAllPages(
+          `${apiBaseUrl}/api/v1/project/${parentProj.uuid}/children`
+        );
+        // Stamp parent reference on each child so the pipeline can read
+        // p.parent?.uuid correctly without any extra resolution step.
+        children.forEach(c => {
+          if (!c.parent) c.parent = { uuid: parentProj.uuid };
+        });
+        return children;
+      } catch(_) {
+        return [];   // /children endpoint absent on older DT — skip silently
+      }
+    }));
+
+    const nextLevel = results.flat();
     if (nextLevel.length === 0) break;
     all.push(...nextLevel);
     currentLevel = nextLevel;
@@ -1594,6 +1639,44 @@ async function fetchProjectMetrics(p, key, violationMap) {
     isLatest:   p.isLatest === true,
     security: sec, operations: ops, license: lic, secpolicy: secpol,
     _dataWarn,  // null when data is complete; string message when a fetch actually failed
+  };
+}
+
+// ── Extract metrics synchronously from an embedded project object ─────────
+// Called by Phase 3 after BFS completes. Every project returned by the
+// /project and /project/{uuid}/children endpoints embeds a metrics{} field
+// with security counts (critical/high/medium/low/unassigned).
+// Policy-violation breakdown (ops/lic/secpolicy) comes from violationMap built
+// in Phase 2; projects absent from the map have zero violations (valid data).
+function extractMetrics(p, violationMap) {
+  const emptyV = () => ({ fail:0, warn:0, info:0, unassigned:0 });
+  let _dataWarn = null;
+
+  // Security counts — read from embedded metrics snapshot
+  let sec = { critical:0, high:0, medium:0, low:0, unassigned:0 };
+  const m = p.metrics || null;
+  if (m) {
+    sec = { critical: m.critical||0, high: m.high||0, medium: m.medium||0, low: m.low||0, unassigned: m.unassigned||0 };
+  } else {
+    // metrics absent — DT version may not embed them; flag so the row shows ⚠
+    _dataWarn = 'Security metrics unavailable (not embedded in API response)';
+  }
+
+  // Policy violation counts — from pre-built violation map
+  let ops = emptyV(), lic = emptyV(), secpol = emptyV();
+  if (violationMap !== null) {
+    const v = violationMap.get(p.uuid);
+    if (v) { ops = v.ops; lic = v.lic; secpol = v.secpolicy; }
+  }
+
+  return {
+    uuid:       p.uuid,
+    name:       p.name,
+    version:    p.version || '',
+    parentUuid: p.parent?.uuid || p.parentUuid || null,
+    isLatest:   p.isLatest === true,
+    security: sec, operations: ops, license: lic, secpolicy: secpol,
+    _dataWarn,
   };
 }
 
@@ -1724,18 +1807,11 @@ async function connectLiveApi(fromModal = false) {
       warnings.push('Policy violation data unavailable — security counts only');
     }
 
-    // Phase 3 — security metrics (per-project endpoint skipped when embedded data
-    // + violationMap are both present, saving up to N round-trips)
-    const BATCH = 20;
-    const enriched = [];
-    let loaded = 0;
-    for (let i = 0; i < projects.length; i += BATCH) {
-      const slice = projects.slice(i, i + BATCH);
-      enriched.push(...await Promise.all(slice.map(p => fetchProjectMetrics(p, apiKey, violationMap))));
-      loaded += slice.length;
-      setStatus(`Metrics ${Math.min(loaded, projects.length)}/${projects.length}`, 'var(--medium)', true);
-    }
-    allProjects = enriched;
+    // Phase 3 — extract metrics synchronously from embedded p.metrics fields.
+    // Since every project object returned by /project and /project/{uuid}/children
+    // already contains a metrics{} snapshot, no additional HTTP calls are needed.
+    setStatus('Processing metrics…', 'var(--medium)', true);
+    allProjects = projects.map(p => extractMetrics(p, violationMap));
 
     // When the global violations fetch failed (non-2xx / network error), every project
     // is missing ops/lic/secpolicy data. Stamp each project so the table row can
@@ -1937,6 +2013,28 @@ document.getElementById('apiModal').addEventListener('transitionend', () => {
   }
 });
 
+// ── Theme (dark / light) ──────────────────────────────────────────────────
+function initTheme() {
+  // Prefer saved preference; fall back to OS preference (dark = default)
+  const saved = localStorage.getItem('dt_theme');
+  const theme = saved || (window.matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark');
+  applyTheme(theme);
+}
+function applyTheme(theme) {
+  if (theme === 'light') {
+    document.documentElement.setAttribute('data-theme', 'light');
+  } else {
+    document.documentElement.removeAttribute('data-theme');
+  }
+  const btn = document.getElementById('themeBtn');
+  if (btn) btn.textContent = theme === 'light' ? '🌙' : '☀';
+  localStorage.setItem('dt_theme', theme);
+}
+function toggleTheme() {
+  const current = document.documentElement.getAttribute('data-theme');
+  applyTheme(current === 'light' ? 'dark' : 'light');
+}
+
 // ── Expose functions required by inline HTML event handlers ───────────────
 // The IIFE scope is not window-global; onclick="fn()" attributes need explicit exposure.
 window.openModal            = openModal;
@@ -1958,8 +2056,10 @@ window.connectLiveApi       = connectLiveApi;
 window.loadMockData         = loadMockData;
 window.exportCSV            = exportCSV;
 window.scheduleProbe        = scheduleProbe;
+window.toggleTheme          = toggleTheme;
 
 // ── Init ───────────────────────────────────────────────────────────────────
+initTheme();
 buildColHeaders();
 // tryLoadCache() renders the last successful live dataset immediately so the
 // page is never blank while loadDtConfig() probes the API.
