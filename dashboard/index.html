@@ -1776,6 +1776,15 @@ function applyViolationData(map) {
     p.operations = v ? v.ops      : { fail:0, warn:0, info:0, unassigned:0 };
     p.license    = v ? v.lic      : { fail:0, warn:0, info:0, unassigned:0 };
     p.secpolicy  = v ? v.secpolicy: { fail:0, warn:0, info:0, unassigned:0 };
+    // buildTree clones projects into nodeMap nodes via { ...p, children: [] }.
+    // Updating allProjects in-place does not affect those clones, so renderTree
+    // would show the original zeroed data. Mirror the update into nodeMap too.
+    const node = nodeMap.get(p.uuid);
+    if (node) {
+      node.operations = p.operations;
+      node.license    = p.license;
+      node.secpolicy  = p.secpolicy;
+    }
   });
   // Recompute summary totals and re-render without resetting filters / expansion
   summaryTotals = null;
