@@ -102,12 +102,12 @@
     /* ── Buttons ──────────────────────────────────────────────────────────── */
     .btn {
       display: inline-flex; align-items: center; gap: 6px;
-      padding: 7px 13px;
+      padding: 7px 13px; height: 34px;
       border-radius: var(--radius);
       border: 1px solid var(--border);
       background: var(--surface2);
       color: var(--text);
-      font-size: 13px;
+      font-size: 13px; line-height: 1;
       cursor: pointer;
       transition: background 0.15s, border-color 0.15s;
       white-space: nowrap;
@@ -1680,15 +1680,19 @@ function extractMetrics(p, violationMap) {
   };
 }
 
-// ── Fetch all policy violations (parallel pages) ───────────────────────────
-// Returns Map<projectUuid, {ops, lic, secpolicy}> with exact Fail/Warn/Info/Unassigned
-// counts per category, sourced directly from individual violation objects.
+// ── Fetch all policy violations (parallel pages, fault-tolerant) ──────────
+// Returns { map, failedCount, totalPages } where:
+//   map         — Map<projectUuid, {ops, lic, secpolicy}> with exact Fail/Warn/Info/Unassigned
+//   failedCount — number of pages that returned an error (SSL, network, 5xx)
+//   totalPages  — total page count derived from X-Total-Count on page 1
 // Strategy:
 //   1. Fetch page 1 serially  → get X-Total-Count header
-//   2. Fire all remaining pages in parallel batches of 20
-//   3. Build per-project map: type (OPERATIONAL/LICENSE/SECURITY) × violationState (FAIL/WARN/INFO)
+//   2. Fire remaining pages in parallel batches of 20 using Promise.allSettled
+//      so a single SSL/network error on one page doesn't abort the whole batch
+//   3. Build per-project map: type (OPERATIONAL/LICENSE/SECURITY) × violationState
 //      Unrecognised types are skipped; null/unknown violationState → 'unassigned' column.
-async function fetchAllViolations(key) {
+// onProgress(done, total) — optional callback called after each batch completes.
+async function fetchAllViolations(key, onProgress) {
   const pageSize = 500;
   const signal   = _fetchController ? _fetchController.signal : undefined;
   const emptyV   = () => ({ fail:0, warn:0, info:0, unassigned:0 });
@@ -1706,11 +1710,12 @@ async function fetchAllViolations(key) {
   }
 
   // Page 1 — serial, needed to learn total count
-  const first     = await fetchPage(1);
-  const allItems  = [...first.items];
+  const first      = await fetchPage(1);
+  const allItems   = [...first.items];
   const totalPages = first.total > 0 ? Math.ceil(first.total / pageSize) : 1;
+  if (onProgress) onProgress(1, totalPages);
 
-  // Remaining pages — batched parallel (20 at a time)
+  let failedCount = 0;
   if (totalPages > 1) {
     const BATCH = 20;
     for (let start = 2; start <= totalPages; start += BATCH) {
@@ -1718,8 +1723,17 @@ async function fetchAllViolations(key) {
         { length: Math.min(BATCH, totalPages - start + 1) },
         (_, i) => start + i
       );
-      const results = await Promise.all(pageNums.map(n => fetchPage(n)));
-      results.forEach(r => allItems.push(...r.items));
+      // allSettled: one SSL/network error on a single page doesn't abort the batch
+      const settled = await Promise.allSettled(pageNums.map(n => fetchPage(n)));
+      for (const r of settled) {
+        if (r.status === 'fulfilled') {
+          allItems.push(...r.value.items);
+        } else {
+          if (r.reason?.name === 'AbortError') throw r.reason; // propagate cancellation
+          failedCount++;
+        }
+      }
+      if (onProgress) onProgress(Math.min(start + BATCH - 1, totalPages), totalPages);
     }
   }
 
@@ -1735,14 +1749,12 @@ async function fetchAllViolations(key) {
     const rawType  = (v.type || '').toUpperCase();
     const rawState = (v.policyCondition?.policy?.violationState || '').toUpperCase();
 
-    // Skip violations with an unrecognised type entirely
     const catKey = rawType === 'OPERATIONAL' ? 'ops'
                  : rawType === 'LICENSE'     ? 'lic'
                  : rawType === 'SECURITY'    ? 'secpolicy'
                  : null;
     if (!catKey) return;
 
-    // null / unknown violationState → unassigned column
     const sevKey = rawState === 'FAIL' ? 'fail'
                  : rawState === 'WARN' ? 'warn'
                  : rawState === 'INFO' ? 'info'
@@ -1751,7 +1763,26 @@ async function fetchAllViolations(key) {
     entry[catKey][sevKey]++;
   });
 
-  return map;
+  return { map, failedCount, totalPages };
+}
+
+// ── Apply violation data to already-rendered projects (background update) ──
+// Called when the background violation fetch completes after the project tree
+// was already shown with security-only data.  Updates allProjects in-place and
+// re-renders the table so operational/license/secpolicy columns populate.
+function applyViolationData(map) {
+  allProjects.forEach(p => {
+    const v = map.get(p.uuid);
+    p.operations = v ? v.ops      : { fail:0, warn:0, info:0, unassigned:0 };
+    p.license    = v ? v.lic      : { fail:0, warn:0, info:0, unassigned:0 };
+    p.secpolicy  = v ? v.secpolicy: { fail:0, warn:0, info:0, unassigned:0 };
+  });
+  // Recompute summary totals and re-render without resetting filters / expansion
+  summaryTotals = null;
+  computeSummaryTotals();
+  renderSummary();
+  renderTree(currentMatchSet);
+  saveToCache();
 }
 
 // ── Connect to live API ────────────────────────────────────────────────────
@@ -1797,50 +1828,55 @@ async function connectLiveApi(fromModal = false) {
 
     inferParentUuids(projects);
 
-    // Phase 2 — policy violations (parallel pages for exact ops/lic/secpolicy counts)
-    setStatus('Loading violations…', 'var(--medium)', true);
-    let violationMap = null;
-    try {
-      violationMap = await fetchAllViolations(apiKey);
-    } catch(err) {
-      if (err.name === 'AbortError') throw err;
-      warnings.push('Policy violation data unavailable — security counts only');
-    }
-
-    // Phase 3 — extract metrics synchronously from embedded p.metrics fields.
-    // Since every project object returned by /project and /project/{uuid}/children
-    // already contains a metrics{} snapshot, no additional HTTP calls are needed.
+    // Phase 2 — extract security metrics synchronously (no API call — embedded in each project)
     setStatus('Processing metrics…', 'var(--medium)', true);
-    allProjects = projects.map(p => extractMetrics(p, violationMap));
-
-    // When the global violations fetch failed (non-2xx / network error), every project
-    // is missing ops/lic/secpolicy data. Stamp each project so the table row can
-    // show ⚠. This is intentionally separate from a project having zero violations
-    // (a valid 200 response with an empty array leaves _dataWarn null).
-    if (violationMap === null) {
-      allProjects.forEach(p => {
-        p._dataWarn = p._dataWarn
-          ? p._dataWarn + ' · Policy violation data unavailable'
-          : 'Policy violation data unavailable';
-      });
-    }
-
+    allProjects = projects.map(p => extractMetrics(p, null));  // violations loaded separately below
     computeLevels(allProjects);
     liveMode = true;
 
-    // Persist to localStorage so next page load can show data immediately
-    saveToCache();
-
-    let bannerHtml = `✓ Live data — ${allProjects.length} projects loaded.`;
-    if (warnings.length) {
-      bannerHtml += `<span class="banner-warn"> ⚠ ${warnings.join(' · ')}</span>`;
-    }
-    document.getElementById('dataBanner').innerHTML = bannerHtml;
-    document.getElementById('dataBanner').className = warnings.length ? 'data-banner' : 'data-banner live';
+    // Show the project tree immediately — operational/license/secpolicy columns will
+    // populate once the background violation fetch completes.
+    document.getElementById('dataBanner').innerHTML =
+      `✓ Live — ${allProjects.length} projects. ⏳ Loading violation data…`;
+    document.getElementById('dataBanner').className = 'data-banner';
     setStatus('Live', 'var(--ok)', false);
-
     closeModal('apiModal');
     afterLoad();
+
+    // Phase 3 — fetch violations in the background so the table is usable immediately.
+    // Violations can be large (thousands of pages); loading them after project render
+    // avoids a long blank screen. The banner shows progress and updates when done.
+    // The _fetchController signal is shared, so Refresh/reconnect cancels this too.
+    const _capturedKey = apiKey;
+    const _capturedCtrl = _fetchController;
+    (async () => {
+      const banner = document.getElementById('dataBanner');
+      let totalPagesKnown = '…';
+      function onProgress(done, total) {
+        totalPagesKnown = total;
+        if (_capturedCtrl !== _fetchController) return; // a new load started — stop updating
+        banner.innerHTML = `✓ Live — ${allProjects.length} projects. ⏳ Loading violations (${done}/${total} pages)…`;
+      }
+      try {
+        const { map, failedCount } = await fetchAllViolations(_capturedKey, onProgress);
+        if (_capturedCtrl !== _fetchController) return; // superseded by a new load
+        applyViolationData(map);
+        let bannerHtml = `✓ Live — ${allProjects.length} projects, violation data loaded.`;
+        if (failedCount > 0) {
+          bannerHtml += ` <span class="banner-warn">⚠ ${failedCount} violation page(s) failed (SSL/network) — data may be partial.</span>`;
+          banner.className = 'data-banner';
+        } else {
+          banner.className = 'data-banner live';
+        }
+        banner.innerHTML = bannerHtml;
+      } catch(err) {
+        if (err.name === 'AbortError') return; // cancelled — a new load is in progress
+        if (_capturedCtrl !== _fetchController) return;
+        banner.innerHTML = `✓ Live — ${allProjects.length} projects. <span class="banner-warn">⚠ Violation data unavailable — operational/license/policy counts may be zero.</span>`;
+        banner.className = 'data-banner';
+      }
+    })();
+
     return true;
   } catch(err) {
     if (err.name === 'AbortError') return false; // silently cancelled — a new load is starting
