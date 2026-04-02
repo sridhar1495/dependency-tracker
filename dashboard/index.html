@@ -328,6 +328,16 @@
     }
     a.nav-icon:hover { opacity: 1; color: var(--accent); }
 
+    /* Per-row data-incomplete warning icon — only shown when a fetch returned
+       a non-2xx status or threw a network error (never for legitimate zero counts) */
+    .data-warn-icon {
+      display: inline-flex; align-items: center; justify-content: center;
+      margin-left: 5px; font-size: 10px; color: var(--medium);
+      cursor: help; vertical-align: middle; opacity: 0.75;
+      transition: opacity 0.15s;
+    }
+    .data-warn-icon:hover { opacity: 1; }
+
     /* ── Pills ────────────────────────────────────────────────────────────── */
     .pill {
       display: inline-flex; align-items: center; justify-content: center;
@@ -979,10 +989,14 @@ function renderTree(matchSet) {
     const navIcon = dtFrontendUrl
       ? `<a class="nav-icon" href="${escHtml(dtFrontendUrl)}/projects/${escHtml(node.uuid)}" target="_blank" rel="noopener" title="Open in DependencyTrack">&#x2197;</a>`
       : '';
-
     const vBadge = node.version ? `<span class="version-badge">v${escHtml(node.version)}</span>` : '';
+    // Show ⚠ only when a fetch returned a non-2xx status or threw a network error.
+    // Zero violation counts (valid 200 response) do not produce a warning icon.
+    const warnIcon = node._dataWarn
+      ? `<span class="data-warn-icon" title="${escHtml(node._dataWarn)}">⚠</span>`
+      : '';
 
-    let html = `<td class="project-name" style="padding-left:${indent + 10}px">${toggle}<span class="proj-name-text" title="${nameInner}">${nameInner}</span>${navIcon}${vBadge}</td>`;
+    let html = `<td class="project-name" style="padding-left:${indent + 10}px">${toggle}<span class="proj-name-text" title="${nameInner}">${nameInner}</span>${warnIcon}${navIcon}${vBadge}</td>`;
     html += `<td class="level-cell">${node.level}</td>`;
     html += `<td>${node.isLatest ? '<input type="checkbox" disabled checked title="Latest version">' : ''}</td>`;
 
@@ -1016,7 +1030,10 @@ function renderFlatList() {
       ? `<a class="nav-icon" href="${escHtml(dtFrontendUrl)}/projects/${escHtml(node.uuid)}" target="_blank" rel="noopener" title="Open in DependencyTrack">&#x2197;</a>`
       : '';
     const vBadge = node.version ? `<span class="version-badge">v${escHtml(node.version)}</span>` : '';
-    let html = `<td class="project-name" style="padding-left:10px"><span class="tree-indent"></span><span class="proj-name-text" title="${nameInner}">${nameInner}</span>${navIcon}${vBadge}</td>`;
+    const warnIcon = node._dataWarn
+      ? `<span class="data-warn-icon" title="${escHtml(node._dataWarn)}">⚠</span>`
+      : '';
+    let html = `<td class="project-name" style="padding-left:10px"><span class="tree-indent"></span><span class="proj-name-text" title="${nameInner}">${nameInner}</span>${warnIcon}${navIcon}${vBadge}</td>`;
     html += `<td class="level-cell">${node.level}</td>`;
     html += `<td>${node.isLatest ? '<input type="checkbox" disabled checked title="Latest version">' : ''}</td>`;
     CATS.forEach((cat, ci) => {
@@ -1513,6 +1530,7 @@ async function fetchProjectMetrics(p, key, violationMap) {
   let sec = {critical:0,high:0,medium:0,low:0,unassigned:0};
   const emptyV = () => ({fail:0,warn:0,info:0,unassigned:0});
   let ops = emptyV(), lic = emptyV(), secpol = emptyV();
+  let _dataWarn = null; // set only on actual HTTP failure (non-2xx) or network error
 
   const m = p.metrics || null;
   if (m) {
@@ -1549,15 +1567,20 @@ async function fetchProjectMetrics(p, key, violationMap) {
           lic = _spread(m2.policyViolationsLicenseTotal || 0);
           // secpol stays zero — no way to estimate security policy without violation data
         }
+      } else {
+        // Non-2xx response (e.g. 404, 500) — flag this project so the table row shows ⚠
+        _dataWarn = `Metrics unavailable (HTTP ${mr.status})`;
       }
     } catch(err) {
       if (err.name === 'AbortError') throw err; // propagate cancellation
-      // individual project metrics fetch failed — leave sec/ops/lic at zero
+      // Network/timeout error — flag the project; counts stay at zero
+      _dataWarn = 'Metrics fetch failed (network error)';
     }
   }
 
   // Use exact counts from the violations sweep when available.
-  // A project absent from the map simply has zero violations.
+  // A project absent from the map simply has zero violations — that is valid data,
+  // not a failure, so no _dataWarn is set here.
   if (violationMap !== null) {
     const v = violationMap.get(p.uuid);
     if (v) { ops = v.ops; lic = v.lic; secpol = v.secpolicy; }
@@ -1570,6 +1593,7 @@ async function fetchProjectMetrics(p, key, violationMap) {
     parentUuid: p.parent?.uuid || p.parentUuid || null,
     isLatest:   p.isLatest === true,
     security: sec, operations: ops, license: lic, secpolicy: secpol,
+    _dataWarn,  // null when data is complete; string message when a fetch actually failed
   };
 }
 
@@ -1712,6 +1736,18 @@ async function connectLiveApi(fromModal = false) {
       setStatus(`Metrics ${Math.min(loaded, projects.length)}/${projects.length}`, 'var(--medium)', true);
     }
     allProjects = enriched;
+
+    // When the global violations fetch failed (non-2xx / network error), every project
+    // is missing ops/lic/secpolicy data. Stamp each project so the table row can
+    // show ⚠. This is intentionally separate from a project having zero violations
+    // (a valid 200 response with an empty array leaves _dataWarn null).
+    if (violationMap === null) {
+      allProjects.forEach(p => {
+        p._dataWarn = p._dataWarn
+          ? p._dataWarn + ' · Policy violation data unavailable'
+          : 'Policy violation data unavailable';
+      });
+    }
 
     computeLevels(allProjects);
     liveMode = true;
