@@ -446,6 +446,18 @@
     ::-webkit-scrollbar-track { background: transparent; }
     ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
     ::-webkit-scrollbar-thumb:hover { background: var(--text-muted); }
+    /* Light mode: border is #c8d0e0 which is near-invisible on white — use a solid mid-tone */
+    [data-theme="light"] ::-webkit-scrollbar-thumb { background: #8899bb; }
+    [data-theme="light"] ::-webkit-scrollbar-thumb:hover { background: #5c6a85; }
+
+    /* Light mode scroll shadow: dark rgba is too faint on white — use a visible blue-gray */
+    [data-theme="light"] .table-wrap {
+      background-image:
+        linear-gradient(to right, var(--surface) 20%, transparent),
+        linear-gradient(to left,  var(--surface) 20%, transparent),
+        linear-gradient(to right, rgba(100,120,160,0.25), transparent),
+        linear-gradient(to left,  rgba(100,120,160,0.25), transparent);
+    }
 
     /* ── Modal code block — adapt for light theme ────────────────────────── */
     [data-theme="light"] .modal code { color: #1d4ed8; }
@@ -1715,26 +1727,21 @@ async function fetchAllViolations(key, onProgress) {
   const totalPages = first.total > 0 ? Math.ceil(first.total / pageSize) : 1;
   if (onProgress) onProgress(1, totalPages);
 
+  // Remaining pages fetched sequentially — one at a time.
+  // Parallel batches (20 concurrent) caused ERR_SSL_PROTOCOL_ERROR on many pages
+  // because the server drops TLS connections under load from simultaneous large
+  // responses.  Sequential fetching keeps only one connection open at a time,
+  // which eliminates the SSL contention at the cost of slightly longer total time.
   let failedCount = 0;
-  if (totalPages > 1) {
-    const BATCH = 20;
-    for (let start = 2; start <= totalPages; start += BATCH) {
-      const pageNums = Array.from(
-        { length: Math.min(BATCH, totalPages - start + 1) },
-        (_, i) => start + i
-      );
-      // allSettled: one SSL/network error on a single page doesn't abort the batch
-      const settled = await Promise.allSettled(pageNums.map(n => fetchPage(n)));
-      for (const r of settled) {
-        if (r.status === 'fulfilled') {
-          allItems.push(...r.value.items);
-        } else {
-          if (r.reason?.name === 'AbortError') throw r.reason; // propagate cancellation
-          failedCount++;
-        }
-      }
-      if (onProgress) onProgress(Math.min(start + BATCH - 1, totalPages), totalPages);
+  for (let page = 2; page <= totalPages; page++) {
+    try {
+      const result = await fetchPage(page);
+      allItems.push(...result.items);
+    } catch(err) {
+      if (err.name === 'AbortError') throw err; // propagate cancellation
+      failedCount++;
     }
+    if (onProgress) onProgress(page, totalPages);
   }
 
   // Build per-project map from raw violation objects
@@ -1860,17 +1867,21 @@ async function connectLiveApi(fromModal = false) {
     const _capturedCtrl = _fetchController;
     (async () => {
       const banner = document.getElementById('dataBanner');
-      let totalPagesKnown = '…';
+      const _vStart = Date.now();
+      function elapsed() {
+        const s = Math.round((Date.now() - _vStart) / 1000);
+        return s < 60 ? `${s}s` : `${Math.floor(s/60)}m ${s%60}s`;
+      }
       function onProgress(done, total) {
-        totalPagesKnown = total;
-        if (_capturedCtrl !== _fetchController) return; // a new load started — stop updating
-        banner.innerHTML = `✓ Live — ${allProjects.length} projects. ⏳ Loading violations (${done}/${total} pages)…`;
+        if (_capturedCtrl !== _fetchController) return;
+        banner.innerHTML = `✓ Live — ${allProjects.length} projects. ⏳ Loading violations (${done}/${total} pages, ${elapsed()})…`;
       }
       try {
         const { map, failedCount } = await fetchAllViolations(_capturedKey, onProgress);
         if (_capturedCtrl !== _fetchController) return; // superseded by a new load
         applyViolationData(map);
-        let bannerHtml = `✓ Live — ${allProjects.length} projects, violation data loaded.`;
+        const t = elapsed();
+        let bannerHtml = `✓ Live — ${allProjects.length} projects, violation data loaded in ${t}.`;
         if (failedCount > 0) {
           bannerHtml += ` <span class="banner-warn">⚠ ${failedCount} violation page(s) failed (SSL/network) — data may be partial.</span>`;
           banner.className = 'data-banner';
@@ -1879,7 +1890,7 @@ async function connectLiveApi(fromModal = false) {
         }
         banner.innerHTML = bannerHtml;
       } catch(err) {
-        if (err.name === 'AbortError') return; // cancelled — a new load is in progress
+        if (err.name === 'AbortError') return;
         if (_capturedCtrl !== _fetchController) return;
         banner.innerHTML = `✓ Live — ${allProjects.length} projects. <span class="banner-warn">⚠ Violation data unavailable — operational/license/policy counts may be zero.</span>`;
         banner.className = 'data-banner';
