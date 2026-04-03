@@ -1867,17 +1867,21 @@ async function connectLiveApi(fromModal = false) {
     const _capturedCtrl = _fetchController;
     (async () => {
       const banner = document.getElementById('dataBanner');
-      let totalPagesKnown = '…';
+      const _vStart = Date.now();
+      function elapsed() {
+        const s = Math.round((Date.now() - _vStart) / 1000);
+        return s < 60 ? `${s}s` : `${Math.floor(s/60)}m ${s%60}s`;
+      }
       function onProgress(done, total) {
-        totalPagesKnown = total;
-        if (_capturedCtrl !== _fetchController) return; // a new load started — stop updating
-        banner.innerHTML = `✓ Live — ${allProjects.length} projects. ⏳ Loading violations (${done}/${total} pages)…`;
+        if (_capturedCtrl !== _fetchController) return;
+        banner.innerHTML = `✓ Live — ${allProjects.length} projects. ⏳ Loading violations (${done}/${total} pages, ${elapsed()})…`;
       }
       try {
         const { map, failedCount } = await fetchAllViolations(_capturedKey, onProgress);
         if (_capturedCtrl !== _fetchController) return; // superseded by a new load
         applyViolationData(map);
-        let bannerHtml = `✓ Live — ${allProjects.length} projects, violation data loaded.`;
+        const t = elapsed();
+        let bannerHtml = `✓ Live — ${allProjects.length} projects, violation data loaded in ${t}.`;
         if (failedCount > 0) {
           bannerHtml += ` <span class="banner-warn">⚠ ${failedCount} violation page(s) failed (SSL/network) — data may be partial.</span>`;
           banner.className = 'data-banner';
@@ -1886,7 +1890,7 @@ async function connectLiveApi(fromModal = false) {
         }
         banner.innerHTML = bannerHtml;
       } catch(err) {
-        if (err.name === 'AbortError') return; // cancelled — a new load is in progress
+        if (err.name === 'AbortError') return;
         if (_capturedCtrl !== _fetchController) return;
         banner.innerHTML = `✓ Live — ${allProjects.length} projects. <span class="banner-warn">⚠ Violation data unavailable — operational/license/policy counts may be zero.</span>`;
         banner.className = 'data-banner';
