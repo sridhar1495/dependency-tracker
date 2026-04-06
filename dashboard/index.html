@@ -1781,8 +1781,6 @@ async function fetchAllViolations(key, onProgress, onPartialData) {
 
   return { map, failedCount, totalPages: totalKnownPages };
 }
-  return { map, failedCount, totalPages };
-}
 
 // ── Apply violation data to already-rendered projects (background update) ──
 // Called when the background violation fetch completes after the project tree
