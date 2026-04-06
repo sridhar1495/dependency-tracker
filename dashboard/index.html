@@ -1692,84 +1692,95 @@ function extractMetrics(p, violationMap) {
   };
 }
 
-// ── Fetch all policy violations (parallel pages, fault-tolerant) ──────────
-// Returns { map, failedCount, totalPages } where:
-//   map         — Map<projectUuid, {ops, lic, secpolicy}> with exact Fail/Warn/Info/Unassigned
-//   failedCount — number of pages that returned an error (SSL, network, 5xx)
-//   totalPages  — total page count derived from X-Total-Count on page 1
-// Strategy:
-//   1. Fetch page 1 serially  → get X-Total-Count header
-//   2. Fire remaining pages in parallel batches of 20 using Promise.allSettled
-//      so a single SSL/network error on one page doesn't abort the whole batch
-//   3. Build per-project map: type (OPERATIONAL/LICENSE/SECURITY) × violationState
-//      Unrecognised types are skipped; null/unknown violationState → 'unassigned' column.
-// onProgress(done, total) — optional callback called after each batch completes.
-async function fetchAllViolations(key, onProgress) {
-  const pageSize = 500;
-  const signal   = _fetchController ? _fetchController.signal : undefined;
-  const emptyV   = () => ({ fail:0, warn:0, info:0, unassigned:0 });
+// ── Fetch all policy violations — 9 parallel pipelines ────────────────────
+// Splits the global /violation endpoint into 9 filtered streams:
+//   riskType  = OPERATIONAL | LICENSE | SECURITY  (3)
+//   violationState = FAIL | WARN | INFO            (3)
+// All 9 pipelines run concurrently; each fetches its own pages sequentially.
+// Benefits vs the old single unfiltered call:
+//   • pageSize=100 → each page ≈ 1/5 the size of a 500-item page, reducing
+//     SSL mid-stream timeout risk significantly
+//   • Total time = slowest pipeline, not sum of all pages across all types
+//   • catKey and sevKey are known from query params — no client-side parsing
+//     of violation type/state fields, just count project.uuid hits
+//   • Map is built page-by-page; no large intermediate allItems array in memory
+// Progressive rendering: onPartialData(map) is called (debounced, ≈ 1 s)
+// while loading so the table populates live instead of waiting for all pipelines.
+// onProgress(done, total)  — called after every page across all 9 pipelines
+// onPartialData(map)       — debounced callback for mid-load table updates
+async function fetchAllViolations(key, onProgress, onPartialData) {
+  const PAGE_SIZE = 100;
+  const signal    = _fetchController ? _fetchController.signal : undefined;
+  const emptyV    = () => ({ fail:0, warn:0, info:0, unassigned:0 });
 
-  async function fetchPage(page) {
-    const r = await fetch(
-      `${apiBaseUrl}/api/v1/violation?pageSize=${pageSize}&pageNumber=${page}`,
-      { headers: { 'X-Api-Key': key }, signal }
-    );
-    if (!r.ok) throw new Error(`Violations page ${page}: HTTP ${r.status}`);
-    const data  = await r.json();
-    const total = page === 1 ? parseInt(r.headers.get('X-Total-Count') || '0', 10) : 0;
-    const items = Array.isArray(data) ? data : (data.violations || []);
-    return { items, total };
-  }
+  const RISK_TYPES = ['OPERATIONAL', 'LICENSE', 'SECURITY'];
+  const STATES     = ['FAIL', 'WARN', 'INFO'];
+  const CAT = { OPERATIONAL: 'ops', LICENSE: 'lic', SECURITY: 'secpolicy' };
+  const SEV = { FAIL: 'fail', WARN: 'warn', INFO: 'info' };
 
-  // Page 1 — serial, needed to learn total count
-  const first      = await fetchPage(1);
-  const allItems   = [...first.items];
-  const totalPages = first.total > 0 ? Math.ceil(first.total / pageSize) : 1;
-  if (onProgress) onProgress(1, totalPages);
-
-  // Remaining pages fetched sequentially — one at a time.
-  // Parallel batches (20 concurrent) caused ERR_SSL_PROTOCOL_ERROR on many pages
-  // because the server drops TLS connections under load from simultaneous large
-  // responses.  Sequential fetching keeps only one connection open at a time,
-  // which eliminates the SSL contention at the cost of slightly longer total time.
-  let failedCount = 0;
-  for (let page = 2; page <= totalPages; page++) {
-    try {
-      const result = await fetchPage(page);
-      allItems.push(...result.items);
-    } catch(err) {
-      if (err.name === 'AbortError') throw err; // propagate cancellation
-      failedCount++;
-    }
-    if (onProgress) onProgress(page, totalPages);
-  }
-
-  // Build per-project map from raw violation objects
+  // Shared project map — JS is single-threaded so concurrent async writes are safe
   const map = new Map();
-  allItems.forEach(v => {
-    const projectUuid = v.project?.uuid;
-    if (!projectUuid) return;
-    if (!map.has(projectUuid)) {
-      map.set(projectUuid, { ops: emptyV(), lic: emptyV(), secpolicy: emptyV() });
+  let donePages = 0, totalKnownPages = 0, failedCount = 0;
+
+  // Fire the partial-data callback at most once per second while loading
+  let _partialTimer = null;
+  function schedulePartial() {
+    if (!onPartialData) return;
+    clearTimeout(_partialTimer);
+    _partialTimer = setTimeout(() => { if (onPartialData) onPartialData(map); }, 1000);
+  }
+
+  async function runPipeline(riskType, state) {
+    const ck  = CAT[riskType];
+    const sk  = SEV[state];
+    const url = `${apiBaseUrl}/api/v1/violation?riskType=${riskType}&violationState=${state}&pageSize=${PAGE_SIZE}`;
+
+    // Page 1 — fetch first batch and learn total page count for this pipeline
+    const r1    = await fetch(`${url}&pageNumber=1`, { headers: { 'X-Api-Key': key }, signal });
+    if (!r1.ok) throw new Error(`${riskType}/${state} p1: HTTP ${r1.status}`);
+    const count = parseInt(r1.headers.get('X-Total-Count') || '0', 10);
+    const pages = count > 0 ? Math.ceil(count / PAGE_SIZE) : 1;
+    totalKnownPages += pages;
+
+    const data1 = await r1.json();
+    (Array.isArray(data1) ? data1 : (data1.violations || [])).forEach(v => {
+      const uuid = v.project?.uuid; if (!uuid) return;
+      if (!map.has(uuid)) map.set(uuid, { ops: emptyV(), lic: emptyV(), secpolicy: emptyV() });
+      map.get(uuid)[ck][sk]++;
+    });
+    donePages++;
+    if (onProgress) onProgress(donePages, totalKnownPages);
+    schedulePartial();
+
+    // Remaining pages — sequential within this pipeline
+    for (let page = 2; page <= pages; page++) {
+      const r = await fetch(`${url}&pageNumber=${page}`, { headers: { 'X-Api-Key': key }, signal });
+      if (!r.ok) throw new Error(`${riskType}/${state} p${page}: HTTP ${r.status}`);
+      const data = await r.json();
+      (Array.isArray(data) ? data : (data.violations || [])).forEach(v => {
+        const uuid = v.project?.uuid; if (!uuid) return;
+        if (!map.has(uuid)) map.set(uuid, { ops: emptyV(), lic: emptyV(), secpolicy: emptyV() });
+        map.get(uuid)[ck][sk]++;
+      });
+      donePages++;
+      if (onProgress) onProgress(donePages, totalKnownPages);
+      schedulePartial();
     }
-    const entry    = map.get(projectUuid);
-    const rawType  = (v.type || '').toUpperCase();
-    const rawState = (v.policyCondition?.policy?.violationState || '').toUpperCase();
+  }
 
-    const catKey = rawType === 'OPERATIONAL' ? 'ops'
-                 : rawType === 'LICENSE'     ? 'lic'
-                 : rawType === 'SECURITY'    ? 'secpolicy'
-                 : null;
-    if (!catKey) return;
+  // Launch all 9 pipelines simultaneously; individual errors are counted, not fatal
+  await Promise.all(
+    RISK_TYPES.flatMap(rt => STATES.map(st =>
+      runPipeline(rt, st).catch(err => {
+        if (err.name === 'AbortError') throw err; // propagate cancellation
+        failedCount++;
+      })
+    ))
+  );
+  clearTimeout(_partialTimer); // cancel any pending partial render before final apply
 
-    const sevKey = rawState === 'FAIL' ? 'fail'
-                 : rawState === 'WARN' ? 'warn'
-                 : rawState === 'INFO' ? 'info'
-                 : 'unassigned';
-
-    entry[catKey][sevKey]++;
-  });
-
+  return { map, failedCount, totalPages: totalKnownPages };
+}
   return { map, failedCount, totalPages };
 }
 
@@ -1876,8 +1887,13 @@ async function connectLiveApi(fromModal = false) {
         if (_capturedCtrl !== _fetchController) return;
         banner.innerHTML = `✓ Live — ${allProjects.length} projects. ⏳ Loading violations (${done}/${total} pages, ${elapsed()})…`;
       }
+      // Progressive render — table populates live every ~1 s as pipeline pages arrive
+      function onPartialData(partialMap) {
+        if (_capturedCtrl !== _fetchController) return;
+        applyViolationData(partialMap);
+      }
       try {
-        const { map, failedCount } = await fetchAllViolations(_capturedKey, onProgress);
+        const { map, failedCount } = await fetchAllViolations(_capturedKey, onProgress, onPartialData);
         if (_capturedCtrl !== _fetchController) return; // superseded by a new load
         applyViolationData(map);
         const t = elapsed();
