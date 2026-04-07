@@ -1,3 +1,4 @@
+# SPDX-License-Identifier: MIT
 server {
     listen 80;
     server_name _;
@@ -75,5 +76,5 @@ server {
     }
 
     gzip on;
-    gzip_types text/plain text/css application/json application/javascript;
+    gzip_types text/plain text/css text/html text/xml application/json application/javascript application/xml image/svg+xml font/woff2;
 }

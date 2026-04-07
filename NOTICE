@@ -1,0 +1,41 @@
+Dependency-Track Risk Dashboard
+Copyright (c) 2024 Dependency-Track Risk Dashboard contributors
+
+This project is licensed under the MIT License.
+See the LICENSE file in the root of this repository.
+
+-------------------------------------------------------------------------------
+Third-party components
+-------------------------------------------------------------------------------
+
+This project does not bundle any third-party JavaScript libraries or runtime
+dependencies. All Node.js code uses only built-in modules (http, https, fs,
+path). The browser-based dashboard is a single-file SPA with no external
+script or stylesheet dependencies.
+
+Infrastructure dependencies pulled at runtime (not bundled):
+
+  nginx (Alpine Linux variant)
+    License : BSD 2-Clause "Simplified" License
+    Source  : https://nginx.org / https://hub.docker.com/_/nginx
+
+  Node.js (Alpine Linux variant)
+    License : MIT License (Node.js core), various (bundled V8/libuv/etc.)
+    Source  : https://nodejs.org / https://hub.docker.com/_/node
+
+  Alpine Linux
+    License : Various (GPL, MIT, etc.) — see https://alpinelinux.org
+    Source  : https://alpinelinux.org
+
+-------------------------------------------------------------------------------
+OWASP Dependency-Track
+-------------------------------------------------------------------------------
+
+This dashboard is a read-only UI layer that connects to an existing
+OWASP Dependency-Track instance. Dependency-Track itself is not bundled
+with or distributed as part of this project.
+
+  OWASP Dependency-Track
+    License : Apache License 2.0
+    Source  : https://dependencytrack.org
+    GitHub  : https://github.com/DependencyTrack/dependency-track

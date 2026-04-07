@@ -1,0 +1,8 @@
+# Exclude everything that is not needed inside the container image.
+# Only server.js is COPYed, so this is a safety net.
+node_modules
+npm-debug.log
+*.test.js
+*.md
+.env
+data/
