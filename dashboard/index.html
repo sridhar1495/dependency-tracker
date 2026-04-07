@@ -119,12 +119,19 @@
       background: rgba(34,197,94,0.12); border-color: rgba(34,197,94,0.35); color: var(--ok);
     }
     .btn.export:hover { background: rgba(34,197,94,0.22); border-color: var(--ok); }
-    .btn.ar-on {
+    /* ── Active state for toggle buttons (Latest Only, Flat View) ───────── */
+    .btn.btn-active {
       background: rgba(34,197,94,0.12); border-color: rgba(34,197,94,0.35); color: var(--ok);
     }
-    .btn.ar-on:hover { background: rgba(34,197,94,0.22); border-color: var(--ok); }
-    /* Visually disabled state for auto-refresh in mock mode */
-    .btn.mock-only { opacity: 0.5; }
+    .btn.btn-active:hover { background: rgba(34,197,94,0.22); border-color: var(--ok); }
+
+    /* ── Inline banner button ─────────────────────────────────────────────── */
+    .btn-xs {
+      font-size: 11px; padding: 2px 8px; border-radius: 4px; cursor: pointer;
+      background: rgba(255,255,255,0.08); border: 1px solid rgba(255,255,255,0.15);
+      color: var(--text); margin-left: 6px; vertical-align: middle;
+    }
+    .btn-xs:hover { background: rgba(255,255,255,0.18); }
 
     /* ── Main ─────────────────────────────────────────────────────────────── */
     /* flex:1 + min-height:0 absorbs remaining space between topbar and footer.
@@ -506,12 +513,6 @@
     </div>
     <button class="btn-theme" id="themeBtn" onclick="toggleTheme()" title="Toggle dark/light mode">🌙</button>
     <button class="btn" onclick="openModal('apiModal')">⚙ Connect API</button>
-    <button class="btn" id="arBtn" onclick="toggleAutoRefresh()" title="Toggle auto-refresh">↺ Auto: Off</button>
-    <select class="filter-select" id="arInterval" style="display:none" onchange="changeArInterval()" title="Auto-refresh interval">
-      <option value="300" selected>5 min</option>
-      <option value="900">15 min</option>
-      <option value="1800">30 min</option>
-    </select>
     <button class="btn primary" onclick="refreshData()">↻ Refresh</button>
   </header>
 
@@ -692,9 +693,8 @@ let apiBaseUrl       = localStorage.getItem('dt_api_url')      || '';  // '' = u
 let dtFrontendUrl    = localStorage.getItem('dt_frontend_url') || '';  // DT UI base URL for project hyperlinks
 let dtProxyTarget    = '';  // raw DT_API_INTERNAL_URL from /dt-config (informational)
 let preconfiguredKey = false;  // true when apiKey came from DT_API_KEY env var (auto-connect)
-let autoRefreshTimer   = null;
-let autoRefreshSeconds = 300;
-let flatView           = false;  // when true: leaf-only flat list, no hierarchy
+let _cachePollTimer  = null;   // setInterval id for polling /violation-cache/status
+let flatView         = false;  // when true: leaf-only flat list, no hierarchy
 let _searchDebounce    = null;   // timer id for search input debounce (200 ms)
 let _fetchController   = null;   // AbortController — cancelled on every new connect/refresh
 
@@ -801,7 +801,7 @@ function buildTree(projects) {
 // ── Infer parent-child relationships from project list data ────────────────
 // Fallback when DT does not supply parent.uuid via the API.
 // Called on the raw project array (before enrichment) so parentUuid is available
-// during fetchProjectMetrics. Three strategies, applied to ALL projects
+// before extractMetrics is run. Three strategies, applied to ALL projects
 // (not just versioned ones) so that non-versioned intermediate nodes also
 // get wired into the hierarchy:
 //   1. Exact name match:   "cs-bff-graphql" (any ver) ← "cs-bff-graphql" vX.Y
@@ -1262,14 +1262,14 @@ function applyFilters() {
 // ── Latest-only toggle ─────────────────────────────────────────────────────
 function toggleLatestFilter() {
   filterLatestOnly = !filterLatestOnly;
-  document.getElementById('latestFilterBtn').classList.toggle('ar-on', filterLatestOnly);
+  document.getElementById('latestFilterBtn').classList.toggle('btn-active', filterLatestOnly);
   applyFilters();
 }
 
 // ── Flat view toggle ───────────────────────────────────────────────────────
 function toggleFlatView() {
   flatView = !flatView;
-  document.getElementById('flatViewBtn').classList.toggle('ar-on', flatView);
+  document.getElementById('flatViewBtn').classList.toggle('btn-active', flatView);
   // Hide level filter and expand/collapse button — not applicable in flat view
   document.getElementById('levelFilter').style.display        = flatView ? 'none' : '';
   document.getElementById('expandCollapseBtn').style.display  = flatView ? 'none' : '';
@@ -1281,7 +1281,7 @@ function toggleFlatView() {
     document.getElementById('levelFilter').value    = 'all';
     clearFilter('version');
     filterLatestOnly = false;
-    document.getElementById('latestFilterBtn').classList.remove('ar-on');
+    document.getElementById('latestFilterBtn').classList.remove('btn-active');
   }
   applyFilters();
 }
@@ -1322,72 +1322,10 @@ function setStatus(text, color, pulsing) {
     `<div class="status-dot" style="background:${color};${anim}"></div><span>${escHtml(text)}</span>`;
 }
 
-// ── localStorage cache ─────────────────────────────────────────────────────
-const CACHE_KEY    = 'dt_projects_cache';
-const CACHE_TS_KEY = 'dt_projects_ts';
+// localStorage is used only for user preferences (api_url, frontend_url, theme).
+// Project and violation data are never persisted to localStorage — they are
+// always fetched fresh from the live API and cache service on each page load.
 
-function saveToCache() {
-  try {
-    localStorage.setItem(CACHE_KEY,    JSON.stringify(allProjects));
-    localStorage.setItem(CACHE_TS_KEY, Date.now().toString());
-  } catch(_) { /* storage quota exceeded — skip silently */ }
-}
-
-// Loads the last successful live dataset from localStorage and renders it.
-// Returns true when valid cache was found so the caller can skip loadMockData().
-function tryLoadCache() {
-  try {
-    const raw = localStorage.getItem(CACHE_KEY);
-    const ts  = localStorage.getItem(CACHE_TS_KEY);
-    if (!raw) return false;
-    const parsed = JSON.parse(raw);
-    if (!Array.isArray(parsed) || parsed.length === 0) return false;
-    allProjects = parsed;
-    liveMode = true;
-    const ageMin = ts ? Math.round((Date.now() - parseInt(ts, 10)) / 60000) : null;
-    document.getElementById('dataBanner').innerHTML =
-      `↺ Showing cached data${ageMin !== null ? ` (${ageMin} min old)` : ''} — connecting to live API…`;
-    document.getElementById('dataBanner').className = 'data-banner';
-    setStatus('Cached', 'var(--medium)', false);
-    afterLoad();
-    return true;
-  } catch(_) { return false; }
-}
-
-// ── Auto-refresh ───────────────────────────────────────────────────────────
-function toggleAutoRefresh() {
-  if (!liveMode) {
-    // Not connected — show a brief hint on the button instead of silently doing nothing
-    const btn = document.getElementById('arBtn');
-    const orig = btn.textContent;
-    btn.textContent = '⚠ Connect API first';
-    setTimeout(() => { btn.textContent = orig; }, 2000);
-    return;
-  }
-  if (autoRefreshTimer) {
-    clearInterval(autoRefreshTimer);
-    autoRefreshTimer = null;
-    const btn = document.getElementById('arBtn');
-    btn.textContent = '↺ Auto: Off';
-    btn.classList.remove('ar-on');
-    document.getElementById('arInterval').style.display = 'none';
-  } else {
-    startAutoRefresh();
-  }
-}
-function startAutoRefresh() {
-  if (autoRefreshTimer) clearInterval(autoRefreshTimer);
-  autoRefreshTimer = setInterval(() => { if (liveMode) refreshData(); }, autoRefreshSeconds * 1000);
-  const btn = document.getElementById('arBtn');
-  const label = autoRefreshSeconds < 60 ? `${autoRefreshSeconds}s` : `${autoRefreshSeconds/60}m`;
-  btn.textContent = `↺ Auto: ${label}`;
-  btn.classList.add('ar-on');
-  document.getElementById('arInterval').style.display = '';
-}
-function changeArInterval() {
-  autoRefreshSeconds = parseInt(document.getElementById('arInterval').value, 10);
-  if (autoRefreshTimer) startAutoRefresh(); // restart with new interval
-}
 
 // ── Export CSV ─────────────────────────────────────────────────────────────
 // Always exports all filtered projects regardless of fold state.
@@ -1480,14 +1418,7 @@ function loadMockData() {
     '⚠ Showing <strong>mock data</strong> — click "Connect Live API" to pull real project risks.';
   document.getElementById('dataBanner').className = 'data-banner';
   setStatus('Mock Data', 'var(--medium)', false);
-  // Stop auto-refresh when switching to mock mode — it can't do anything useful
-  if (autoRefreshTimer) {
-    clearInterval(autoRefreshTimer);
-    autoRefreshTimer = null;
-    const btn = document.getElementById('arBtn');
-    if (btn) { btn.textContent = '↺ Auto: Off'; btn.classList.remove('ar-on'); }
-    document.getElementById('arInterval').style.display = 'none';
-  }
+  if (_cachePollTimer) { clearInterval(_cachePollTimer); _cachePollTimer = null; }
   afterLoad();
 }
 
@@ -1569,90 +1500,6 @@ async function fetchAllProjects(key) {
   return all;
 }
 
-// ── Fetch metrics for one project ─────────────────────────────────────────
-// The project list endpoint (/api/v1/project) embeds a metrics snapshot that
-// contains security counts (critical/high/medium/low/unassigned) but does NOT
-// include the per-category policy violation breakdown needed for Operational and
-// License columns (policyViolationsOperationalFail etc.). Those fields only exist
-// on the dedicated /api/v1/metrics/project/{uuid}/current endpoint.
-// Strategy: use embedded data for security (saves a round-trip), always call the
-// dedicated endpoint for policy violations.
-// NOTE: Operational and License counts are driven by DependencyTrack's Policy
-// Engine.  They will be 0 for every project until policies are defined in the
-// DT "Policy Management" section and violations are triggered.  Security counts
-// (critical/high/medium/low) come from automated SBOM component analysis and do
-// not require any policy configuration.
-async function fetchProjectMetrics(p, key, violationMap) {
-  const signal = _fetchController ? _fetchController.signal : undefined;
-  let sec = {critical:0,high:0,medium:0,low:0,unassigned:0};
-  const emptyV = () => ({fail:0,warn:0,info:0,unassigned:0});
-  let ops = emptyV(), lic = emptyV(), secpol = emptyV();
-  let _dataWarn = null; // set only on actual HTTP failure (non-2xx) or network error
-
-  const m = p.metrics || null;
-  if (m) {
-    sec = { critical: m.critical||0, high: m.high||0, medium: m.medium||0, low: m.low||0, unassigned: m.unassigned||0 };
-  }
-
-  // Skip the dedicated metrics endpoint when embedded data + violationMap are both
-  // available — that eliminates one HTTP round-trip per project (up to 500 saved calls).
-  const needsMetricsFetch = !m || violationMap === null;
-  if (needsMetricsFetch) {
-    try {
-      const mr = await fetch(`${apiBaseUrl}/api/v1/metrics/project/${p.uuid}/current`, {
-        headers: { 'X-Api-Key': key }, signal
-      });
-      if (mr.ok) {
-        const m2 = await mr.json();
-        if (!m) {
-          sec = { critical: m2.critical||0, high: m2.high||0, medium: m2.medium||0, low: m2.low||0, unassigned: m2.unassigned||0 };
-        }
-        // Proportional fallback only when the violation endpoint was entirely unreachable
-        if (violationMap === null) {
-          const _oFail = m2.policyViolationsFail || 0;
-          const _oWarn = m2.policyViolationsWarn || 0;
-          const _oInfo = m2.policyViolationsInfo || 0;
-          function _spread(catTotal) {
-            if (catTotal === 0) return emptyV();
-            const tot = _oFail + _oWarn + _oInfo;
-            if (tot === 0) return { fail:0, warn:0, info:catTotal, unassigned:0 };
-            const f = Math.round(catTotal * _oFail / tot);
-            const w = Math.round(catTotal * _oWarn / tot);
-            return { fail:f, warn:w, info:catTotal-f-w, unassigned:0 };
-          }
-          ops = _spread(m2.policyViolationsOperationalTotal || 0);
-          lic = _spread(m2.policyViolationsLicenseTotal || 0);
-          // secpol stays zero — no way to estimate security policy without violation data
-        }
-      } else {
-        // Non-2xx response (e.g. 404, 500) — flag this project so the table row shows ⚠
-        _dataWarn = `Metrics unavailable (HTTP ${mr.status})`;
-      }
-    } catch(err) {
-      if (err.name === 'AbortError') throw err; // propagate cancellation
-      // Network/timeout error — flag the project; counts stay at zero
-      _dataWarn = 'Metrics fetch failed (network error)';
-    }
-  }
-
-  // Use exact counts from the violations sweep when available.
-  // A project absent from the map simply has zero violations — that is valid data,
-  // not a failure, so no _dataWarn is set here.
-  if (violationMap !== null) {
-    const v = violationMap.get(p.uuid);
-    if (v) { ops = v.ops; lic = v.lic; secpol = v.secpolicy; }
-  }
-
-  return {
-    uuid:       p.uuid,
-    name:       p.name,
-    version:    p.version || '',
-    parentUuid: p.parent?.uuid || p.parentUuid || null,
-    isLatest:   p.isLatest === true,
-    security: sec, operations: ops, license: lic, secpolicy: secpol,
-    _dataWarn,  // null when data is complete; string message when a fetch actually failed
-  };
-}
 
 // ── Extract metrics synchronously from an embedded project object ─────────
 // Called by Phase 3 after BFS completes. Every project returned by the
@@ -1692,94 +1539,195 @@ function extractMetrics(p, violationMap) {
   };
 }
 
-// ── Fetch all policy violations — 9 parallel pipelines ────────────────────
-// Splits the global /violation endpoint into 9 filtered streams:
-//   riskType  = OPERATIONAL | LICENSE | SECURITY  (3)
-//   violationState = FAIL | WARN | INFO            (3)
-// All 9 pipelines run concurrently; each fetches its own pages sequentially.
-// Benefits vs the old single unfiltered call:
-//   • pageSize=100 → each page ≈ 1/5 the size of a 500-item page, reducing
-//     SSL mid-stream timeout risk significantly
-//   • Total time = slowest pipeline, not sum of all pages across all types
-//   • catKey and sevKey are known from query params — no client-side parsing
-//     of violation type/state fields, just count project.uuid hits
-//   • Map is built page-by-page; no large intermediate allItems array in memory
-// Progressive rendering: onPartialData(map) is called (debounced, ≈ 1 s)
-// while loading so the table populates live instead of waiting for all pipelines.
-// onProgress(done, total)  — called after every page across all 9 pipelines
-// onPartialData(map)       — debounced callback for mid-load table updates
-async function fetchAllViolations(key, onProgress, onPartialData) {
-  const PAGE_SIZE = 100;
-  const signal    = _fetchController ? _fetchController.signal : undefined;
-  const emptyV    = () => ({ fail:0, warn:0, info:0, unassigned:0 });
+// ── Violation cache — server-side cache integration ───────────────────────
+// The dt-violation-cache service pre-builds the per-project count map and
+// stores it as a JSON file.  The dashboard reads that file via three endpoints
+// proxied through nginx:
+//   GET  /violation-cache/status   — {status, progress, generatedAt, …}
+//   GET  /violation-cache/data     — {generatedAt, expiresAt, map:{uuid:…}}
+//   POST /violation-cache/refresh  — trigger a background rebuild
+//
+// Status values the service returns:
+//   ready     — cache file is valid and within TTL
+//   stale     — file exists but TTL has expired
+//   building  — job is currently running
+//   none      — no file yet (first boot or file deleted)
+//   no-key    — DT_API_KEY not configured on the service
 
-  const RISK_TYPES = ['OPERATIONAL', 'LICENSE', 'SECURITY'];
-  const STATES     = ['FAIL', 'WARN', 'INFO'];
-  const CAT = { OPERATIONAL: 'ops', LICENSE: 'lic', SECURITY: 'secpolicy' };
-  const SEV = { FAIL: 'fail', WARN: 'warn', INFO: 'info' };
+// Poll /violation-cache/status every 5 s until the job completes, then apply.
+// Cancelled automatically when _fetchController changes (i.e. on Refresh/reconnect).
+function startCachePoll() {
+  if (_cachePollTimer) { clearInterval(_cachePollTimer); _cachePollTimer = null; }
+  const banner      = document.getElementById('dataBanner');
+  const capturedCtrl = _fetchController;
 
-  // Shared project map — JS is single-threaded so concurrent async writes are safe
-  const map = new Map();
-  let donePages = 0, totalKnownPages = 0, failedCount = 0;
-
-  // Fire the partial-data callback at most once per second while loading
-  let _partialTimer = null;
-  function schedulePartial() {
-    if (!onPartialData) return;
-    clearTimeout(_partialTimer);
-    _partialTimer = setTimeout(() => { if (onPartialData) onPartialData(map); }, 1000);
-  }
-
-  async function runPipeline(riskType, state) {
-    const ck  = CAT[riskType];
-    const sk  = SEV[state];
-    const url = `${apiBaseUrl}/api/v1/violation?riskType=${riskType}&violationState=${state}&pageSize=${PAGE_SIZE}`;
-
-    // Page 1 — fetch first batch and learn total page count for this pipeline
-    const r1    = await fetch(`${url}&pageNumber=1`, { headers: { 'X-Api-Key': key }, signal });
-    if (!r1.ok) throw new Error(`${riskType}/${state} p1: HTTP ${r1.status}`);
-    const count = parseInt(r1.headers.get('X-Total-Count') || '0', 10);
-    const pages = count > 0 ? Math.ceil(count / PAGE_SIZE) : 1;
-    totalKnownPages += pages;
-
-    const data1 = await r1.json();
-    (Array.isArray(data1) ? data1 : (data1.violations || [])).forEach(v => {
-      const uuid = v.project?.uuid; if (!uuid) return;
-      if (!map.has(uuid)) map.set(uuid, { ops: emptyV(), lic: emptyV(), secpolicy: emptyV() });
-      map.get(uuid)[ck][sk]++;
-    });
-    donePages++;
-    if (onProgress) onProgress(donePages, totalKnownPages);
-    schedulePartial();
-
-    // Remaining pages — sequential within this pipeline
-    for (let page = 2; page <= pages; page++) {
-      const r = await fetch(`${url}&pageNumber=${page}`, { headers: { 'X-Api-Key': key }, signal });
-      if (!r.ok) throw new Error(`${riskType}/${state} p${page}: HTTP ${r.status}`);
-      const data = await r.json();
-      (Array.isArray(data) ? data : (data.violations || [])).forEach(v => {
-        const uuid = v.project?.uuid; if (!uuid) return;
-        if (!map.has(uuid)) map.set(uuid, { ops: emptyV(), lic: emptyV(), secpolicy: emptyV() });
-        map.get(uuid)[ck][sk]++;
-      });
-      donePages++;
-      if (onProgress) onProgress(donePages, totalKnownPages);
-      schedulePartial();
+  _cachePollTimer = setInterval(async () => {
+    if (capturedCtrl !== _fetchController) {
+      clearInterval(_cachePollTimer); _cachePollTimer = null; return;
     }
-  }
+    try {
+      const r = await fetch('/violation-cache/status');
+      if (!r.ok) return; // transient — keep polling
+      const s = await r.json();
 
-  // Launch all 9 pipelines simultaneously; individual errors are counted, not fatal
-  await Promise.all(
-    RISK_TYPES.flatMap(rt => STATES.map(st =>
-      runPipeline(rt, st).catch(err => {
-        if (err.name === 'AbortError') throw err; // propagate cancellation
-        failedCount++;
-      })
-    ))
+      if (s.status === 'building') {
+        const prog = (s.progress?.pagesTotal || 0) > 0
+          ? ` (${s.progress.pagesDone}/${s.progress.pagesTotal} pages)` : '';
+        banner.innerHTML =
+          `✓ Live — ${allProjects.length} projects. ⏳ Building violation cache${prog}…`;
+        banner.className = 'data-banner';
+
+      } else if (s.status === 'ready') {
+        clearInterval(_cachePollTimer); _cachePollTimer = null;
+        try {
+          const dr = await fetch('/violation-cache/data');
+          if (!dr.ok) throw new Error(`HTTP ${dr.status}`);
+          const cacheJson = await dr.json();
+          applyViolationData(new Map(Object.entries(cacheJson.map || {})));
+          banner.innerHTML = buildReadyBanner(cacheJson);
+          banner.className = 'data-banner live';
+        } catch(e) {
+          banner.innerHTML =
+            `✓ Live — ${allProjects.length} projects. ` +
+            `<span class="banner-warn">⚠ Cache ready but data load failed: ${e.message}</span>`;
+          banner.className = 'data-banner';
+        }
+
+      } else {
+        // error or unexpected terminal state
+        clearInterval(_cachePollTimer); _cachePollTimer = null;
+        banner.innerHTML =
+          `✓ Live — ${allProjects.length} projects. ` +
+          `<span class="banner-warn">⚠ Violation cache build failed. ` +
+          `<button class="btn-xs" onclick="triggerCacheRefresh()">↻ Retry</button></span>`;
+        banner.className = 'data-banner';
+      }
+    } catch(_) { /* network hiccup — keep polling */ }
+  }, 5000);
+}
+
+function buildReadyBanner(cacheJson) {
+  const ageMs  = Date.now() - new Date(cacheJson.generatedAt).getTime();
+  const ageH   = Math.floor(ageMs / 3_600_000);
+  const ageMin = Math.floor((ageMs % 3_600_000) / 60_000);
+  const ageStr = ageH > 0 ? `${ageH}h ${ageMin}m ago` : `${ageMin}m ago`;
+  const failNote = (cacheJson.failedPipelines || 0) > 0
+    ? ` <span class="banner-warn">⚠ ${cacheJson.failedPipelines} pipeline(s) had errors — data may be partial.</span>`
+    : '';
+  return (
+    `✓ Live — ${allProjects.length} projects. ` +
+    `Violations from cache (built ${ageStr}).` +
+    `${failNote} ` +
+    `<button class="btn-xs" onclick="triggerCacheRefresh()">↻ Refresh</button>`
   );
-  clearTimeout(_partialTimer); // cancel any pending partial render before final apply
+}
 
-  return { map, failedCount, totalPages: totalKnownPages };
+// Phase 3 entry point.  Checks cache status and either applies data immediately
+// (ready) or falls into the appropriate recovery path (stale/building/none).
+async function loadViolationCache() {
+  const banner = document.getElementById('dataBanner');
+  try {
+    const r = await fetch('/violation-cache/status');
+    if (!r.ok) throw new Error(`Status HTTP ${r.status}`);
+    const status = await r.json();
+
+    if (status.status === 'ready') {
+      // ── Happy path: serve instantly from cache ───────────────────────────
+      const dr = await fetch('/violation-cache/data');
+      if (!dr.ok) throw new Error(`Data HTTP ${dr.status}`);
+      const cacheJson = await dr.json();
+      applyViolationData(new Map(Object.entries(cacheJson.map || {})));
+      banner.innerHTML = buildReadyBanner(cacheJson);
+      banner.className = 'data-banner live';
+
+    } else if (status.status === 'stale') {
+      // ── Stale: apply old data immediately, rebuild silently in background ─
+      try {
+        const dr = await fetch('/violation-cache/data');
+        if (dr.ok) {
+          const cacheJson = await dr.json();
+          const ageH = Math.floor(
+            (Date.now() - new Date(cacheJson.generatedAt).getTime()) / 3_600_000
+          );
+          applyViolationData(new Map(Object.entries(cacheJson.map || {})));
+          banner.innerHTML =
+            `✓ Live — ${allProjects.length} projects. ` +
+            `⚠ Violation cache expired (${ageH}h old) — refreshing in background…`;
+          banner.className = 'data-banner';
+        }
+      } catch(_) {}
+      await fetch('/violation-cache/refresh', { method: 'POST' }).catch(() => {});
+      startCachePoll();
+
+    } else if (status.status === 'building') {
+      // ── Already building (e.g. another user triggered it): just poll ─────
+      const prog = (status.progress?.pagesTotal || 0) > 0
+        ? ` (${status.progress.pagesDone}/${status.progress.pagesTotal} pages)` : '';
+      banner.innerHTML =
+        `✓ Live — ${allProjects.length} projects. ⏳ Building violation cache${prog}…`;
+      banner.className = 'data-banner';
+      startCachePoll();
+
+    } else if (status.status === 'no-key') {
+      // ── No API key on service: operational/license counts will stay zero ──
+      banner.innerHTML =
+        `✓ Live — ${allProjects.length} projects. ` +
+        `<span class="banner-warn">⚠ Violation cache unavailable — ` +
+        `DT_API_KEY not configured on the cache service.</span>`;
+      banner.className = 'data-banner';
+
+    } else {
+      // ── none or error: auto-trigger build ────────────────────────────────
+      banner.innerHTML =
+        `✓ Live — ${allProjects.length} projects. ⏳ Building violation cache…`;
+      banner.className = 'data-banner';
+      await fetch('/violation-cache/refresh', { method: 'POST' }).catch(() => {});
+      startCachePoll();
+    }
+
+  } catch(err) {
+    if (err.name === 'AbortError') return;
+    // Cache service unreachable (not deployed / network error)
+    banner.innerHTML =
+      `✓ Live — ${allProjects.length} projects. ` +
+      `<span class="banner-warn">⚠ Violation cache service unreachable — ` +
+      `operational/license/policy counts may be zero.</span>`;
+    banner.className = 'data-banner';
+  }
+}
+
+// Called by the ↻ Refresh button rendered inside the banner.
+// Only triggers a violation cache rebuild — does not re-fetch projects.
+async function triggerCacheRefresh() {
+  const banner = document.getElementById('dataBanner');
+  if (_cachePollTimer) { clearInterval(_cachePollTimer); _cachePollTimer = null; }
+  try {
+    const r = await fetch('/violation-cache/refresh', { method: 'POST' });
+    if (r.status === 409) {
+      // Already building — just resume polling
+      banner.innerHTML =
+        `✓ Live — ${allProjects.length} projects. ⏳ Building violation cache…`;
+    } else if (!r.ok) {
+      const body = await r.json().catch(() => ({}));
+      banner.innerHTML =
+        `✓ Live — ${allProjects.length} projects. ` +
+        `<span class="banner-warn">⚠ ${body.error || 'Refresh failed.'} ` +
+        `<button class="btn-xs" onclick="triggerCacheRefresh()">↻ Retry</button></span>`;
+      banner.className = 'data-banner';
+      return;
+    } else {
+      banner.innerHTML =
+        `✓ Live — ${allProjects.length} projects. ⏳ Building violation cache…`;
+    }
+    banner.className = 'data-banner';
+    startCachePoll();
+  } catch(e) {
+    banner.innerHTML =
+      `✓ Live — ${allProjects.length} projects. ` +
+      `<span class="banner-warn">⚠ Failed to reach cache service. ` +
+      `<button class="btn-xs" onclick="triggerCacheRefresh()">↻ Retry</button></span>`;
+    banner.className = 'data-banner';
+  }
 }
 
 // ── Apply violation data to already-rendered projects (background update) ──
@@ -1807,7 +1755,6 @@ function applyViolationData(map) {
   computeSummaryTotals();
   renderSummary();
   renderTree(currentMatchSet);
-  saveToCache();
 }
 
 // ── Connect to live API ────────────────────────────────────────────────────
@@ -1855,12 +1802,12 @@ async function connectLiveApi(fromModal = false) {
 
     // Phase 2 — extract security metrics synchronously (no API call — embedded in each project)
     setStatus('Processing metrics…', 'var(--medium)', true);
-    allProjects = projects.map(p => extractMetrics(p, null));  // violations loaded separately below
+    allProjects = projects.map(p => extractMetrics(p, null));  // violation counts loaded in Phase 3 via cache service
     computeLevels(allProjects);
     liveMode = true;
 
     // Show the project tree immediately — operational/license/secpolicy columns will
-    // populate once the background violation fetch completes.
+    // populate once loadViolationCache() reads from (or waits for) the cache service.
     document.getElementById('dataBanner').innerHTML =
       `✓ Live — ${allProjects.length} projects. ⏳ Loading violation data…`;
     document.getElementById('dataBanner').className = 'data-banner';
@@ -1868,48 +1815,12 @@ async function connectLiveApi(fromModal = false) {
     closeModal('apiModal');
     afterLoad();
 
-    // Phase 3 — fetch violations in the background so the table is usable immediately.
-    // Violations can be large (thousands of pages); loading them after project render
-    // avoids a long blank screen. The banner shows progress and updates when done.
-    // The _fetchController signal is shared, so Refresh/reconnect cancels this too.
-    const _capturedKey = apiKey;
-    const _capturedCtrl = _fetchController;
-    (async () => {
-      const banner = document.getElementById('dataBanner');
-      const _vStart = Date.now();
-      function elapsed() {
-        const s = Math.round((Date.now() - _vStart) / 1000);
-        return s < 60 ? `${s}s` : `${Math.floor(s/60)}m ${s%60}s`;
-      }
-      function onProgress(done, total) {
-        if (_capturedCtrl !== _fetchController) return;
-        banner.innerHTML = `✓ Live — ${allProjects.length} projects. ⏳ Loading violations (${done}/${total} pages, ${elapsed()})…`;
-      }
-      // Progressive render — table populates live every ~1 s as pipeline pages arrive
-      function onPartialData(partialMap) {
-        if (_capturedCtrl !== _fetchController) return;
-        applyViolationData(partialMap);
-      }
-      try {
-        const { map, failedCount } = await fetchAllViolations(_capturedKey, onProgress, onPartialData);
-        if (_capturedCtrl !== _fetchController) return; // superseded by a new load
-        applyViolationData(map);
-        const t = elapsed();
-        let bannerHtml = `✓ Live — ${allProjects.length} projects, violation data loaded in ${t}.`;
-        if (failedCount > 0) {
-          bannerHtml += ` <span class="banner-warn">⚠ ${failedCount} violation page(s) failed (SSL/network) — data may be partial.</span>`;
-          banner.className = 'data-banner';
-        } else {
-          banner.className = 'data-banner live';
-        }
-        banner.innerHTML = bannerHtml;
-      } catch(err) {
-        if (err.name === 'AbortError') return;
-        if (_capturedCtrl !== _fetchController) return;
-        banner.innerHTML = `✓ Live — ${allProjects.length} projects. <span class="banner-warn">⚠ Violation data unavailable — operational/license/policy counts may be zero.</span>`;
-        banner.className = 'data-banner';
-      }
-    })();
+    // Phase 3 — load violation counts from the shared server-side cache service.
+    // No violation objects are downloaded to the browser; the cache service holds
+    // the pre-built per-project count map.  Any in-flight poll from a previous
+    // load is cancelled here before the new one starts.
+    if (_cachePollTimer) { clearInterval(_cachePollTimer); _cachePollTimer = null; }
+    loadViolationCache();
 
     return true;
   } catch(err) {
@@ -2109,9 +2020,8 @@ function toggleTheme() {
 // The IIFE scope is not window-global; onclick="fn()" attributes need explicit exposure.
 window.openModal            = openModal;
 window.closeModal           = closeModal;
-window.toggleAutoRefresh    = toggleAutoRefresh;
-window.changeArInterval     = changeArInterval;
 window.refreshData          = refreshData;
+window.triggerCacheRefresh  = triggerCacheRefresh;
 window.debouncedFilter      = debouncedFilter;
 window.applyFilters         = applyFilters;
 window.toggleLatestFilter   = toggleLatestFilter;
@@ -2131,13 +2041,10 @@ window.toggleTheme          = toggleTheme;
 // ── Init ───────────────────────────────────────────────────────────────────
 initTheme();
 buildColHeaders();
-// tryLoadCache() renders the last successful live dataset immediately so the
-// page is never blank while loadDtConfig() probes the API.
 // loadDtConfig() auto-connects when DT_API_KEY is configured in the environment.
-// Only fall back to mock data when both the cache and live auto-connect are absent.
-const _hadCache = tryLoadCache();
+// Fall back to mock data only when no auto-connect is available.
 loadDtConfig().then(autoConnected => {
-  if (!autoConnected && !_hadCache) loadMockData();
+  if (!autoConnected) loadMockData();
 });
 
 })(); // end module IIFE

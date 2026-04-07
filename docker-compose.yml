@@ -125,3 +125,29 @@ services:
       - dependency-track
     depends_on:
       - dtrack-apiserver
+
+  # ─── Violation Cache Service ──────────────────────────────────────────────────
+  # Fetches all policy violations from DependencyTrack on demand and caches the
+  # per-project count map in a JSON file.  The dashboard reads this file instead
+  # of streaming large violation payloads through the browser on every page load.
+  dt-violation-cache:
+    build:
+      context: ./violation-cache
+    container_name: dt-violation-cache
+    restart: unless-stopped
+    environment:
+      # Must point to the DT API server reachable within the Docker network.
+      DT_API_URL: "${DT_API_INTERNAL_URL:-http://dtrack-apiserver:8080}"
+      # DT API key used by the cache service to fetch violations server-side.
+      # Should be the same key (or a read-only key) used by the dashboard.
+      DT_API_KEY: "${DT_API_KEY:-}"
+      # How many hours the cached file is considered valid before auto-expiry.
+      CACHE_TTL_HOURS: "${VIOLATION_CACHE_TTL_HOURS:-24}"
+      PORT: "3001"
+    volumes:
+      # Persists violation-cache.json across container restarts.
+      - ./violation-cache/data:/data
+    networks:
+      - dependency-track
+    depends_on:
+      - dtrack-apiserver
