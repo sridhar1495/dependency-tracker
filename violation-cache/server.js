@@ -10,29 +10,90 @@
 //   GET  /violation-cache/status   — current state + build progress
 //   GET  /violation-cache/data     — the cached map (only when ready/stale)
 //   POST /violation-cache/refresh  — trigger a background rebuild
+//   POST /violation-cache/config   — update DT_API_KEY in .env (persists across restarts)
 //
 // Status values:
 //   none      — no cache file exists yet
 //   building  — job is currently running
 //   ready     — file exists and TTL has not expired
 //   stale     — file exists but TTL has expired
-//   no-key    — DT_API_KEY env var is not set; cannot fetch
+//   no-key    — DT_API_KEY is not set; cannot fetch
 
 const http  = require('http');
 const https = require('https');
 const fs    = require('fs');
 const path  = require('path');
 
-// ── Config ────────────────────────────────────────────────────────────────────
-const PORT         = parseInt(process.env.PORT         || '3001',  10);
-const DT_API_URL   = (process.env.DT_API_URL || 'http://localhost:8080').replace(/\/$/, '');
-// Strip any control characters (newlines, carriage returns, tabs) that may be
-// introduced by copy-paste or Windows line endings in the .env file.
-const DT_API_KEY   = (process.env.DT_API_KEY || '').replace(/[\x00-\x1F\x7F]/g, '').trim();
+// ── Static config (set once at startup, never change at runtime) ──────────────
+const PORT         = parseInt(process.env.PORT || '3001', 10);
 const CACHE_TTL_MS = parseInt(process.env.CACHE_TTL_HOURS || '24', 10) * 3_600_000;
-const CACHE_DIR    = process.env.CACHE_DIR   || '/data';
+const CACHE_DIR    = process.env.CACHE_DIR || '/data';
 const CACHE_FILE   = path.join(CACHE_DIR, 'violation-cache.json');
 const CACHE_TMP    = path.join(CACHE_DIR, 'violation-cache.tmp.json');
+// Path to the bind-mounted .env file — writable so the config endpoint can persist changes.
+const ENV_FILE     = process.env.ENV_FILE || '/app/.env';
+
+// ── Dynamic config — re-read from .env before every job run ──────────────────
+// Falls back to env vars injected by Docker Compose (initial values).
+const STARTUP_API_URL = (process.env.DT_API_URL || 'http://localhost:8080').replace(/\/$/, '');
+const STARTUP_API_KEY = (process.env.DT_API_KEY || '').replace(/[\x00-\x1F\x7F]/g, '').trim();
+
+/** Parse a .env file and return a plain key→value object. */
+function parseEnvFile(filePath) {
+  if (!fs.existsSync(filePath)) return {};
+  const result = {};
+  for (const line of fs.readFileSync(filePath, 'utf8').split('\n')) {
+    const trimmed = line.trim();
+    if (!trimmed || trimmed.startsWith('#')) continue;
+    const eqIdx = trimmed.indexOf('=');
+    if (eqIdx < 1) continue;
+    const key = trimmed.slice(0, eqIdx).trim();
+    const val = trimmed.slice(eqIdx + 1).trim().replace(/^["']|["']$/g, '');
+    result[key] = val;
+  }
+  return result;
+}
+
+/** Write a single key=value update into the .env file, preserving all other lines. */
+function patchEnvFile(filePath, updates) {
+  let lines = fs.existsSync(filePath) ? fs.readFileSync(filePath, 'utf8').split('\n') : [];
+  const remaining = new Set(Object.keys(updates));
+
+  lines = lines.map(line => {
+    const eqIdx = line.indexOf('=');
+    if (eqIdx < 1) return line;
+    const key = line.slice(0, eqIdx).trim();
+    if (key in updates) {
+      remaining.delete(key);
+      return `${key}=${updates[key]}`;
+    }
+    return line;
+  });
+
+  // Append any keys that weren't already in the file
+  for (const key of remaining) {
+    lines.push(`${key}=${updates[key]}`);
+  }
+
+  fs.writeFileSync(filePath, lines.join('\n'), 'utf8');
+}
+
+/**
+ * Read the effective DT_API_URL and DT_API_KEY.
+ * Priority: .env file (if mounted and readable) > Docker Compose env vars (startup values).
+ * This means changes written to .env via the config endpoint are picked up on the next job.
+ */
+function getEffectiveConfig() {
+  const envVars = parseEnvFile(ENV_FILE);
+
+  const rawUrl = envVars['DT_API_INTERNAL_URL'] || STARTUP_API_URL;
+  const apiUrl = rawUrl.replace(/\/$/, '');
+
+  const rawKey = envVars['DT_API_KEY'] || STARTUP_API_KEY;
+  const apiKey = rawKey.replace(/[\x00-\x1F\x7F]/g, '').trim();
+
+  return { apiUrl, apiKey };
+}
 
 // ── Fetch parameters ──────────────────────────────────────────────────────────
 const PAGE_SIZE   = 100;
@@ -42,25 +103,25 @@ const CAT         = { OPERATIONAL: 'ops', LICENSE: 'lic', SECURITY: 'secpolicy' 
 const SEV         = { FAIL: 'fail', WARN: 'warn', INFO: 'info' };
 
 // ── Retry config ──────────────────────────────────────────────────────────────
-const MAX_RETRIES    = 3;           // total attempts per page (1 initial + 2 retries)
-const RETRY_DELAYS   = [2000, 4000, 8000]; // ms between attempts
+const MAX_RETRIES  = 3;
+const RETRY_DELAYS = [2000, 4000, 8000];
 
-// ── In-memory job state ────────────────────────────────────────────────────────
-let jobRunning = false;
+// ── In-memory job state ───────────────────────────────────────────────────────
+let jobRunning  = false;
 let jobProgress = { pagesDone: 0, pagesTotal: 0, failedPipelines: 0 };
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 const sleep = ms => new Promise(r => setTimeout(r, ms));
 
 /** Perform a GET request to the DT API and return parsed JSON + response headers. */
-function dtGet(urlPath) {
+function dtGet(urlPath, apiUrl, apiKey) {
   return new Promise((resolve, reject) => {
-    const fullUrl = `${DT_API_URL}${urlPath}`;
+    const fullUrl = `${apiUrl}${urlPath}`;
     const mod     = fullUrl.startsWith('https') ? https : http;
     const req     = mod.request(fullUrl, {
-      method:              'GET',
-      headers:             { 'X-Api-Key': DT_API_KEY, Accept: 'application/json' },
-      rejectUnauthorized:  false,
+      method:             'GET',
+      headers:            { 'X-Api-Key': apiKey, Accept: 'application/json' },
+      rejectUnauthorized: false,
     }, (res) => {
       // Timeout on the response body stream — catches servers that send headers
       // then stall before sending the body.
@@ -88,16 +149,15 @@ function dtGet(urlPath) {
       res.on('error', err => { clearTimeout(bodyTimer); reject(err); });
     });
     req.on('error', reject);
-    // Request-level timeout covers connect + first byte
     req.setTimeout(60_000, () => req.destroy(new Error('Request timeout')));
     req.end();
   });
 }
 
 /** dtGet with per-page exponential-backoff retry. */
-async function dtGetWithRetry(urlPath, attempt = 0) {
+async function dtGetWithRetry(urlPath, apiUrl, apiKey, attempt = 0) {
   try {
-    return await dtGet(urlPath);
+    return await dtGet(urlPath, apiUrl, apiKey);
   } catch (err) {
     if (attempt < MAX_RETRIES - 1) {
       const delay = RETRY_DELAYS[attempt];
@@ -106,7 +166,7 @@ async function dtGetWithRetry(urlPath, attempt = 0) {
         `after ${delay}ms: ${err.message}`
       );
       await sleep(delay);
-      return dtGetWithRetry(urlPath, attempt + 1);
+      return dtGetWithRetry(urlPath, apiUrl, apiKey, attempt + 1);
     }
     throw err;
   }
@@ -139,29 +199,35 @@ function getStatus() {
       },
     };
   }
-  if (!DT_API_KEY) return { status: 'no-key' };
+  const { apiKey } = getEffectiveConfig();
+  if (!apiKey) return { status: 'no-key' };
   const data = readCacheFile();
   if (!data) return { status: 'none' };
   const expired = new Date(data.expiresAt).getTime() < Date.now();
   return {
-    status:         expired ? 'stale' : 'ready',
-    generatedAt:    data.generatedAt,
-    expiresAt:      data.expiresAt,
-    projectCount:   data.projectCount   || 0,
+    status:          expired ? 'stale' : 'ready',
+    generatedAt:     data.generatedAt,
+    expiresAt:       data.expiresAt,
+    projectCount:    data.projectCount    || 0,
     failedPipelines: data.failedPipelines || 0,
   };
 }
 
 // ── Violation fetch job ───────────────────────────────────────────────────────
-// Max wall-clock time for the whole job before it is force-aborted.
-const JOB_TIMEOUT_MS = 30 * 60_000; // 30 minutes
+const JOB_TIMEOUT_MS = 30 * 60_000; // 30-minute watchdog
 
 async function runJob() {
   if (jobRunning) {
     console.log('[cache] Job already running — skipping duplicate trigger');
     return;
   }
-  if (!DT_API_KEY) {
+
+  // Re-read .env immediately before the job so any key/URL update is picked up.
+  const { apiUrl, apiKey } = getEffectiveConfig();
+  console.log(`[cache] Effective DT_API_URL : ${apiUrl}`);
+  console.log(`[cache] Effective DT_API_KEY : ${apiKey ? '***' + apiKey.slice(-4) : 'NOT SET'}`);
+
+  if (!apiKey) {
     console.error('[cache] DT_API_KEY not set — cannot fetch violations');
     return;
   }
@@ -170,10 +236,8 @@ async function runJob() {
   jobProgress = { pagesDone: 0, pagesTotal: 0, failedPipelines: 0 };
   console.log('[cache] Violation fetch job started');
 
-  // Watchdog: if the job exceeds JOB_TIMEOUT_MS something is fatally stuck.
-  // Force-reset jobRunning so the next poll/request can trigger a fresh build.
   let jobTimedOut = false;
-  const watchdog = setTimeout(() => {
+  const watchdog  = setTimeout(() => {
     jobTimedOut = true;
     jobRunning  = false;
     console.error(
@@ -182,10 +246,9 @@ async function runJob() {
     );
   }, JOB_TIMEOUT_MS);
 
-  const map    = {};           // { uuid: { ops, lic, secpolicy } }
+  const map    = {};
   const emptyV = () => ({ fail: 0, warn: 0, info: 0, unassigned: 0 });
 
-  /** Fetch all pages for one riskType × violationState combination. */
   async function runPipeline(riskType, state) {
     const ck      = CAT[riskType];
     const sk      = SEV[state];
@@ -194,13 +257,12 @@ async function runJob() {
       `/api/v1/violation?riskType=${riskType}&violationState=${state}` +
       `&pageSize=${PAGE_SIZE}`;
 
-    // Page 1 — discover total count
     console.log(`[cache] Pipeline ${label}: fetching page 1`);
-    const r1         = await dtGetWithRetry(`${baseUrl}&pageNumber=1`);
+    const r1         = await dtGetWithRetry(`${baseUrl}&pageNumber=1`, apiUrl, apiKey);
     const totalCount = parseInt(r1.headers['x-total-count'] || '0', 10);
     const totalPages = totalCount > 0 ? Math.ceil(totalCount / PAGE_SIZE) : 1;
 
-    jobProgress.pagesTotal += totalPages;   // running total; becomes exact after all p1s
+    jobProgress.pagesTotal += totalPages;
     console.log(`[cache] Pipeline ${label}: ${totalCount} violations, ${totalPages} page(s)`);
 
     const items1 = Array.isArray(r1.json) ? r1.json : (r1.json.violations || []);
@@ -211,14 +273,13 @@ async function runJob() {
     });
     jobProgress.pagesDone++;
 
-    // Remaining pages — sequential within this pipeline, each with retry
     for (let page = 2; page <= totalPages; page++) {
       if (jobTimedOut) {
         console.warn(`[cache] Pipeline ${label}: aborting at page ${page} — job timed out`);
         throw new Error('Job timed out');
       }
       console.log(`[cache] Pipeline ${label}: fetching page ${page}/${totalPages}`);
-      const r = await dtGetWithRetry(`${baseUrl}&pageNumber=${page}`);
+      const r = await dtGetWithRetry(`${baseUrl}&pageNumber=${page}`, apiUrl, apiKey);
       const items = Array.isArray(r.json) ? r.json : (r.json.violations || []);
       items.forEach(v => {
         const uuid = v.project?.uuid; if (!uuid) return;
@@ -232,7 +293,6 @@ async function runJob() {
   }
 
   try {
-    // Launch all 9 pipelines simultaneously; individual pipeline errors are non-fatal
     await Promise.all(
       RISK_TYPES.flatMap(rt => STATES.map(st =>
         runPipeline(rt, st).catch(err => {
@@ -242,9 +302,9 @@ async function runJob() {
       ))
     );
 
-    if (jobTimedOut) return; // watchdog already reset state; don't overwrite cache
+    if (jobTimedOut) return;
 
-    const now      = new Date();
+    const now       = new Date();
     const cacheData = {
       generatedAt:     now.toISOString(),
       expiresAt:       new Date(now.getTime() + CACHE_TTL_MS).toISOString(),
@@ -257,8 +317,7 @@ async function runJob() {
       writeCacheFile(cacheData);
       console.log(
         `[cache] Job complete — ${cacheData.projectCount} projects with violations, ` +
-        `${cacheData.failedPipelines} failed pipeline(s), ` +
-        `expires ${cacheData.expiresAt}`
+        `${cacheData.failedPipelines} failed pipeline(s), expires ${cacheData.expiresAt}`
       );
     } catch (e) {
       console.error('[cache] Failed to write cache file:', e.message);
@@ -280,10 +339,19 @@ function jsonReply(res, status, body) {
   res.end(payload);
 }
 
-http.createServer((req, res) => {
+/** Read the full request body as a string. */
+function readBody(req) {
+  return new Promise((resolve, reject) => {
+    let data = '';
+    req.on('data', chunk => { data += chunk; });
+    req.on('end',  () => resolve(data));
+    req.on('error', reject);
+  });
+}
+
+http.createServer(async (req, res) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
 
-  // Pre-flight
   if (req.method === 'OPTIONS') {
     res.writeHead(204, { 'Access-Control-Allow-Methods': 'GET, POST, OPTIONS' });
     res.end();
@@ -318,9 +386,49 @@ http.createServer((req, res) => {
     return;
   }
 
+  // ── POST /violation-cache/config ──────────────────────────────────────────
+  // Accepts { apiKey } and writes it to the bind-mounted .env file so the
+  // next job run picks up the updated key without a container restart.
+  // The API URL is intentionally excluded — it is a server-admin concern
+  // (Docker-internal URL) and must not be overwritten with a browser URL.
+  if (method === 'POST' && url === '/violation-cache/config') {
+    try {
+      const raw  = await readBody(req);
+      const body = JSON.parse(raw);
+
+      if (!body.apiKey || typeof body.apiKey !== 'string') {
+        jsonReply(res, 400, { error: 'apiKey is required' });
+        return;
+      }
+
+      const cleanKey = body.apiKey.replace(/[\x00-\x1F\x7F]/g, '').trim();
+      if (!cleanKey) {
+        jsonReply(res, 400, { error: 'apiKey must not be empty after sanitisation' });
+        return;
+      }
+
+      if (!fs.existsSync(ENV_FILE)) {
+        jsonReply(res, 503, {
+          error: `Config file not found at ${ENV_FILE}. ` +
+                 'Ensure .env is bind-mounted into the container.'
+        });
+        return;
+      }
+
+      patchEnvFile(ENV_FILE, { DT_API_KEY: cleanKey });
+      console.log(`[cache] DT_API_KEY updated in ${ENV_FILE} (***${cleanKey.slice(-4)})`);
+      jsonReply(res, 200, { ok: true, message: 'API key updated; will take effect on next job run' });
+    } catch (e) {
+      console.error('[cache] Config update error:', e.message);
+      jsonReply(res, 500, { error: e.message });
+    }
+    return;
+  }
+
   // ── POST /violation-cache/refresh ─────────────────────────────────────────
   if (method === 'POST' && url === '/violation-cache/refresh') {
-    if (!DT_API_KEY) {
+    const { apiKey } = getEffectiveConfig();
+    if (!apiKey) {
       jsonReply(res, 503, { error: 'DT_API_KEY not configured on the cache service' });
       return;
     }
@@ -328,7 +436,6 @@ http.createServer((req, res) => {
       jsonReply(res, 409, { status: 'building', message: 'Job already running' });
       return;
     }
-    // Fire-and-forget — errors are logged by runJob
     runJob().catch(err => console.error('[cache] Unhandled job error:', err.message));
     jsonReply(res, 202, { status: 'building', message: 'Job started' });
     return;
@@ -338,13 +445,14 @@ http.createServer((req, res) => {
   res.end('Not found');
 
 }).listen(PORT, () => {
+  const { apiUrl, apiKey } = getEffectiveConfig();
   console.log(`[cache] Violation cache service listening on :${PORT}`);
-  console.log(`[cache] DT_API_URL      : ${DT_API_URL}`);
-  console.log(`[cache] DT_API_KEY      : ${DT_API_KEY ? '***' + DT_API_KEY.slice(-4) : 'NOT SET'}`);
+  console.log(`[cache] DT_API_URL      : ${apiUrl}`);
+  console.log(`[cache] DT_API_KEY      : ${apiKey ? '***' + apiKey.slice(-4) : 'NOT SET'}`);
   console.log(`[cache] CACHE_TTL_HOURS : ${CACHE_TTL_MS / 3_600_000}`);
   console.log(`[cache] CACHE_FILE      : ${CACHE_FILE}`);
+  console.log(`[cache] ENV_FILE        : ${ENV_FILE} (${fs.existsSync(ENV_FILE) ? 'mounted ✓' : 'NOT FOUND — config endpoint disabled'})`);
 
-  // Auto-trigger on startup when no valid (non-stale) cache exists
   const s = getStatus();
   if (s.status === 'none' || s.status === 'stale') {
     console.log(`[cache] Auto-triggering initial cache build (status: ${s.status})`);
@@ -353,3 +461,4 @@ http.createServer((req, res) => {
     console.log(`[cache] Cache status on startup: ${s.status}`);
   }
 });
+

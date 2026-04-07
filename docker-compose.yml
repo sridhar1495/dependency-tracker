@@ -62,5 +62,8 @@ services:
     volumes:
       # Persists violation-cache.json across container restarts.
       - ./violation-cache/data:/data
+      # Bind-mount .env so the service can read updated config and persist
+      # API key changes written via POST /violation-cache/config.
+      - ./.env:/app/.env
     networks:
       - dependency-track

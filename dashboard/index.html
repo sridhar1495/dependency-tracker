@@ -1773,6 +1773,16 @@ async function connectLiveApi(fromModal = false) {
     dtFrontendUrl = frontendVal;
     if (dtFrontendUrl) localStorage.setItem('dt_frontend_url', dtFrontendUrl);
     else               localStorage.removeItem('dt_frontend_url');
+
+    // Persist the API key to the cache service so the next violation fetch
+    // uses the same key the browser is now using, regardless of env vars.
+    if (apiKey) {
+      fetch('/violation-cache/config', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ apiKey }),
+      }).catch(() => { /* non-fatal — cache will use its own configured key */ });
+    }
   }
 
   if (!apiKey) { alert('Please enter an API key.'); return; }
