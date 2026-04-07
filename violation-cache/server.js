@@ -62,9 +62,16 @@ function dtGet(urlPath) {
       headers:             { 'X-Api-Key': DT_API_KEY, Accept: 'application/json' },
       rejectUnauthorized:  false,
     }, (res) => {
+      // Timeout on the response body stream — catches servers that send headers
+      // then stall before sending the body.
+      const bodyTimer = setTimeout(() => {
+        res.destroy(new Error('Response body timeout'));
+      }, 90_000);
+
       let body = '';
       res.on('data', chunk => { body += chunk; });
       res.on('end', () => {
+        clearTimeout(bodyTimer);
         if (res.statusCode < 200 || res.statusCode >= 300) {
           reject(Object.assign(
             new Error(`HTTP ${res.statusCode} for ${urlPath}`),
@@ -75,11 +82,13 @@ function dtGet(urlPath) {
         try {
           resolve({ json: JSON.parse(body), headers: res.headers });
         } catch (e) {
-          reject(new Error(`JSON parse failed: ${e.message}`));
+          reject(new Error(`JSON parse failed for ${urlPath}: ${e.message}`));
         }
       });
+      res.on('error', err => { clearTimeout(bodyTimer); reject(err); });
     });
     req.on('error', reject);
+    // Request-level timeout covers connect + first byte
     req.setTimeout(60_000, () => req.destroy(new Error('Request timeout')));
     req.end();
   });
@@ -144,6 +153,9 @@ function getStatus() {
 }
 
 // ── Violation fetch job ───────────────────────────────────────────────────────
+// Max wall-clock time for the whole job before it is force-aborted.
+const JOB_TIMEOUT_MS = 30 * 60_000; // 30 minutes
+
 async function runJob() {
   if (jobRunning) {
     console.log('[cache] Job already running — skipping duplicate trigger');
@@ -158,6 +170,18 @@ async function runJob() {
   jobProgress = { pagesDone: 0, pagesTotal: 0, failedPipelines: 0 };
   console.log('[cache] Violation fetch job started');
 
+  // Watchdog: if the job exceeds JOB_TIMEOUT_MS something is fatally stuck.
+  // Force-reset jobRunning so the next poll/request can trigger a fresh build.
+  let jobTimedOut = false;
+  const watchdog = setTimeout(() => {
+    jobTimedOut = true;
+    jobRunning  = false;
+    console.error(
+      `[cache] Job watchdog fired after ${JOB_TIMEOUT_MS / 60_000} min — ` +
+      `force-resetting state (progress was ${jobProgress.pagesDone}/${jobProgress.pagesTotal})`
+    );
+  }, JOB_TIMEOUT_MS);
+
   const map    = {};           // { uuid: { ops, lic, secpolicy } }
   const emptyV = () => ({ fail: 0, warn: 0, info: 0, unassigned: 0 });
 
@@ -165,16 +189,19 @@ async function runJob() {
   async function runPipeline(riskType, state) {
     const ck      = CAT[riskType];
     const sk      = SEV[state];
+    const label   = `${riskType}/${state}`;
     const baseUrl =
       `/api/v1/violation?riskType=${riskType}&violationState=${state}` +
       `&pageSize=${PAGE_SIZE}`;
 
     // Page 1 — discover total count
+    console.log(`[cache] Pipeline ${label}: fetching page 1`);
     const r1         = await dtGetWithRetry(`${baseUrl}&pageNumber=1`);
     const totalCount = parseInt(r1.headers['x-total-count'] || '0', 10);
     const totalPages = totalCount > 0 ? Math.ceil(totalCount / PAGE_SIZE) : 1;
 
     jobProgress.pagesTotal += totalPages;   // running total; becomes exact after all p1s
+    console.log(`[cache] Pipeline ${label}: ${totalCount} violations, ${totalPages} page(s)`);
 
     const items1 = Array.isArray(r1.json) ? r1.json : (r1.json.violations || []);
     items1.forEach(v => {
@@ -186,6 +213,11 @@ async function runJob() {
 
     // Remaining pages — sequential within this pipeline, each with retry
     for (let page = 2; page <= totalPages; page++) {
+      if (jobTimedOut) {
+        console.warn(`[cache] Pipeline ${label}: aborting at page ${page} — job timed out`);
+        throw new Error('Job timed out');
+      }
+      console.log(`[cache] Pipeline ${label}: fetching page ${page}/${totalPages}`);
       const r = await dtGetWithRetry(`${baseUrl}&pageNumber=${page}`);
       const items = Array.isArray(r.json) ? r.json : (r.json.violations || []);
       items.forEach(v => {
@@ -195,39 +227,46 @@ async function runJob() {
       });
       jobProgress.pagesDone++;
     }
+
+    console.log(`[cache] Pipeline ${label}: done (${totalPages} page(s) fetched)`);
   }
-
-  // Launch all 9 pipelines simultaneously; individual pipeline errors are non-fatal
-  await Promise.all(
-    RISK_TYPES.flatMap(rt => STATES.map(st =>
-      runPipeline(rt, st).catch(err => {
-        console.error(`[cache] Pipeline ${rt}/${st} failed after retries: ${err.message}`);
-        jobProgress.failedPipelines++;
-      })
-    ))
-  );
-
-  const now      = new Date();
-  const cacheData = {
-    generatedAt:     now.toISOString(),
-    expiresAt:       new Date(now.getTime() + CACHE_TTL_MS).toISOString(),
-    projectCount:    Object.keys(map).length,
-    failedPipelines: jobProgress.failedPipelines,
-    map,
-  };
 
   try {
-    writeCacheFile(cacheData);
-    console.log(
-      `[cache] Job complete — ${cacheData.projectCount} projects with violations, ` +
-      `${cacheData.failedPipelines} failed pipeline(s), ` +
-      `expires ${cacheData.expiresAt}`
+    // Launch all 9 pipelines simultaneously; individual pipeline errors are non-fatal
+    await Promise.all(
+      RISK_TYPES.flatMap(rt => STATES.map(st =>
+        runPipeline(rt, st).catch(err => {
+          console.error(`[cache] Pipeline ${rt}/${st} failed: ${err.message}`);
+          jobProgress.failedPipelines++;
+        })
+      ))
     );
-  } catch (e) {
-    console.error('[cache] Failed to write cache file:', e.message);
-  }
 
-  jobRunning = false;
+    if (jobTimedOut) return; // watchdog already reset state; don't overwrite cache
+
+    const now      = new Date();
+    const cacheData = {
+      generatedAt:     now.toISOString(),
+      expiresAt:       new Date(now.getTime() + CACHE_TTL_MS).toISOString(),
+      projectCount:    Object.keys(map).length,
+      failedPipelines: jobProgress.failedPipelines,
+      map,
+    };
+
+    try {
+      writeCacheFile(cacheData);
+      console.log(
+        `[cache] Job complete — ${cacheData.projectCount} projects with violations, ` +
+        `${cacheData.failedPipelines} failed pipeline(s), ` +
+        `expires ${cacheData.expiresAt}`
+      );
+    } catch (e) {
+      console.error('[cache] Failed to write cache file:', e.message);
+    }
+  } finally {
+    clearTimeout(watchdog);
+    if (!jobTimedOut) jobRunning = false;
+  }
 }
 
 // ── HTTP server ───────────────────────────────────────────────────────────────

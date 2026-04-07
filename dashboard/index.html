@@ -519,9 +519,7 @@
   <!-- ── Main ────────────────────────────────────────────────────────────── -->
   <main class="main">
 
-    <div class="data-banner" id="dataBanner">
-      ⚠ Showing <strong>mock data</strong> — click "Connect Live API" to pull real project risks.
-    </div>
+    <div class="data-banner" id="dataBanner"></div>
 
     <div class="summary-grid" id="summaryGrid"></div>
 
@@ -670,9 +668,9 @@
 //              'unassigned' captures violations whose violationState is null/unknown.
 const CAT_LEVELS = {
   security:   ['critical','high','medium','low','unassigned'],
-  operations: ['fail','warn','info','unassigned'],
-  license:    ['fail','warn','info','unassigned'],
-  secpolicy:  ['fail','warn','info','unassigned'],
+  operations: ['fail','warn','info'],
+  license:    ['fail','warn','info'],
+  secpolicy:  ['fail','warn','info'],
 };
 const CATS = ['security','operations','license','secpolicy'];
 
@@ -1336,21 +1334,21 @@ function exportCSV() {
   const headers = [
     'Project','Version','Level','Type','Latest',
     'Security Critical','Security High','Security Medium','Security Low','Security Unassigned',
-    'Operational Fail','Operational Warn','Operational Info','Operational Unassigned',
-    'License Fail','License Warn','License Info','License Unassigned',
-    'SecPolicy Fail','SecPolicy Warn','SecPolicy Info','SecPolicy Unassigned',
+    'Operational Fail','Operational Warn','Operational Info',
+    'License Fail','License Warn','License Info',
+    'SecPolicy Fail','SecPolicy Warn','SecPolicy Info',
   ];
 
   const rows = filtered.map(p => {
     const node = nodeMap.get(p.uuid);
     const type = (node && node.children.length > 0) ? 'Group' : 'Project';
-    const sp   = p.secpolicy || { fail:0, warn:0, info:0, unassigned:0 };
+    const sp   = p.secpolicy || { fail:0, warn:0, info:0 };
     return [
       p.name, p.version || '', p.level ?? '', type, p.isLatest ? 'Yes' : '',
       p.security.critical,  p.security.high,  p.security.medium,  p.security.low,  p.security.unassigned,
-      p.operations.fail,    p.operations.warn, p.operations.info,  p.operations.unassigned||0,
-      p.license.fail,       p.license.warn,    p.license.info,     p.license.unassigned||0,
-      sp.fail,              sp.warn,           sp.info,            sp.unassigned,
+      p.operations.fail,    p.operations.warn, p.operations.info,
+      p.license.fail,       p.license.warn,    p.license.info,
+      sp.fail,              sp.warn,           sp.info,
     ];
   });
 
@@ -1574,7 +1572,7 @@ function startCachePoll() {
         const prog = (s.progress?.pagesTotal || 0) > 0
           ? ` (${s.progress.pagesDone}/${s.progress.pagesTotal} pages)` : '';
         banner.innerHTML =
-          `✓ Live — ${allProjects.length} projects. ⏳ Building violation cache${prog}…`;
+          `✓ Live — ${allProjects.length} projects. ⏳ Refetching violations${prog}…`;
         banner.className = 'data-banner';
 
       } else if (s.status === 'ready') {
@@ -1618,7 +1616,7 @@ function buildReadyBanner(cacheJson) {
     `✓ Live — ${allProjects.length} projects. ` +
     `Violations from cache (built ${ageStr}).` +
     `${failNote} ` +
-    `<button class="btn-xs" onclick="triggerCacheRefresh()">↻ Refresh</button>`
+    `<button class="btn-xs" onclick="triggerCacheRefresh()">↻ Refetch Violations</button>`
   );
 }
 
@@ -1664,7 +1662,7 @@ async function loadViolationCache() {
       const prog = (status.progress?.pagesTotal || 0) > 0
         ? ` (${status.progress.pagesDone}/${status.progress.pagesTotal} pages)` : '';
       banner.innerHTML =
-        `✓ Live — ${allProjects.length} projects. ⏳ Building violation cache${prog}…`;
+        `✓ Live — ${allProjects.length} projects. ⏳ Refetching violations${prog}…`;
       banner.className = 'data-banner';
       startCachePoll();
 
@@ -1679,7 +1677,7 @@ async function loadViolationCache() {
     } else {
       // ── none or error: auto-trigger build ────────────────────────────────
       banner.innerHTML =
-        `✓ Live — ${allProjects.length} projects. ⏳ Building violation cache…`;
+        `✓ Live — ${allProjects.length} projects. ⏳ Refetching violations…`;
       banner.className = 'data-banner';
       await fetch('/violation-cache/refresh', { method: 'POST' }).catch(() => {});
       startCachePoll();
@@ -1706,18 +1704,18 @@ async function triggerCacheRefresh() {
     if (r.status === 409) {
       // Already building — just resume polling
       banner.innerHTML =
-        `✓ Live — ${allProjects.length} projects. ⏳ Building violation cache…`;
+        `✓ Live — ${allProjects.length} projects. ⏳ Refetching violations…`;
     } else if (!r.ok) {
       const body = await r.json().catch(() => ({}));
       banner.innerHTML =
         `✓ Live — ${allProjects.length} projects. ` +
-        `<span class="banner-warn">⚠ ${body.error || 'Refresh failed.'} ` +
+        `<span class="banner-warn">⚠ ${body.error || 'Refetch failed.'} ` +
         `<button class="btn-xs" onclick="triggerCacheRefresh()">↻ Retry</button></span>`;
       banner.className = 'data-banner';
       return;
     } else {
       banner.innerHTML =
-        `✓ Live — ${allProjects.length} projects. ⏳ Building violation cache…`;
+        `✓ Live — ${allProjects.length} projects. ⏳ Refetching violations…`;
     }
     banner.className = 'data-banner';
     startCachePoll();
@@ -1809,7 +1807,7 @@ async function connectLiveApi(fromModal = false) {
     // Show the project tree immediately — operational/license/secpolicy columns will
     // populate once loadViolationCache() reads from (or waits for) the cache service.
     document.getElementById('dataBanner').innerHTML =
-      `✓ Live — ${allProjects.length} projects. ⏳ Loading violation data…`;
+      `✓ Live — ${allProjects.length} projects. ⏳ Refetching violations…`;
     document.getElementById('dataBanner').className = 'data-banner';
     setStatus('Live', 'var(--ok)', false);
     closeModal('apiModal');
@@ -1942,6 +1940,9 @@ async function loadDtConfig() {
       if (cfg.apiKey) {
         apiKey = cfg.apiKey;
         preconfiguredKey = true;
+        const banner = document.getElementById('dataBanner');
+        banner.innerHTML = '⏳ Connecting to DependencyTrack…';
+        banner.className = 'data-banner';
         // Returns true on success; false on connection failure → caller loads mock data.
         return await connectLiveApi();
       }
