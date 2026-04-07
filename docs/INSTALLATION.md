@@ -100,6 +100,24 @@ docker compose --env-file .env up -d
 | `DT_FRONTEND_URL` | _(blank)_ | DT web UI URL for project hyperlinks (e.g. `https://dtrack.company.com`) |
 | `VIOLATION_CACHE_TTL_HOURS` | `24` | Hours the violation cache file is valid before auto-rebuild |
 
+### Changing the violation cache TTL after installation
+
+The TTL is not set during installation — the default is 24 hours. To change it:
+
+```bash
+# Edit .env
+VIOLATION_CACHE_TTL_HOURS=12
+
+# Apply the change
+docker compose --env-file .env restart dt-violation-cache
+```
+
+The new TTL takes effect for the next cache build. A rebuild can be triggered immediately with:
+
+```bash
+curl -X POST http://localhost:3000/violation-cache/refresh
+```
+
 ### Generating an API key in DependencyTrack
 
 The dashboard only reads data. Create a dedicated read-only team and key:

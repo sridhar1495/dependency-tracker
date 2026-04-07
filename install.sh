@@ -207,11 +207,10 @@ if [[ "$NON_INTERACTIVE" == "false" ]]; then
   DT_API_KEY="${DT_API_KEY:-}"
   read -rsp "  DependencyTrack API key      [${DT_API_KEY:+(set)}]: " _in
   echo ""
-  [[ -n "$_in" ]] && DT_API_KEY="$_in"
-
-  _default_ttl="${VIOLATION_CACHE_TTL_HOURS:-24}"
-  read -rp "  Violation cache TTL (hours)  [${_default_ttl}]: " _in
-  [[ -n "$_in" ]] && VIOLATION_CACHE_TTL_HOURS="$_in" || VIOLATION_CACHE_TTL_HOURS="$_default_ttl"
+  # Strip control characters (newlines, carriage returns, etc.) from the key
+  if [[ -n "$_in" ]]; then
+    DT_API_KEY="$(printf '%s' "$_in" | tr -d '\000-\037\177')"
+  fi
 
   # Write back (overwrite only the keys we manage)
   grep -v "^DT_DASHBOARD_PORT=\|^DT_API_INTERNAL_URL=\|^DT_FRONTEND_URL=\|^DT_API_KEY=\|^VIOLATION_CACHE_TTL_HOURS=" \
