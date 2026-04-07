@@ -26,7 +26,9 @@ const path  = require('path');
 // ── Config ────────────────────────────────────────────────────────────────────
 const PORT         = parseInt(process.env.PORT         || '3001',  10);
 const DT_API_URL   = (process.env.DT_API_URL || 'http://localhost:8080').replace(/\/$/, '');
-const DT_API_KEY   = process.env.DT_API_KEY  || '';
+// Strip any control characters (newlines, carriage returns, tabs) that may be
+// introduced by copy-paste or Windows line endings in the .env file.
+const DT_API_KEY   = (process.env.DT_API_KEY || '').replace(/[\x00-\x1F\x7F]/g, '').trim();
 const CACHE_TTL_MS = parseInt(process.env.CACHE_TTL_HOURS || '24', 10) * 3_600_000;
 const CACHE_DIR    = process.env.CACHE_DIR   || '/data';
 const CACHE_FILE   = path.join(CACHE_DIR, 'violation-cache.json');
