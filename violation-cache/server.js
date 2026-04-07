@@ -58,8 +58,9 @@ function dtGet(urlPath) {
     const fullUrl = `${DT_API_URL}${urlPath}`;
     const mod     = fullUrl.startsWith('https') ? https : http;
     const req     = mod.request(fullUrl, {
-      method:  'GET',
-      headers: { 'X-Api-Key': DT_API_KEY, Accept: 'application/json' },
+      method:              'GET',
+      headers:             { 'X-Api-Key': DT_API_KEY, Accept: 'application/json' },
+      rejectUnauthorized:  false,
     }, (res) => {
       let body = '';
       res.on('data', chunk => { body += chunk; });
