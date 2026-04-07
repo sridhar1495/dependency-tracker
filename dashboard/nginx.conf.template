@@ -30,6 +30,16 @@ server {
         add_header Cache-Control "no-store";
     }
 
+    # Proxy violation cache service requests to the dt-violation-cache container.
+    # Uses a variable so nginx doesn't fail on startup if the container isn't up yet.
+    location /violation-cache/ {
+        set $vcache "http://dt-violation-cache:3001";
+        proxy_pass $vcache;
+        proxy_set_header Host $http_host;
+        proxy_read_timeout 300s;   # long enough to cover a full rebuild poll cycle
+        add_header Cache-Control "no-store" always;
+    }
+
     # Proxy API calls to DependencyTrack.
     # Target is set by DT_API_INTERNAL_URL (injected at container start via envsubst).
     #   Local Docker:  http://dtrack-apiserver:8080   (default)
