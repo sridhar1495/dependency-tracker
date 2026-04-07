@@ -1,101 +1,15 @@
 #
-# Dependency-Track Community Edition — Docker Compose
-# Includes: API Server, Frontend, PostgreSQL, and Custom Dashboard
+# Dependency-Track Risk Dashboard — Docker Compose
+# Serves the custom risk dashboard and violation cache service.
+# Both containers proxy to an existing DependencyTrack API instance
+# (set DT_API_INTERNAL_URL to point at your DT API server).
 #
-
-volumes:
-  dependency-track-data:
-    driver: local
-  postgres-data:
-    driver: local
 
 networks:
   dependency-track:
     driver: bridge
 
 services:
-
-  # ─── PostgreSQL Database ────────────────────────────────────────────────────
-  postgres:
-    image: postgres:15-alpine
-    container_name: dt-postgres
-    restart: unless-stopped
-    environment:
-      POSTGRES_DB: ${POSTGRES_DB:-dtrack}
-      POSTGRES_USER: ${POSTGRES_USER:-dtrack}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-dtrack_password_change_me}
-    volumes:
-      - postgres-data:/var/lib/postgresql/data
-    networks:
-      - dependency-track
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-dtrack} -d ${POSTGRES_DB:-dtrack}"]
-      interval: 10s
-      timeout: 5s
-      retries: 5
-      start_period: 20s
-
-  # ─── DependencyTrack API Server ─────────────────────────────────────────────
-  dtrack-apiserver:
-    image: dependencytrack/apiserver:${DT_VERSION:-latest}
-    container_name: dt-apiserver
-    restart: unless-stopped
-    depends_on:
-      postgres:
-        condition: service_healthy
-    environment:
-      # ── Database ──────────────────────────────────────────────────────────
-      ALPINE_DATABASE_MODE: "external"
-      ALPINE_DATABASE_URL: "jdbc:postgresql://postgres:5432/${POSTGRES_DB:-dtrack}"
-      ALPINE_DATABASE_DRIVER: "org.postgresql.Driver"
-      ALPINE_DATABASE_USERNAME: "${POSTGRES_USER:-dtrack}"
-      ALPINE_DATABASE_PASSWORD: "${POSTGRES_PASSWORD:-dtrack_password_change_me}"
-      # ── API Key for initial admin bootstrap ───────────────────────────────
-      ALPINE_FORCE_CHANGE_PASSWORD: "false"
-      # ── HTTP ──────────────────────────────────────────────────────────────
-      ALPINE_HTTP_PORT: "8080"
-      # ── Data directory ────────────────────────────────────────────────────
-      ALPINE_DATA_DIRECTORY: "/data"
-      # ── OIDC (optional, uncomment to enable) ──────────────────────────────
-      # ALPINE_OIDC_ENABLED: "true"
-      # ALPINE_OIDC_ISSUER: "https://your-idp/.well-known/openid-configuration"
-    volumes:
-      - dependency-track-data:/data
-    ports:
-      - "${DT_API_PORT:-8081}:8080"
-    networks:
-      - dependency-track
-    deploy:
-      resources:
-        limits:
-          memory: 12g
-        reservations:
-          memory: 4g
-    healthcheck:
-      # First-run downloads the NVD database — allow up to 15 minutes.
-      # start_period: container is not marked unhealthy during this window.
-      test: ["CMD-SHELL", "wget -qO- http://localhost:8080/api/version || exit 1"]
-      interval: 30s
-      timeout: 10s
-      retries: 20
-      start_period: 600s
-
-  # ─── DependencyTrack Frontend ────────────────────────────────────────────────
-  dtrack-frontend:
-    image: dependencytrack/frontend:${DT_VERSION:-latest}
-    container_name: dt-frontend
-    restart: unless-stopped
-    depends_on:
-      dtrack-apiserver:
-        # service_started (not service_healthy) so the frontend launches
-        # immediately — it will keep retrying API connections on its own.
-        condition: service_started
-    environment:
-      API_BASE_URL: "http://${DT_HOST:-localhost}:${DT_API_PORT:-8081}"
-    ports:
-      - "${DT_FRONTEND_PORT:-8080}:8080"
-    networks:
-      - dependency-track
 
   # ─── Custom Risk Dashboard ────────────────────────────────────────────────────
   dt-dashboard:
@@ -104,13 +18,12 @@ services:
     restart: unless-stopped
     environment:
       # Where nginx should proxy /api/* requests.
-      # Local (default): the API server on the same Docker network.
-      # Production:      set to your external DT URL, e.g.
-      #                    DT_API_INTERNAL_URL=https://dtrack.company.com
+      # Point this at your DependencyTrack API server (on the same Docker network
+      # or an external URL if DT is hosted elsewhere).
+      # Example external: DT_API_INTERNAL_URL=https://dtrack.company.com
       DT_API_INTERNAL_URL: "${DT_API_INTERNAL_URL:-http://dtrack-apiserver:8080}"
       # Optional: pre-configure the DT API key so the dashboard loads live data
       # automatically on page open (no manual "Connect API" step needed).
-      # Leave blank to keep the default manual-connect behaviour.
       DT_API_KEY: "${DT_API_KEY:-}"
       # Optional: DependencyTrack UI URL used by the dashboard for clickable project links.
       DT_FRONTEND_URL: "${DT_FRONTEND_URL:-}"
@@ -123,25 +36,27 @@ services:
       - "${DT_DASHBOARD_PORT:-3000}:80"
     networks:
       - dependency-track
-    depends_on:
-      - dtrack-apiserver
 
   # ─── Violation Cache Service ──────────────────────────────────────────────────
   # Fetches all policy violations from DependencyTrack on demand and caches the
   # per-project count map in a JSON file.  The dashboard reads this file instead
   # of streaming large violation payloads through the browser on every page load.
+  #
+  # Endpoints (proxied through nginx at /violation-cache/*):
+  #   GET  /violation-cache/status   — cache state + build progress
+  #   GET  /violation-cache/data     — the cached per-project violation map
+  #   POST /violation-cache/refresh  — trigger a background rebuild
   dt-violation-cache:
     build:
       context: ./violation-cache
     container_name: dt-violation-cache
     restart: unless-stopped
     environment:
-      # Must point to the DT API server reachable within the Docker network.
+      # Must point to the DT API server reachable from within this container.
       DT_API_URL: "${DT_API_INTERNAL_URL:-http://dtrack-apiserver:8080}"
       # DT API key used by the cache service to fetch violations server-side.
-      # Should be the same key (or a read-only key) used by the dashboard.
       DT_API_KEY: "${DT_API_KEY:-}"
-      # How many hours the cached file is considered valid before auto-expiry.
+      # How many hours the cached file is valid before auto-expiry (default 24 h).
       CACHE_TTL_HOURS: "${VIOLATION_CACHE_TTL_HOURS:-24}"
       PORT: "3001"
     volumes:
@@ -149,5 +64,3 @@ services:
       - ./violation-cache/data:/data
     networks:
       - dependency-track
-    depends_on:
-      - dtrack-apiserver
