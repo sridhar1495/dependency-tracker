@@ -1,4 +1,6 @@
 #!/usr/bin/env bash
+# SPDX-License-Identifier: MIT
+# Copyright (c) 2024 Dependency-Track Risk Dashboard contributors
 # =============================================================================
 # Dependency-Track Risk Dashboard — Installer
 # =============================================================================
@@ -210,6 +212,25 @@ if [[ "$NON_INTERACTIVE" == "false" ]]; then
   # Strip control characters (newlines, carriage returns, etc.) from the key
   if [[ -n "$_in" ]]; then
     DT_API_KEY="$(printf '%s' "$_in" | tr -d '\000-\037\177')"
+  fi
+
+  # O4: Validate API key against DependencyTrack before saving
+  if [[ -n "$DT_API_KEY" && -n "$DT_API_INTERNAL_URL" ]]; then
+    info "Validating API key against DependencyTrack…"
+    _api_test_url="${DT_API_INTERNAL_URL%/}/api/v1/project?pageSize=1"
+    _http_status=$(curl -sk -o /dev/null -w "%{http_code}" \
+      -H "X-Api-Key: ${DT_API_KEY}" "$_api_test_url" 2>/dev/null || echo "000")
+    if [[ "$_http_status" == "200" ]]; then
+      success "API key validated (HTTP 200)"
+    elif [[ "$_http_status" == "401" || "$_http_status" == "403" ]]; then
+      warn "API key validation failed (HTTP ${_http_status}) — key may be incorrect or lack VIEW_PORTFOLIO permission"
+      warn "Continuing anyway; you can update DT_API_KEY in .env after installation"
+    elif [[ "$_http_status" == "000" ]]; then
+      warn "Could not reach DT API at ${DT_API_INTERNAL_URL} — skipping key validation"
+      warn "Ensure DT_API_INTERNAL_URL is reachable from this host, or update .env after install"
+    else
+      warn "Unexpected HTTP ${_http_status} from DT API — continuing without validation"
+    fi
   fi
 
   # Write back (overwrite only the keys we manage)

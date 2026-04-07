@@ -16,6 +16,17 @@ services:
     image: nginx:alpine
     container_name: dt-dashboard
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost/"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "5"
     environment:
       # Where nginx should proxy /api/* requests.
       # Point this at your DependencyTrack API server (on the same Docker network
@@ -51,6 +62,17 @@ services:
       context: ./violation-cache
     container_name: dt-violation-cache
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:3001/violation-cache/status"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "100m"
+        max-file: "5"
     environment:
       # Must point to the DT API server reachable from within this container.
       DT_API_URL: "${DT_API_INTERNAL_URL:-http://dtrack-apiserver:8080}"

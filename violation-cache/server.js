@@ -1,3 +1,5 @@
+// SPDX-License-Identifier: MIT
+// Copyright (c) 2024 Dependency-Track Risk Dashboard contributors
 'use strict';
 
 // ── Violation Cache Service ───────────────────────────────────────────────────
@@ -18,6 +20,15 @@
 //   ready     — file exists and TTL has not expired
 //   stale     — file exists but TTL has expired
 //   no-key    — DT_API_KEY is not set; cannot fetch
+//
+// Environment variables:
+//   PORT                — HTTP port (default 3001)
+//   DT_API_URL          — DependencyTrack API base URL
+//   DT_API_KEY          — API key for DependencyTrack
+//   CACHE_TTL_HOURS     — hours before cache expires (default 24)
+//   CACHE_DIR           — directory for cache files (default /data)
+//   ENV_FILE            — path to bind-mounted .env file (default /app/.env)
+//   LOG_FORMAT          — set to "json" for structured JSON log output
 
 const http  = require('http');
 const https = require('https');
@@ -38,11 +49,44 @@ const ENV_FILE     = process.env.ENV_FILE || '/app/.env';
 const STARTUP_API_URL = (process.env.DT_API_URL || 'http://localhost:8080').replace(/\/$/, '');
 const STARTUP_API_KEY = (process.env.DT_API_KEY || '').replace(/[\x00-\x1F\x7F]/g, '').trim();
 
+// ── Structured logging (O3) ───────────────────────────────────────────────────
+// Set LOG_FORMAT=json in .env or environment to emit newline-delimited JSON.
+// Compatible with Datadog, Loki, Grafana, and other log aggregators.
+const LOG_JSON = process.env.LOG_FORMAT === 'json';
+
+function log(level, message, meta = {}) {
+  const ts      = new Date().toISOString();
+  const hasMeta = Object.keys(meta).length > 0;
+  if (LOG_JSON) {
+    const entry = { level, ts, msg: message };
+    if (hasMeta) Object.assign(entry, meta);
+    const out = JSON.stringify(entry);
+    if (level === 'error') console.error(out);
+    else if (level === 'warn') console.warn(out);
+    else console.log(out);
+  } else {
+    const suffix = hasMeta ? ` ${JSON.stringify(meta)}` : '';
+    const line   = `[cache] ${message}${suffix}`;
+    if (level === 'error') console.error(line);
+    else if (level === 'warn') console.warn(line);
+    else console.log(line);
+  }
+}
+
+// ── HTTP keep-alive agents (P1) ───────────────────────────────────────────────
+// Reusing connections across the 9 parallel pipelines avoids repeated
+// TCP+TLS handshakes for every page fetch (can be hundreds of connections).
+const httpsAgent = new https.Agent({ keepAlive: true, maxSockets: 20 });
+const httpAgent  = new http.Agent({ keepAlive: true, maxSockets: 20 });
+
+// ── .env helpers (Q7, Q8) ─────────────────────────────────────────────────────
+
 /** Parse a .env file and return a plain key→value object. */
 function parseEnvFile(filePath) {
   if (!fs.existsSync(filePath)) return {};
   const result = {};
-  for (const line of fs.readFileSync(filePath, 'utf8').split('\n')) {
+  // Q7: normalise Windows CRLF so keys/values don't carry a trailing \r
+  for (const line of fs.readFileSync(filePath, 'utf8').replace(/\r\n/g, '\n').split('\n')) {
     const trimmed = line.trim();
     if (!trimmed || trimmed.startsWith('#')) continue;
     const eqIdx = trimmed.indexOf('=');
@@ -54,12 +98,27 @@ function parseEnvFile(filePath) {
   return result;
 }
 
-/** Write a single key=value update into the .env file, preserving all other lines. */
+/**
+ * Write key=value updates into a .env file, preserving all other lines.
+ * Q7: normalises CRLF before splitting.
+ * Q8: throws typed errors for read and write failures so callers can log them separately.
+ */
 function patchEnvFile(filePath, updates) {
-  let lines = fs.existsSync(filePath) ? fs.readFileSync(filePath, 'utf8').split('\n') : [];
-  const remaining = new Set(Object.keys(updates));
+  // Q8: separate read error
+  let content;
+  try {
+    content = fs.existsSync(filePath)
+      ? fs.readFileSync(filePath, 'utf8').replace(/\r\n/g, '\n') // Q7
+      : '';
+  } catch (e) {
+    throw Object.assign(
+      new Error(`Failed to read ${filePath}: ${e.message}`),
+      { code: 'PATCH_READ_FAILED', cause: e }
+    );
+  }
 
-  lines = lines.map(line => {
+  const remaining = new Set(Object.keys(updates));
+  let lines = content.split('\n').map(line => {
     const eqIdx = line.indexOf('=');
     if (eqIdx < 1) return line;
     const key = line.slice(0, eqIdx).trim();
@@ -70,37 +129,38 @@ function patchEnvFile(filePath, updates) {
     return line;
   });
 
-  // Append any keys that weren't already in the file
-  for (const key of remaining) {
-    lines.push(`${key}=${updates[key]}`);
-  }
+  // Append any keys that were not already in the file
+  for (const key of remaining) lines.push(`${key}=${updates[key]}`);
 
-  fs.writeFileSync(filePath, lines.join('\n'), 'utf8');
+  // Q8: separate write error
+  try {
+    fs.writeFileSync(filePath, lines.join('\n'), 'utf8');
+  } catch (e) {
+    throw Object.assign(
+      new Error(`Failed to write ${filePath}: ${e.message}`),
+      { code: 'PATCH_WRITE_FAILED', cause: e }
+    );
+  }
 }
 
 /**
  * Read the effective DT_API_URL and DT_API_KEY.
- * Priority: .env file (if mounted and readable) > Docker Compose env vars (startup values).
- * This means changes written to .env via the config endpoint are picked up on the next job.
+ * Priority: .env file (if mounted and readable) > Docker Compose env vars.
+ * Called before every job so changes written via /config are picked up immediately.
  */
 function getEffectiveConfig() {
   const envVars = parseEnvFile(ENV_FILE);
-
-  const rawUrl = envVars['DT_API_INTERNAL_URL'] || STARTUP_API_URL;
-  const apiUrl = rawUrl.replace(/\/$/, '');
-
-  const rawKey = envVars['DT_API_KEY'] || STARTUP_API_KEY;
-  const apiKey = rawKey.replace(/[\x00-\x1F\x7F]/g, '').trim();
-
+  const apiUrl  = (envVars['DT_API_INTERNAL_URL'] || STARTUP_API_URL).replace(/\/$/, '');
+  const apiKey  = (envVars['DT_API_KEY'] || STARTUP_API_KEY).replace(/[\x00-\x1F\x7F]/g, '').trim();
   return { apiUrl, apiKey };
 }
 
 // ── Fetch parameters ──────────────────────────────────────────────────────────
-const PAGE_SIZE   = 100;
-const RISK_TYPES  = ['OPERATIONAL', 'LICENSE', 'SECURITY'];
-const STATES      = ['FAIL', 'WARN', 'INFO'];
-const CAT         = { OPERATIONAL: 'ops', LICENSE: 'lic', SECURITY: 'secpolicy' };
-const SEV         = { FAIL: 'fail', WARN: 'warn', INFO: 'info' };
+const PAGE_SIZE  = 100;
+const RISK_TYPES = ['OPERATIONAL', 'LICENSE', 'SECURITY'];
+const STATES     = ['FAIL', 'WARN', 'INFO'];
+const CAT        = { OPERATIONAL: 'ops', LICENSE: 'lic', SECURITY: 'secpolicy' };
+const SEV        = { FAIL: 'fail', WARN: 'warn', INFO: 'info' };
 
 // ── Retry config ──────────────────────────────────────────────────────────────
 const MAX_RETRIES  = 3;
@@ -117,14 +177,16 @@ const sleep = ms => new Promise(r => setTimeout(r, ms));
 function dtGet(urlPath, apiUrl, apiKey) {
   return new Promise((resolve, reject) => {
     const fullUrl = `${apiUrl}${urlPath}`;
-    const mod     = fullUrl.startsWith('https') ? https : http;
+    const isHttps = fullUrl.startsWith('https');
+    const mod     = isHttps ? https : http;
     const req     = mod.request(fullUrl, {
       method:             'GET',
       headers:            { 'X-Api-Key': apiKey, Accept: 'application/json' },
       rejectUnauthorized: false,
+      agent:              isHttps ? httpsAgent : httpAgent, // P1: reuse connections
     }, (res) => {
       // Timeout on the response body stream — catches servers that send headers
-      // then stall before sending the body.
+      // then stall before flushing the body.
       const bodyTimer = setTimeout(() => {
         res.destroy(new Error('Response body timeout'));
       }, 90_000);
@@ -161,10 +223,7 @@ async function dtGetWithRetry(urlPath, apiUrl, apiKey, attempt = 0) {
   } catch (err) {
     if (attempt < MAX_RETRIES - 1) {
       const delay = RETRY_DELAYS[attempt];
-      console.warn(
-        `[cache] Retry ${attempt + 1}/${MAX_RETRIES - 1} for ${urlPath} ` +
-        `after ${delay}ms: ${err.message}`
-      );
+      log('warn', `Retry ${attempt + 1}/${MAX_RETRIES - 1} for ${urlPath} after ${delay}ms`, { error: err.message });
       await sleep(delay);
       return dtGetWithRetry(urlPath, apiUrl, apiKey, attempt + 1);
     }
@@ -178,25 +237,22 @@ function readCacheFile() {
   try {
     return JSON.parse(fs.readFileSync(CACHE_FILE, 'utf8'));
   } catch (e) {
-    console.error('[cache] Failed to read cache file:', e.message);
+    log('error', `Failed to read cache file: ${e.message}`);
     return null;
   }
 }
 
 function writeCacheFile(data) {
   fs.mkdirSync(CACHE_DIR, { recursive: true });
-  fs.writeFileSync(CACHE_TMP, JSON.stringify(data));
-  fs.renameSync(CACHE_TMP, CACHE_FILE);  // atomic on POSIX
+  fs.writeFileSync(CACHE_TMP, JSON.stringify(data), { mode: 0o640 });
+  fs.renameSync(CACHE_TMP, CACHE_FILE); // atomic on POSIX
 }
 
 function getStatus() {
   if (jobRunning) {
     return {
       status:   'building',
-      progress: {
-        pagesDone:  jobProgress.pagesDone,
-        pagesTotal: jobProgress.pagesTotal,
-      },
+      progress: { pagesDone: jobProgress.pagesDone, pagesTotal: jobProgress.pagesTotal },
     };
   }
   const { apiKey } = getEffectiveConfig();
@@ -218,90 +274,114 @@ const JOB_TIMEOUT_MS = 30 * 60_000; // 30-minute watchdog
 
 async function runJob() {
   if (jobRunning) {
-    console.log('[cache] Job already running — skipping duplicate trigger');
+    log('info', 'Job already running — skipping duplicate trigger');
     return;
   }
 
   // Re-read .env immediately before the job so any key/URL update is picked up.
   const { apiUrl, apiKey } = getEffectiveConfig();
-  console.log(`[cache] Effective DT_API_URL : ${apiUrl}`);
-  console.log(`[cache] Effective DT_API_KEY : ${apiKey ? '***' + apiKey.slice(-4) : 'NOT SET'}`);
+  log('info', 'Effective config for this run', {
+    apiUrl,
+    apiKey: apiKey ? `***${apiKey.slice(-4)}` : 'NOT SET',
+  });
 
   if (!apiKey) {
-    console.error('[cache] DT_API_KEY not set — cannot fetch violations');
+    log('error', 'DT_API_KEY not set — cannot fetch violations');
     return;
   }
 
   jobRunning  = true;
   jobProgress = { pagesDone: 0, pagesTotal: 0, failedPipelines: 0 };
-  console.log('[cache] Violation fetch job started');
+  log('info', 'Violation fetch job started');
 
   let jobTimedOut = false;
   const watchdog  = setTimeout(() => {
     jobTimedOut = true;
     jobRunning  = false;
-    console.error(
-      `[cache] Job watchdog fired after ${JOB_TIMEOUT_MS / 60_000} min — ` +
-      `force-resetting state (progress was ${jobProgress.pagesDone}/${jobProgress.pagesTotal})`
-    );
+    log('error', 'Job watchdog fired — force-resetting state', {
+      timeoutMin: JOB_TIMEOUT_MS / 60_000,
+      progress:   `${jobProgress.pagesDone}/${jobProgress.pagesTotal}`,
+    });
   }, JOB_TIMEOUT_MS);
 
   const map    = {};
   const emptyV = () => ({ fail: 0, warn: 0, info: 0, unassigned: 0 });
 
-  async function runPipeline(riskType, state) {
-    const ck      = CAT[riskType];
-    const sk      = SEV[state];
-    const label   = `${riskType}/${state}`;
-    const baseUrl =
-      `/api/v1/violation?riskType=${riskType}&violationState=${state}` +
-      `&pageSize=${PAGE_SIZE}`;
+  const pipelines = RISK_TYPES.flatMap(rt => STATES.map(st => ({ rt, st })));
 
-    console.log(`[cache] Pipeline ${label}: fetching page 1`);
-    const r1         = await dtGetWithRetry(`${baseUrl}&pageNumber=1`, apiUrl, apiKey);
-    const totalCount = parseInt(r1.headers['x-total-count'] || '0', 10);
-    const totalPages = totalCount > 0 ? Math.ceil(totalCount / PAGE_SIZE) : 1;
+  // ── Phase 1: Discover total page counts (P2) ──────────────────────────────
+  // Run all 9 page-1 fetches in parallel first so pagesTotal is accurate
+  // from the start and the progress indicator doesn't undercount early on.
+  const phase1 = await Promise.all(
+    pipelines.map(async ({ rt, st }) => {
+      const label   = `${rt}/${st}`;
+      const baseUrl = `/api/v1/violation?riskType=${rt}&violationState=${st}&pageSize=${PAGE_SIZE}`;
+      try {
+        log('info', `Pipeline ${label}: fetching page 1`);
+        const r1         = await dtGetWithRetry(`${baseUrl}&pageNumber=1`, apiUrl, apiKey);
+        const totalCount = parseInt(r1.headers['x-total-count'] || '0', 10);
+        const totalPages = totalCount > 0 ? Math.ceil(totalCount / PAGE_SIZE) : 1;
+        log('info', `Pipeline ${label}: ${totalCount} violations across ${totalPages} page(s)`);
+        return { rt, st, r1, totalCount, totalPages, baseUrl, failed: false };
+      } catch (err) {
+        log('error', `Pipeline ${label} failed on page 1`, { error: err.message });
+        jobProgress.failedPipelines++;
+        return { rt, st, failed: true };
+      }
+    })
+  );
 
-    jobProgress.pagesTotal += totalPages;
-    console.log(`[cache] Pipeline ${label}: ${totalCount} violations, ${totalPages} page(s)`);
+  // Set accurate total now that all page counts are known
+  jobProgress.pagesTotal = phase1.reduce((sum, p) => sum + (p.failed ? 0 : p.totalPages), 0);
+  log('info', `Discovery complete — ${jobProgress.pagesTotal} total pages across ${pipelines.length} pipelines`);
 
-    const items1 = Array.isArray(r1.json) ? r1.json : (r1.json.violations || []);
-    items1.forEach(v => {
+  // Apply page-1 data
+  for (const p of phase1) {
+    if (p.failed) continue;
+    const ck    = CAT[p.rt];
+    const sk    = SEV[p.st];
+    const items = Array.isArray(p.r1.json) ? p.r1.json : (p.r1.json.violations || []);
+    items.forEach(v => {
       const uuid = v.project?.uuid; if (!uuid) return;
       if (!map[uuid]) map[uuid] = { ops: emptyV(), lic: emptyV(), secpolicy: emptyV() };
       map[uuid][ck][sk]++;
     });
     jobProgress.pagesDone++;
-
-    for (let page = 2; page <= totalPages; page++) {
-      if (jobTimedOut) {
-        console.warn(`[cache] Pipeline ${label}: aborting at page ${page} — job timed out`);
-        throw new Error('Job timed out');
-      }
-      console.log(`[cache] Pipeline ${label}: fetching page ${page}/${totalPages}`);
-      const r = await dtGetWithRetry(`${baseUrl}&pageNumber=${page}`, apiUrl, apiKey);
-      const items = Array.isArray(r.json) ? r.json : (r.json.violations || []);
-      items.forEach(v => {
-        const uuid = v.project?.uuid; if (!uuid) return;
-        if (!map[uuid]) map[uuid] = { ops: emptyV(), lic: emptyV(), secpolicy: emptyV() };
-        map[uuid][ck][sk]++;
-      });
-      jobProgress.pagesDone++;
-    }
-
-    console.log(`[cache] Pipeline ${label}: done (${totalPages} page(s) fetched)`);
   }
 
-  try {
-    await Promise.all(
-      RISK_TYPES.flatMap(rt => STATES.map(st =>
-        runPipeline(rt, st).catch(err => {
-          console.error(`[cache] Pipeline ${rt}/${st} failed: ${err.message}`);
+  // ── Phase 2: Fetch remaining pages (page 2+) ──────────────────────────────
+  await Promise.all(
+    phase1
+      .filter(p => !p.failed && p.totalPages > 1)
+      .map(async ({ rt, st, totalPages, baseUrl }) => {
+        const label = `${rt}/${st}`;
+        const ck    = CAT[rt];
+        const sk    = SEV[st];
+        try {
+          for (let page = 2; page <= totalPages; page++) {
+            if (jobTimedOut) {
+              log('warn', `Pipeline ${label}: aborting at page ${page} — job timed out`);
+              throw new Error('Job timed out');
+            }
+            log('info', `Pipeline ${label}: fetching page ${page}/${totalPages}`);
+            const r = await dtGetWithRetry(`${baseUrl}&pageNumber=${page}`, apiUrl, apiKey);
+            const items = Array.isArray(r.json) ? r.json : (r.json.violations || []);
+            items.forEach(v => {
+              const uuid = v.project?.uuid; if (!uuid) return;
+              if (!map[uuid]) map[uuid] = { ops: emptyV(), lic: emptyV(), secpolicy: emptyV() };
+              map[uuid][ck][sk]++;
+            });
+            jobProgress.pagesDone++;
+          }
+          log('info', `Pipeline ${label}: done`);
+        } catch (err) {
+          log('error', `Pipeline ${label} failed fetching pages 2+`, { error: err.message });
           jobProgress.failedPipelines++;
-        })
-      ))
-    );
+        }
+      })
+  );
 
+  try {
     if (jobTimedOut) return;
 
     const now       = new Date();
@@ -313,15 +393,14 @@ async function runJob() {
       map,
     };
 
-    try {
-      writeCacheFile(cacheData);
-      console.log(
-        `[cache] Job complete — ${cacheData.projectCount} projects with violations, ` +
-        `${cacheData.failedPipelines} failed pipeline(s), expires ${cacheData.expiresAt}`
-      );
-    } catch (e) {
-      console.error('[cache] Failed to write cache file:', e.message);
-    }
+    writeCacheFile(cacheData);
+    log('info', 'Job complete', {
+      projects:        cacheData.projectCount,
+      failedPipelines: cacheData.failedPipelines,
+      expiresAt:       cacheData.expiresAt,
+    });
+  } catch (e) {
+    log('error', `Failed to write cache file: ${e.message}`);
   } finally {
     clearTimeout(watchdog);
     if (!jobTimedOut) jobRunning = false;
@@ -339,12 +418,17 @@ function jsonReply(res, status, body) {
   res.end(payload);
 }
 
-/** Read the full request body as a string. */
+/** Read the full request body as a string (max 64 KB). */
 function readBody(req) {
   return new Promise((resolve, reject) => {
-    let data = '';
-    req.on('data', chunk => { data += chunk; });
-    req.on('end',  () => resolve(data));
+    const MAX = 64 * 1024;
+    let data = '', bytes = 0;
+    req.on('data', chunk => {
+      bytes += chunk.length;
+      if (bytes > MAX) { req.destroy(); reject(new Error('Request body too large')); return; }
+      data += chunk;
+    });
+    req.on('end',   () => resolve(data));
     req.on('error', reject);
   });
 }
@@ -381,16 +465,15 @@ http.createServer(async (req, res) => {
       });
       res.end(raw);
     } catch (e) {
-      jsonReply(res, 500, { error: e.message });
+      log('error', `Failed to serve cache file: ${e.message}`);
+      jsonReply(res, 500, { error: 'Failed to read cache file' });
     }
     return;
   }
 
   // ── POST /violation-cache/config ──────────────────────────────────────────
-  // Accepts { apiKey } and writes it to the bind-mounted .env file so the
-  // next job run picks up the updated key without a container restart.
-  // The API URL is intentionally excluded — it is a server-admin concern
-  // (Docker-internal URL) and must not be overwritten with a browser URL.
+  // Accepts { apiKey } and persists it to the bind-mounted .env file so the
+  // next job run uses the updated key without a container restart.
   if (method === 'POST' && url === '/violation-cache/config') {
     try {
       const raw  = await readBody(req);
@@ -400,27 +483,34 @@ http.createServer(async (req, res) => {
         jsonReply(res, 400, { error: 'apiKey is required' });
         return;
       }
-
       const cleanKey = body.apiKey.replace(/[\x00-\x1F\x7F]/g, '').trim();
       if (!cleanKey) {
-        jsonReply(res, 400, { error: 'apiKey must not be empty after sanitisation' });
+        jsonReply(res, 400, { error: 'apiKey is empty after sanitisation' });
         return;
       }
-
       if (!fs.existsSync(ENV_FILE)) {
         jsonReply(res, 503, {
-          error: `Config file not found at ${ENV_FILE}. ` +
-                 'Ensure .env is bind-mounted into the container.'
+          error: `Config file not found at ${ENV_FILE}. Ensure .env is bind-mounted.`,
         });
         return;
       }
 
+      // Q8: handle read and write errors separately
       patchEnvFile(ENV_FILE, { DT_API_KEY: cleanKey });
-      console.log(`[cache] DT_API_KEY updated in ${ENV_FILE} (***${cleanKey.slice(-4)})`);
-      jsonReply(res, 200, { ok: true, message: 'API key updated; will take effect on next job run' });
+      log('info', `DT_API_KEY updated in ${ENV_FILE}`, { key: `***${cleanKey.slice(-4)}` });
+      jsonReply(res, 200, { ok: true, message: 'API key updated; takes effect on next job run' });
+
     } catch (e) {
-      console.error('[cache] Config update error:', e.message);
-      jsonReply(res, 500, { error: e.message });
+      if (e.code === 'PATCH_READ_FAILED') {
+        log('error', `Config update failed — could not read .env: ${e.message}`);
+        jsonReply(res, 500, { error: 'Could not read configuration file — check file permissions' });
+      } else if (e.code === 'PATCH_WRITE_FAILED') {
+        log('error', `Config update failed — could not write .env: ${e.message}`);
+        jsonReply(res, 500, { error: 'Could not write configuration file — check file permissions' });
+      } else {
+        log('error', `Config update error: ${e.message}`);
+        jsonReply(res, 500, { error: e.message });
+      }
     }
     return;
   }
@@ -436,7 +526,7 @@ http.createServer(async (req, res) => {
       jsonReply(res, 409, { status: 'building', message: 'Job already running' });
       return;
     }
-    runJob().catch(err => console.error('[cache] Unhandled job error:', err.message));
+    runJob().catch(err => log('error', `Unhandled job error: ${err.message}`));
     jsonReply(res, 202, { status: 'building', message: 'Job started' });
     return;
   }
@@ -446,19 +536,21 @@ http.createServer(async (req, res) => {
 
 }).listen(PORT, () => {
   const { apiUrl, apiKey } = getEffectiveConfig();
-  console.log(`[cache] Violation cache service listening on :${PORT}`);
-  console.log(`[cache] DT_API_URL      : ${apiUrl}`);
-  console.log(`[cache] DT_API_KEY      : ${apiKey ? '***' + apiKey.slice(-4) : 'NOT SET'}`);
-  console.log(`[cache] CACHE_TTL_HOURS : ${CACHE_TTL_MS / 3_600_000}`);
-  console.log(`[cache] CACHE_FILE      : ${CACHE_FILE}`);
-  console.log(`[cache] ENV_FILE        : ${ENV_FILE} (${fs.existsSync(ENV_FILE) ? 'mounted ✓' : 'NOT FOUND — config endpoint disabled'})`);
+  log('info', `Violation cache service listening on :${PORT}`);
+  log('info', 'Startup configuration', {
+    apiUrl,
+    apiKey:       apiKey ? `***${apiKey.slice(-4)}` : 'NOT SET',
+    cacheTtlHrs:  CACHE_TTL_MS / 3_600_000,
+    cacheFile:    CACHE_FILE,
+    envFile:      `${ENV_FILE} (${fs.existsSync(ENV_FILE) ? 'mounted ✓' : 'NOT FOUND — config endpoint disabled'})`,
+    logFormat:    LOG_JSON ? 'json' : 'text',
+  });
 
   const s = getStatus();
   if (s.status === 'none' || s.status === 'stale') {
-    console.log(`[cache] Auto-triggering initial cache build (status: ${s.status})`);
-    runJob().catch(err => console.error('[cache] Startup job error:', err.message));
+    log('info', `Auto-triggering cache build (status: ${s.status})`);
+    runJob().catch(err => log('error', `Startup job error: ${err.message}`));
   } else {
-    console.log(`[cache] Cache status on startup: ${s.status}`);
+    log('info', `Cache status on startup: ${s.status}`);
   }
 });
-
