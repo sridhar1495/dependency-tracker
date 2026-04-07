@@ -1,260 +1,87 @@
-# Dependency-Track — Custom Risk Dashboard
+# Dependency-Track — Risk Dashboard
 
-A **portfolio-level risk dashboard** for
-[OWASP Dependency-Track Community Edition](https://dependencytrack.org/).
+A **portfolio-level risk dashboard** for [DependencyTrack](https://dependencytrack.org/) that displays hierarchical project security and policy violation data in a single filterable view.
 
-The core focus of this project is the **custom dashboard** — a single-page view
-that surfaces Security, Operational, and License risk counts across all your
-projects in a hierarchical report. Every row (parent or leaf) displays the counts
-exactly as returned by the DependencyTrack API — no in-code aggregation.
-DependencyTrack provides the analysis engine; this dashboard gives you the
-consolidated visibility on top of it.
-
-Also included:
-
-- One-command Docker installer (full stack or dashboard-only mode)
-- User creation scripts
-- SBOM project upload scripts (single & bulk) with large-file support
+> **This project is a dashboard only.** It connects to an existing DependencyTrack instance — it does not include or install DependencyTrack itself.
 
 ---
 
 ## Quick Start
 
 ```bash
-# 1. Clone
 git clone <repo-url> dependency-tracker
 cd dependency-tracker
-
-# 2. Make scripts executable
-chmod +x install.sh scripts/*.sh
-
-# 3. Full install — DependencyTrack + custom dashboard (interactive)
+chmod +x install.sh
 ./install.sh
-
-# — OR — deploy only the custom dashboard if DependencyTrack is already running
-./install.sh --dashboard-only
 ```
 
-After a full install (~3–15 minutes on first run), open:
-
-| Application            | URL                        |
-|------------------------|----------------------------|
-| DependencyTrack UI     | http://localhost:8080      |
-| DependencyTrack API    | http://localhost:8081      |
-| Custom Risk Dashboard  | http://localhost:3000      |
-
-Default login: `admin` / *(password set during install)*
-
----
-
-## Installer Options
-
-| Flag | Description |
-|------|-------------|
-| *(none)* | Interactive full install — DependencyTrack stack + dashboard |
-| `--dashboard-only` | Deploy only the custom dashboard (nginx container). Prompts for dashboard port and the DependencyTrack API URL to proxy to. Use when DT is already running elsewhere. |
-| `--non-interactive` | Skip all prompts, use `.env` values / defaults. Combine with `--dashboard-only` for automation. |
-| `--skip-docker-check` | Skip Docker version validation |
-| `--uninstall` / `-u` | Remove containers, volumes, and networks (keep images) |
-| `--all` / `-a` | Remove containers, volumes, networks, **and** images |
+The installer prompts for your DependencyTrack API URL and (optionally) an API key, then starts the dashboard at **http://localhost:3000**.
 
 ---
 
 ## What's Included
 
-```
-dependency-tracker/
-├── install.sh                   # Automated installer (full or dashboard-only)
-├── docker-compose.yml           # Full stack definition
-├── .env.example                 # Configuration template
-│
-├── scripts/
-│   ├── create-user.sh           # Add managed users
-│   ├── upload-sbom.sh           # Upload single SBOM → auto-create project
-│   └── bulk-upload-sbom.sh      # Batch upload all SBOMs in a directory
-│
-├── dashboard/
-│   ├── index.html               # Custom risk matrix dashboard (single-file app)
-│   └── nginx.conf.template      # Nginx config with API proxy (envsubst rendered)
-│
-└── docs/
-    ├── INSTALLATION.md          # Full installation & configuration guide
-    ├── USER_MANAGEMENT.md       # User/team/permission management
-    ├── SBOM_PROJECTS.md         # SBOM generation & project upload guide
-    └── DASHBOARD_INTEGRATION.md # Connecting the dashboard to live data
-```
-
----
-
-## Technology Stack
-
-### Dashboard (`dashboard/index.html`)
-
-The dashboard is a **zero-dependency, single-file HTML application** — no npm, no
-build step, no external libraries. Everything runs natively in the browser.
-
-| Technology | Version / Notes | Purpose |
-|------------|-----------------|---------|
-| **HTML5** | Semantic markup | Structure |
-| **CSS3** | Custom properties, Grid, Flexbox, `position: relative/absolute` | Layout & theming |
-| **Vanilla JavaScript (ES2020+)** | `async/await`, optional chaining (`?.`), `Map`, `Set` | All application logic |
-| **Fetch API** | Native browser | DependencyTrack REST API calls |
-| **localStorage** | Native browser | Persist API URL and Frontend URL across sessions |
-| **CSS Custom Properties** | `var(--bg)`, `var(--accent)`, etc. | Dark-theme colour tokens |
-
-No frameworks (React, Vue, Angular), no bundler (Webpack, Vite), no package manager.
-
-### Infrastructure
-
-| Component | Technology | Image / Version | Purpose |
-|-----------|-----------|-----------------|---------|
-| **DT API Server** | OWASP DependencyTrack | `dependencytrack/apiserver` (latest) | SBOM analysis engine + REST API |
-| **DT Frontend** | OWASP DependencyTrack | `dependencytrack/frontend` (latest) | Official DT web UI |
-| **Database** | PostgreSQL | `postgres:15-alpine` | Persistent project/vulnerability storage |
-| **Dashboard server** | Nginx | `nginx:alpine` | Serves `index.html` + proxies `/api/*` to DT |
-| **Orchestration** | Docker Compose v2 | `docker compose` (plugin) | Multi-container lifecycle management |
-
-### SBOM Format
-
-| Standard | Supported formats |
-|----------|------------------|
-| **CycloneDX** | JSON (`.json`), XML (`.xml`) |
-| **SPDX** | JSON (`.spdx.json`) — via DT native support |
-
-### DependencyTrack REST API (consumed by dashboard)
-
-All dashboard data comes from the DependencyTrack REST API v1:
-
-| Endpoint | Used for |
-|----------|----------|
-| `GET /api/v1/project?onlyRoot=true` | Fetch root-level projects (BFS level 0) |
-| `GET /api/v1/project/{uuid}/children` | Fetch direct children of a project (BFS levels 1…N) |
-| `GET /api/v1/metrics/project/{uuid}/current` | Per-project risk metrics (security + policy violations) |
-| `GET /dt-config` | Read proxy target URL for display in the Connect modal |
-
-### Shell Scripts
-
-| Tool | Used in |
-|------|---------|
-| **bash** (4+) | `install.sh`, all scripts |
-| **curl** | DT API calls from scripts |
-| **jq** | JSON parsing in scripts |
-| **Docker CLI** | Container management in install script |
-| **envsubst** | Template rendering for `nginx.conf` |
+| Component | Description |
+|-----------|-------------|
+| `dashboard/index.html` | Single-file SPA dashboard (zero npm dependencies) |
+| `dashboard/nginx.conf.template` | nginx config with API proxy and violation-cache proxy |
+| `violation-cache/server.js` | Node.js service that pre-fetches policy violations server-side |
+| `violation-cache/Dockerfile` | Builds the cache service image |
+| `docker-compose.yml` | Defines `dt-dashboard` (nginx) and `dt-violation-cache` |
+| `install.sh` | Interactive installer |
+| `.env.example` | Environment variable reference |
 
 ---
 
 ## Docker Stack
 
-| Container        | Image                            | Purpose                     |
-|------------------|----------------------------------|-----------------------------|
-| `dt-postgres`    | `postgres:15-alpine`             | Persistent database         |
-| `dt-apiserver`   | `dependencytrack/apiserver`      | Analysis engine + REST API  |
-| `dt-frontend`    | `dependencytrack/frontend`       | Official web UI             |
-| `dt-dashboard`   | `nginx:alpine` + custom HTML     | Custom risk dashboard       |
+| Container | Image | Purpose |
+|-----------|-------|---------|
+| `dt-dashboard` | `nginx:alpine` | Serves the dashboard SPA; proxies `/api/*` to your DT instance |
+| `dt-violation-cache` | Built locally | Fetches and caches policy violations server-side |
 
 ---
 
-## User Management
+## Installer Options
 
 ```bash
-# Create a user and assign to a team
-./scripts/create-user.sh \
-  --username alice \
-  --password "S3cur3P@ss!" \
-  --email alice@example.com \
-  --team "Developers"
-
-# Interactive mode
-./scripts/create-user.sh
+./install.sh [OPTIONS]
 ```
 
-Full guide: [docs/USER_MANAGEMENT.md](docs/USER_MANAGEMENT.md)
+| Flag | Description |
+|------|-------------|
+| _(none)_ | Interactive install — prompts for all settings |
+| `--non-interactive` | Skip prompts, use `.env` values / defaults |
+| `--skip-docker-check` | Skip Docker version validation |
+| `--uninstall` / `-u` | Remove containers and network (keep images) |
+| `--all` / `-a` | Remove containers, network, and images |
+| `--help` | Show usage |
 
 ---
 
-## Adding Projects via SBOM
+## Configuration
 
-```bash
-# Auto-detect project name from the SBOM metadata
-./scripts/upload-sbom.sh --file ./target/bom.json
+Copy `.env.example` to `.env` and set:
 
-# Explicit name + version + tags
-./scripts/upload-sbom.sh \
-  --file    ./target/bom.json \
-  --project "payment-service" \
-  --version "2.3.1" \
-  --tags    "java,pci-dss"
-
-# Bulk upload an entire directory
-./scripts/bulk-upload-sbom.sh --dir ./sboms/
-```
-
-The upload script uses **multipart form upload** (`POST /api/v1/bom`) so it
-handles arbitrarily large SBOM files without hitting shell argument size limits.
-
-Full guide: [docs/SBOM_PROJECTS.md](docs/SBOM_PROJECTS.md)
+| Variable | Description |
+|----------|-------------|
+| `DT_API_INTERNAL_URL` | Your DependencyTrack API URL (nginx proxy target) |
+| `DT_API_KEY` | API key for auto-connect and server-side violation fetch |
+| `DT_FRONTEND_URL` | DT web UI URL for clickable project links (optional) |
+| `DT_DASHBOARD_PORT` | Host port for the dashboard (default `3000`) |
+| `VIOLATION_CACHE_TTL_HOURS` | Hours before violation cache auto-expires (default `24`) |
 
 ---
 
-## Custom Risk Dashboard
+## Tech Stack
 
-The dashboard at **http://localhost:3000** shows all projects in a risk matrix.
-It works with **mock data** out of the box (no DependencyTrack connection needed).
-When the installer completes, it automatically saves an API key to `.env` — the
-dashboard then loads live data on first open with no manual configuration required.
-
-<!-- Screenshot: place a full-page dashboard screenshot here.
-     Suggested path: docs/images/dashboard-overview.png
-     Example:  ![Dashboard overview](docs/images/dashboard-overview.png) -->
-
-### Features
-
-- **Risk matrix table** — Security (Critical/High/Medium/Low/Unassigned), Operational (Fail/Warn/Info), License (Fail/Warn/Info) — 14 columns total
-- **Hierarchical tree** — mirrors DependencyTrack parent/child structure; fetched top-down via BFS (`onlyRoot=true` → `/children` per level)
-- **Raw API counts per row** — every row (group or leaf) displays the counts exactly as returned by the DependencyTrack API; no in-code child aggregation is performed
-- **Hierarchy level column** — depth in the parent/child tree (Level 1 = root, Level 2 = child, …)
-- **Latest column** — disabled checkbox shown on rows where DependencyTrack's `isLatest` field is `true`; blank for all other rows
-- **Project hyperlinks** — set a DT Frontend URL in the Connect modal to make project names clickable links into the DependencyTrack UI
-- **Tag chips** — first tag shown inline; "+N more" badge with hover tooltip for additional tags
-- **Level single-select filter** — show only projects at a specific hierarchy depth
-- **Risk level filter** — filters each project's own API-returned risk data
-- **Category filter** — narrow to Security, Operational, or License risks
-- **★ Latest Only toggle** — narrows the table to `isLatest = true` projects (combined with all other active filters), then auto-includes each matching project's full ancestor chain up to the root
-- **KPI summary cards** — risk totals computed once at load from root-level projects (no double-counting of parent + child); fixed values regardless of filter state; clickable to set risk filter
-- **Search box** — substring match on project name
-- **CSV export** — all filtered rows with full column names including a `Latest` column (`Yes` / blank)
-- **Single expand/collapse toggle** — dynamically switches between "Expand All" and "Collapse All"
-- **Auto-refresh** — configurable interval (30 s / 1 min / 5 min) in the top bar, live mode only
-
-```
-┌─────────────────────┬─────┬────────┬──────────────────────────────┬─────────────────┬─────────────────┐
-│ Project / Version   │ Lvl │ Latest │       Security Risk           │ Operational Risk│  License Risk   │
-│                     │     │        │ Crit  High  Med  Low  Unassn  │ Fail  Warn  Info│ Fail  Warn  Info│
-├─────────────────────┼─────┼────────┼──────────────────────────────┼─────────────────┼─────────────────┤
-│ Commerce Suite      │  1  │        │  2     8    14   20     3     │  0     5    10  │  0     3     6  │
-│  commerce-be        │  2  │        │  1     3     6    9     1     │  0     2     4  │  0     1     2  │
-│   commerce-be v1.4.1│  3  │  [✓]  │  0     2     4    7     0     │  0     1     2  │  0     0     1  │
-│   commerce-be v1.5.0│  3  │        │  1     3     6    9     1     │  0     2     4  │  0     1     2  │
-└─────────────────────┴─────┴────────┴──────────────────────────────┴─────────────────┴─────────────────┘
-  [✓] = disabled checked checkbox (isLatest = true)
-```
-
-Dashboard integration guide: [docs/DASHBOARD_INTEGRATION.md](docs/DASHBOARD_INTEGRATION.md)
+- **Dashboard**: HTML5, CSS3, Vanilla JS (ES2020+), Fetch API
+- **Violation cache**: Node.js 18 (zero npm dependencies), built-in `http`/`https`
+- **Infrastructure**: nginx:alpine, Docker Compose
 
 ---
 
-## Documentation
+## Docs
 
-| Guide                                                  | Description                              |
-|--------------------------------------------------------|------------------------------------------|
-| [Installation](docs/INSTALLATION.md)                   | Full install, config, upgrade, troubleshoot |
-| [User Management](docs/USER_MANAGEMENT.md)             | Users, teams, permissions, API keys      |
-| [SBOM & Projects](docs/SBOM_PROJECTS.md)               | Generate SBOMs, upload, CI/CD            |
-| [Dashboard Integration](docs/DASHBOARD_INTEGRATION.md) | Connect live data, filter, export CSV    |
-
----
-
-## License
-
-MIT — see [LICENSE](LICENSE)
+- [Installation Guide](docs/INSTALLATION.md)
+- [Dashboard Integration Guide](docs/DASHBOARD_INTEGRATION.md)
