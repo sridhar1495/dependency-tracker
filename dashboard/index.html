@@ -703,7 +703,7 @@ let parentUuids      = new Set(); // cached in afterLoad(); never recomputed dur
 let currentMatchSet  = null;      // last filter match set; reused by lighter expand/collapse render
 let filterLatestOnly = false; // when true: show only isLatest=true projects + ancestors
 let liveMode         = false;
-let apiKey           = '';
+let apiKey           = localStorage.getItem('dt_api_key')      || '';  // persisted so reloads re-connect automatically
 let apiBaseUrl       = localStorage.getItem('dt_api_url')      || '';  // '' = use nginx proxy
 let dtFrontendUrl    = localStorage.getItem('dt_frontend_url') || '';  // DT UI base URL for project hyperlinks
 let dtProxyTarget    = '';  // raw DT_API_INTERNAL_URL from /dt-config (informational)
@@ -1353,7 +1353,11 @@ function setStatus(text, color, pulsing) {
     `<div class="status-dot" style="background:${color};${anim}"></div><span>${escHtml(text)}</span>`;
 }
 
-// localStorage is used only for user preferences (api_url, frontend_url, theme).
+// localStorage keys:
+//   dt_api_key      — API key entered via the Connect modal (persists across reloads)
+//   dt_api_url      — DT API base URL override ('' = use nginx proxy)
+//   dt_frontend_url — DT UI base URL for project hyperlinks
+//   dt_theme        — 'light' | 'dark' colour scheme preference
 // Project and violation data are never persisted to localStorage — they are
 // always fetched fresh from the live API and cache service on each page load.
 
@@ -1811,7 +1815,11 @@ async function connectLiveApi(fromModal = false) {
 
   if (fromModal) {
     const inputKey = document.getElementById('apiKeyInput').value.trim();
-    if (inputKey) { apiKey = inputKey; preconfiguredKey = false; }
+    if (inputKey) {
+      apiKey = inputKey;
+      preconfiguredKey = false;
+      localStorage.setItem('dt_api_key', apiKey);  // persist so page reloads re-connect
+    }
     const urlVal = (document.getElementById('apiUrlInput').value || '').trim().replace(/\/$/, '');
     apiBaseUrl = urlVal;
     if (apiBaseUrl) localStorage.setItem('dt_api_url', apiBaseUrl);
@@ -1917,7 +1925,9 @@ function openModal(id) {
     if (keyInp) {
       keyInp.placeholder = preconfiguredKey
         ? 'Pre-configured via DT_API_KEY — enter a new key to override'
-        : 'odt_xxxxxxxxxxxxxxxxxxxxxxxxxx';
+        : apiKey
+          ? 'Saved key in use — enter a new key to change'
+          : 'odt_xxxxxxxxxxxxxxxxxxxxxxxxxx';
     }
   }
 }
@@ -1994,9 +2004,11 @@ async function loadDtConfig() {
         if (fInp && !fInp.value) fInp.value = dtFrontendUrl;
 }
 
-      // Auto-connect when DT_API_KEY is pre-configured in the environment
+      // Auto-connect when DT_API_KEY is pre-configured in the environment.
+      // The env key always overrides any key stored in localStorage.
       if (cfg.apiKey) {
         apiKey = cfg.apiKey;
+        localStorage.setItem('dt_api_key', apiKey);  // keep localStorage in sync
         preconfiguredKey = true;
         const banner = document.getElementById('dataBanner');
         banner.innerHTML = '⏳ Connecting to DependencyTrack…';
@@ -2006,6 +2018,18 @@ async function loadDtConfig() {
       }
     }
   } catch(_) { /* silently ignore */ }
+
+  // No env key — try the key previously saved via the Connect modal (localStorage).
+  // This covers page reloads after a manual connect and cases where the install
+  // provided a key in .env but the env key has since been removed.
+  if (apiKey) {
+    preconfiguredKey = false;
+    const banner = document.getElementById('dataBanner');
+    banner.innerHTML = '⏳ Connecting to DependencyTrack…';
+    banner.className = 'data-banner';
+    return await connectLiveApi();
+  }
+
   return false;
 }
 
