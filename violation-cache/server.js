@@ -9,10 +9,15 @@
 // the browser.
 //
 // Endpoints:
-//   GET  /violation-cache/status   — current state + build progress
-//   GET  /violation-cache/data     — the cached map (only when ready/stale)
-//   POST /violation-cache/refresh  — trigger a background rebuild
-//   POST /violation-cache/config   — update DT_API_KEY in .env (persists across restarts)
+//   GET    /violation-cache/status              — current state + build progress
+//   GET    /violation-cache/data                — the cached map (only when ready/stale)
+//   POST   /violation-cache/refresh             — trigger a background rebuild
+//   POST   /violation-cache/config              — update DT_API_KEY in .env (persists across restarts)
+//   POST   /violation-cache/report/generate     — start a vulnerability Excel report job
+//   GET    /violation-cache/report/list         — list all report jobs with status
+//   DELETE /violation-cache/report/:id          — delete a report job + file
+//   GET    /violation-cache/report/:id/download — stream the completed Excel file
+//   POST   /violation-cache/report/:id/cancel   — cancel a running report job
 //
 // Status values:
 //   none      — no cache file exists yet
@@ -30,10 +35,12 @@
 //   ENV_FILE            — path to bind-mounted .env file (default /app/.env)
 //   LOG_FORMAT          — set to "json" for structured JSON log output
 
-const http  = require('http');
-const https = require('https');
-const fs    = require('fs');
-const path  = require('path');
+const http    = require('http');
+const https   = require('https');
+const fs      = require('fs');
+const path    = require('path');
+const crypto  = require('crypto');
+const ExcelJS = require('exceljs'); // MIT-licensed Excel generation library
 
 // ── Static config (set once at startup, never change at runtime) ──────────────
 const PORT         = parseInt(process.env.PORT || '3001', 10);
@@ -43,6 +50,16 @@ const CACHE_FILE   = path.join(CACHE_DIR, 'violation-cache.json');
 const CACHE_TMP    = path.join(CACHE_DIR, 'violation-cache.tmp.json');
 // Path to the bind-mounted .env file — writable so the config endpoint can persist changes.
 const ENV_FILE     = process.env.ENV_FILE || '/app/.env';
+
+// ── Report generation config ──────────────────────────────────────────────────
+// Static constants — edit here to change behaviour; no env-var override needed.
+const REPORT_DIR         = path.join(CACHE_DIR, 'reports');
+const REPORT_REGISTRY    = path.join(REPORT_DIR, 'registry.json');
+const REPORT_TMP         = path.join(REPORT_DIR, 'registry.tmp.json');
+const REPORT_TIMEOUT_MS  = 30 * 60_000;  // 30 min hard limit per job
+const FINDINGS_PAGE_SIZE = 200;          // DT API page size for findings
+const REPORT_CONCURRENCY = 5;            // projects fetched in parallel
+const MAX_REPORTS        = 10;           // combined completed + running ceiling
 
 // ── Dynamic config — re-read from .env before every job run ──────────────────
 // Falls back to env vars injected by Docker Compose (initial values).
@@ -418,14 +435,13 @@ function jsonReply(res, status, body) {
   res.end(payload);
 }
 
-/** Read the full request body as a string (max 64 KB). */
-function readBody(req) {
+/** Read the full request body as a string (default max 64 KB; pass maxBytes to override). */
+function readBody(req, maxBytes = 64 * 1024) {
   return new Promise((resolve, reject) => {
-    const MAX = 64 * 1024;
     let data = '', bytes = 0;
     req.on('data', chunk => {
       bytes += chunk.length;
-      if (bytes > MAX) { req.destroy(); reject(new Error('Request body too large')); return; }
+      if (bytes > maxBytes) { req.destroy(); reject(new Error('Request body too large')); return; }
       data += chunk;
     });
     req.on('end',   () => resolve(data));
@@ -433,11 +449,336 @@ function readBody(req) {
   });
 }
 
+// ── Report job registry ───────────────────────────────────────────────────────
+// In-memory Map; loaded from REPORT_REGISTRY on startup and saved atomically
+// after every status transition.
+//
+// Job shape stored in registry file (cancelFlag is runtime-only, not persisted):
+//   { id, status, filename, error, progress:{done,total}, createdAt, updatedAt }
+
+const reportJobs = new Map(); // id → full job object (includes runtime cancelFlag)
+
+function saveRegistry() {
+  try {
+    fs.mkdirSync(REPORT_DIR, { recursive: true });
+    const entries = [];
+    for (const job of reportJobs.values()) {
+      // Omit runtime-only fields before persisting
+      const { cancelFlag, watchdogId, ...persisted } = job; // eslint-disable-line no-unused-vars
+      entries.push(persisted);
+    }
+    fs.writeFileSync(REPORT_TMP, JSON.stringify(entries, null, 2), 'utf8');
+    fs.renameSync(REPORT_TMP, REPORT_REGISTRY);
+  } catch (e) {
+    log('error', `Failed to save report registry: ${e.message}`);
+  }
+}
+
+function loadRegistry() {
+  try {
+    if (!fs.existsSync(REPORT_REGISTRY)) return;
+    const entries = JSON.parse(fs.readFileSync(REPORT_REGISTRY, 'utf8'));
+    for (const entry of entries) {
+      // Jobs that were 'running' when the service stopped cannot be resumed —
+      // mark them failed so the user knows what happened.
+      if (entry.status === 'running') {
+        entry.status    = 'failed';
+        entry.error     = 'Service restarted while this report was being generated.';
+        entry.updatedAt = new Date().toISOString();
+      }
+      reportJobs.set(entry.id, { ...entry, cancelFlag: { cancelled: false } });
+    }
+    log('info', `Loaded ${reportJobs.size} report job(s) from registry`);
+  } catch (e) {
+    log('warn', `Could not load report registry (starting fresh): ${e.message}`);
+  }
+}
+
+// ── Semaphore helper (limits concurrent async tasks) ─────────────────────────
+function makeSemaphore(limit) {
+  let active = 0;
+  const queue = [];
+  return function acquire(fn) {
+    return new Promise((resolve, reject) => {
+      const run = () => {
+        active++;
+        Promise.resolve().then(fn).then(
+          v => { active--; if (queue.length) queue.shift()(); resolve(v); },
+          e => { active--; if (queue.length) queue.shift()(); reject(e); }
+        );
+      };
+      if (active < limit) run();
+      else queue.push(run);
+    });
+  };
+}
+
+// ── Findings fetch helper ─────────────────────────────────────────────────────
+/**
+ * Fetch all finding pages from DependencyTrack for one project.
+ * Uses the text-search API:
+ *   /api/v1/finding?textSearchInput={name}%20{version}&severity=...
+ * Paginates until X-Total-Count is satisfied or a short page is returned.
+ * Checks cancelFlag before every page request.
+ */
+async function fetchAllFindings(apiUrl, apiKey, name, version, cancelFlag) {
+  const baseQs = [
+    'showInactive=false',
+    'showSuppressed=false',
+    'textSearchField=vulnerability_id,vulnerability_title,component_name,component_version,project_name',
+    `textSearchInput=${encodeURIComponent(`${name} ${version}`)}`,
+    'severity=critical,high,medium,low,unassigned',
+    `pageSize=${FINDINGS_PAGE_SIZE}`,
+  ].join('&');
+
+  const all = [];
+  let page = 1;
+  while (true) {
+    if (cancelFlag.cancelled) throw Object.assign(new Error('__CANCELLED__'), { isCancelled: true });
+    const urlPath = `/api/v1/finding?${baseQs}&pageNumber=${page}`;
+    const { json, headers } = await dtGetWithRetry(urlPath, apiUrl, apiKey);
+    const batch = Array.isArray(json) ? json : [];
+    all.push(...batch);
+    const total = parseInt(headers['x-total-count'] || '0', 10);
+    if ((total > 0 && all.length >= total) || batch.length < FINDINGS_PAGE_SIZE) break;
+    page++;
+  }
+  return all;
+}
+
+// ── Excel report builder ──────────────────────────────────────────────────────
+/**
+ * Build a 3-sheet XLSX vulnerability report and write it to filePath.
+ * Sheet 1 — Vulnerability Findings  (one row per finding)
+ * Sheet 2 — Project Summary         (severity counts per project)
+ * Sheet 3 — Component Summary       (unique components + count)
+ */
+async function buildExcelReport(filePath, allFindings, projectSummary, componentMap) {
+  const wb = new ExcelJS.Workbook();
+  wb.creator  = 'Dependency-Track Risk Dashboard';
+  wb.created  = new Date();
+  wb.modified = new Date();
+
+  // ── Helper: style header row ───────────────────────────────────────────────
+  function styleHeader(sheet) {
+    const row = sheet.getRow(1);
+    row.font      = { bold: true, color: { argb: 'FFFFFFFF' } };
+    row.fill      = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FF374151' } };
+    row.alignment = { vertical: 'middle', horizontal: 'center', wrapText: true };
+    row.height    = 28;
+    sheet.views   = [{ state: 'frozen', ySplit: 1 }];
+  }
+
+  // ── Sheet 1: Vulnerability Findings ───────────────────────────────────────
+  const ws1 = wb.addWorksheet('Vulnerability Findings');
+  ws1.columns = [
+    { header: 'S.No',            key: 'sno',        width: 6  },
+    { header: 'Project Name',    key: 'projName',   width: 28 },
+    { header: 'Project Version', key: 'projVer',    width: 14 },
+    { header: 'Vulnerability',   key: 'vulnId',     width: 20 },
+    { header: 'Severity',        key: 'severity',   width: 12 },
+    { header: 'CWE',             key: 'cwe',        width: 22 },
+    { header: 'Score',           key: 'score',      width: 8  },
+    { header: 'Component',       key: 'component',  width: 36 },
+    { header: 'Current Version', key: 'curVer',     width: 14 },
+    { header: 'Latest Version',  key: 'latestVer',  width: 14 },
+  ];
+  styleHeader(ws1);
+
+  allFindings.forEach((f, idx) => {
+    const v   = f.vulnerability || {};
+    const c   = f.component     || {};
+    const cwes = (v.cwes || []).map(w => `CWE-${w.cweId}`).join(', ');
+    const comp = [c.name, c.group].filter(Boolean).join('-');
+    ws1.addRow({
+      sno:       idx + 1,
+      projName:  c.projectName   || '',
+      projVer:   c.projectVersion || '',
+      vulnId:    v.vulnId        || '',
+      severity:  v.severity      || '',
+      cwe:       cwes,
+      score:     v.cvssV3BaseScore != null ? v.cvssV3BaseScore : '',
+      component: comp,
+      curVer:    c.version       || '',
+      latestVer: c.latestVersion || '',
+    });
+  });
+
+  // Alternate row shading for readability
+  ws1.eachRow((row, rowNum) => {
+    if (rowNum === 1) return;
+    if (rowNum % 2 === 0) {
+      row.eachCell(cell => {
+        cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFF9FAFB' } };
+      });
+    }
+  });
+
+  // ── Sheet 2: Project Summary ───────────────────────────────────────────────
+  const ws2 = wb.addWorksheet('Project Summary');
+  ws2.columns = [
+    { header: 'S.No',            key: 'sno',        width: 6  },
+    { header: 'Project Name',    key: 'projName',   width: 28 },
+    { header: 'Project Version', key: 'projVer',    width: 14 },
+    { header: 'Critical',        key: 'critical',   width: 10 },
+    { header: 'High',            key: 'high',       width: 10 },
+    { header: 'Medium',          key: 'medium',     width: 10 },
+    { header: 'Low',             key: 'low',        width: 10 },
+    { header: 'Unassigned',      key: 'unassigned', width: 12 },
+  ];
+  styleHeader(ws2);
+
+  let sno2 = 1;
+  for (const s of projectSummary.values()) {
+    ws2.addRow({
+      sno:        sno2++,
+      projName:   s.name,
+      projVer:    s.version || '',
+      critical:   s.critical,
+      high:       s.high,
+      medium:     s.medium,
+      low:        s.low,
+      unassigned: s.unassigned,
+    });
+  }
+
+  // ── Sheet 3: Component Summary ─────────────────────────────────────────────
+  const ws3 = wb.addWorksheet('Component Summary');
+  ws3.columns = [
+    { header: 'S.No',                key: 'sno',     width: 6  },
+    { header: 'Component',           key: 'comp',    width: 40 },
+    { header: 'Vulnerability Count', key: 'count',   width: 18 },
+  ];
+  styleHeader(ws3);
+
+  let sno3 = 1;
+  // Sort by count descending so most-vulnerable components appear first
+  const sortedComps = [...componentMap.entries()].sort((a, b) => b[1] - a[1]);
+  for (const [comp, count] of sortedComps) {
+    ws3.addRow({ sno: sno3++, comp, count });
+  }
+
+  await wb.xlsx.writeFile(filePath);
+}
+
+// ── Report job runner ─────────────────────────────────────────────────────────
+/**
+ * Background job that fetches findings for every project in the list,
+ * builds the 3-sheet XLSX, and updates the job registry throughout.
+ *
+ * @param {string}   id       — job UUID
+ * @param {Array}    projects — [{ uuid, name, version }]
+ */
+async function runReportJob(id, projects) {
+  const job     = reportJobs.get(id);
+  const semaphore = makeSemaphore(REPORT_CONCURRENCY);
+
+  job.status   = 'running';
+  job.progress = { done: 0, total: projects.length };
+  job.updatedAt = new Date().toISOString();
+  saveRegistry();
+
+  // 30-min watchdog — sets cancel flag so the inner loops exit cleanly
+  const watchdog = setTimeout(() => {
+    log('warn', `Report job ${id} timed out after ${REPORT_TIMEOUT_MS / 60_000} min`);
+    job.cancelFlag.cancelled = true;
+    job.cancelReason = 'timeout';
+  }, REPORT_TIMEOUT_MS);
+
+  try {
+    const { apiUrl, apiKey } = getEffectiveConfig();
+    if (!apiKey) throw new Error('DT_API_KEY is not configured on the cache service.');
+
+    const allFindings   = [];               // Sheet 1 rows
+    const projectSummary = new Map();        // Sheet 2: uuid → sev counts
+    const componentMap   = new Map();        // Sheet 3: component key → count
+
+    // Fetch each project concurrently (up to REPORT_CONCURRENCY at once)
+    const tasks = projects.map(proj =>
+      semaphore(async () => {
+        if (job.cancelFlag.cancelled) return; // early exit if already cancelled
+
+        log('info', `Report ${id}: fetching findings for "${proj.name}" ${proj.version || '(no version)'}`);
+        const findings = await fetchAllFindings(apiUrl, apiKey, proj.name, proj.version || '', job.cancelFlag);
+
+        // Accumulate per-project severity counts
+        const sev = { critical: 0, high: 0, medium: 0, low: 0, unassigned: 0 };
+        for (const f of findings) {
+          allFindings.push(f);
+          const s = (f.vulnerability?.severity || 'UNASSIGNED').toLowerCase();
+          if (s in sev) sev[s]++;
+          else sev.unassigned++;
+
+          // Component tally for Sheet 3
+          const c    = f.component || {};
+          const cKey = [c.name, c.group].filter(Boolean).join('-');
+          if (cKey) componentMap.set(cKey, (componentMap.get(cKey) || 0) + 1);
+        }
+        projectSummary.set(proj.uuid, { name: proj.name, version: proj.version, ...sev });
+
+        job.progress.done++;
+        job.updatedAt = new Date().toISOString();
+        saveRegistry();
+      })
+    );
+
+    await Promise.all(tasks);
+
+    // Check cancellation after all tasks complete
+    if (job.cancelFlag.cancelled) {
+      throw new Error(
+        job.cancelReason === 'timeout'
+          ? `Report generation timed out after ${REPORT_TIMEOUT_MS / 60_000} minutes.`
+          : 'Report generation was cancelled by the user.'
+      );
+    }
+
+    // Write XLSX
+    const ts       = new Date().toISOString().replace(/[:.]/g, '-');
+    const filename = `vulnerability_report_${ts}.xlsx`;
+    const filePath = path.join(REPORT_DIR, filename);
+    fs.mkdirSync(REPORT_DIR, { recursive: true });
+
+    log('info', `Report ${id}: building Excel workbook (${allFindings.length} finding rows)`);
+    await buildExcelReport(filePath, allFindings, projectSummary, componentMap);
+
+    clearTimeout(watchdog);
+    job.status    = 'completed';
+    job.filename  = filename;
+    job.filePath  = filePath;
+    job.updatedAt = new Date().toISOString();
+    log('info', `Report ${id}: completed — ${filename}`);
+
+  } catch (err) {
+    clearTimeout(watchdog);
+    const isCancelled = err.isCancelled || job.cancelFlag.cancelled;
+    job.status    = 'failed';
+    job.error     = isCancelled
+      ? (job.cancelReason === 'timeout'
+          ? `Timed out after ${REPORT_TIMEOUT_MS / 60_000} minutes.`
+          : 'Cancelled by user.')
+      : err.message;
+    job.updatedAt = new Date().toISOString();
+    log('error', `Report ${id} failed: ${job.error}`);
+  }
+
+  saveRegistry();
+}
+
+/** Serialise a job for the API response (strip runtime-only fields). */
+function jobToApi(job) {
+  const { cancelFlag, watchdogId, filePath, ...pub } = job; // eslint-disable-line no-unused-vars
+  return pub;
+}
+
 http.createServer(async (req, res) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
 
   if (req.method === 'OPTIONS') {
-    res.writeHead(204, { 'Access-Control-Allow-Methods': 'GET, POST, OPTIONS' });
+    res.writeHead(204, {
+      'Access-Control-Allow-Methods': 'GET, POST, DELETE, OPTIONS',
+      'Access-Control-Allow-Headers': 'Content-Type',
+    });
     res.end();
     return;
   }
@@ -531,10 +872,152 @@ http.createServer(async (req, res) => {
     return;
   }
 
+  // ── Report endpoints (/violation-cache/report/*) ──────────────────────────
+  // Parse pathname for dynamic :id segments
+  const parsedPath = new URL(url, 'http://x').pathname;
+
+  // POST /violation-cache/report/generate
+  if (method === 'POST' && parsedPath === '/violation-cache/report/generate') {
+    try {
+      const raw  = await readBody(req, 5 * 1024 * 1024); // 5 MB — project list can be large
+      const body = JSON.parse(raw);
+
+      if (!Array.isArray(body.projects) || body.projects.length === 0) {
+        jsonReply(res, 400, { error: 'projects must be a non-empty array' });
+        return;
+      }
+
+      const jobs = Array.from(reportJobs.values());
+      const completedCount = jobs.filter(j => j.status === 'completed').length;
+      const runningCount   = jobs.filter(j => j.status === 'running').length;
+      if (completedCount + runningCount >= MAX_REPORTS) {
+        jsonReply(res, 429, {
+          error: `Report limit reached (${completedCount} completed + ${runningCount} in-progress = ${completedCount + runningCount}). ` +
+                 'Delete existing reports before generating a new one.',
+          completedCount,
+          runningCount,
+        });
+        return;
+      }
+
+      const id  = crypto.randomUUID();
+      const job = {
+        id,
+        status:     'pending',
+        filename:   null,
+        filePath:   null,
+        error:      null,
+        progress:   { done: 0, total: body.projects.length },
+        createdAt:  new Date().toISOString(),
+        updatedAt:  new Date().toISOString(),
+        cancelFlag: { cancelled: false },
+        cancelReason: null,
+      };
+      reportJobs.set(id, job);
+      saveRegistry();
+
+      // Fire and forget — status is polled via /report/list
+      runReportJob(id, body.projects).catch(err =>
+        log('error', `Unhandled report job error (${id}): ${err.message}`)
+      );
+
+      log('info', `Report job created: ${id} (${body.projects.length} projects)`);
+      jsonReply(res, 201, { id, message: 'Report generation started' });
+    } catch (e) {
+      log('error', `Report generate error: ${e.message}`);
+      jsonReply(res, 400, { error: e.message });
+    }
+    return;
+  }
+
+  // GET /violation-cache/report/list
+  if (method === 'GET' && parsedPath === '/violation-cache/report/list') {
+    const list = Array.from(reportJobs.values())
+      .map(jobToApi)
+      .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+    jsonReply(res, 200, list);
+    return;
+  }
+
+  // Dynamic :id routes
+  const dlMatch     = parsedPath.match(/^\/violation-cache\/report\/([^/]+)\/download$/);
+  const cancelMatch = parsedPath.match(/^\/violation-cache\/report\/([^/]+)\/cancel$/);
+  const idMatch     = parsedPath.match(/^\/violation-cache\/report\/([^/]+)$/);
+
+  // GET /violation-cache/report/:id/download
+  if (method === 'GET' && dlMatch) {
+    const id  = dlMatch[1];
+    const job = reportJobs.get(id);
+    if (!job) { jsonReply(res, 404, { error: 'Report not found' }); return; }
+    if (job.status !== 'completed') {
+      jsonReply(res, 409, { error: `Report is not ready (status: ${job.status})` });
+      return;
+    }
+    if (!fs.existsSync(job.filePath)) {
+      jsonReply(res, 410, { error: 'Report file no longer exists on disk' });
+      return;
+    }
+    try {
+      const stat = fs.statSync(job.filePath);
+      res.writeHead(200, {
+        'Content-Type':        'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        'Content-Disposition': `attachment; filename="${job.filename}"`,
+        'Content-Length':      stat.size,
+        'Cache-Control':       'no-store',
+      });
+      fs.createReadStream(job.filePath).pipe(res);
+    } catch (e) {
+      log('error', `Report download failed (${id}): ${e.message}`);
+      jsonReply(res, 500, { error: 'Failed to stream report file' });
+    }
+    return;
+  }
+
+  // POST /violation-cache/report/:id/cancel
+  if (method === 'POST' && cancelMatch) {
+    const id  = cancelMatch[1];
+    const job = reportJobs.get(id);
+    if (!job) { jsonReply(res, 404, { error: 'Report not found' }); return; }
+    if (job.status !== 'running') {
+      jsonReply(res, 409, { error: `Cannot cancel — job is not running (status: ${job.status})` });
+      return;
+    }
+    job.cancelFlag.cancelled = true;
+    job.cancelReason = 'user';
+    log('info', `Report job ${id} cancel requested by user`);
+    jsonReply(res, 200, { ok: true, message: 'Cancellation requested' });
+    return;
+  }
+
+  // DELETE /violation-cache/report/:id
+  if (method === 'DELETE' && idMatch) {
+    const id  = idMatch[1];
+    const job = reportJobs.get(id);
+    if (!job) { jsonReply(res, 404, { error: 'Report not found' }); return; }
+    if (job.status === 'running') {
+      jsonReply(res, 409, { error: 'Cancel the job before deleting it' });
+      return;
+    }
+    // Delete the file only for completed jobs (failed jobs never produced a file)
+    if (job.status === 'completed' && job.filePath && fs.existsSync(job.filePath)) {
+      try { fs.unlinkSync(job.filePath); } catch (e) {
+        log('warn', `Could not delete report file ${job.filePath}: ${e.message}`);
+      }
+    }
+    reportJobs.delete(id);
+    saveRegistry();
+    log('info', `Report job ${id} deleted`);
+    jsonReply(res, 200, { ok: true });
+    return;
+  }
+
+  // ── Allow DELETE in CORS preflight ───────────────────────────────────────
   res.writeHead(404);
   res.end('Not found');
 
 }).listen(PORT, () => {
+  loadRegistry(); // restore persisted report jobs before serving requests
+
   const { apiUrl, apiKey } = getEffectiveConfig();
   log('info', `Violation cache service listening on :${PORT}`);
   log('info', 'Startup configuration', {

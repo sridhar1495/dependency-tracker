@@ -1,0 +1,10 @@
+{
+  "name": "dt-violation-cache",
+  "version": "1.0.0",
+  "private": true,
+  "license": "MIT",
+  "description": "Server-side violation cache and vulnerability report service for the DependencyTrack Risk Dashboard",
+  "dependencies": {
+    "exceljs": "^4.4.0"
+  }
+}
