@@ -242,3 +242,174 @@ describe('CONFIG constants (Q4)', () => {
     assert.ok(CONFIG.PROJECT_PAGE_SIZE >= 100 && CONFIG.PROJECT_PAGE_SIZE <= 1000);
   });
 });
+
+// ── Report pre-flight decision logic ─────────────────────────────────────────
+// Extracted pure decision function mirroring generateReport() in index.html.
+// The browser version has UI side-effects (toasts, confirm dialogs); here we
+// test just the branching logic that decides what action to take.
+
+const MAX_REPORTS_DASH = 10;
+
+/**
+ * Pure decision function that mirrors the pre-flight checks in generateReport().
+ * Returns one of:
+ *   { action: 'trigger' }            — go ahead and generate
+ *   { action: 'limit' }              — hard limit reached
+ *   { action: 'running', count: N }  — N jobs already running
+ *   { action: 'today',   count: N }  — N reports completed today
+ */
+function reportPreFlight(reports, todayStr) {
+  const completed     = reports.filter(r => r.status === 'completed');
+  const running       = reports.filter(r => r.status === 'running');
+  const total         = completed.length + running.length;
+  const todayComplete = completed.filter(r => r.createdAt.startsWith(todayStr));
+
+  if (total >= MAX_REPORTS_DASH)    return { action: 'limit' };
+  if (running.length > 0)           return { action: 'running', count: running.length };
+  if (todayComplete.length > 0)     return { action: 'today',   count: todayComplete.length };
+  return { action: 'trigger' };
+}
+
+describe('reportPreFlight()', () => {
+  const TODAY = '2024-06-15';
+  const YEST  = '2024-06-14';
+
+  test('returns trigger when no reports exist', () => {
+    assert.equal(reportPreFlight([], TODAY).action, 'trigger');
+  });
+
+  test('returns trigger when only failed reports exist', () => {
+    const reports = [{ status: 'failed', createdAt: `${TODAY}T00:00:00Z` }];
+    assert.equal(reportPreFlight(reports, TODAY).action, 'trigger');
+  });
+
+  test('returns running when a job is in-progress', () => {
+    const reports = [{ status: 'running', createdAt: `${TODAY}T01:00:00Z` }];
+    const r = reportPreFlight(reports, TODAY);
+    assert.equal(r.action, 'running');
+    assert.equal(r.count, 1);
+  });
+
+  test('returns today when completed report exists for today', () => {
+    const reports = [{ status: 'completed', createdAt: `${TODAY}T08:00:00Z` }];
+    const r = reportPreFlight(reports, TODAY);
+    assert.equal(r.action, 'today');
+    assert.equal(r.count, 1);
+  });
+
+  test('returns trigger when completed report is from yesterday only', () => {
+    const reports = [{ status: 'completed', createdAt: `${YEST}T08:00:00Z` }];
+    assert.equal(reportPreFlight(reports, TODAY).action, 'trigger');
+  });
+
+  test('returns limit when total completed+running equals MAX', () => {
+    const reports = [
+      ...Array.from({ length: 7 }, (_, i) => ({ status: 'completed', createdAt: `${YEST}T0${i}:00:00Z` })),
+      ...Array.from({ length: 3 }, (_, i) => ({ status: 'running',   createdAt: `${TODAY}T0${i}:00:00Z` })),
+    ];
+    assert.equal(reportPreFlight(reports, TODAY).action, 'limit');
+  });
+
+  test('limit takes precedence over running check', () => {
+    const reports = Array.from({ length: MAX_REPORTS_DASH }, () => ({ status: 'running', createdAt: `${TODAY}T00:00:00Z` }));
+    assert.equal(reportPreFlight(reports, TODAY).action, 'limit');
+  });
+
+  test('running check takes precedence over today check', () => {
+    const reports = [
+      { status: 'running',   createdAt: `${TODAY}T01:00:00Z` },
+      { status: 'completed', createdAt: `${TODAY}T00:30:00Z` },
+    ];
+    assert.equal(reportPreFlight(reports, TODAY).action, 'running');
+  });
+
+  test('today count reflects only completed reports from today', () => {
+    const reports = [
+      { status: 'completed', createdAt: `${TODAY}T08:00:00Z` },
+      { status: 'completed', createdAt: `${TODAY}T09:00:00Z` },
+      { status: 'completed', createdAt: `${YEST}T10:00:00Z` },  // yesterday — not counted
+    ];
+    const r = reportPreFlight(reports, TODAY);
+    assert.equal(r.action, 'today');
+    assert.equal(r.count, 2);
+  });
+});
+
+// ── renderReportsList item structure ─────────────────────────────────────────
+// Pure helper: extract the display properties for a single report item.
+
+function reportItemProps(job) {
+  let badge, actions;
+  if (job.status === 'completed') {
+    badge   = 'completed';
+    actions = ['download', 'clear'];
+  } else if (job.status === 'running') {
+    badge   = 'running';
+    actions = ['cancel'];
+  } else {
+    badge   = 'failed';
+    actions = ['clear'];
+  }
+  const progressText = job.status === 'running' && job.progress
+    ? `${job.progress.done}/${job.progress.total}`
+    : null;
+  return { badge, actions, progressText };
+}
+
+describe('reportItemProps()', () => {
+  test('completed job has download + clear actions', () => {
+    const p = reportItemProps({ status: 'completed', filename: 'r.xlsx', progress: null });
+    assert.deepEqual(p.actions, ['download', 'clear']);
+    assert.equal(p.badge, 'completed');
+    assert.equal(p.progressText, null);
+  });
+
+  test('running job has cancel action and progress text', () => {
+    const p = reportItemProps({ status: 'running', progress: { done: 3, total: 10 } });
+    assert.deepEqual(p.actions, ['cancel']);
+    assert.equal(p.badge, 'running');
+    assert.equal(p.progressText, '3/10');
+  });
+
+  test('failed job has only clear action', () => {
+    const p = reportItemProps({ status: 'failed', error: 'Network error', progress: null });
+    assert.deepEqual(p.actions, ['clear']);
+    assert.equal(p.badge, 'failed');
+    assert.equal(p.progressText, null);
+  });
+
+  test('running job with done=0 shows 0/N progress', () => {
+    const p = reportItemProps({ status: 'running', progress: { done: 0, total: 5 } });
+    assert.equal(p.progressText, '0/5');
+  });
+
+  test('running job with all done shows N/N progress', () => {
+    const p = reportItemProps({ status: 'running', progress: { done: 5, total: 5 } });
+    assert.equal(p.progressText, '5/5');
+  });
+});
+
+// ── updateReportsBadge logic ──────────────────────────────────────────────────
+// The badge on the Reports button should show the count of running jobs.
+
+function badgeCount(reports) {
+  return reports.filter(r => r.status === 'running').length;
+}
+
+describe('badgeCount() — Reports button badge', () => {
+  test('returns 0 when no jobs exist', () => {
+    assert.equal(badgeCount([]), 0);
+  });
+
+  test('returns 0 when all jobs are completed or failed', () => {
+    assert.equal(badgeCount([
+      { status: 'completed' }, { status: 'failed' },
+    ]), 0);
+  });
+
+  test('returns count of running jobs only', () => {
+    assert.equal(badgeCount([
+      { status: 'running' }, { status: 'running' }, { status: 'completed' },
+    ]), 2);
+  });
+});

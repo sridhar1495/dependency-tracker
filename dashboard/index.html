@@ -469,6 +469,61 @@
     /* ── Modal code block — adapt for light theme ────────────────────────── */
     [data-theme="light"] .modal code { color: #1d4ed8; }
 
+    /* ── Toast notifications ────────────────────────────────────────────── */
+    #toastContainer {
+      position: fixed; bottom: 24px; right: 24px; z-index: 9999;
+      display: flex; flex-direction: column; gap: 8px; pointer-events: none;
+    }
+    .toast {
+      background: var(--surface2); border: 1px solid var(--border);
+      border-radius: 8px; padding: 10px 16px; font-size: 13px;
+      box-shadow: 0 4px 16px rgba(0,0,0,0.35); pointer-events: auto;
+      max-width: 360px; animation: toastSlideIn 0.2s ease;
+    }
+    .toast.success { border-left: 3px solid var(--ok); }
+    .toast.warn    { border-left: 3px solid var(--medium); }
+    .toast.error   { border-left: 3px solid var(--critical); }
+    .toast.info    { border-left: 3px solid var(--text-muted); }
+    @keyframes toastSlideIn {
+      from { opacity: 0; transform: translateY(10px); }
+      to   { opacity: 1; transform: none; }
+    }
+
+    /* ── Reports modal ──────────────────────────────────────────────────── */
+    .report-item {
+      border: 1px solid var(--border); border-radius: 8px;
+      padding: 12px 14px; background: var(--surface2);
+    }
+    .report-item.status-completed { border-left: 4px solid var(--ok); }
+    .report-item.status-running   { border-left: 4px solid var(--medium); }
+    .report-item.status-failed    { border-left: 4px solid var(--critical); }
+    .report-item-header { display: flex; align-items: center; gap: 8px; }
+    .report-badge {
+      font-size: 11px; font-weight: 600; padding: 2px 7px; border-radius: 10px;
+      white-space: nowrap;
+    }
+    .report-badge.completed { background: rgba(34,197,94,0.2); color: var(--ok); }
+    .report-badge.running   { background: rgba(234,179,8,0.2);  color: var(--medium); }
+    .report-badge.failed    { background: rgba(239,68,68,0.2);  color: var(--critical); }
+    .report-name { flex: 1; font-size: 12px; color: var(--text-muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+    .report-actions { display: flex; gap: 6px; flex-shrink: 0; }
+    .report-sub { margin-top: 8px; font-size: 12px; color: var(--text-muted); }
+    .report-progress { height: 4px; background: var(--border); border-radius: 2px; margin-top: 8px; overflow: hidden; }
+    .report-progress-bar { height: 100%; background: var(--medium); border-radius: 2px; transition: width 0.4s; }
+    .btn-rpt { font-size: 11px; padding: 3px 10px; border-radius: 5px; border: 1px solid var(--border);
+      background: var(--surface); color: var(--text); cursor: pointer; }
+    .btn-rpt:hover { background: var(--surface2); }
+    .btn-rpt.danger { border-color: var(--critical); color: var(--critical); }
+    .btn-rpt.danger:hover { background: rgba(239,68,68,0.1); }
+    /* Badge dot on Reports button */
+    #reportsBtn { position: relative; }
+    #reportsBadge {
+      position: absolute; top: -4px; right: -4px;
+      background: var(--critical); color: #fff;
+      font-size: 10px; font-weight: 700; border-radius: 8px;
+      padding: 1px 5px; display: none;
+    }
+
     /* ── Responsive breakpoints ───────────────────────────────────────────── */
     /* 1200px: enforce 3-column summary grid */
     @media (max-width: 1200px) {
@@ -513,6 +568,9 @@
     </div>
     <button class="btn-theme" id="themeBtn" onclick="toggleTheme()" title="Toggle dark/light mode">🌙</button>
     <button class="btn" onclick="openModal('apiModal')">⚙ Connect API</button>
+    <button class="btn" id="reportsBtn" onclick="openModal('reportsModal')" title="View and download generated vulnerability reports">
+      📥 Reports<span id="reportsBadge"></span>
+    </button>
     <button class="btn primary" onclick="refreshData()">↻ Refresh</button>
   </header>
 
@@ -575,6 +633,7 @@
 
       <div style="flex:1"></div>
       <button class="btn" id="expandCollapseBtn" onclick="toggleExpandCollapse()" title="Expand all groups">▼ Expand All</button>
+      <button class="btn" id="genReportBtn" onclick="generateReport()" title="Generate Excel vulnerability report for the projects currently shown in the table">📋 Generate Report</button>
       <button class="btn export" onclick="exportCSV()">↓ Export CSV</button>
     </div>
 
@@ -655,6 +714,39 @@
   http://&lt;DT-HOST&gt;:8081/api/v1/team | jq -r '.[0].apiKeys[0].key'</code>
   </div>
 </div>
+
+<!-- ── Reports modal ────────────────────────────────────────────────────── -->
+<div class="modal-overlay" id="reportsModal">
+  <div class="modal" style="width:660px;max-width:95vw">
+    <button class="modal-close" onclick="closeModal('reportsModal')">&times;</button>
+    <h2>📥 Vulnerability Reports</h2>
+    <p>Server-generated Excel reports from DependencyTrack findings.
+       <strong>Completed</strong> reports are downloaded once and then automatically cleared from the server.
+    </p>
+    <div id="reportsList" style="display:flex;flex-direction:column;gap:10px;max-height:440px;overflow-y:auto;padding-right:4px"></div>
+    <p id="reportsEmpty" style="text-align:center;color:var(--text-muted);padding:32px 0 16px;display:none">
+      No reports yet — click <strong>📋 Generate Report</strong> in the toolbar to create one.
+    </p>
+    <div style="margin-top:14px;font-size:11px;color:var(--text-muted)">
+      Reports are stored on the server. Maximum 10 active (completed + in-progress) at a time.
+    </div>
+  </div>
+</div>
+
+<!-- ── Confirm / info dialog (shared for all prompts) ───────────────────── -->
+<div class="modal-overlay" id="confirmModal">
+  <div class="modal" style="max-width:420px">
+    <h2 id="confirmTitle">Confirm</h2>
+    <p id="confirmMessage" style="font-size:13px;line-height:1.6;color:var(--text)"></p>
+    <div style="display:flex;gap:8px;margin-top:20px">
+      <button class="btn primary" id="confirmOkBtn">OK</button>
+      <button class="btn" id="confirmCancelBtn" style="display:none">Cancel</button>
+    </div>
+  </div>
+</div>
+
+<!-- ── Toast container ───────────────────────────────────────────────────── -->
+<div id="toastContainer"></div>
 
 <!-- SPDX-License-Identifier: MIT -->
 <script>
@@ -1903,6 +1995,12 @@ async function refreshData() {
 // ── Modal helpers ──────────────────────────────────────────────────────────
 function openModal(id) {
   document.getElementById(id).classList.add('open');
+  if (id === 'reportsModal') {
+    refreshReportsList();
+    if (!_reportPollTimer) {
+      _reportPollTimer = setInterval(refreshReportsList, 5000);
+    }
+  }
   if (id === 'apiModal') {
     const inp = document.getElementById('apiUrlInput');
     if (inp && !inp.value) {
@@ -1931,10 +2029,16 @@ function openModal(id) {
     }
   }
 }
-function closeModal(id) { document.getElementById(id).classList.remove('open'); }
+function closeModal(id) {
+  document.getElementById(id).classList.remove('open');
+  if (id === 'reportsModal') {
+    clearInterval(_reportPollTimer);
+    _reportPollTimer = null;
+  }
+}
 
 document.querySelectorAll('.modal-overlay').forEach(el => {
-  el.addEventListener('click', e => { if (e.target === el) el.classList.remove('open'); });
+  el.addEventListener('click', e => { if (e.target === el) closeModal(el.id); });
 });
 
 function escHtml(s) {
@@ -2099,6 +2203,378 @@ function toggleTheme() {
   applyTheme(current === 'light' ? 'dark' : 'light');
 }
 
+// ── Toast notification system ─────────────────────────────────────────────
+/**
+ * Show an auto-dismissing toast notification.
+ * @param {string} message - Text to display
+ * @param {'info'|'success'|'warn'|'error'} type - Controls border colour
+ */
+function showToast(message, type = 'info') {
+  const el = document.createElement('div');
+  el.className   = `toast ${type}`;
+  el.textContent = message;
+  document.getElementById('toastContainer').appendChild(el);
+  setTimeout(() => el.remove(), 5000);
+}
+
+// ── Confirm / info dialog ────────────────────────────────────────────────
+/**
+ * Show a modal confirmation dialog.
+ * @param {string}      title       - Dialog heading
+ * @param {string}      message     - Body text
+ * @param {string}      okLabel     - Primary button label
+ * @param {string|null} cancelLabel - Secondary button label; null = info-only (no cancel)
+ * @returns {Promise<boolean>} true = OK clicked, false = Cancel clicked
+ */
+function showConfirm(title, message, okLabel = 'OK', cancelLabel = null) {
+  return new Promise(resolve => {
+    document.getElementById('confirmTitle').textContent   = title;
+    document.getElementById('confirmMessage').textContent = message;
+
+    const okBtn     = document.getElementById('confirmOkBtn');
+    const cancelBtn = document.getElementById('confirmCancelBtn');
+    okBtn.textContent     = okLabel;
+    cancelBtn.textContent = cancelLabel || 'Cancel';
+    cancelBtn.style.display = cancelLabel ? '' : 'none';
+
+    // Clone to remove any previous listeners
+    const ok2  = okBtn.cloneNode(true);
+    const ca2  = cancelBtn.cloneNode(true);
+    okBtn.replaceWith(ok2);
+    cancelBtn.replaceWith(ca2);
+
+    const close = val => { closeModal('confirmModal'); resolve(val); };
+    ok2.addEventListener('click', () => close(true));
+    ca2.addEventListener('click', () => close(false));
+
+    openModal('confirmModal');
+  });
+}
+
+// ── Report state ──────────────────────────────────────────────────────────
+let _reportPollTimer = null;  // setInterval id — active only while reportsModal is open
+
+// ── Report list UI ────────────────────────────────────────────────────────
+/** Fetch /violation-cache/report/list and re-render the reports modal. */
+async function refreshReportsList() {
+  try {
+    const r = await fetch('/violation-cache/report/list');
+    if (!r.ok) return;
+    const reports = await r.json();
+    renderReportsList(reports);
+    updateReportsBadge(reports);
+  } catch (_) { /* network hiccup — keep polling */ }
+}
+
+/** Update the badge count on the Reports button (shows in-progress count). */
+function updateReportsBadge(reports) {
+  const running = (reports || []).filter(r => r.status === 'running').length;
+  const badge   = document.getElementById('reportsBadge');
+  if (!badge) return;
+  if (running > 0) {
+    badge.textContent   = running;
+    badge.style.display = '';
+  } else {
+    badge.style.display = 'none';
+  }
+}
+
+/** Render the report job list inside the reports modal. */
+function renderReportsList(reports) {
+  const container = document.getElementById('reportsList');
+  const empty     = document.getElementById('reportsEmpty');
+  if (!container) return;
+
+  // Filter out 'pending' items (briefly exist before job starts running)
+  const visible = reports.filter(r => r.status !== 'pending');
+  container.innerHTML = '';
+
+  if (visible.length === 0) {
+    if (empty) empty.style.display = '';
+    return;
+  }
+  if (empty) empty.style.display = 'none';
+
+  for (const job of visible) {
+    const item = document.createElement('div');
+    item.className = `report-item status-${job.status}`;
+
+    // ── Header row ──────────────────────────────────────────────────────
+    const hdr = document.createElement('div');
+    hdr.className = 'report-item-header';
+
+    const badge = document.createElement('span');
+    badge.className = `report-badge ${job.status}`;
+    badge.textContent = job.status === 'completed' ? '✅ Completed'
+                      : job.status === 'running'   ? '⏳ In Progress'
+                      : '❌ Failed';
+
+    const nameEl = document.createElement('span');
+    nameEl.className = 'report-name';
+    const displayName = job.filename
+      || (job.createdAt ? `Report — ${new Date(job.createdAt).toLocaleString()}` : `Report ${job.id.slice(0,8)}`);
+    nameEl.textContent = displayName;
+    nameEl.title       = displayName;
+
+    const actions = document.createElement('div');
+    actions.className = 'report-actions';
+
+    if (job.status === 'completed') {
+      const dlBtn = document.createElement('button');
+      dlBtn.className   = 'btn-rpt';
+      dlBtn.textContent = '⬇ Download';
+      dlBtn.title       = 'Download report and clear from server';
+      dlBtn.onclick     = () => downloadReport(job.id);
+
+      const clrBtn = document.createElement('button');
+      clrBtn.className   = 'btn-rpt danger';
+      clrBtn.textContent = '🗑 Clear';
+      clrBtn.title       = 'Delete this report from the server without downloading';
+      clrBtn.onclick     = () => clearReport(job.id);
+
+      actions.append(dlBtn, clrBtn);
+
+    } else if (job.status === 'running') {
+      const stopBtn = document.createElement('button');
+      stopBtn.className   = 'btn-rpt danger';
+      stopBtn.textContent = '⏹ Cancel';
+      stopBtn.title       = 'Cancel this report generation';
+      stopBtn.onclick     = () => cancelReport(job.id);
+      actions.append(stopBtn);
+
+    } else if (job.status === 'failed') {
+      const clrBtn = document.createElement('button');
+      clrBtn.className   = 'btn-rpt danger';
+      clrBtn.textContent = '🗑 Clear';
+      clrBtn.title       = 'Remove this failed job entry';
+      clrBtn.onclick     = () => clearReport(job.id);
+      actions.append(clrBtn);
+    }
+
+    hdr.append(badge, nameEl, actions);
+    item.appendChild(hdr);
+
+    // ── Sub-row: progress / error details ───────────────────────────────
+    if (job.status === 'running' && job.progress) {
+      const sub = document.createElement('div');
+      sub.className = 'report-sub';
+      sub.textContent = `Fetching findings: ${job.progress.done} / ${job.progress.total} project(s) done`;
+
+      const bar = document.createElement('div');
+      bar.className = 'report-progress';
+      const pct = job.progress.total > 0 ? Math.round(job.progress.done / job.progress.total * 100) : 0;
+      bar.innerHTML = `<div class="report-progress-bar" style="width:${pct}%"></div>`;
+
+      item.append(sub, bar);
+
+    } else if (job.status === 'failed' && job.error) {
+      const sub = document.createElement('div');
+      sub.className   = 'report-sub';
+      sub.textContent = `Error: ${job.error}`;
+      item.appendChild(sub);
+    }
+
+    // ── Timestamp ────────────────────────────────────────────────────────
+    if (job.createdAt) {
+      const ts = document.createElement('div');
+      ts.style.cssText = 'font-size:11px;color:var(--text-muted);margin-top:6px';
+      ts.textContent   = `Created: ${new Date(job.createdAt).toLocaleString()}`;
+      item.appendChild(ts);
+    }
+
+    container.appendChild(item);
+  }
+}
+
+// ── Generate report — pre-flight ─────────────────────────────────────────
+/**
+ * Called when the user clicks "📋 Generate Report".
+ * Checks limits and existing jobs, shows appropriate confirmation dialogs,
+ * then calls doTriggerReport() if the user proceeds.
+ */
+async function generateReport() {
+  if (!liveMode) {
+    showToast('Connect to the live DependencyTrack API first before generating a report.', 'warn');
+    return;
+  }
+
+  const projectsToReport = filtered.filter(p => {
+    // Only leaf projects (not group containers) — same logic as type column in CSV
+    const node = nodeMap.get(p.uuid);
+    return !node || node.children.length === 0;
+  });
+
+  if (projectsToReport.length === 0) {
+    showToast('No projects are currently shown in the table — adjust filters and try again.', 'warn');
+    return;
+  }
+
+  let reports = [];
+  try {
+    const r = await fetch('/violation-cache/report/list');
+    if (r.ok) reports = await r.json();
+  } catch (_) { /* service unreachable */ }
+
+  const completedCount = reports.filter(j => j.status === 'completed').length;
+  const runningCount   = reports.filter(j => j.status === 'running').length;
+  const total          = completedCount + runningCount;
+
+  // ── Limit check (≥ MAX_REPORTS combined) ────────────────────────────────
+  if (total >= 10) {
+    await showConfirm(
+      '📋 Report Limit Reached',
+      `You have reached the maximum of 10 active reports ` +
+      `(${completedCount} completed + ${runningCount} in-progress). ` +
+      `Open the 📥 Reports panel to download or clear existing reports before generating a new one.`,
+      'Close',
+      null  // info-only — no cancel button
+    );
+    showToast('Open 📥 Reports to manage existing reports.', 'info');
+    return;
+  }
+
+  // ── Already running today ────────────────────────────────────────────────
+  const todayStr   = new Date().toISOString().slice(0, 10);
+  const runningNow = reports.filter(j => j.status === 'running');
+  if (runningNow.length > 0) {
+    const ok = await showConfirm(
+      '⏳ Report Already In Progress',
+      `A vulnerability report is already being generated (${runningNow.length} job${runningNow.length > 1 ? 's' : ''} running). ` +
+      `Do you want to start another one for the ${projectsToReport.length} currently shown project(s)?`,
+      'Start Another',
+      'Cancel'
+    );
+    if (!ok) {
+      showToast('Open 📥 Reports to track the current report.', 'info');
+      return;
+    }
+    await doTriggerReport(projectsToReport);
+    return;
+  }
+
+  // ── Already completed today ──────────────────────────────────────────────
+  const completedToday = reports.filter(
+    j => j.status === 'completed' && (j.createdAt || '').startsWith(todayStr)
+  );
+  if (completedToday.length > 0) {
+    const ok = await showConfirm(
+      '📋 Report Already Generated Today',
+      `${completedToday.length} report${completedToday.length > 1 ? 's have' : ' has'} already been generated today. ` +
+      `Do you want to create a new one for the ${projectsToReport.length} currently shown project(s)?`,
+      'Create New',
+      'Cancel'
+    );
+    if (!ok) {
+      showToast('Open 📥 Reports to download today\'s report.', 'info');
+      return;
+    }
+    await doTriggerReport(projectsToReport);
+    return;
+  }
+
+  // ── No conflicts — go directly ───────────────────────────────────────────
+  await doTriggerReport(projectsToReport);
+}
+
+/** Send the generate request to the backend and show a toast. */
+async function doTriggerReport(projectsToReport) {
+  try {
+    const projects = projectsToReport.map(p => ({
+      uuid:    p.uuid,
+      name:    p.name,
+      version: p.version || '',
+    }));
+
+    const r = await fetch('/violation-cache/report/generate', {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body:    JSON.stringify({ projects }),
+    });
+
+    if (r.status === 429) {
+      const body = await r.json().catch(() => ({}));
+      showToast(`Report limit reached: ${body.error || 'max 10 reports'}. Open 📥 Reports to manage.`, 'warn');
+      return;
+    }
+    if (!r.ok) {
+      const body = await r.json().catch(() => ({}));
+      showToast(`Failed to start report: ${body.error || r.statusText}`, 'error');
+      return;
+    }
+
+    showToast(`📋 Generating report for ${projects.length} project(s) — open 📥 Reports to track progress.`, 'success');
+    refreshReportsList();
+
+  } catch (e) {
+    showToast(`Could not reach the report service: ${e.message}`, 'error');
+  }
+}
+
+/** Download a completed report file, then auto-clear it from the server. */
+async function downloadReport(id) {
+  try {
+    const r = await fetch(`/violation-cache/report/${id}/download`);
+    if (!r.ok) {
+      const body = await r.json().catch(() => ({}));
+      showToast(`Download failed: ${body.error || r.statusText}`, 'error');
+      return;
+    }
+    const blob        = await r.blob();
+    const disposition = r.headers.get('Content-Disposition') || '';
+    const fnMatch     = disposition.match(/filename="([^"]+)"/);
+    const filename    = fnMatch ? fnMatch[1] : `vulnerability_report_${id}.xlsx`;
+
+    const url = URL.createObjectURL(blob);
+    const a   = document.createElement('a');
+    a.href     = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    URL.revokeObjectURL(url);
+
+    // Auto-clear from server after download (spec requirement)
+    await fetch(`/violation-cache/report/${id}`, { method: 'DELETE' }).catch(() => {});
+
+    showToast('Report downloaded and cleared from server.', 'success');
+    refreshReportsList();
+  } catch (e) {
+    showToast(`Download error: ${e.message}`, 'error');
+  }
+}
+
+/** Delete a report entry (and its file for completed reports) from the server. */
+async function clearReport(id) {
+  try {
+    const r = await fetch(`/violation-cache/report/${id}`, { method: 'DELETE' });
+    if (!r.ok) {
+      const body = await r.json().catch(() => ({}));
+      showToast(`Could not clear report: ${body.error || r.statusText}`, 'error');
+      return;
+    }
+    showToast('Report cleared from server.', 'success');
+    refreshReportsList();
+  } catch (e) {
+    showToast(`Error clearing report: ${e.message}`, 'error');
+  }
+}
+
+/** Request cancellation of a running report job. */
+async function cancelReport(id) {
+  try {
+    const r = await fetch(`/violation-cache/report/${id}/cancel`, { method: 'POST' });
+    if (!r.ok) {
+      const body = await r.json().catch(() => ({}));
+      showToast(`Could not cancel: ${body.error || r.statusText}`, 'error');
+      return;
+    }
+    showToast('Cancellation requested — the job will stop shortly.', 'warn');
+    refreshReportsList();
+  } catch (e) {
+    showToast(`Error cancelling report: ${e.message}`, 'error');
+  }
+}
+
 // ── Expose functions required by inline HTML event handlers ───────────────
 // The IIFE scope is not window-global; onclick="fn()" attributes need explicit exposure.
 window.openModal            = openModal;
@@ -2120,6 +2596,10 @@ window.loadMockData         = loadMockData;
 window.exportCSV            = exportCSV;
 window.scheduleProbe        = scheduleProbe;
 window.toggleTheme          = toggleTheme;
+window.generateReport       = generateReport;
+window.downloadReport       = downloadReport;
+window.clearReport          = clearReport;
+window.cancelReport         = cancelReport;
 
 // ── Init ───────────────────────────────────────────────────────────────────
 initTheme();
