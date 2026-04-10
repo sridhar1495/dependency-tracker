@@ -825,3 +825,68 @@ describe('readBody() maxBytes override', () => {
     );
   });
 });
+
+// ── componentMap accumulation (Affected Projects) ─────────────────────────────
+// Mirrors the accumulation logic in runReportJob — tracks { count, projects:Set }
+// so Sheet 3 can list the affected projects per component.
+
+function accumulate(componentMap, cKey, projName) {
+  const entry = componentMap.get(cKey) || { count: 0, projects: new Set() };
+  entry.count++;
+  entry.projects.add(projName);
+  componentMap.set(cKey, entry);
+}
+
+describe('componentMap accumulation (Affected Projects)', () => {
+  test('count increments with each finding', () => {
+    const m = new Map();
+    accumulate(m, 'lodash', 'ProjectA');
+    accumulate(m, 'lodash', 'ProjectA');
+    assert.equal(m.get('lodash').count, 2);
+  });
+
+  test('projects Set contains unique project names only', () => {
+    const m = new Map();
+    accumulate(m, 'lodash', 'ProjectA');
+    accumulate(m, 'lodash', 'ProjectA'); // same project, different finding
+    accumulate(m, 'lodash', 'ProjectB');
+    assert.deepEqual([...m.get('lodash').projects].sort(), ['ProjectA', 'ProjectB']);
+  });
+
+  test('multiple findings from same project do not duplicate the project name', () => {
+    const m = new Map();
+    for (let i = 0; i < 5; i++) accumulate(m, 'react', 'Frontend');
+    assert.equal(m.get('react').count,          5);
+    assert.equal(m.get('react').projects.size,  1);
+  });
+
+  test('different components are tracked independently', () => {
+    const m = new Map();
+    accumulate(m, 'axios',   'ServiceA');
+    accumulate(m, 'express', 'ServiceA');
+    accumulate(m, 'axios',   'ServiceB');
+    assert.equal(m.get('axios').count,   2);
+    assert.equal(m.get('express').count, 1);
+    assert.deepEqual([...m.get('axios').projects].sort(), ['ServiceA', 'ServiceB']);
+  });
+
+  test('affected projects list sorts alphabetically when joined', () => {
+    const m = new Map();
+    accumulate(m, 'axios', 'Zebra');
+    accumulate(m, 'axios', 'Apple');
+    accumulate(m, 'axios', 'Mango');
+    const list = [...m.get('axios').projects].sort().join(', ');
+    assert.equal(list, 'Apple, Mango, Zebra');
+  });
+
+  test('sort by count descending works with new entry shape', () => {
+    const m = new Map();
+    accumulate(m, 'a', 'P1');
+    accumulate(m, 'b', 'P1');
+    accumulate(m, 'b', 'P2');
+    accumulate(m, 'b', 'P3');
+    const sorted = [...m.entries()].sort((x, y) => y[1].count - x[1].count);
+    assert.equal(sorted[0][0], 'b', '"b" should be first (count 3 > 1)');
+    assert.equal(sorted[1][0], 'a');
+  });
+});

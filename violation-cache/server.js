@@ -645,17 +645,23 @@ async function buildExcelReport(filePath, allFindings, projectSummary, component
   // ── Sheet 3: Component Summary ─────────────────────────────────────────────
   const ws3 = wb.addWorksheet('Component Summary');
   ws3.columns = [
-    { header: 'S.No',                key: 'sno',     width: 6  },
-    { header: 'Component',           key: 'comp',    width: 40 },
-    { header: 'Vulnerability Count', key: 'count',   width: 18 },
+    { header: 'S.No',                key: 'sno',      width: 6  },
+    { header: 'Component',           key: 'comp',     width: 40 },
+    { header: 'Vulnerability Count', key: 'count',    width: 18 },
+    { header: 'Affected Projects',   key: 'projects', width: 55 },
   ];
   styleHeader(ws3);
 
   let sno3 = 1;
   // Sort by count descending so most-vulnerable components appear first
-  const sortedComps = [...componentMap.entries()].sort((a, b) => b[1] - a[1]);
-  for (const [comp, count] of sortedComps) {
-    ws3.addRow({ sno: sno3++, comp, count });
+  const sortedComps = [...componentMap.entries()].sort((a, b) => b[1].count - a[1].count);
+  for (const [comp, entry] of sortedComps) {
+    ws3.addRow({
+      sno:      sno3++,
+      comp,
+      count:    entry.count,
+      projects: [...entry.projects].sort().join(', '),
+    });
   }
 
   await wb.xlsx.writeFile(filePath);
@@ -691,7 +697,7 @@ async function runReportJob(id, projects) {
 
     const allFindings   = [];               // Sheet 1 rows
     const projectSummary = new Map();        // Sheet 2: uuid → sev counts
-    const componentMap   = new Map();        // Sheet 3: component key → count
+    const componentMap   = new Map();        // Sheet 3: component key → { count, projects: Set<name> }
 
     // Fetch each project concurrently (up to REPORT_CONCURRENCY at once)
     const tasks = projects.map(proj =>
@@ -712,7 +718,12 @@ async function runReportJob(id, projects) {
           // Component tally for Sheet 3
           const c    = f.component || {};
           const cKey = [c.name, c.group].filter(Boolean).join('-');
-          if (cKey) componentMap.set(cKey, (componentMap.get(cKey) || 0) + 1);
+          if (cKey) {
+            const entry = componentMap.get(cKey) || { count: 0, projects: new Set() };
+            entry.count++;
+            entry.projects.add(proj.name);
+            componentMap.set(cKey, entry);
+          }
         }
         projectSummary.set(proj.uuid, { name: proj.name, version: proj.version, ...sev });
 
