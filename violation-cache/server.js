@@ -59,7 +59,8 @@ const REPORT_TMP         = path.join(REPORT_DIR, 'registry.tmp.json');
 const REPORT_TIMEOUT_MS  = 30 * 60_000;  // 30 min hard limit per job
 const FINDINGS_PAGE_SIZE    = 200;  // DT API page size for findings
 const VIOLATIONS_PAGE_SIZE  = 200;  // DT API page size for violation queries
-const REPORT_CONCURRENCY    = 5;    // projects fetched in parallel
+const REPORT_CONCURRENCY    = 5;    // projects fetched in parallel for security
+const VIOLATION_CONCURRENCY = 1;    // projects processed in series for license/operational
 const MAX_REPORTS           = 10;   // combined completed + running ceiling
 const VALID_RISK_TYPES      = new Set(['security', 'license', 'operational']);
 
@@ -538,6 +539,7 @@ async function fetchAllFindings(apiUrl, apiKey, name, version, cancelFlag) {
   while (true) {
     if (cancelFlag.cancelled) throw Object.assign(new Error('__CANCELLED__'), { isCancelled: true });
     const urlPath = `/api/v1/finding?${baseQs}&pageNumber=${page}`;
+    log('info', `[report-fetch] GET ${apiUrl}${urlPath}`);
     const { json, headers } = await dtGetWithRetry(urlPath, apiUrl, apiKey);
     const batch = Array.isArray(json) ? json : [];
     all.push(...batch);
@@ -550,12 +552,17 @@ async function fetchAllFindings(apiUrl, apiKey, name, version, cancelFlag) {
 
 // ── Per-project violation fetch helper ───────────────────────────────────────
 /**
- * Fetch all violation pages from DependencyTrack for one project and risk type.
- * Uses:  /api/v1/violation?project={uuid}&riskType={LICENSE|OPERATIONAL}&...
- * Paginates until X-Total-Count is satisfied or a short page is returned.
- * Checks cancelFlag before every page request.
+ * Stream all violation pages for one project and risk type, invoking onItem(v)
+ * for each violation as it is received.  The raw DT objects are NOT accumulated
+ * in an array — each page's objects are processed by the caller's callback and
+ * then become eligible for GC before the next page is fetched.  This keeps
+ * memory usage bounded to ~one page of raw objects at a time regardless of how
+ * many total violations a project has.
+ *
+ * @param {Function} onItem  called synchronously for each violation object on a page
+ * @returns {Promise<number>} total violation count processed
  */
-async function fetchAllViolationsForProject(apiUrl, apiKey, projectUuid, riskType, cancelFlag) {
+async function streamViolationsForProject(apiUrl, apiKey, projectUuid, riskType, cancelFlag, onItem) {
   const dtRiskType = riskType === 'license' ? 'LICENSE' : 'OPERATIONAL';
   const baseQs = [
     `project=${projectUuid}`,
@@ -564,19 +571,21 @@ async function fetchAllViolationsForProject(apiUrl, apiKey, projectUuid, riskTyp
     `pageSize=${VIOLATIONS_PAGE_SIZE}`,
   ].join('&');
 
-  const all = [];
+  let processed = 0;
   let page = 1;
   while (true) {
     if (cancelFlag.cancelled) throw Object.assign(new Error('__CANCELLED__'), { isCancelled: true });
     const urlPath = `/api/v1/violation?${baseQs}&pageNumber=${page}`;
+    log('info', `[report-fetch] GET ${apiUrl}${urlPath}`);
     const { json, headers } = await dtGetWithRetry(urlPath, apiUrl, apiKey);
     const batch = Array.isArray(json) ? json : (json?.violations || []);
-    all.push(...batch);
+    for (const v of batch) { onItem(v); }
+    processed += batch.length;
     const total = parseInt(headers['x-total-count'] || '0', 10);
-    if ((total > 0 && all.length >= total) || batch.length < VIOLATIONS_PAGE_SIZE) break;
+    if ((total > 0 && processed >= total) || batch.length < VIOLATIONS_PAGE_SIZE) break;
     page++;
   }
-  return all;
+  return processed;
 }
 
 // ── Excel report builder ──────────────────────────────────────────────────────
@@ -859,8 +868,12 @@ async function buildExcelReport(filePath, reportData) {
  * @param {string[]} riskTypes — subset of ['security','license','operational']
  */
 async function runReportJob(id, projects, riskTypes) {
-  const job       = reportJobs.get(id);
-  const semaphore = makeSemaphore(REPORT_CONCURRENCY);
+  const job              = reportJobs.get(id);
+  const semaphore        = makeSemaphore(REPORT_CONCURRENCY);
+  // Violations use concurrency=1: each project's pages are processed and GC'd
+  // before the next project starts, keeping at most one page of raw DT objects
+  // in memory at a time.
+  const violationSema    = makeSemaphore(VIOLATION_CONCURRENCY);
 
   job.status    = 'running';
   job.riskTypes = riskTypes;
@@ -913,55 +926,57 @@ async function runReportJob(id, projects, riskTypes) {
           secProjectSummary.set(proj.uuid, { name: proj.name, version: proj.version, ...sev });
         }
 
-        // ── License violations ───────────────────────────────────────────
+        // ── License violations (serial, one project at a time to cap memory) ──
         if (riskTypes.includes('license')) {
-          log('info', `Report ${id}: fetching license violations for "${proj.name}" ${proj.version || '(no version)'}`);
-          const violations = await fetchAllViolationsForProject(apiUrl, apiKey, proj.uuid, 'license', job.cancelFlag);
-          log('info', `Report ${id}: received ${violations.length} license violations for "${proj.name}"`);
-          const counts = { fail: 0, warn: 0, info: 0 };
-          for (const v of violations) {
-            const c   = v.component       || {};
-            const pc  = v.policyCondition || {};
-            const pol = pc.policy         || {};
-            licViolations.push({
-              projName:   proj.name,
-              projVersion: proj.version || '',
-              component:  [c.name, c.group].filter(Boolean).join('-') || c.name || '',
-              compVersion: c.version  || '',
-              license:    pc.value    || '',
-              policy:     pol.name    || '',
-              state:      v.violationState || 'INFO',
+          await violationSema(async () => {
+            log('info', `Report ${id}: fetching license violations for "${proj.name}" ${proj.version || '(no version)'}`);
+            const counts = { fail: 0, warn: 0, info: 0 };
+            const n = await streamViolationsForProject(apiUrl, apiKey, proj.uuid, 'license', job.cancelFlag, (v) => {
+              const c   = v.component       || {};
+              const pc  = v.policyCondition || {};
+              const pol = pc.policy         || {};
+              licViolations.push({
+                projName:    proj.name,
+                projVersion: proj.version || '',
+                component:   [c.name, c.group].filter(Boolean).join('-') || c.name || '',
+                compVersion: c.version  || '',
+                license:     pc.value   || '',
+                policy:      pol.name   || '',
+                state:       v.violationState || 'INFO',
+              });
+              const state = (v.violationState || 'INFO').toLowerCase();
+              if (state in counts) counts[state]++;
             });
-            const state = (v.violationState || 'INFO').toLowerCase();
-            if (state in counts) counts[state]++;
-          }
-          licProjectSummary.set(proj.uuid, { name: proj.name, version: proj.version, ...counts });
+            log('info', `Report ${id}: processed ${n} license violations for "${proj.name}"`);
+            licProjectSummary.set(proj.uuid, { name: proj.name, version: proj.version, ...counts });
+          });
         }
 
-        // ── Operational violations ───────────────────────────────────────
+        // ── Operational violations (serial, one project at a time) ────────
         if (riskTypes.includes('operational')) {
-          log('info', `Report ${id}: fetching operational violations for "${proj.name}" ${proj.version || '(no version)'}`);
-          const violations = await fetchAllViolationsForProject(apiUrl, apiKey, proj.uuid, 'operational', job.cancelFlag);
-          log('info', `Report ${id}: received ${violations.length} operational violations for "${proj.name}"`);
-          const counts = { fail: 0, warn: 0, info: 0 };
-          for (const v of violations) {
-            const c   = v.component       || {};
-            const pc  = v.policyCondition || {};
-            const pol = pc.policy         || {};
-            opsViolations.push({
-              projName:   proj.name,
-              projVersion: proj.version || '',
-              component:  [c.name, c.group].filter(Boolean).join('-') || c.name || '',
-              compVersion: c.version  || '',
-              policy:     pol.name    || '',
-              subject:    pc.subject  || '',
-              condition:  pc.value    || '',
-              state:      v.violationState || 'INFO',
+          await violationSema(async () => {
+            log('info', `Report ${id}: fetching operational violations for "${proj.name}" ${proj.version || '(no version)'}`);
+            const counts = { fail: 0, warn: 0, info: 0 };
+            const n = await streamViolationsForProject(apiUrl, apiKey, proj.uuid, 'operational', job.cancelFlag, (v) => {
+              const c   = v.component       || {};
+              const pc  = v.policyCondition || {};
+              const pol = pc.policy         || {};
+              opsViolations.push({
+                projName:    proj.name,
+                projVersion: proj.version || '',
+                component:   [c.name, c.group].filter(Boolean).join('-') || c.name || '',
+                compVersion: c.version  || '',
+                policy:      pol.name   || '',
+                subject:     pc.subject || '',
+                condition:   pc.value   || '',
+                state:       v.violationState || 'INFO',
+              });
+              const state = (v.violationState || 'INFO').toLowerCase();
+              if (state in counts) counts[state]++;
             });
-            const state = (v.violationState || 'INFO').toLowerCase();
-            if (state in counts) counts[state]++;
-          }
-          opsProjectSummary.set(proj.uuid, { name: proj.name, version: proj.version, ...counts });
+            log('info', `Report ${id}: processed ${n} operational violations for "${proj.name}"`);
+            opsProjectSummary.set(proj.uuid, { name: proj.name, version: proj.version, ...counts });
+          });
         }
 
         job.progress.done++;

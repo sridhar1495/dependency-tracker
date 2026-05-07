@@ -891,8 +891,8 @@ describe('componentMap accumulation (Affected Projects)', () => {
   });
 });
 
-// ── fetchAllViolationsForProject URL construction ─────────────────────────────
-// Inline the URL-building logic from fetchAllViolationsForProject (no HTTP calls).
+// ── streamViolationsForProject URL construction ─────────────────────────────
+// Inline the URL-building logic from streamViolationsForProject (no HTTP calls).
 
 const VIOLATIONS_PAGE_SIZE_TEST = 200;
 
@@ -907,7 +907,7 @@ function buildViolationUrl(projectUuid, riskType, page) {
   return `/api/v1/violation?${baseQs}&pageNumber=${page}`;
 }
 
-describe('fetchAllViolationsForProject URL construction', () => {
+describe('streamViolationsForProject URL construction', () => {
   test('targets /api/v1/violation endpoint', () => {
     const url = buildViolationUrl('proj-uuid-1', 'license', 1);
     assert.ok(url.startsWith('/api/v1/violation'));
