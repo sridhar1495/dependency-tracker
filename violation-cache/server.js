@@ -728,26 +728,30 @@ async function buildExcelReport(filePath, reportData) {
     // Sheet 1: License Violations (one row per violation)
     const wsL1 = wb.addWorksheet('License Violations');
     wsL1.columns = [
-      { header: 'S.No',              key: 'sno',       width: 6  },
-      { header: 'Project Name',      key: 'projName',  width: 28 },
-      { header: 'Project Version',   key: 'projVer',   width: 14 },
-      { header: 'Component',         key: 'component', width: 36 },
-      { header: 'Component Version', key: 'compVer',   width: 14 },
-      { header: 'License',           key: 'license',   width: 30 },
-      { header: 'Policy',            key: 'policy',    width: 30 },
-      { header: 'State',             key: 'state',     width: 10 },
+      { header: 'S.No',              key: 'sno',         width: 6  },
+      { header: 'Project Name',      key: 'projName',    width: 28 },
+      { header: 'Project Version',   key: 'projVer',     width: 14 },
+      { header: 'Component',         key: 'component',   width: 36 },
+      { header: 'Component Version', key: 'compVer',     width: 14 },
+      { header: 'License Name',      key: 'licenseName', width: 34 },
+      { header: 'License ID',        key: 'licenseId',   width: 24 },
+      { header: 'Policy Condition',  key: 'license',     width: 30 },
+      { header: 'Policy',            key: 'policy',      width: 30 },
+      { header: 'State',             key: 'state',       width: 10 },
     ];
     styleHeader(wsL1);
     licViolations.forEach((v, idx) => {
       wsL1.addRow({
-        sno:       idx + 1,
-        projName:  v.projName,
-        projVer:   v.projVersion,
-        component: v.component,
-        compVer:   v.compVersion,
-        license:   v.license,
-        policy:    v.policy,
-        state:     v.state,
+        sno:         idx + 1,
+        projName:    v.projName,
+        projVer:     v.projVersion,
+        component:   v.component,
+        compVer:     v.compVersion,
+        licenseName: v.licenseName,
+        licenseId:   v.licenseId,
+        license:     v.license,
+        policy:      v.policy,
+        state:       v.state,
       });
     });
     alternateShading(wsL1);
@@ -768,13 +772,25 @@ async function buildExcelReport(filePath, reportData) {
       wsL2.addRow({ sno: snoL++, projName: s.name, projVer: s.version || '', fail: s.fail, warn: s.warn, info: s.info });
     }
 
-    // Sheet 3: Unique License Risks — one row per distinct license
-    // Aggregates across all projects: total violations, affected project count, worst state
-    const licenseMap = new Map(); // license name → { fail, warn, info, projects: Set }
+    // Sheet 3: Unique License Risks — one row per unique component + component version.
+    // Aggregates violation counts and affected projects across all fetched data.
+    const compLicMap = new Map(); // key: "component||compVersion" → entry
     for (const v of licViolations) {
-      const key = v.license || '(unknown)';
-      if (!licenseMap.has(key)) licenseMap.set(key, { fail: 0, warn: 0, info: 0, projects: new Set() });
-      const entry = licenseMap.get(key);
+      const key = `${v.component}||${v.compVersion}`;
+      if (!compLicMap.has(key)) {
+        compLicMap.set(key, {
+          component:   v.component,
+          compVersion: v.compVersion,
+          licenseName: v.licenseName,
+          licenseId:   v.licenseId,
+          fail: 0, warn: 0, info: 0,
+          projects: new Set(),
+        });
+      }
+      const entry = compLicMap.get(key);
+      // Prefer non-empty licenseName/licenseId if a later violation has it
+      if (!entry.licenseName && v.licenseName) entry.licenseName = v.licenseName;
+      if (!entry.licenseId   && v.licenseId)   entry.licenseId   = v.licenseId;
       const st = v.state.toLowerCase();
       if (st === 'fail') entry.fail++;
       else if (st === 'warn') entry.warn++;
@@ -783,34 +799,39 @@ async function buildExcelReport(filePath, reportData) {
     }
     const wsL3 = wb.addWorksheet('Unique License Risks');
     wsL3.columns = [
-      { header: 'S.No',               key: 'sno',           width: 6  },
-      { header: 'License',            key: 'license',       width: 40 },
-      { header: 'Total Violations',   key: 'total',         width: 16 },
-      { header: 'Fail',               key: 'fail',          width: 10 },
-      { header: 'Warn',               key: 'warn',          width: 10 },
-      { header: 'Info',               key: 'info',          width: 10 },
-      { header: 'Affected Projects',  key: 'projCount',     width: 16 },
-      { header: 'Project Names',      key: 'projNames',     width: 60 },
+      { header: 'S.No',               key: 'sno',         width: 6  },
+      { header: 'Component',          key: 'component',   width: 36 },
+      { header: 'Component Version',  key: 'compVer',     width: 14 },
+      { header: 'License Name',       key: 'licenseName', width: 34 },
+      { header: 'License ID',         key: 'licenseId',   width: 24 },
+      { header: 'Total Violations',   key: 'total',       width: 16 },
+      { header: 'Fail',               key: 'fail',        width: 10 },
+      { header: 'Warn',               key: 'warn',        width: 10 },
+      { header: 'Info',               key: 'info',        width: 10 },
+      { header: 'Affected Projects',  key: 'projCount',   width: 16 },
+      { header: 'Project Names',      key: 'projNames',   width: 60 },
     ];
     styleHeader(wsL3);
-    // Sort by Fail desc, then Warn desc, then total desc
-    const sortedLicenses = [...licenseMap.entries()].sort((a, b) => {
-      const [, ae] = a; const [, be] = b;
-      if (be.fail !== ae.fail) return be.fail - ae.fail;
-      if (be.warn !== ae.warn) return be.warn - ae.warn;
-      return (be.fail + be.warn + be.info) - (ae.fail + ae.warn + ae.info);
+    // Sort by Fail desc, Warn desc, total desc
+    const sortedCompsL = [...compLicMap.values()].sort((a, b) => {
+      if (b.fail !== a.fail) return b.fail - a.fail;
+      if (b.warn !== a.warn) return b.warn - a.warn;
+      return (b.fail + b.warn + b.info) - (a.fail + a.warn + a.info);
     });
     let snoL3 = 1;
-    for (const [license, entry] of sortedLicenses) {
+    for (const e of sortedCompsL) {
       wsL3.addRow({
-        sno:       snoL3++,
-        license,
-        total:     entry.fail + entry.warn + entry.info,
-        fail:      entry.fail,
-        warn:      entry.warn,
-        info:      entry.info,
-        projCount: entry.projects.size,
-        projNames: [...entry.projects].sort().join(', '),
+        sno:         snoL3++,
+        component:   e.component,
+        compVer:     e.compVersion,
+        licenseName: e.licenseName,
+        licenseId:   e.licenseId,
+        total:       e.fail + e.warn + e.info,
+        fail:        e.fail,
+        warn:        e.warn,
+        info:        e.info,
+        projCount:   e.projects.size,
+        projNames:   [...e.projects].sort().join(', '),
       });
     }
     alternateShading(wsL3);
@@ -945,17 +966,20 @@ async function runReportJob(id, projects, riskTypes) {
               const c   = v.component       || {};
               const pc  = v.policyCondition || {};
               const pol = pc.policy         || {};
+              const state = (pol.violationState || 'INFO').toUpperCase();
               licViolations.push({
                 projName:    proj.name,
                 projVersion: proj.version || '',
                 component:   [c.name, c.group].filter(Boolean).join('-') || c.name || '',
-                compVersion: c.version  || '',
-                license:     pc.value   || '',
-                policy:      pol.name   || '',
-                state:       v.violationState || 'INFO',
+                compVersion: c.version                         || '',
+                licenseName: c.resolvedLicense?.name           || '',
+                licenseId:   c.resolvedLicense?.licenseId      || '',
+                license:     pc.value                          || '',
+                policy:      pol.name                          || '',
+                state,
               });
-              const state = (v.violationState || 'INFO').toLowerCase();
-              if (state in counts) counts[state]++;
+              const stLower = state.toLowerCase();
+              if (stLower in counts) counts[stLower]++;
             });
             log('info', `Report ${id}: processed ${n} license violations for "${proj.name}"`);
             licProjectSummary.set(proj.uuid, { name: proj.name, version: proj.version, ...counts });
