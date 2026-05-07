@@ -562,16 +562,22 @@ async function fetchAllFindings(apiUrl, apiKey, name, version, cancelFlag) {
  * @param {Function} onItem  called synchronously for each violation object on a page
  * @returns {Promise<number>} total violation count processed
  */
-async function streamViolationsForProject(apiUrl, apiKey, projectUuid, riskType, cancelFlag, onItem) {
+async function streamViolationsForProject(apiUrl, apiKey, proj, riskType, cancelFlag, onItem) {
   const dtRiskType = riskType === 'license' ? 'LICENSE' : 'OPERATIONAL';
+  // DT's project={uuid} filter is silently ignored on this version; instead use
+  // project_name text search (same pattern as fetchAllFindings) and filter by
+  // project UUID in-memory to exclude partial-name matches from other projects.
   const baseQs = [
-    `project=${projectUuid}`,
+    'showInactive=false',
+    'suppressed=false',
     `riskType=${dtRiskType}`,
-    `suppressed=false`,
+    'textSearchField=project_name',
+    `textSearchInput=${encodeURIComponent(proj.name)}`,
     `pageSize=${VIOLATIONS_PAGE_SIZE}`,
   ].join('&');
 
   let processed = 0;
+  let fetched   = 0;   // unfiltered count from API, used for pagination boundary
   let page = 1;
   while (true) {
     if (cancelFlag.cancelled) throw Object.assign(new Error('__CANCELLED__'), { isCancelled: true });
@@ -579,10 +585,14 @@ async function streamViolationsForProject(apiUrl, apiKey, projectUuid, riskType,
     log('info', `[report-fetch] GET ${apiUrl}${urlPath}`);
     const { json, headers } = await dtGetWithRetry(urlPath, apiUrl, apiKey);
     const batch = Array.isArray(json) ? json : (json?.violations || []);
-    for (const v of batch) { onItem(v); }
-    processed += batch.length;
+    for (const v of batch) {
+      // Only keep violations whose project UUID matches exactly — guards against
+      // text-search returning partial-name matches from other projects.
+      if (v.project?.uuid === proj.uuid) { onItem(v); processed++; }
+    }
+    fetched += batch.length;
     const total = parseInt(headers['x-total-count'] || '0', 10);
-    if ((total > 0 && processed >= total) || batch.length < VIOLATIONS_PAGE_SIZE) break;
+    if (batch.length < VIOLATIONS_PAGE_SIZE || (total > 0 && fetched >= total)) break;
     page++;
   }
   return processed;
@@ -931,7 +941,7 @@ async function runReportJob(id, projects, riskTypes) {
           await violationSema(async () => {
             log('info', `Report ${id}: fetching license violations for "${proj.name}" ${proj.version || '(no version)'}`);
             const counts = { fail: 0, warn: 0, info: 0 };
-            const n = await streamViolationsForProject(apiUrl, apiKey, proj.uuid, 'license', job.cancelFlag, (v) => {
+            const n = await streamViolationsForProject(apiUrl, apiKey, proj, 'license', job.cancelFlag, (v) => {
               const c   = v.component       || {};
               const pc  = v.policyCondition || {};
               const pol = pc.policy         || {};
@@ -957,7 +967,7 @@ async function runReportJob(id, projects, riskTypes) {
           await violationSema(async () => {
             log('info', `Report ${id}: fetching operational violations for "${proj.name}" ${proj.version || '(no version)'}`);
             const counts = { fail: 0, warn: 0, info: 0 };
-            const n = await streamViolationsForProject(apiUrl, apiKey, proj.uuid, 'operational', job.cancelFlag, (v) => {
+            const n = await streamViolationsForProject(apiUrl, apiKey, proj, 'operational', job.cancelFlag, (v) => {
               const c   = v.component       || {};
               const pc  = v.policyCondition || {};
               const pol = pc.policy         || {};

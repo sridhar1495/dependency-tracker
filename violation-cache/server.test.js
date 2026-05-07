@@ -893,66 +893,77 @@ describe('componentMap accumulation (Affected Projects)', () => {
 
 // ── streamViolationsForProject URL construction ─────────────────────────────
 // Inline the URL-building logic from streamViolationsForProject (no HTTP calls).
+// Uses project_name text-search instead of project={uuid} because DT silently
+// ignores the project UUID filter on this API version.
 
 const VIOLATIONS_PAGE_SIZE_TEST = 200;
 
-function buildViolationUrl(projectUuid, riskType, page) {
+function buildViolationUrl(proj, riskType, page) {
   const dtRiskType = riskType === 'license' ? 'LICENSE' : 'OPERATIONAL';
   const baseQs = [
-    `project=${projectUuid}`,
-    `riskType=${dtRiskType}`,
+    'showInactive=false',
     'suppressed=false',
+    `riskType=${dtRiskType}`,
+    'textSearchField=project_name',
+    `textSearchInput=${encodeURIComponent(proj.name)}`,
     `pageSize=${VIOLATIONS_PAGE_SIZE_TEST}`,
   ].join('&');
   return `/api/v1/violation?${baseQs}&pageNumber=${page}`;
 }
 
+const testProj = { uuid: 'proj-uuid-1', name: 'my-service', version: '1.0.0' };
+
 describe('streamViolationsForProject URL construction', () => {
   test('targets /api/v1/violation endpoint', () => {
-    const url = buildViolationUrl('proj-uuid-1', 'license', 1);
-    assert.ok(url.startsWith('/api/v1/violation'));
+    assert.ok(buildViolationUrl(testProj, 'license', 1).startsWith('/api/v1/violation'));
   });
 
-  test('includes project UUID in the query string', () => {
-    const url = buildViolationUrl('proj-uuid-abc', 'license', 1);
-    assert.ok(url.includes('project=proj-uuid-abc'));
+  test('uses textSearchField=project_name (not project=uuid)', () => {
+    const url = buildViolationUrl(testProj, 'license', 1);
+    assert.ok(url.includes('textSearchField=project_name'));
+    assert.ok(!url.includes('project=proj-uuid'));
+  });
+
+  test('encodes project name into textSearchInput', () => {
+    const url = buildViolationUrl({ uuid: 'u', name: 'my service', version: '1' }, 'license', 1);
+    assert.ok(url.includes('textSearchInput=my%20service'));
   });
 
   test('maps "license" to "LICENSE" DT riskType', () => {
-    const url = buildViolationUrl('uuid', 'license', 1);
+    const url = buildViolationUrl(testProj, 'license', 1);
     assert.ok(url.includes('riskType=LICENSE'));
     assert.ok(!url.includes('riskType=OPERATIONAL'));
   });
 
   test('maps "operational" to "OPERATIONAL" DT riskType', () => {
-    const url = buildViolationUrl('uuid', 'operational', 1);
+    const url = buildViolationUrl(testProj, 'operational', 1);
     assert.ok(url.includes('riskType=OPERATIONAL'));
     assert.ok(!url.includes('riskType=LICENSE'));
   });
 
-  test('includes suppressed=false filter', () => {
-    const url = buildViolationUrl('uuid', 'license', 1);
-    assert.ok(url.includes('suppressed=false'));
+  test('includes showInactive=false', () => {
+    assert.ok(buildViolationUrl(testProj, 'license', 1).includes('showInactive=false'));
+  });
+
+  test('includes suppressed=false', () => {
+    assert.ok(buildViolationUrl(testProj, 'license', 1).includes('suppressed=false'));
   });
 
   test('includes correct pageSize', () => {
-    const url = buildViolationUrl('uuid', 'license', 1);
-    assert.ok(url.includes(`pageSize=${VIOLATIONS_PAGE_SIZE_TEST}`));
+    assert.ok(buildViolationUrl(testProj, 'license', 1).includes(`pageSize=${VIOLATIONS_PAGE_SIZE_TEST}`));
   });
 
-  test('increments pageNumber correctly for page 1', () => {
-    assert.ok(buildViolationUrl('uuid', 'license', 1).includes('pageNumber=1'));
+  test('increments pageNumber correctly', () => {
+    assert.ok(buildViolationUrl(testProj, 'license', 1).includes('pageNumber=1'));
+    assert.ok(buildViolationUrl(testProj, 'license', 2).includes('pageNumber=2'));
+    assert.ok(buildViolationUrl(testProj, 'license', 5).includes('pageNumber=5'));
   });
 
-  test('increments pageNumber correctly for subsequent pages', () => {
-    assert.ok(buildViolationUrl('uuid', 'license', 2).includes('pageNumber=2'));
-    assert.ok(buildViolationUrl('uuid', 'license', 5).includes('pageNumber=5'));
-  });
-
-  test('page 1 URL is different from page 2 URL', () => {
-    const url1 = buildViolationUrl('uuid', 'license', 1);
-    const url2 = buildViolationUrl('uuid', 'license', 2);
+  test('page 1 and page 2 URLs differ only in pageNumber', () => {
+    const url1 = buildViolationUrl(testProj, 'license', 1);
+    const url2 = buildViolationUrl(testProj, 'license', 2);
     assert.notEqual(url1, url2);
+    assert.equal(url1.replace('pageNumber=1', 'pageNumber=2'), url2);
   });
 });
 
