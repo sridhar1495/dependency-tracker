@@ -1135,3 +1135,191 @@ describe('jobToApi() with riskTypes field', () => {
     assert.equal(out.id, 'j3');  // other fields still present
   });
 });
+
+// ── Flat field extraction for license/operational violations ──────────────────
+// Mirrors the extraction logic in runReportJob to verify only needed fields
+// are kept (guards against re-introducing full object spread that caused OOM).
+
+function extractLicenseViolation(v, projName, projVersion) {
+  const c   = v.component       || {};
+  const pc  = v.policyCondition || {};
+  const pol = pc.policy         || {};
+  return {
+    projName,
+    projVersion,
+    component:   [c.name, c.group].filter(Boolean).join('-') || c.name || '',
+    compVersion: c.version  || '',
+    license:     pc.value   || '',
+    policy:      pol.name   || '',
+    state:       v.violationState || 'INFO',
+  };
+}
+
+function extractOperationalViolation(v, projName, projVersion) {
+  const c   = v.component       || {};
+  const pc  = v.policyCondition || {};
+  const pol = pc.policy         || {};
+  return {
+    projName,
+    projVersion,
+    component:   [c.name, c.group].filter(Boolean).join('-') || c.name || '',
+    compVersion: c.version  || '',
+    policy:      pol.name   || '',
+    subject:     pc.subject || '',
+    condition:   pc.value   || '',
+    state:       v.violationState || 'INFO',
+  };
+}
+
+describe('flat field extraction — license violations', () => {
+  test('extracts all needed fields from a full violation object', () => {
+    const v = {
+      component: { name: 'lodash', group: 'com.lodash', version: '4.17.0' },
+      policyCondition: { value: 'MIT', policy: { name: 'License Policy' } },
+      violationState: 'WARN',
+    };
+    const flat = extractLicenseViolation(v, 'my-service', '1.0.0');
+    assert.equal(flat.projName,    'my-service');
+    assert.equal(flat.projVersion, '1.0.0');
+    assert.equal(flat.component,   'lodash-com.lodash');
+    assert.equal(flat.compVersion, '4.17.0');
+    assert.equal(flat.license,     'MIT');
+    assert.equal(flat.policy,      'License Policy');
+    assert.equal(flat.state,       'WARN');
+  });
+
+  test('does not include raw component/policyCondition objects', () => {
+    const v = {
+      component: { name: 'react', group: null, version: '18.0.0' },
+      policyCondition: { value: 'Apache-2.0', policy: { name: 'P1' } },
+      violationState: 'FAIL',
+      extraField: 'should-be-dropped',
+    };
+    const flat = extractLicenseViolation(v, 'app', '2.0.0');
+    assert.equal(flat.component, 'react');
+    assert.equal('component' in flat, true);
+    assert.equal('extraField' in flat, false);
+    assert.equal('policyCondition' in flat, false);
+  });
+
+  test('defaults missing violationState to INFO', () => {
+    const v = { component: {}, policyCondition: {} };
+    assert.equal(extractLicenseViolation(v, 'x', '1').state, 'INFO');
+  });
+
+  test('joins component name and group with dash', () => {
+    const v = {
+      component: { name: 'spring-core', group: 'org.springframework', version: '5.3.0' },
+      policyCondition: {}, violationState: 'INFO',
+    };
+    assert.equal(extractLicenseViolation(v, 'svc', '1').component, 'spring-core-org.springframework');
+  });
+
+  test('falls back to name alone when group is absent', () => {
+    const v = { component: { name: 'axios', version: '1.0.0' }, policyCondition: {}, violationState: 'INFO' };
+    assert.equal(extractLicenseViolation(v, 'svc', '1').component, 'axios');
+  });
+});
+
+describe('flat field extraction — operational violations', () => {
+  test('extracts all needed fields', () => {
+    const v = {
+      component: { name: 'guava', group: 'com.google', version: '30.0' },
+      policyCondition: { value: 'LATEST', subject: 'VERSION', policy: { name: 'Op Policy' } },
+      violationState: 'FAIL',
+    };
+    const flat = extractOperationalViolation(v, 'svc', '1.2.0');
+    assert.equal(flat.policy,    'Op Policy');
+    assert.equal(flat.subject,   'VERSION');
+    assert.equal(flat.condition, 'LATEST');
+    assert.equal(flat.state,     'FAIL');
+    assert.equal('policyCondition' in flat, false);
+  });
+
+  test('defaults missing fields to empty strings', () => {
+    const v = { component: {}, policyCondition: {}, violationState: 'WARN' };
+    const flat = extractOperationalViolation(v, 'svc', '1');
+    assert.equal(flat.policy,    '');
+    assert.equal(flat.subject,   '');
+    assert.equal(flat.condition, '');
+  });
+});
+
+// ── Unique License Risks aggregation ─────────────────────────────────────────
+
+function buildUniqueLicenseMap(licViolations) {
+  const licenseMap = new Map();
+  for (const v of licViolations) {
+    const key = v.license || '(unknown)';
+    if (!licenseMap.has(key)) licenseMap.set(key, { fail: 0, warn: 0, info: 0, projects: new Set() });
+    const entry = licenseMap.get(key);
+    const st = v.state.toLowerCase();
+    if (st === 'fail') entry.fail++;
+    else if (st === 'warn') entry.warn++;
+    else entry.info++;
+    entry.projects.add(v.projName);
+  }
+  return licenseMap;
+}
+
+describe('Unique License Risks aggregation', () => {
+  test('produces one entry per distinct license', () => {
+    const violations = [
+      { license: 'MIT',        state: 'WARN', projName: 'A' },
+      { license: 'Apache-2.0', state: 'FAIL', projName: 'B' },
+      { license: 'MIT',        state: 'INFO', projName: 'C' },
+    ];
+    const map = buildUniqueLicenseMap(violations);
+    assert.equal(map.size, 2);
+  });
+
+  test('counts fail/warn/info correctly per license', () => {
+    const violations = [
+      { license: 'GPL', state: 'FAIL', projName: 'A' },
+      { license: 'GPL', state: 'FAIL', projName: 'B' },
+      { license: 'GPL', state: 'WARN', projName: 'C' },
+    ];
+    const entry = buildUniqueLicenseMap(violations).get('GPL');
+    assert.equal(entry.fail, 2);
+    assert.equal(entry.warn, 1);
+    assert.equal(entry.info, 0);
+  });
+
+  test('affected projects uses a Set (no duplicates)', () => {
+    const violations = [
+      { license: 'MIT', state: 'WARN', projName: 'ServiceA' },
+      { license: 'MIT', state: 'FAIL', projName: 'ServiceA' },
+      { license: 'MIT', state: 'INFO', projName: 'ServiceB' },
+    ];
+    const entry = buildUniqueLicenseMap(violations).get('MIT');
+    assert.equal(entry.projects.size, 2);
+  });
+
+  test('handles empty violations array', () => {
+    assert.equal(buildUniqueLicenseMap([]).size, 0);
+  });
+
+  test('sorts by fail desc then warn desc', () => {
+    const violations = [
+      { license: 'MIT',  state: 'WARN', projName: 'A' },
+      { license: 'GPL',  state: 'FAIL', projName: 'B' },
+      { license: 'LGPL', state: 'INFO', projName: 'C' },
+    ];
+    const map = buildUniqueLicenseMap(violations);
+    const sorted = [...map.entries()].sort((a, b) => {
+      const [, ae] = a; const [, be] = b;
+      if (be.fail !== ae.fail) return be.fail - ae.fail;
+      if (be.warn !== ae.warn) return be.warn - ae.warn;
+      return (be.fail + be.warn + be.info) - (ae.fail + ae.warn + ae.info);
+    });
+    assert.equal(sorted[0][0], 'GPL',  'GPL (fail) should be first');
+    assert.equal(sorted[1][0], 'MIT',  'MIT (warn) should be second');
+    assert.equal(sorted[2][0], 'LGPL', 'LGPL (info) should be last');
+  });
+
+  test('unknown license key used when license field is empty', () => {
+    const violations = [{ license: '', state: 'INFO', projName: 'X' }];
+    const map = buildUniqueLicenseMap(violations);
+    assert.ok(map.has('(unknown)'));
+  });
+});
