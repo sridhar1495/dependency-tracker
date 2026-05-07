@@ -2454,10 +2454,10 @@ function renderReportsList(reports) {
 // ── Generate report — pre-flight ─────────────────────────────────────────
 /**
  * Called when the user clicks "📋 Generate Report".
- * Checks limits and existing jobs, shows appropriate confirmation dialogs,
- * then calls doTriggerReport() if the user proceeds.
+ * Opens the risk-type selection modal immediately; pre-flight checks happen
+ * after the user clicks Generate inside that modal.
  */
-async function generateReport() {
+function generateReport() {
   if (!liveMode) {
     showToast('Connect to the live DependencyTrack API first before generating a report.', 'warn');
     return;
@@ -2474,70 +2474,6 @@ async function generateReport() {
     return;
   }
 
-  let reports = [];
-  try {
-    const r = await fetch('/violation-cache/report/list');
-    if (r.ok) reports = await r.json();
-  } catch (_) { /* service unreachable */ }
-
-  const completedCount = reports.filter(j => j.status === 'completed').length;
-  const runningCount   = reports.filter(j => j.status === 'running').length;
-  const total          = completedCount + runningCount;
-
-  // ── Limit check (≥ MAX_REPORTS combined) ────────────────────────────────
-  if (total >= 10) {
-    await showConfirm(
-      '📋 Report Limit Reached',
-      `You have reached the maximum of 10 active reports ` +
-      `(${completedCount} completed + ${runningCount} in-progress). ` +
-      `Open the 📥 Reports panel to download or clear existing reports before generating a new one.`,
-      'Close',
-      null  // info-only — no cancel button
-    );
-    showToast('Open 📥 Reports to manage existing reports.', 'info');
-    return;
-  }
-
-  // ── Already running today ────────────────────────────────────────────────
-  const todayStr   = new Date().toISOString().slice(0, 10);
-  const runningNow = reports.filter(j => j.status === 'running');
-  if (runningNow.length > 0) {
-    const ok = await showConfirm(
-      '⏳ Report Already In Progress',
-      `A vulnerability report is already being generated (${runningNow.length} job${runningNow.length > 1 ? 's' : ''} running). ` +
-      `Do you want to start another one for the ${projectsToReport.length} currently shown project(s)?`,
-      'Start Another',
-      'Cancel'
-    );
-    if (!ok) {
-      showToast('Open 📥 Reports to track the current report.', 'info');
-      return;
-    }
-    openReportOptionsModal(projectsToReport);
-    return;
-  }
-
-  // ── Already completed today ──────────────────────────────────────────────
-  const completedToday = reports.filter(
-    j => j.status === 'completed' && (j.createdAt || '').startsWith(todayStr)
-  );
-  if (completedToday.length > 0) {
-    const ok = await showConfirm(
-      '📋 Report Already Generated Today',
-      `${completedToday.length} report${completedToday.length > 1 ? 's have' : ' has'} already been generated today. ` +
-      `Do you want to create a new one for the ${projectsToReport.length} currently shown project(s)?`,
-      'Create New',
-      'Cancel'
-    );
-    if (!ok) {
-      showToast('Open 📥 Reports to download today\'s report.', 'info');
-      return;
-    }
-    openReportOptionsModal(projectsToReport);
-    return;
-  }
-
-  // ── No conflicts — open risk-type selection dialog ───────────────────────
   openReportOptionsModal(projectsToReport);
 }
 
@@ -2563,11 +2499,11 @@ function openReportOptionsModal(projects) {
 
 /**
  * Called when the user clicks Generate inside the risk-type options modal.
- * Reads the checkbox state, validates at least one type is chosen, then triggers.
+ * Reads checkbox state, validates selection, runs pre-flight checks, then triggers.
  */
 async function confirmReportOptions() {
-  const secChecked = document.getElementById('rptOptSecurity')?.checked  ?? false;
-  const licChecked = document.getElementById('rptOptLicense')?.checked   ?? false;
+  const secChecked = document.getElementById('rptOptSecurity')?.checked   ?? false;
+  const licChecked = document.getElementById('rptOptLicense')?.checked    ?? false;
   const opsChecked = document.getElementById('rptOptOperational')?.checked ?? false;
 
   const riskTypes = [
@@ -2581,13 +2517,71 @@ async function confirmReportOptions() {
     return;
   }
 
-  closeModal('reportOptionsModal');
+  if (!_pendingReportProjects) return;
+  const projectsToReport = _pendingReportProjects;
 
-  if (_pendingReportProjects) {
-    const projects = _pendingReportProjects;
-    _pendingReportProjects = null;
-    await doTriggerReport(projects, riskTypes);
+  // ── Pre-flight: fetch existing jobs ──────────────────────────────────────
+  let reports = [];
+  try {
+    const r = await fetch('/violation-cache/report/list');
+    if (r.ok) reports = await r.json();
+  } catch (_) { /* service unreachable */ }
+
+  const completedCount = reports.filter(j => j.status === 'completed').length;
+  const runningCount   = reports.filter(j => j.status === 'running').length;
+
+  // ── Limit check ───────────────────────────────────────────────────────────
+  if (completedCount + runningCount >= 10) {
+    await showConfirm(
+      '📋 Report Limit Reached',
+      `You have reached the maximum of 10 active reports ` +
+      `(${completedCount} completed + ${runningCount} in-progress). ` +
+      `Open the 📥 Reports panel to download or clear existing reports before generating a new one.`,
+      'Close',
+      null
+    );
+    showToast('Open 📥 Reports to manage existing reports.', 'info');
+    return;
   }
+
+  // ── Already running ───────────────────────────────────────────────────────
+  const runningNow = reports.filter(j => j.status === 'running');
+  if (runningNow.length > 0) {
+    const ok = await showConfirm(
+      '⏳ Report Already In Progress',
+      `A report is already being generated (${runningNow.length} job${runningNow.length > 1 ? 's' : ''} running). ` +
+      `Do you want to start another one for the ${projectsToReport.length} currently shown project(s)?`,
+      'Start Another',
+      'Cancel'
+    );
+    if (!ok) {
+      showToast('Open 📥 Reports to track the current report.', 'info');
+      return;
+    }
+  } else {
+    // ── Already completed today ─────────────────────────────────────────────
+    const todayStr       = new Date().toISOString().slice(0, 10);
+    const completedToday = reports.filter(
+      j => j.status === 'completed' && (j.createdAt || '').startsWith(todayStr)
+    );
+    if (completedToday.length > 0) {
+      const ok = await showConfirm(
+        '📋 Report Already Generated Today',
+        `${completedToday.length} report${completedToday.length > 1 ? 's have' : ' has'} already been generated today. ` +
+        `Do you want to create a new one for the ${projectsToReport.length} currently shown project(s)?`,
+        'Create New',
+        'Cancel'
+      );
+      if (!ok) {
+        showToast('Open 📥 Reports to download today\'s report.', 'info');
+        return;
+      }
+    }
+  }
+
+  _pendingReportProjects = null;
+  closeModal('reportOptionsModal');
+  await doTriggerReport(projectsToReport, riskTypes);
 }
 
 /** Send the generate request to the backend and show a toast. */

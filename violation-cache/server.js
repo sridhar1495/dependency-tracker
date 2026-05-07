@@ -570,7 +570,7 @@ async function fetchAllViolationsForProject(apiUrl, apiKey, projectUuid, riskTyp
     if (cancelFlag.cancelled) throw Object.assign(new Error('__CANCELLED__'), { isCancelled: true });
     const urlPath = `/api/v1/violation?${baseQs}&pageNumber=${page}`;
     const { json, headers } = await dtGetWithRetry(urlPath, apiUrl, apiKey);
-    const batch = Array.isArray(json) ? json : [];
+    const batch = Array.isArray(json) ? json : (json?.violations || []);
     all.push(...batch);
     const total = parseInt(headers['x-total-count'] || '0', 10);
     if ((total > 0 && all.length >= total) || batch.length < VIOLATIONS_PAGE_SIZE) break;
