@@ -539,6 +539,7 @@ async function fetchAllFindings(apiUrl, apiKey, name, version, cancelFlag) {
   while (true) {
     if (cancelFlag.cancelled) throw Object.assign(new Error('__CANCELLED__'), { isCancelled: true });
     const urlPath = `/api/v1/finding?${baseQs}&pageNumber=${page}`;
+    log('info', `[report-fetch] GET ${apiUrl}${urlPath}`);
     const { json, headers } = await dtGetWithRetry(urlPath, apiUrl, apiKey);
     const batch = Array.isArray(json) ? json : [];
     all.push(...batch);
@@ -575,6 +576,7 @@ async function streamViolationsForProject(apiUrl, apiKey, projectUuid, riskType,
   while (true) {
     if (cancelFlag.cancelled) throw Object.assign(new Error('__CANCELLED__'), { isCancelled: true });
     const urlPath = `/api/v1/violation?${baseQs}&pageNumber=${page}`;
+    log('info', `[report-fetch] GET ${apiUrl}${urlPath}`);
     const { json, headers } = await dtGetWithRetry(urlPath, apiUrl, apiKey);
     const batch = Array.isArray(json) ? json : (json?.violations || []);
     for (const v of batch) { onItem(v); }
