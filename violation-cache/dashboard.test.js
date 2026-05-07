@@ -413,3 +413,138 @@ describe('badgeCount() — Reports button badge', () => {
     ]), 2);
   });
 });
+
+// ── buildRiskTypes — mirrors confirmReportOptions() selection logic ────────────
+// Pure helper: converts checkbox state into the riskTypes array sent to the server.
+
+function buildRiskTypes(security, license, operational) {
+  const types = [];
+  if (security)    types.push('security');
+  if (license)     types.push('license');
+  if (operational) types.push('operational');
+  return types;
+}
+
+function isValidRiskSelection(riskTypes) {
+  return Array.isArray(riskTypes) && riskTypes.length > 0;
+}
+
+describe('buildRiskTypes() — risk type selection from checkboxes', () => {
+  test('all unchecked returns empty array (invalid)', () => {
+    const types = buildRiskTypes(false, false, false);
+    assert.deepEqual(types, []);
+    assert.equal(isValidRiskSelection(types), false);
+  });
+
+  test('only security checked returns ["security"]', () => {
+    const types = buildRiskTypes(true, false, false);
+    assert.deepEqual(types, ['security']);
+    assert.ok(isValidRiskSelection(types));
+  });
+
+  test('only license checked returns ["license"]', () => {
+    const types = buildRiskTypes(false, true, false);
+    assert.deepEqual(types, ['license']);
+    assert.ok(isValidRiskSelection(types));
+  });
+
+  test('only operational checked returns ["operational"]', () => {
+    const types = buildRiskTypes(false, false, true);
+    assert.deepEqual(types, ['operational']);
+    assert.ok(isValidRiskSelection(types));
+  });
+
+  test('security + license returns correct array', () => {
+    assert.deepEqual(buildRiskTypes(true, true, false), ['security', 'license']);
+  });
+
+  test('security + operational returns correct array', () => {
+    assert.deepEqual(buildRiskTypes(true, false, true), ['security', 'operational']);
+  });
+
+  test('license + operational returns correct array', () => {
+    assert.deepEqual(buildRiskTypes(false, true, true), ['license', 'operational']);
+  });
+
+  test('all three checked returns all three in order', () => {
+    assert.deepEqual(buildRiskTypes(true, true, true), ['security', 'license', 'operational']);
+  });
+
+  test('result does not contain duplicates', () => {
+    const types = buildRiskTypes(true, true, true);
+    const unique = [...new Set(types)];
+    assert.deepEqual(types, unique);
+  });
+
+  test('order is always security → license → operational', () => {
+    const types = buildRiskTypes(true, true, true);
+    assert.equal(types[0], 'security');
+    assert.equal(types[1], 'license');
+    assert.equal(types[2], 'operational');
+  });
+});
+
+// ── reportItemProps() is unaffected by riskTypes field ───────────────────────
+
+describe('reportItemProps() is unchanged by new riskTypes field', () => {
+  test('completed job with riskTypes still shows correct badge and actions', () => {
+    const p = reportItemProps({
+      status: 'completed', filename: 'r.xlsx', progress: null,
+      riskTypes: ['security', 'license'],
+    });
+    assert.equal(p.badge, 'completed');
+    assert.deepEqual(p.actions, ['download', 'clear']);
+    assert.equal(p.progressText, null);
+  });
+
+  test('running job with riskTypes still shows correct badge and progress', () => {
+    const p = reportItemProps({
+      status: 'running', progress: { done: 4, total: 10 },
+      riskTypes: ['operational'],
+    });
+    assert.equal(p.badge, 'running');
+    assert.deepEqual(p.actions, ['cancel']);
+    assert.equal(p.progressText, '4/10');
+  });
+
+  test('failed job with riskTypes still shows failed badge', () => {
+    const p = reportItemProps({
+      status: 'failed', error: 'timeout', progress: null,
+      riskTypes: ['security', 'license', 'operational'],
+    });
+    assert.equal(p.badge, 'failed');
+    assert.deepEqual(p.actions, ['clear']);
+  });
+});
+
+// ── reportPreFlight unchanged by riskTypes ────────────────────────────────────
+// Confirm that adding riskTypes to job objects does not affect the pre-flight logic.
+
+describe('reportPreFlight() is unaffected by riskTypes field on jobs', () => {
+  const TODAY = '2024-07-01';
+
+  test('trigger when only old jobs (with riskTypes) completed yesterday', () => {
+    const reports = [
+      { status: 'completed', createdAt: '2024-06-30T10:00:00Z', riskTypes: ['security'] },
+    ];
+    assert.equal(reportPreFlight(reports, TODAY).action, 'trigger');
+  });
+
+  test('today check still fires when completed today regardless of riskTypes', () => {
+    const reports = [
+      { status: 'completed', createdAt: `${TODAY}T08:00:00Z`, riskTypes: ['license', 'operational'] },
+    ];
+    const r = reportPreFlight(reports, TODAY);
+    assert.equal(r.action, 'today');
+    assert.equal(r.count, 1);
+  });
+
+  test('running check still fires when job is running regardless of riskTypes', () => {
+    const reports = [
+      { status: 'running', createdAt: `${TODAY}T09:00:00Z`, riskTypes: ['security', 'license'] },
+    ];
+    const r = reportPreFlight(reports, TODAY);
+    assert.equal(r.action, 'running');
+    assert.equal(r.count, 1);
+  });
+});
