@@ -890,3 +890,248 @@ describe('componentMap accumulation (Affected Projects)', () => {
     assert.equal(sorted[1][0], 'a');
   });
 });
+
+// ── fetchAllViolationsForProject URL construction ─────────────────────────────
+// Inline the URL-building logic from fetchAllViolationsForProject (no HTTP calls).
+
+const VIOLATIONS_PAGE_SIZE_TEST = 200;
+
+function buildViolationUrl(projectUuid, riskType, page) {
+  const dtRiskType = riskType === 'license' ? 'LICENSE' : 'OPERATIONAL';
+  const baseQs = [
+    `project=${projectUuid}`,
+    `riskType=${dtRiskType}`,
+    'suppressed=false',
+    `pageSize=${VIOLATIONS_PAGE_SIZE_TEST}`,
+  ].join('&');
+  return `/api/v1/violation?${baseQs}&pageNumber=${page}`;
+}
+
+describe('fetchAllViolationsForProject URL construction', () => {
+  test('targets /api/v1/violation endpoint', () => {
+    const url = buildViolationUrl('proj-uuid-1', 'license', 1);
+    assert.ok(url.startsWith('/api/v1/violation'));
+  });
+
+  test('includes project UUID in the query string', () => {
+    const url = buildViolationUrl('proj-uuid-abc', 'license', 1);
+    assert.ok(url.includes('project=proj-uuid-abc'));
+  });
+
+  test('maps "license" to "LICENSE" DT riskType', () => {
+    const url = buildViolationUrl('uuid', 'license', 1);
+    assert.ok(url.includes('riskType=LICENSE'));
+    assert.ok(!url.includes('riskType=OPERATIONAL'));
+  });
+
+  test('maps "operational" to "OPERATIONAL" DT riskType', () => {
+    const url = buildViolationUrl('uuid', 'operational', 1);
+    assert.ok(url.includes('riskType=OPERATIONAL'));
+    assert.ok(!url.includes('riskType=LICENSE'));
+  });
+
+  test('includes suppressed=false filter', () => {
+    const url = buildViolationUrl('uuid', 'license', 1);
+    assert.ok(url.includes('suppressed=false'));
+  });
+
+  test('includes correct pageSize', () => {
+    const url = buildViolationUrl('uuid', 'license', 1);
+    assert.ok(url.includes(`pageSize=${VIOLATIONS_PAGE_SIZE_TEST}`));
+  });
+
+  test('increments pageNumber correctly for page 1', () => {
+    assert.ok(buildViolationUrl('uuid', 'license', 1).includes('pageNumber=1'));
+  });
+
+  test('increments pageNumber correctly for subsequent pages', () => {
+    assert.ok(buildViolationUrl('uuid', 'license', 2).includes('pageNumber=2'));
+    assert.ok(buildViolationUrl('uuid', 'license', 5).includes('pageNumber=5'));
+  });
+
+  test('page 1 URL is different from page 2 URL', () => {
+    const url1 = buildViolationUrl('uuid', 'license', 1);
+    const url2 = buildViolationUrl('uuid', 'license', 2);
+    assert.notEqual(url1, url2);
+  });
+});
+
+// ── riskTypes validation logic ────────────────────────────────────────────────
+// Inline the validation from the POST /violation-cache/report/generate handler.
+
+const VALID_RISK_TYPES_TEST = new Set(['security', 'license', 'operational']);
+
+function validateRiskTypes(input) {
+  const riskTypes = Array.isArray(input) && input.length > 0 ? input : ['security'];
+  const invalid   = riskTypes.filter(t => !VALID_RISK_TYPES_TEST.has(t));
+  return { riskTypes, invalid, valid: invalid.length === 0 };
+}
+
+describe('riskTypes validation', () => {
+  test('defaults to ["security"] when body.riskTypes is undefined', () => {
+    assert.deepEqual(validateRiskTypes(undefined).riskTypes, ['security']);
+  });
+
+  test('defaults to ["security"] when body.riskTypes is an empty array', () => {
+    assert.deepEqual(validateRiskTypes([]).riskTypes, ['security']);
+  });
+
+  test('defaults to ["security"] when body.riskTypes is not an array', () => {
+    assert.deepEqual(validateRiskTypes('security').riskTypes, ['security']);
+    assert.deepEqual(validateRiskTypes(42).riskTypes, ['security']);
+  });
+
+  test('accepts ["security"] as valid', () => {
+    const r = validateRiskTypes(['security']);
+    assert.ok(r.valid);
+    assert.equal(r.invalid.length, 0);
+  });
+
+  test('accepts ["license"] as valid', () => {
+    assert.ok(validateRiskTypes(['license']).valid);
+  });
+
+  test('accepts ["operational"] as valid', () => {
+    assert.ok(validateRiskTypes(['operational']).valid);
+  });
+
+  test('accepts all three types together', () => {
+    assert.ok(validateRiskTypes(['security', 'license', 'operational']).valid);
+  });
+
+  test('accepts ["security", "license"] as valid', () => {
+    assert.ok(validateRiskTypes(['security', 'license']).valid);
+  });
+
+  test('rejects an unknown risk type and reports it', () => {
+    const r = validateRiskTypes(['security', 'unknown']);
+    assert.ok(!r.valid);
+    assert.ok(r.invalid.includes('unknown'));
+  });
+
+  test('rejects multiple unknown types', () => {
+    const r = validateRiskTypes(['foo', 'bar']);
+    assert.ok(!r.valid);
+    assert.equal(r.invalid.length, 2);
+  });
+
+  test('passes through only valid types unchanged', () => {
+    const r = validateRiskTypes(['license', 'operational']);
+    assert.deepEqual(r.riskTypes, ['license', 'operational']);
+  });
+});
+
+// ── violation state accumulation (license / operational) ──────────────────────
+// Mirrors the counts accumulation in runReportJob for license and operational.
+
+function accumulateViolationCounts(violations) {
+  const counts = { fail: 0, warn: 0, info: 0 };
+  for (const v of violations) {
+    const state = (v.violationState || 'INFO').toLowerCase();
+    if (state in counts) counts[state]++;
+  }
+  return counts;
+}
+
+describe('violation state accumulation (license / operational)', () => {
+  test('counts FAIL violations correctly', () => {
+    const counts = accumulateViolationCounts([
+      { violationState: 'FAIL' }, { violationState: 'FAIL' },
+    ]);
+    assert.equal(counts.fail, 2);
+    assert.equal(counts.warn, 0);
+    assert.equal(counts.info, 0);
+  });
+
+  test('counts WARN violations correctly', () => {
+    const counts = accumulateViolationCounts([{ violationState: 'WARN' }]);
+    assert.equal(counts.warn, 1);
+  });
+
+  test('counts INFO violations correctly', () => {
+    const counts = accumulateViolationCounts([{ violationState: 'INFO' }]);
+    assert.equal(counts.info, 1);
+  });
+
+  test('defaults null violationState to INFO bucket', () => {
+    const counts = accumulateViolationCounts([{ violationState: null }]);
+    assert.equal(counts.info, 1);
+  });
+
+  test('defaults missing violationState to INFO bucket', () => {
+    const counts = accumulateViolationCounts([{}]);
+    assert.equal(counts.info, 1);
+  });
+
+  test('handles mixed violation states', () => {
+    const counts = accumulateViolationCounts([
+      { violationState: 'FAIL' },
+      { violationState: 'WARN' },
+      { violationState: 'INFO' },
+      { violationState: 'FAIL' },
+    ]);
+    assert.equal(counts.fail, 2);
+    assert.equal(counts.warn, 1);
+    assert.equal(counts.info, 1);
+  });
+
+  test('returns all zeros for empty violations array', () => {
+    assert.deepEqual(accumulateViolationCounts([]), { fail: 0, warn: 0, info: 0 });
+  });
+
+  test('is case-insensitive for violationState', () => {
+    const counts = accumulateViolationCounts([
+      { violationState: 'fail' },
+      { violationState: 'WARN' },
+    ]);
+    assert.equal(counts.fail, 1);
+    assert.equal(counts.warn, 1);
+  });
+});
+
+// ── jobToApi includes riskTypes ───────────────────────────────────────────────
+// Verify jobToApi (already tested above) correctly passes through riskTypes.
+
+describe('jobToApi() with riskTypes field', () => {
+  test('riskTypes is included in API output', () => {
+    const job = {
+      id: 'j1', status: 'completed', filename: 'r.xlsx',
+      filePath: '/data/r.xlsx', error: null,
+      riskTypes: ['security', 'license'],
+      progress: { done: 2, total: 2 },
+      createdAt: '2024-01-01T00:00:00Z',
+      updatedAt: '2024-01-01T00:01:00Z',
+      cancelFlag: { cancelled: false },
+      watchdogId: 1,
+    };
+    const out = jobToApi(job);
+    assert.deepEqual(out.riskTypes, ['security', 'license']);
+  });
+
+  test('riskTypes for security-only job is preserved', () => {
+    const job = {
+      id: 'j2', status: 'running', filename: null,
+      filePath: null, error: null,
+      riskTypes: ['security'],
+      progress: { done: 0, total: 3 },
+      createdAt: '2024-01-01T00:00:00Z',
+      updatedAt: '2024-01-01T00:00:00Z',
+      cancelFlag: { cancelled: false },
+    };
+    assert.deepEqual(jobToApi(job).riskTypes, ['security']);
+  });
+
+  test('job without riskTypes (legacy) returns undefined riskTypes gracefully', () => {
+    const job = {
+      id: 'j3', status: 'completed', filename: 'old.xlsx',
+      filePath: '/data/old.xlsx', error: null,
+      progress: { done: 1, total: 1 },
+      createdAt: '2024-01-01T00:00:00Z',
+      updatedAt: '2024-01-01T00:01:00Z',
+      cancelFlag: { cancelled: false },
+    };
+    const out = jobToApi(job);
+    assert.equal(out.riskTypes, undefined);
+    assert.equal(out.id, 'j3');  // other fields still present
+  });
+});

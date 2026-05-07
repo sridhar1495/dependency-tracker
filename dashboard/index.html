@@ -524,6 +524,24 @@
       padding: 1px 5px; display: none;
     }
 
+    /* ── Report options modal ────────────────────────────────────────── */
+    .report-options-list { display:flex; flex-direction:column; gap:8px; margin:16px 0 4px; }
+    .report-option-item {
+      display:flex; align-items:flex-start; gap:12px;
+      padding:12px 14px; border-radius:8px;
+      border:1px solid var(--border); background:var(--surface2);
+      cursor:pointer; transition:border-color 0.15s, background 0.15s;
+      user-select:none;
+    }
+    .report-option-item:hover { border-color:var(--accent); background:var(--surface); }
+    .report-option-item input[type=checkbox] {
+      accent-color:var(--accent); width:16px; height:16px;
+      flex-shrink:0; margin-top:2px; cursor:pointer;
+    }
+    .report-option-item .opt-title { font-size:13px; font-weight:600; color:var(--text); }
+    .report-option-item .opt-desc  { font-size:12px; color:var(--text-muted); margin-top:3px; line-height:1.4; }
+    .report-options-count { font-size:12px; color:var(--text-muted); margin-bottom:4px; }
+
     /* ── Responsive breakpoints ───────────────────────────────────────────── */
     /* 1200px: enforce 3-column summary grid */
     @media (max-width: 1200px) {
@@ -741,6 +759,43 @@
     <div style="display:flex;gap:8px;margin-top:20px">
       <button class="btn primary" id="confirmOkBtn">OK</button>
       <button class="btn" id="confirmCancelBtn" style="display:none">Cancel</button>
+    </div>
+  </div>
+</div>
+
+<!-- ── Report options dialog ─────────────────────────────────────────────── -->
+<div class="modal-overlay" id="reportOptionsModal">
+  <div class="modal" style="max-width:440px">
+    <button class="modal-close" onclick="closeModal('reportOptionsModal')">&times;</button>
+    <h2>📋 Generate Report</h2>
+    <p>Select the risk categories to include in the Excel report.</p>
+    <div class="report-options-list">
+      <label class="report-option-item">
+        <input type="checkbox" id="rptOptSecurity" checked>
+        <div>
+          <div class="opt-title">🔒 Security Vulnerabilities</div>
+          <div class="opt-desc">CVE findings with CVSS scores, severity levels, CWE IDs, and affected components</div>
+        </div>
+      </label>
+      <label class="report-option-item">
+        <input type="checkbox" id="rptOptLicense">
+        <div>
+          <div class="opt-title">📄 License Risks</div>
+          <div class="opt-desc">Policy violations related to component licenses (Fail / Warn / Info)</div>
+        </div>
+      </label>
+      <label class="report-option-item">
+        <input type="checkbox" id="rptOptOperational">
+        <div>
+          <div class="opt-title">⚙ Operational Risks</div>
+          <div class="opt-desc">Policy violations for operational concerns such as outdated or unresolved components</div>
+        </div>
+      </label>
+    </div>
+    <p class="report-options-count" id="reportOptionsCount"></p>
+    <div style="display:flex;gap:8px;margin-top:16px">
+      <button class="btn primary" onclick="confirmReportOptions()">Generate</button>
+      <button class="btn" onclick="closeModal('reportOptionsModal')">Cancel</button>
     </div>
   </div>
 </div>
@@ -2252,7 +2307,8 @@ function showConfirm(title, message, okLabel = 'OK', cancelLabel = null) {
 }
 
 // ── Report state ──────────────────────────────────────────────────────────
-let _reportPollTimer = null;  // setInterval id — active only while reportsModal is open
+let _reportPollTimer      = null;  // setInterval id — active only while reportsModal is open
+let _pendingReportProjects = null; // projects waiting for risk-type selection in the options modal
 
 // ── Report list UI ────────────────────────────────────────────────────────
 /** Fetch /violation-cache/report/list and re-render the reports modal. */
@@ -2351,7 +2407,16 @@ function renderReportsList(reports) {
       actions.append(clrBtn);
     }
 
-    hdr.append(badge, nameEl, actions);
+    // Risk-type tags (e.g. "security + license") — only shown when available
+    if (Array.isArray(job.riskTypes) && job.riskTypes.length > 0) {
+      const typeTag = document.createElement('span');
+      typeTag.style.cssText = 'font-size:10px;color:var(--text-muted);background:var(--surface);' +
+        'border:1px solid var(--border);border-radius:4px;padding:1px 6px;white-space:nowrap;flex-shrink:0;';
+      typeTag.textContent = job.riskTypes.join(' + ');
+      hdr.append(badge, typeTag, nameEl, actions);
+    } else {
+      hdr.append(badge, nameEl, actions);
+    }
     item.appendChild(hdr);
 
     // ── Sub-row: progress / error details ───────────────────────────────
@@ -2448,7 +2513,7 @@ async function generateReport() {
       showToast('Open 📥 Reports to track the current report.', 'info');
       return;
     }
-    await doTriggerReport(projectsToReport);
+    openReportOptionsModal(projectsToReport);
     return;
   }
 
@@ -2468,16 +2533,65 @@ async function generateReport() {
       showToast('Open 📥 Reports to download today\'s report.', 'info');
       return;
     }
-    await doTriggerReport(projectsToReport);
+    openReportOptionsModal(projectsToReport);
     return;
   }
 
-  // ── No conflicts — go directly ───────────────────────────────────────────
-  await doTriggerReport(projectsToReport);
+  // ── No conflicts — open risk-type selection dialog ───────────────────────
+  openReportOptionsModal(projectsToReport);
+}
+
+/**
+ * Open the risk-type selection modal for a pending set of projects.
+ * Resets checkboxes to their defaults (security pre-checked) each time.
+ */
+function openReportOptionsModal(projects) {
+  _pendingReportProjects = projects;
+  // Reset to default selection each time
+  const secCb = document.getElementById('rptOptSecurity');
+  const licCb = document.getElementById('rptOptLicense');
+  const opsCb = document.getElementById('rptOptOperational');
+  if (secCb) secCb.checked = true;
+  if (licCb) licCb.checked = false;
+  if (opsCb) opsCb.checked = false;
+  const countEl = document.getElementById('reportOptionsCount');
+  if (countEl) {
+    countEl.textContent = `${projects.length} project(s) will be included based on current filters.`;
+  }
+  openModal('reportOptionsModal');
+}
+
+/**
+ * Called when the user clicks Generate inside the risk-type options modal.
+ * Reads the checkbox state, validates at least one type is chosen, then triggers.
+ */
+async function confirmReportOptions() {
+  const secChecked = document.getElementById('rptOptSecurity')?.checked  ?? false;
+  const licChecked = document.getElementById('rptOptLicense')?.checked   ?? false;
+  const opsChecked = document.getElementById('rptOptOperational')?.checked ?? false;
+
+  const riskTypes = [
+    ...(secChecked ? ['security']    : []),
+    ...(licChecked ? ['license']     : []),
+    ...(opsChecked ? ['operational'] : []),
+  ];
+
+  if (riskTypes.length === 0) {
+    showToast('Please select at least one risk category.', 'warn');
+    return;
+  }
+
+  closeModal('reportOptionsModal');
+
+  if (_pendingReportProjects) {
+    const projects = _pendingReportProjects;
+    _pendingReportProjects = null;
+    await doTriggerReport(projects, riskTypes);
+  }
 }
 
 /** Send the generate request to the backend and show a toast. */
-async function doTriggerReport(projectsToReport) {
+async function doTriggerReport(projectsToReport, riskTypes = ['security']) {
   try {
     const projects = projectsToReport.map(p => ({
       uuid:    p.uuid,
@@ -2488,7 +2602,7 @@ async function doTriggerReport(projectsToReport) {
     const r = await fetch('/violation-cache/report/generate', {
       method:  'POST',
       headers: { 'Content-Type': 'application/json' },
-      body:    JSON.stringify({ projects }),
+      body:    JSON.stringify({ projects, riskTypes }),
     });
 
     if (r.status === 429) {
@@ -2502,7 +2616,8 @@ async function doTriggerReport(projectsToReport) {
       return;
     }
 
-    showToast(`📋 Generating report for ${projects.length} project(s) — open 📥 Reports to track progress.`, 'success');
+    const typeLabel = riskTypes.join(' + ');
+    showToast(`📋 Generating report [${typeLabel}] for ${projects.length} project(s) — open 📥 Reports to track progress.`, 'success');
     refreshReportsList();
 
   } catch (e) {
@@ -2597,6 +2712,7 @@ window.exportCSV            = exportCSV;
 window.scheduleProbe        = scheduleProbe;
 window.toggleTheme          = toggleTheme;
 window.generateReport       = generateReport;
+window.confirmReportOptions = confirmReportOptions;
 window.downloadReport       = downloadReport;
 window.clearReport          = clearReport;
 window.cancelReport         = cancelReport;

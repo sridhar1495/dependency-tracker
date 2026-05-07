@@ -57,9 +57,11 @@ const REPORT_DIR         = path.join(CACHE_DIR, 'reports');
 const REPORT_REGISTRY    = path.join(REPORT_DIR, 'registry.json');
 const REPORT_TMP         = path.join(REPORT_DIR, 'registry.tmp.json');
 const REPORT_TIMEOUT_MS  = 30 * 60_000;  // 30 min hard limit per job
-const FINDINGS_PAGE_SIZE = 200;          // DT API page size for findings
-const REPORT_CONCURRENCY = 5;            // projects fetched in parallel
-const MAX_REPORTS        = 10;           // combined completed + running ceiling
+const FINDINGS_PAGE_SIZE    = 200;  // DT API page size for findings
+const VIOLATIONS_PAGE_SIZE  = 200;  // DT API page size for violation queries
+const REPORT_CONCURRENCY    = 5;    // projects fetched in parallel
+const MAX_REPORTS           = 10;   // combined completed + running ceiling
+const VALID_RISK_TYPES      = new Set(['security', 'license', 'operational']);
 
 // ── Dynamic config — re-read from .env before every job run ──────────────────
 // Falls back to env vars injected by Docker Compose (initial values).
@@ -546,20 +548,65 @@ async function fetchAllFindings(apiUrl, apiKey, name, version, cancelFlag) {
   return all;
 }
 
+// ── Per-project violation fetch helper ───────────────────────────────────────
+/**
+ * Fetch all violation pages from DependencyTrack for one project and risk type.
+ * Uses:  /api/v1/violation?project={uuid}&riskType={LICENSE|OPERATIONAL}&...
+ * Paginates until X-Total-Count is satisfied or a short page is returned.
+ * Checks cancelFlag before every page request.
+ */
+async function fetchAllViolationsForProject(apiUrl, apiKey, projectUuid, riskType, cancelFlag) {
+  const dtRiskType = riskType === 'license' ? 'LICENSE' : 'OPERATIONAL';
+  const baseQs = [
+    `project=${projectUuid}`,
+    `riskType=${dtRiskType}`,
+    `suppressed=false`,
+    `pageSize=${VIOLATIONS_PAGE_SIZE}`,
+  ].join('&');
+
+  const all = [];
+  let page = 1;
+  while (true) {
+    if (cancelFlag.cancelled) throw Object.assign(new Error('__CANCELLED__'), { isCancelled: true });
+    const urlPath = `/api/v1/violation?${baseQs}&pageNumber=${page}`;
+    const { json, headers } = await dtGetWithRetry(urlPath, apiUrl, apiKey);
+    const batch = Array.isArray(json) ? json : [];
+    all.push(...batch);
+    const total = parseInt(headers['x-total-count'] || '0', 10);
+    if ((total > 0 && all.length >= total) || batch.length < VIOLATIONS_PAGE_SIZE) break;
+    page++;
+  }
+  return all;
+}
+
 // ── Excel report builder ──────────────────────────────────────────────────────
 /**
- * Build a 3-sheet XLSX vulnerability report and write it to filePath.
- * Sheet 1 — Vulnerability Findings  (one row per finding)
- * Sheet 2 — Project Summary         (severity counts per project)
- * Sheet 3 — Component Summary       (unique components + count)
+ * Build a multi-sheet XLSX report and write it to filePath.
+ * Sheets are added only for the risk types present in reportData.riskTypes:
+ *
+ *   security    → Vulnerability Findings, Security Project Summary, Component Summary
+ *   license     → License Violations, License Project Summary
+ *   operational → Operational Violations, Operational Project Summary
+ *
+ * @param {string} filePath
+ * @param {{ riskTypes: string[],
+ *           secFindings: object[], secProjectSummary: Map, secComponentMap: Map,
+ *           licViolations: object[], licProjectSummary: Map,
+ *           opsViolations: object[], opsProjectSummary: Map }} reportData
  */
-async function buildExcelReport(filePath, allFindings, projectSummary, componentMap) {
+async function buildExcelReport(filePath, reportData) {
+  const {
+    riskTypes,
+    secFindings, secProjectSummary, secComponentMap,
+    licViolations, licProjectSummary,
+    opsViolations, opsProjectSummary,
+  } = reportData;
+
   const wb = new ExcelJS.Workbook();
   wb.creator  = 'Dependency-Track Risk Dashboard';
   wb.created  = new Date();
   wb.modified = new Date();
 
-  // ── Helper: style header row ───────────────────────────────────────────────
   function styleHeader(sheet) {
     const row = sheet.getRow(1);
     row.font      = { bold: true, color: { argb: 'FFFFFFFF' } };
@@ -569,99 +616,194 @@ async function buildExcelReport(filePath, allFindings, projectSummary, component
     sheet.views   = [{ state: 'frozen', ySplit: 1 }];
   }
 
-  // ── Sheet 1: Vulnerability Findings ───────────────────────────────────────
-  const ws1 = wb.addWorksheet('Vulnerability Findings');
-  ws1.columns = [
-    { header: 'S.No',            key: 'sno',        width: 6  },
-    { header: 'Project Name',    key: 'projName',   width: 28 },
-    { header: 'Project Version', key: 'projVer',    width: 14 },
-    { header: 'Vulnerability',   key: 'vulnId',     width: 20 },
-    { header: 'Severity',        key: 'severity',   width: 12 },
-    { header: 'CWE',             key: 'cwe',        width: 22 },
-    { header: 'Score',           key: 'score',      width: 8  },
-    { header: 'Component',       key: 'component',  width: 36 },
-    { header: 'Current Version', key: 'curVer',     width: 14 },
-    { header: 'Latest Version',  key: 'latestVer',  width: 14 },
-  ];
-  styleHeader(ws1);
-
-  allFindings.forEach((f, idx) => {
-    const v   = f.vulnerability || {};
-    const c   = f.component     || {};
-    const cwes = (v.cwes || []).map(w => `CWE-${w.cweId}`).join(', ');
-    const comp = [c.name, c.group].filter(Boolean).join('-');
-    ws1.addRow({
-      sno:       idx + 1,
-      projName:  c.projectName   || '',
-      projVer:   c.projectVersion || '',
-      vulnId:    v.vulnId        || '',
-      severity:  v.severity      || '',
-      cwe:       cwes,
-      score:     v.cvssV3BaseScore != null ? v.cvssV3BaseScore : '',
-      component: comp,
-      curVer:    c.version       || '',
-      latestVer: c.latestVersion || '',
-    });
-  });
-
-  // Alternate row shading for readability
-  ws1.eachRow((row, rowNum) => {
-    if (rowNum === 1) return;
-    if (rowNum % 2 === 0) {
-      row.eachCell(cell => {
-        cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFF9FAFB' } };
-      });
-    }
-  });
-
-  // ── Sheet 2: Project Summary ───────────────────────────────────────────────
-  const ws2 = wb.addWorksheet('Project Summary');
-  ws2.columns = [
-    { header: 'S.No',            key: 'sno',        width: 6  },
-    { header: 'Project Name',    key: 'projName',   width: 28 },
-    { header: 'Project Version', key: 'projVer',    width: 14 },
-    { header: 'Critical',        key: 'critical',   width: 10 },
-    { header: 'High',            key: 'high',       width: 10 },
-    { header: 'Medium',          key: 'medium',     width: 10 },
-    { header: 'Low',             key: 'low',        width: 10 },
-    { header: 'Unassigned',      key: 'unassigned', width: 12 },
-  ];
-  styleHeader(ws2);
-
-  let sno2 = 1;
-  for (const s of projectSummary.values()) {
-    ws2.addRow({
-      sno:        sno2++,
-      projName:   s.name,
-      projVer:    s.version || '',
-      critical:   s.critical,
-      high:       s.high,
-      medium:     s.medium,
-      low:        s.low,
-      unassigned: s.unassigned,
+  function alternateShading(sheet) {
+    sheet.eachRow((row, rowNum) => {
+      if (rowNum === 1) return;
+      if (rowNum % 2 === 0) {
+        row.eachCell(cell => {
+          cell.fill = { type: 'pattern', pattern: 'solid', fgColor: { argb: 'FFF9FAFB' } };
+        });
+      }
     });
   }
 
-  // ── Sheet 3: Component Summary ─────────────────────────────────────────────
-  const ws3 = wb.addWorksheet('Component Summary');
-  ws3.columns = [
-    { header: 'S.No',                key: 'sno',      width: 6  },
-    { header: 'Component',           key: 'comp',     width: 40 },
-    { header: 'Vulnerability Count', key: 'count',    width: 18 },
-    { header: 'Affected Projects',   key: 'projects', width: 55 },
-  ];
-  styleHeader(ws3);
-
-  let sno3 = 1;
-  // Sort by count descending so most-vulnerable components appear first
-  const sortedComps = [...componentMap.entries()].sort((a, b) => b[1].count - a[1].count);
-  for (const [comp, entry] of sortedComps) {
-    ws3.addRow({
-      sno:      sno3++,
-      comp,
-      count:    entry.count,
-      projects: [...entry.projects].sort().join(', '),
+  // ── Security sheets ───────────────────────────────────────────────────────
+  if (riskTypes.includes('security')) {
+    // Sheet: Vulnerability Findings
+    const ws1 = wb.addWorksheet('Vulnerability Findings');
+    ws1.columns = [
+      { header: 'S.No',            key: 'sno',        width: 6  },
+      { header: 'Project Name',    key: 'projName',   width: 28 },
+      { header: 'Project Version', key: 'projVer',    width: 14 },
+      { header: 'Vulnerability',   key: 'vulnId',     width: 20 },
+      { header: 'Severity',        key: 'severity',   width: 12 },
+      { header: 'CWE',             key: 'cwe',        width: 22 },
+      { header: 'Score',           key: 'score',      width: 8  },
+      { header: 'Component',       key: 'component',  width: 36 },
+      { header: 'Current Version', key: 'curVer',     width: 14 },
+      { header: 'Latest Version',  key: 'latestVer',  width: 14 },
+    ];
+    styleHeader(ws1);
+    secFindings.forEach((f, idx) => {
+      const v    = f.vulnerability || {};
+      const c    = f.component     || {};
+      const cwes = (v.cwes || []).map(w => `CWE-${w.cweId}`).join(', ');
+      const comp = [c.name, c.group].filter(Boolean).join('-');
+      ws1.addRow({
+        sno:       idx + 1,
+        projName:  c.projectName    || '',
+        projVer:   c.projectVersion || '',
+        vulnId:    v.vulnId         || '',
+        severity:  v.severity       || '',
+        cwe:       cwes,
+        score:     v.cvssV3BaseScore != null ? v.cvssV3BaseScore : '',
+        component: comp,
+        curVer:    c.version        || '',
+        latestVer: c.latestVersion  || '',
+      });
     });
+    alternateShading(ws1);
+
+    // Sheet: Security Project Summary
+    const ws2 = wb.addWorksheet('Security Project Summary');
+    ws2.columns = [
+      { header: 'S.No',            key: 'sno',        width: 6  },
+      { header: 'Project Name',    key: 'projName',   width: 28 },
+      { header: 'Project Version', key: 'projVer',    width: 14 },
+      { header: 'Critical',        key: 'critical',   width: 10 },
+      { header: 'High',            key: 'high',       width: 10 },
+      { header: 'Medium',          key: 'medium',     width: 10 },
+      { header: 'Low',             key: 'low',        width: 10 },
+      { header: 'Unassigned',      key: 'unassigned', width: 12 },
+    ];
+    styleHeader(ws2);
+    let sno2 = 1;
+    for (const s of secProjectSummary.values()) {
+      ws2.addRow({
+        sno: sno2++, projName: s.name, projVer: s.version || '',
+        critical: s.critical, high: s.high, medium: s.medium, low: s.low, unassigned: s.unassigned,
+      });
+    }
+
+    // Sheet: Component Summary
+    const ws3 = wb.addWorksheet('Component Summary');
+    ws3.columns = [
+      { header: 'S.No',                key: 'sno',      width: 6  },
+      { header: 'Component',           key: 'comp',     width: 40 },
+      { header: 'Vulnerability Count', key: 'count',    width: 18 },
+      { header: 'Affected Projects',   key: 'projects', width: 55 },
+    ];
+    styleHeader(ws3);
+    let sno3 = 1;
+    const sortedComps = [...secComponentMap.entries()].sort((a, b) => b[1].count - a[1].count);
+    for (const [comp, entry] of sortedComps) {
+      ws3.addRow({
+        sno: sno3++, comp, count: entry.count,
+        projects: [...entry.projects].sort().join(', '),
+      });
+    }
+  }
+
+  // ── License sheets ────────────────────────────────────────────────────────
+  if (riskTypes.includes('license')) {
+    // Sheet: License Violations
+    const wsL1 = wb.addWorksheet('License Violations');
+    wsL1.columns = [
+      { header: 'S.No',              key: 'sno',       width: 6  },
+      { header: 'Project Name',      key: 'projName',  width: 28 },
+      { header: 'Project Version',   key: 'projVer',   width: 14 },
+      { header: 'Component',         key: 'component', width: 36 },
+      { header: 'Component Version', key: 'compVer',   width: 14 },
+      { header: 'License',           key: 'license',   width: 30 },
+      { header: 'Policy',            key: 'policy',    width: 30 },
+      { header: 'State',             key: 'state',     width: 10 },
+    ];
+    styleHeader(wsL1);
+    licViolations.forEach((v, idx) => {
+      const c   = v.component       || {};
+      const pc  = v.policyCondition || {};
+      const pol = pc.policy         || {};
+      const comp = [c.name, c.group].filter(Boolean).join('-');
+      wsL1.addRow({
+        sno:       idx + 1,
+        projName:  v._projName    || c.projectName    || '',
+        projVer:   v._projVersion || c.projectVersion || '',
+        component: comp           || c.name           || '',
+        compVer:   c.version      || '',
+        license:   pc.value       || '',
+        policy:    pol.name       || '',
+        state:     v.violationState || '',
+      });
+    });
+    alternateShading(wsL1);
+
+    // Sheet: License Project Summary
+    const wsL2 = wb.addWorksheet('License Project Summary');
+    wsL2.columns = [
+      { header: 'S.No',            key: 'sno',      width: 6  },
+      { header: 'Project Name',    key: 'projName', width: 28 },
+      { header: 'Project Version', key: 'projVer',  width: 14 },
+      { header: 'Fail',            key: 'fail',     width: 10 },
+      { header: 'Warn',            key: 'warn',     width: 10 },
+      { header: 'Info',            key: 'info',     width: 10 },
+    ];
+    styleHeader(wsL2);
+    let snoL = 1;
+    for (const s of licProjectSummary.values()) {
+      wsL2.addRow({ sno: snoL++, projName: s.name, projVer: s.version || '', fail: s.fail, warn: s.warn, info: s.info });
+    }
+  }
+
+  // ── Operational sheets ────────────────────────────────────────────────────
+  if (riskTypes.includes('operational')) {
+    // Sheet: Operational Violations
+    const wsO1 = wb.addWorksheet('Operational Violations');
+    wsO1.columns = [
+      { header: 'S.No',              key: 'sno',       width: 6  },
+      { header: 'Project Name',      key: 'projName',  width: 28 },
+      { header: 'Project Version',   key: 'projVer',   width: 14 },
+      { header: 'Component',         key: 'component', width: 36 },
+      { header: 'Component Version', key: 'compVer',   width: 14 },
+      { header: 'Policy',            key: 'policy',    width: 30 },
+      { header: 'Subject',           key: 'subject',   width: 20 },
+      { header: 'Condition',         key: 'condition', width: 24 },
+      { header: 'State',             key: 'state',     width: 10 },
+    ];
+    styleHeader(wsO1);
+    opsViolations.forEach((v, idx) => {
+      const c   = v.component       || {};
+      const pc  = v.policyCondition || {};
+      const pol = pc.policy         || {};
+      const comp = [c.name, c.group].filter(Boolean).join('-');
+      wsO1.addRow({
+        sno:       idx + 1,
+        projName:  v._projName    || c.projectName    || '',
+        projVer:   v._projVersion || c.projectVersion || '',
+        component: comp           || c.name           || '',
+        compVer:   c.version      || '',
+        policy:    pol.name       || '',
+        subject:   pc.subject     || '',
+        condition: pc.value       || '',
+        state:     v.violationState || '',
+      });
+    });
+    alternateShading(wsO1);
+
+    // Sheet: Operational Project Summary
+    const wsO2 = wb.addWorksheet('Operational Project Summary');
+    wsO2.columns = [
+      { header: 'S.No',            key: 'sno',      width: 6  },
+      { header: 'Project Name',    key: 'projName', width: 28 },
+      { header: 'Project Version', key: 'projVer',  width: 14 },
+      { header: 'Fail',            key: 'fail',     width: 10 },
+      { header: 'Warn',            key: 'warn',     width: 10 },
+      { header: 'Info',            key: 'info',     width: 10 },
+    ];
+    styleHeader(wsO2);
+    let snoO = 1;
+    for (const s of opsProjectSummary.values()) {
+      wsO2.addRow({ sno: snoO++, projName: s.name, projVer: s.version || '', fail: s.fail, warn: s.warn, info: s.info });
+    }
   }
 
   await wb.xlsx.writeFile(filePath);
@@ -669,18 +811,21 @@ async function buildExcelReport(filePath, allFindings, projectSummary, component
 
 // ── Report job runner ─────────────────────────────────────────────────────────
 /**
- * Background job that fetches findings for every project in the list,
- * builds the 3-sheet XLSX, and updates the job registry throughout.
+ * Background job that fetches data for every project in the list,
+ * builds the multi-sheet XLSX for selected risk types, and updates
+ * the job registry throughout.
  *
- * @param {string}   id       — job UUID
- * @param {Array}    projects — [{ uuid, name, version }]
+ * @param {string}   id        — job UUID
+ * @param {Array}    projects  — [{ uuid, name, version }]
+ * @param {string[]} riskTypes — subset of ['security','license','operational']
  */
-async function runReportJob(id, projects) {
-  const job     = reportJobs.get(id);
+async function runReportJob(id, projects, riskTypes) {
+  const job       = reportJobs.get(id);
   const semaphore = makeSemaphore(REPORT_CONCURRENCY);
 
-  job.status   = 'running';
-  job.progress = { done: 0, total: projects.length };
+  job.status    = 'running';
+  job.riskTypes = riskTypes;
+  job.progress  = { done: 0, total: projects.length };
   job.updatedAt = new Date().toISOString();
   saveRegistry();
 
@@ -695,37 +840,65 @@ async function runReportJob(id, projects) {
     const { apiUrl, apiKey } = getEffectiveConfig();
     if (!apiKey) throw new Error('DT_API_KEY is not configured on the cache service.');
 
-    const allFindings   = [];               // Sheet 1 rows
-    const projectSummary = new Map();        // Sheet 2: uuid → sev counts
-    const componentMap   = new Map();        // Sheet 3: component key → { count, projects: Set<name> }
+    // ── Data collectors — populated concurrently per project ─────────────
+    const secFindings       = [];   // security: one entry per finding
+    const secProjectSummary = new Map();  // uuid → { name, version, critical, high, … }
+    const secComponentMap   = new Map();  // component key → { count, projects: Set }
+    const licViolations     = [];   // license: one entry per violation
+    const licProjectSummary = new Map();  // uuid → { name, version, fail, warn, info }
+    const opsViolations     = [];   // operational: one entry per violation
+    const opsProjectSummary = new Map();  // uuid → { name, version, fail, warn, info }
 
-    // Fetch each project concurrently (up to REPORT_CONCURRENCY at once)
     const tasks = projects.map(proj =>
       semaphore(async () => {
-        if (job.cancelFlag.cancelled) return; // early exit if already cancelled
+        if (job.cancelFlag.cancelled) return;
 
-        log('info', `Report ${id}: fetching findings for "${proj.name}" ${proj.version || '(no version)'}`);
-        const findings = await fetchAllFindings(apiUrl, apiKey, proj.name, proj.version || '', job.cancelFlag);
-
-        // Accumulate per-project severity counts
-        const sev = { critical: 0, high: 0, medium: 0, low: 0, unassigned: 0 };
-        for (const f of findings) {
-          allFindings.push(f);
-          const s = (f.vulnerability?.severity || 'UNASSIGNED').toLowerCase();
-          if (s in sev) sev[s]++;
-          else sev.unassigned++;
-
-          // Component tally for Sheet 3
-          const c    = f.component || {};
-          const cKey = [c.name, c.group].filter(Boolean).join('-');
-          if (cKey) {
-            const entry = componentMap.get(cKey) || { count: 0, projects: new Set() };
-            entry.count++;
-            entry.projects.add(proj.name);
-            componentMap.set(cKey, entry);
+        // ── Security findings ────────────────────────────────────────────
+        if (riskTypes.includes('security')) {
+          log('info', `Report ${id}: fetching security findings for "${proj.name}" ${proj.version || '(no version)'}`);
+          const findings = await fetchAllFindings(apiUrl, apiKey, proj.name, proj.version || '', job.cancelFlag);
+          const sev = { critical: 0, high: 0, medium: 0, low: 0, unassigned: 0 };
+          for (const f of findings) {
+            secFindings.push(f);
+            const s = (f.vulnerability?.severity || 'UNASSIGNED').toLowerCase();
+            if (s in sev) sev[s]++; else sev.unassigned++;
+            const c    = f.component || {};
+            const cKey = [c.name, c.group].filter(Boolean).join('-');
+            if (cKey) {
+              const entry = secComponentMap.get(cKey) || { count: 0, projects: new Set() };
+              entry.count++;
+              entry.projects.add(proj.name);
+              secComponentMap.set(cKey, entry);
+            }
           }
+          secProjectSummary.set(proj.uuid, { name: proj.name, version: proj.version, ...sev });
         }
-        projectSummary.set(proj.uuid, { name: proj.name, version: proj.version, ...sev });
+
+        // ── License violations ───────────────────────────────────────────
+        if (riskTypes.includes('license')) {
+          log('info', `Report ${id}: fetching license violations for "${proj.name}" ${proj.version || '(no version)'}`);
+          const violations = await fetchAllViolationsForProject(apiUrl, apiKey, proj.uuid, 'license', job.cancelFlag);
+          const counts = { fail: 0, warn: 0, info: 0 };
+          for (const v of violations) {
+            licViolations.push({ ...v, _projName: proj.name, _projVersion: proj.version || '' });
+            const state = (v.violationState || 'INFO').toLowerCase();
+            if (state in counts) counts[state]++;
+          }
+          licProjectSummary.set(proj.uuid, { name: proj.name, version: proj.version, ...counts });
+        }
+
+        // ── Operational violations ───────────────────────────────────────
+        if (riskTypes.includes('operational')) {
+          log('info', `Report ${id}: fetching operational violations for "${proj.name}" ${proj.version || '(no version)'}`);
+          const violations = await fetchAllViolationsForProject(apiUrl, apiKey, proj.uuid, 'operational', job.cancelFlag);
+          const counts = { fail: 0, warn: 0, info: 0 };
+          for (const v of violations) {
+            opsViolations.push({ ...v, _projName: proj.name, _projVersion: proj.version || '' });
+            const state = (v.violationState || 'INFO').toLowerCase();
+            if (state in counts) counts[state]++;
+          }
+          opsProjectSummary.set(proj.uuid, { name: proj.name, version: proj.version, ...counts });
+        }
 
         job.progress.done++;
         job.updatedAt = new Date().toISOString();
@@ -750,8 +923,14 @@ async function runReportJob(id, projects) {
     const filePath = path.join(REPORT_DIR, filename);
     fs.mkdirSync(REPORT_DIR, { recursive: true });
 
-    log('info', `Report ${id}: building Excel workbook (${allFindings.length} finding rows)`);
-    await buildExcelReport(filePath, allFindings, projectSummary, componentMap);
+    const totalRows = secFindings.length + licViolations.length + opsViolations.length;
+    log('info', `Report ${id}: building Excel workbook (${totalRows} total rows, types: ${riskTypes.join(',')})`);
+    await buildExcelReport(filePath, {
+      riskTypes,
+      secFindings, secProjectSummary, secComponentMap,
+      licViolations, licProjectSummary,
+      opsViolations, opsProjectSummary,
+    });
 
     clearTimeout(watchdog);
     job.status    = 'completed';
@@ -898,6 +1077,18 @@ http.createServer(async (req, res) => {
         return;
       }
 
+      // riskTypes defaults to ['security'] for backward compatibility when omitted.
+      const riskTypes = Array.isArray(body.riskTypes) && body.riskTypes.length > 0
+        ? body.riskTypes
+        : ['security'];
+      const invalidTypes = riskTypes.filter(t => !VALID_RISK_TYPES.has(t));
+      if (invalidTypes.length > 0) {
+        jsonReply(res, 400, {
+          error: `Invalid risk type(s): ${invalidTypes.join(', ')}. Valid values: security, license, operational`,
+        });
+        return;
+      }
+
       const jobs = Array.from(reportJobs.values());
       const completedCount = jobs.filter(j => j.status === 'completed').length;
       const runningCount   = jobs.filter(j => j.status === 'running').length;
@@ -914,21 +1105,22 @@ http.createServer(async (req, res) => {
       const id  = crypto.randomUUID();
       const job = {
         id,
-        status:     'pending',
-        filename:   null,
-        filePath:   null,
-        error:      null,
-        progress:   { done: 0, total: body.projects.length },
-        createdAt:  new Date().toISOString(),
-        updatedAt:  new Date().toISOString(),
-        cancelFlag: { cancelled: false },
+        status:       'pending',
+        filename:     null,
+        filePath:     null,
+        error:        null,
+        riskTypes,
+        progress:     { done: 0, total: body.projects.length },
+        createdAt:    new Date().toISOString(),
+        updatedAt:    new Date().toISOString(),
+        cancelFlag:   { cancelled: false },
         cancelReason: null,
       };
       reportJobs.set(id, job);
       saveRegistry();
 
       // Fire and forget — status is polled via /report/list
-      runReportJob(id, body.projects).catch(err =>
+      runReportJob(id, body.projects, riskTypes).catch(err =>
         log('error', `Unhandled report job error (${id}): ${err.message}`)
       );
 
