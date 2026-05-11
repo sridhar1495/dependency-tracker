@@ -1173,6 +1173,7 @@ function extractOperationalViolation(v, projName, projVersion) {
   const c   = v.component       || {};
   const pc  = v.policyCondition || {};
   const pol = pc.policy         || {};
+  const state = (pol.violationState || 'INFO').toUpperCase();
   return {
     projName,
     projVersion,
@@ -1181,7 +1182,7 @@ function extractOperationalViolation(v, projName, projVersion) {
     policy:      pol.name   || '',
     subject:     pc.subject || '',
     condition:   pc.value   || '',
-    state:       v.violationState || 'INFO',
+    state,
   };
 }
 
@@ -1266,8 +1267,7 @@ describe('flat field extraction — operational violations', () => {
   test('extracts all needed fields', () => {
     const v = {
       component: { name: 'guava', group: 'com.google', version: '30.0' },
-      policyCondition: { value: 'LATEST', subject: 'VERSION', policy: { name: 'Op Policy' } },
-      violationState: 'FAIL',
+      policyCondition: { value: 'LATEST', subject: 'VERSION', policy: { name: 'Op Policy', violationState: 'FAIL' } },
     };
     const flat = extractOperationalViolation(v, 'svc', '1.2.0');
     assert.equal(flat.policy,    'Op Policy');
@@ -1277,12 +1277,114 @@ describe('flat field extraction — operational violations', () => {
     assert.equal('policyCondition' in flat, false);
   });
 
+  test('state comes from policyCondition.policy.violationState, not top-level violationState', () => {
+    const v = {
+      component: {},
+      policyCondition: { policy: { violationState: 'WARN' } },
+      violationState: 'INFO',
+    };
+    assert.equal(extractOperationalViolation(v, 'svc', '1').state, 'WARN');
+  });
+
+  test('defaults to INFO when policy.violationState is absent', () => {
+    const v = { component: {}, policyCondition: {} };
+    assert.equal(extractOperationalViolation(v, 'svc', '1').state, 'INFO');
+  });
+
   test('defaults missing fields to empty strings', () => {
-    const v = { component: {}, policyCondition: {}, violationState: 'WARN' };
+    const v = { component: {}, policyCondition: { policy: {} } };
     const flat = extractOperationalViolation(v, 'svc', '1');
     assert.equal(flat.policy,    '');
     assert.equal(flat.subject,   '');
     assert.equal(flat.condition, '');
+  });
+});
+
+// ── Unique Operational Risks aggregation (keyed by component + version) ───────
+
+function buildOpsCompMap(opsViolations) {
+  const opsCompMap = new Map();
+  for (const v of opsViolations) {
+    const key = `${v.component}||${v.compVersion}`;
+    if (!opsCompMap.has(key)) {
+      opsCompMap.set(key, {
+        component:   v.component,
+        compVersion: v.compVersion,
+        fail: 0, warn: 0, info: 0,
+        projects: new Set(),
+      });
+    }
+    const entry = opsCompMap.get(key);
+    const st = v.state.toLowerCase();
+    if (st === 'fail') entry.fail++;
+    else if (st === 'warn') entry.warn++;
+    else entry.info++;
+    entry.projects.add(v.projName);
+  }
+  return opsCompMap;
+}
+
+describe('Unique Operational Risks aggregation', () => {
+  test('produces one entry per unique component + version', () => {
+    const violations = [
+      { component: 'guava', compVersion: '30.0', state: 'FAIL', projName: 'A' },
+      { component: 'guava', compVersion: '30.0', state: 'WARN', projName: 'B' },
+      { component: 'netty', compVersion: '4.1.0', state: 'INFO', projName: 'C' },
+    ];
+    assert.equal(buildOpsCompMap(violations).size, 2);
+  });
+
+  test('same component with different versions produces separate entries', () => {
+    const violations = [
+      { component: 'guava', compVersion: '29.0', state: 'INFO', projName: 'A' },
+      { component: 'guava', compVersion: '30.0', state: 'FAIL', projName: 'B' },
+    ];
+    assert.equal(buildOpsCompMap(violations).size, 2);
+  });
+
+  test('counts fail/warn/info correctly per component+version', () => {
+    const violations = [
+      { component: 'c', compVersion: '1', state: 'FAIL', projName: 'A' },
+      { component: 'c', compVersion: '1', state: 'FAIL', projName: 'B' },
+      { component: 'c', compVersion: '1', state: 'WARN', projName: 'C' },
+      { component: 'c', compVersion: '1', state: 'INFO', projName: 'D' },
+    ];
+    const entry = buildOpsCompMap(violations).get('c||1');
+    assert.equal(entry.fail, 2);
+    assert.equal(entry.warn, 1);
+    assert.equal(entry.info, 1);
+  });
+
+  test('affected projects Set has no duplicates', () => {
+    const v = (p) => ({ component: 'lib', compVersion: '1', state: 'INFO', projName: p });
+    assert.equal(buildOpsCompMap([v('A'), v('A'), v('B')]).get('lib||1').projects.size, 2);
+  });
+
+  test('component and version are stored on the entry', () => {
+    const violations = [{ component: 'spring', compVersion: '5.3', state: 'WARN', projName: 'X' }];
+    const entry = buildOpsCompMap(violations).get('spring||5.3');
+    assert.equal(entry.component,   'spring');
+    assert.equal(entry.compVersion, '5.3');
+  });
+
+  test('handles empty violations array', () => {
+    assert.equal(buildOpsCompMap([]).size, 0);
+  });
+
+  test('sorts by fail desc then warn desc', () => {
+    const violations = [
+      { component: 'a', compVersion: '1', state: 'WARN', projName: 'X' },
+      { component: 'b', compVersion: '1', state: 'FAIL', projName: 'X' },
+      { component: 'c', compVersion: '1', state: 'INFO', projName: 'X' },
+    ];
+    const entries = [...buildOpsCompMap(violations).values()].sort((a, b) => {
+      if (b.fail !== a.fail) return b.fail - a.fail;
+      if (b.warn !== a.warn) return b.warn - a.warn;
+      return (b.fail + b.warn + b.info) - (a.fail + a.warn + a.info);
+    });
+    assert.equal(entries[0].component, 'b');
+    assert.equal(entries[1].component, 'a');
+    assert.equal(entries[2].component, 'c');
   });
 });
 
