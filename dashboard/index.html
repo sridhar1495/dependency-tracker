@@ -2421,20 +2421,42 @@ function renderReportsList(reports) {
 
     // ── Sub-row: progress / error details ───────────────────────────────
     if (job.status === 'running' && job.progress) {
-      const sub = document.createElement('div');
-      sub.className = 'report-sub';
-      const _numProjects = Array.isArray(job.riskTypes) && job.riskTypes.length > 0
-        ? Math.round(job.progress.total / job.riskTypes.length)
-        : job.progress.total;
-      sub.textContent = `Fetching data: ${job.progress.done} / ${job.progress.total} steps done (${_numProjects} project(s))`;
+      const TYPE_LABEL = { security: '🔒 Security', license: '📄 License', operational: '⚙ Operational' };
+      // New per-type format: job.progress = { security: {done,total}, license: {done,total}, ... }
+      // Legacy format:        job.progress = { done, total }
+      const isPerType = Array.isArray(job.riskTypes) && job.riskTypes.length > 0
+        && typeof job.progress[job.riskTypes[0]] === 'object';
 
-
-      const bar = document.createElement('div');
-      bar.className = 'report-progress';
-      const pct = job.progress.total > 0 ? Math.round(job.progress.done / job.progress.total * 100) : 0;
-      bar.innerHTML = `<div class="report-progress-bar" style="width:${pct}%"></div>`;
-
-      item.append(sub, bar);
+      if (isPerType) {
+        const wrap = document.createElement('div');
+        wrap.style.cssText = 'display:flex;flex-direction:column;gap:6px;margin-top:6px;';
+        for (const rt of job.riskTypes) {
+          const p = job.progress[rt];
+          if (!p) continue;
+          const pct = p.total > 0 ? Math.round(p.done / p.total * 100) : 0;
+          const row = document.createElement('div');
+          row.innerHTML = `
+            <div style="display:flex;justify-content:space-between;font-size:11px;color:var(--text-muted);margin-bottom:2px;">
+              <span>${TYPE_LABEL[rt] || rt}</span>
+              <span>${p.done} / ${p.total} projects (${pct}%)</span>
+            </div>
+            <div class="report-progress">
+              <div class="report-progress-bar" style="width:${pct}%"></div>
+            </div>`;
+          wrap.appendChild(row);
+        }
+        item.appendChild(wrap);
+      } else {
+        // Legacy single-bar fallback
+        const sub = document.createElement('div');
+        sub.className = 'report-sub';
+        sub.textContent = `Fetching data: ${job.progress.done} / ${job.progress.total} project(s)`;
+        const bar = document.createElement('div');
+        bar.className = 'report-progress';
+        const pct = job.progress.total > 0 ? Math.round(job.progress.done / job.progress.total * 100) : 0;
+        bar.innerHTML = `<div class="report-progress-bar" style="width:${pct}%"></div>`;
+        item.append(sub, bar);
+      }
 
     } else if (job.status === 'failed' && job.error) {
       const sub = document.createElement('div');
