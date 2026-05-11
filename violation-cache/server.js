@@ -959,7 +959,11 @@ async function runReportJob(id, projects, riskTypes) {
 
   job.status    = 'running';
   job.riskTypes = riskTypes;
-  job.progress  = { done: 0, total: projects.length };
+  // One progress counter per selected risk type so the UI can show an
+  // independent bar for each category.
+  job.progress  = Object.fromEntries(
+    riskTypes.map(rt => [rt, { done: 0, total: projects.length }])
+  );
   job.updatedAt = new Date().toISOString();
   saveRegistry();
 
@@ -1006,6 +1010,9 @@ async function runReportJob(id, projects, riskTypes) {
             }
           }
           secProjectSummary.set(proj.uuid, { name: proj.name, version: proj.version, ...sev });
+          job.progress.security.done++;
+          job.updatedAt = new Date().toISOString();
+          saveRegistry();
         }
 
         // ── License violations (serial, one project at a time to cap memory) ──
@@ -1034,6 +1041,9 @@ async function runReportJob(id, projects, riskTypes) {
             });
             log('info', `Report ${id}: processed ${n} license violations for "${proj.name}"`);
             licProjectSummary.set(proj.uuid, { name: proj.name, version: proj.version, ...counts });
+            job.progress.license.done++;
+            job.updatedAt = new Date().toISOString();
+            saveRegistry();
           });
         }
 
@@ -1062,12 +1072,11 @@ async function runReportJob(id, projects, riskTypes) {
             });
             log('info', `Report ${id}: processed ${n} operational violations for "${proj.name}"`);
             opsProjectSummary.set(proj.uuid, { name: proj.name, version: proj.version, ...counts });
+            job.progress.operational.done++;
+            job.updatedAt = new Date().toISOString();
+            saveRegistry();
           });
         }
-
-        job.progress.done++;
-        job.updatedAt = new Date().toISOString();
-        saveRegistry();
       })
     );
 
