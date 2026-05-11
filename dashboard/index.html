@@ -2545,6 +2545,9 @@ async function confirmReportOptions() {
 
   if (!_pendingReportProjects) return;
   const projectsToReport = _pendingReportProjects;
+  _pendingReportProjects = null;
+  // Close the options modal now so any subsequent confirm dialogs render on top.
+  closeModal('reportOptionsModal');
 
   // ── Pre-flight: fetch existing jobs ──────────────────────────────────────
   let reports = [];
@@ -2605,8 +2608,6 @@ async function confirmReportOptions() {
     }
   }
 
-  _pendingReportProjects = null;
-  closeModal('reportOptionsModal');
   await doTriggerReport(projectsToReport, riskTypes);
 }
 
