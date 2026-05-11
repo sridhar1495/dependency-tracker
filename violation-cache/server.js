@@ -883,6 +883,57 @@ async function buildExcelReport(filePath, reportData) {
     for (const s of opsProjectSummary.values()) {
       wsO2.addRow({ sno: snoO++, projName: s.name, projVer: s.version || '', fail: s.fail, warn: s.warn, info: s.info });
     }
+
+    // Sheet 3: Unique Operational Risks — one row per unique component + version
+    const opsCompMap = new Map(); // key: "component||compVersion" → entry
+    for (const v of opsViolations) {
+      const key = `${v.component}||${v.compVersion}`;
+      if (!opsCompMap.has(key)) {
+        opsCompMap.set(key, {
+          component:   v.component,
+          compVersion: v.compVersion,
+          fail: 0, warn: 0, info: 0,
+          projects: new Set(),
+        });
+      }
+      const entry = opsCompMap.get(key);
+      const st = v.state.toLowerCase();
+      if (st === 'fail') entry.fail++;
+      else if (st === 'warn') entry.warn++;
+      else entry.info++;
+      entry.projects.add(v.projName);
+    }
+    const wsO3 = wb.addWorksheet('Unique Operational Risks');
+    wsO3.columns = [
+      { header: 'S.No',              key: 'sno',       width: 6  },
+      { header: 'Component',         key: 'component', width: 36 },
+      { header: 'Component Version', key: 'compVer',   width: 14 },
+      { header: 'Fail',              key: 'fail',      width: 10 },
+      { header: 'Warn',              key: 'warn',      width: 10 },
+      { header: 'Info',              key: 'info',      width: 10 },
+      { header: 'Affected Projects', key: 'projCount', width: 16 },
+      { header: 'Project Names',     key: 'projNames', width: 60 },
+    ];
+    styleHeader(wsO3);
+    const sortedOpsComps = [...opsCompMap.values()].sort((a, b) => {
+      if (b.fail !== a.fail) return b.fail - a.fail;
+      if (b.warn !== a.warn) return b.warn - a.warn;
+      return (b.fail + b.warn + b.info) - (a.fail + a.warn + a.info);
+    });
+    let snoO3 = 1;
+    for (const e of sortedOpsComps) {
+      wsO3.addRow({
+        sno:       snoO3++,
+        component: e.component,
+        compVer:   e.compVersion,
+        fail:      e.fail,
+        warn:      e.warn,
+        info:      e.info,
+        projCount: e.projects.size,
+        projNames: [...e.projects].sort().join(', '),
+      });
+    }
+    alternateShading(wsO3);
   }
 
   await wb.xlsx.writeFile(filePath);
@@ -995,6 +1046,7 @@ async function runReportJob(id, projects, riskTypes) {
               const c   = v.component       || {};
               const pc  = v.policyCondition || {};
               const pol = pc.policy         || {};
+              const state = (pol.violationState || 'INFO').toUpperCase();
               opsViolations.push({
                 projName:    proj.name,
                 projVersion: proj.version || '',
@@ -1003,10 +1055,10 @@ async function runReportJob(id, projects, riskTypes) {
                 policy:      pol.name   || '',
                 subject:     pc.subject || '',
                 condition:   pc.value   || '',
-                state:       v.violationState || 'INFO',
+                state,
               });
-              const state = (v.violationState || 'INFO').toLowerCase();
-              if (state in counts) counts[state]++;
+              const stLower = state.toLowerCase();
+              if (stLower in counts) counts[stLower]++;
             });
             log('info', `Report ${id}: processed ${n} operational violations for "${proj.name}"`);
             opsProjectSummary.set(proj.uuid, { name: proj.name, version: proj.version, ...counts });
