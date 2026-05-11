@@ -2423,7 +2423,11 @@ function renderReportsList(reports) {
     if (job.status === 'running' && job.progress) {
       const sub = document.createElement('div');
       sub.className = 'report-sub';
-      sub.textContent = `Fetching findings: ${job.progress.done} / ${job.progress.total} project(s) done`;
+      const _numProjects = Array.isArray(job.riskTypes) && job.riskTypes.length > 0
+        ? Math.round(job.progress.total / job.riskTypes.length)
+        : job.progress.total;
+      sub.textContent = `Fetching data: ${job.progress.done} / ${job.progress.total} steps done (${_numProjects} project(s))`;
+
 
       const bar = document.createElement('div');
       bar.className = 'report-progress';
