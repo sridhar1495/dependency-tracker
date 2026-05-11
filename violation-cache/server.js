@@ -649,7 +649,7 @@ async function buildExcelReport(filePath, reportData) {
   // ── Security sheets ───────────────────────────────────────────────────────
   if (riskTypes.includes('security')) {
     // Sheet: Vulnerability Findings
-    const ws1 = wb.addWorksheet('Vulnerability Findings');
+    const ws1 = wb.addWorksheet('SV_Vulnerability Findings');
     ws1.columns = [
       { header: 'S.No',            key: 'sno',        width: 6  },
       { header: 'Project Name',    key: 'projName',   width: 28 },
@@ -684,7 +684,7 @@ async function buildExcelReport(filePath, reportData) {
     alternateShading(ws1);
 
     // Sheet: Security Project Summary
-    const ws2 = wb.addWorksheet('Security Project Summary');
+    const ws2 = wb.addWorksheet('SV_Project Summary');
     ws2.columns = [
       { header: 'S.No',            key: 'sno',        width: 6  },
       { header: 'Project Name',    key: 'projName',   width: 28 },
@@ -705,7 +705,7 @@ async function buildExcelReport(filePath, reportData) {
     }
 
     // Sheet: Component Summary
-    const ws3 = wb.addWorksheet('Component Summary');
+    const ws3 = wb.addWorksheet('SV_Component Summary');
     ws3.columns = [
       { header: 'S.No',                key: 'sno',      width: 6  },
       { header: 'Component',           key: 'comp',     width: 40 },
@@ -726,7 +726,7 @@ async function buildExcelReport(filePath, reportData) {
   // ── License sheets ────────────────────────────────────────────────────────
   if (riskTypes.includes('license')) {
     // Sheet 1: License Violations (one row per violation)
-    const wsL1 = wb.addWorksheet('License Violations');
+    const wsL1 = wb.addWorksheet('LR_Violations');
     wsL1.columns = [
       { header: 'S.No',              key: 'sno',         width: 6  },
       { header: 'Project Name',      key: 'projName',    width: 28 },
@@ -757,7 +757,7 @@ async function buildExcelReport(filePath, reportData) {
     alternateShading(wsL1);
 
     // Sheet 2: License Project Summary
-    const wsL2 = wb.addWorksheet('License Project Summary');
+    const wsL2 = wb.addWorksheet('LR_Project Summary');
     wsL2.columns = [
       { header: 'S.No',            key: 'sno',      width: 6  },
       { header: 'Project Name',    key: 'projName', width: 28 },
@@ -797,7 +797,7 @@ async function buildExcelReport(filePath, reportData) {
       else entry.info++;
       entry.projects.add(v.projName);
     }
-    const wsL3 = wb.addWorksheet('Unique License Risks');
+    const wsL3 = wb.addWorksheet('LR_Unique Risks');
     wsL3.columns = [
       { header: 'S.No',               key: 'sno',         width: 6  },
       { header: 'Component',          key: 'component',   width: 36 },
@@ -840,7 +840,7 @@ async function buildExcelReport(filePath, reportData) {
   // ── Operational sheets ────────────────────────────────────────────────────
   if (riskTypes.includes('operational')) {
     // Sheet: Operational Violations
-    const wsO1 = wb.addWorksheet('Operational Violations');
+    const wsO1 = wb.addWorksheet('OR_Violations');
     wsO1.columns = [
       { header: 'S.No',              key: 'sno',       width: 6  },
       { header: 'Project Name',      key: 'projName',  width: 28 },
@@ -869,7 +869,7 @@ async function buildExcelReport(filePath, reportData) {
     alternateShading(wsO1);
 
     // Sheet: Operational Project Summary
-    const wsO2 = wb.addWorksheet('Operational Project Summary');
+    const wsO2 = wb.addWorksheet('OR_Project Summary');
     wsO2.columns = [
       { header: 'S.No',            key: 'sno',      width: 6  },
       { header: 'Project Name',    key: 'projName', width: 28 },
@@ -903,7 +903,7 @@ async function buildExcelReport(filePath, reportData) {
       else entry.info++;
       entry.projects.add(v.projName);
     }
-    const wsO3 = wb.addWorksheet('Unique Operational Risks');
+    const wsO3 = wb.addWorksheet('OR_Unique Risks');
     wsO3.columns = [
       { header: 'S.No',              key: 'sno',       width: 6  },
       { header: 'Component',         key: 'component', width: 36 },
