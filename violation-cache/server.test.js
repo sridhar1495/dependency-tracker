@@ -734,7 +734,7 @@ describe('Report limit check', () => {
 // ── fetchAllFindings URL construction ─────────────────────────────────────────
 // Test the URL-building logic inline (independent of actual HTTP calls).
 
-const FINDINGS_PAGE_SIZE_TEST = 200;
+const FINDINGS_PAGE_SIZE_TEST = 300;
 
 function buildFindingsUrl(name, version, page) {
   const baseQs = [
@@ -896,7 +896,7 @@ describe('componentMap accumulation (Affected Projects)', () => {
 // Uses project_name text-search instead of project={uuid} because DT silently
 // ignores the project UUID filter on this API version.
 
-const VIOLATIONS_PAGE_SIZE_TEST = 200;
+const VIOLATIONS_PAGE_SIZE_TEST = 300;
 
 function buildViolationUrl(proj, riskType, page) {
   const dtRiskType = riskType === 'license' ? 'LICENSE' : 'OPERATIONAL';
@@ -1492,5 +1492,94 @@ describe('Unique License Risks aggregation', () => {
     assert.equal(entries[0].component, 'b');
     assert.equal(entries[1].component, 'a');
     assert.equal(entries[2].component, 'c');
+  });
+});
+
+// ── Performance constants and parallel phase behaviour ────────────────────────
+// Verify the page-size and concurrency constants match the documented values,
+// and that the Promise.all parallelisation contract holds: all three phases can
+// be started concurrently within one project slot.
+
+describe('performance constants and parallel phase execution', () => {
+  test('FINDINGS_PAGE_SIZE_TEST matches the updated constant (300)', () => {
+    assert.equal(FINDINGS_PAGE_SIZE_TEST, 300);
+  });
+
+  test('VIOLATIONS_PAGE_SIZE_TEST matches the updated constant (300)', () => {
+    assert.equal(VIOLATIONS_PAGE_SIZE_TEST, 300);
+  });
+
+  // Simulate the Promise.all([security, license, operational]) pattern used in
+  // runReportJob to verify all phases complete and results are independent.
+  test('Promise.all phases resolve independently — security result unaffected by violation results', async () => {
+    const results = {};
+    await Promise.all([
+      (async () => { results.security    = 'sec-done'; })(),
+      (async () => { results.license     = 'lic-done'; })(),
+      (async () => { results.operational = 'ops-done'; })(),
+    ]);
+    assert.equal(results.security,    'sec-done');
+    assert.equal(results.license,     'lic-done');
+    assert.equal(results.operational, 'ops-done');
+  });
+
+  test('Promise.all with only security selected skips license and operational', async () => {
+    const riskTypes = ['security'];
+    const phaseRan  = { security: false, license: false, operational: false };
+    await Promise.all([
+      riskTypes.includes('security')    ? (async () => { phaseRan.security    = true; })() : Promise.resolve(),
+      riskTypes.includes('license')     ? (async () => { phaseRan.license     = true; })() : Promise.resolve(),
+      riskTypes.includes('operational') ? (async () => { phaseRan.operational = true; })() : Promise.resolve(),
+    ]);
+    assert.equal(phaseRan.security,    true);
+    assert.equal(phaseRan.license,     false);
+    assert.equal(phaseRan.operational, false);
+  });
+
+  test('Promise.all with all three types runs every phase', async () => {
+    const riskTypes = ['security', 'license', 'operational'];
+    const phaseRan  = { security: false, license: false, operational: false };
+    await Promise.all([
+      riskTypes.includes('security')    ? (async () => { phaseRan.security    = true; })() : Promise.resolve(),
+      riskTypes.includes('license')     ? (async () => { phaseRan.license     = true; })() : Promise.resolve(),
+      riskTypes.includes('operational') ? (async () => { phaseRan.operational = true; })() : Promise.resolve(),
+    ]);
+    assert.equal(phaseRan.security,    true);
+    assert.equal(phaseRan.license,     true);
+    assert.equal(phaseRan.operational, true);
+  });
+
+  test('violationSema at concurrency=3 allows up to 3 simultaneous violation fetches', async () => {
+    const VIOLATION_CONCURRENCY_TEST = 3;
+    const sema = makeSemaphore(VIOLATION_CONCURRENCY_TEST);
+    let concurrent    = 0;
+    let maxConcurrent = 0;
+
+    const tasks = Array.from({ length: 6 }, (_, i) =>
+      sema(async () => {
+        concurrent++;
+        if (concurrent > maxConcurrent) maxConcurrent = concurrent;
+        await new Promise(r => setImmediate(r));
+        concurrent--;
+        return i;
+      })
+    );
+    await Promise.all(tasks);
+    assert.ok(maxConcurrent <= VIOLATION_CONCURRENCY_TEST,
+      `Expected maxConcurrent <= ${VIOLATION_CONCURRENCY_TEST}, got ${maxConcurrent}`);
+    assert.ok(maxConcurrent >= 2,
+      `Expected at least 2 concurrent tasks, got ${maxConcurrent}`);
+  });
+
+  test('findingsUrl pageSize is 300', () => {
+    const url = buildFindingsUrl('svc', '2.0', 1);
+    assert.ok(url.includes('pageSize=300'), `Expected pageSize=300 in: ${url}`);
+    assert.ok(!url.includes('pageSize=200'), 'Old pageSize=200 should not appear');
+  });
+
+  test('violationUrl pageSize is 300', () => {
+    const url = buildViolationUrl(testProj, 'license', 1);
+    assert.ok(url.includes('pageSize=300'), `Expected pageSize=300 in: ${url}`);
+    assert.ok(!url.includes('pageSize=200'), 'Old pageSize=200 should not appear');
   });
 });

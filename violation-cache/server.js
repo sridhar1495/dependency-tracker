@@ -57,10 +57,10 @@ const REPORT_DIR         = path.join(CACHE_DIR, 'reports');
 const REPORT_REGISTRY    = path.join(REPORT_DIR, 'registry.json');
 const REPORT_TMP         = path.join(REPORT_DIR, 'registry.tmp.json');
 const REPORT_TIMEOUT_MS  = 30 * 60_000;  // 30 min hard limit per job
-const FINDINGS_PAGE_SIZE    = 200;  // DT API page size for findings
-const VIOLATIONS_PAGE_SIZE  = 200;  // DT API page size for violation queries
+const FINDINGS_PAGE_SIZE    = 300;  // DT API page size for findings
+const VIOLATIONS_PAGE_SIZE  = 300;  // DT API page size for violation queries
 const REPORT_CONCURRENCY    = 5;    // projects fetched in parallel for security
-const VIOLATION_CONCURRENCY = 1;    // projects processed in series for license/operational
+const VIOLATION_CONCURRENCY = 3;    // max concurrent violation fetches (license+operational)
 const MAX_REPORTS           = 10;   // combined completed + running ceiling
 const VALID_RISK_TYPES      = new Set(['security', 'license', 'operational']);
 
@@ -991,92 +991,100 @@ async function runReportJob(id, projects, riskTypes) {
       semaphore(async () => {
         if (job.cancelFlag.cancelled) return;
 
-        // ── Security findings ────────────────────────────────────────────
-        if (riskTypes.includes('security')) {
-          log('info', `Report ${id}: fetching security findings for "${proj.name}" ${proj.version || '(no version)'}`);
-          const findings = await fetchAllFindings(apiUrl, apiKey, proj.name, proj.version || '', job.cancelFlag);
-          const sev = { critical: 0, high: 0, medium: 0, low: 0, unassigned: 0 };
-          for (const f of findings) {
-            secFindings.push(f);
-            const s = (f.vulnerability?.severity || 'UNASSIGNED').toLowerCase();
-            if (s in sev) sev[s]++; else sev.unassigned++;
-            const c    = f.component || {};
-            const cKey = [c.name, c.group].filter(Boolean).join('-');
-            if (cKey) {
-              const entry = secComponentMap.get(cKey) || { count: 0, projects: new Set() };
-              entry.count++;
-              entry.projects.add(proj.name);
-              secComponentMap.set(cKey, entry);
-            }
-          }
-          secProjectSummary.set(proj.uuid, { name: proj.name, version: proj.version, ...sev });
-          job.progress.security.done++;
-          job.updatedAt = new Date().toISOString();
-          saveRegistry();
-        }
+        // All three phases run concurrently per project.
+        // Security runs directly; license and operational go through violationSema
+        // (concurrency=3) to cap total simultaneous violation fetches across all
+        // project tasks and avoid OOM from accumulating too many raw DT objects.
+        await Promise.all([
+          // ── Security findings ──────────────────────────────────────────
+          riskTypes.includes('security')
+            ? (async () => {
+                log('info', `Report ${id}: fetching security findings for "${proj.name}" ${proj.version || '(no version)'}`);
+                const findings = await fetchAllFindings(apiUrl, apiKey, proj.name, proj.version || '', job.cancelFlag);
+                const sev = { critical: 0, high: 0, medium: 0, low: 0, unassigned: 0 };
+                for (const f of findings) {
+                  secFindings.push(f);
+                  const s = (f.vulnerability?.severity || 'UNASSIGNED').toLowerCase();
+                  if (s in sev) sev[s]++; else sev.unassigned++;
+                  const c    = f.component || {};
+                  const cKey = [c.name, c.group].filter(Boolean).join('-');
+                  if (cKey) {
+                    const entry = secComponentMap.get(cKey) || { count: 0, projects: new Set() };
+                    entry.count++;
+                    entry.projects.add(proj.name);
+                    secComponentMap.set(cKey, entry);
+                  }
+                }
+                secProjectSummary.set(proj.uuid, { name: proj.name, version: proj.version, ...sev });
+                job.progress.security.done++;
+                job.updatedAt = new Date().toISOString();
+                saveRegistry();
+              })()
+            : Promise.resolve(),
 
-        // ── License violations (serial, one project at a time to cap memory) ──
-        if (riskTypes.includes('license')) {
-          await violationSema(async () => {
-            log('info', `Report ${id}: fetching license violations for "${proj.name}" ${proj.version || '(no version)'}`);
-            const counts = { fail: 0, warn: 0, info: 0 };
-            const n = await streamViolationsForProject(apiUrl, apiKey, proj, 'license', job.cancelFlag, (v) => {
-              const c   = v.component       || {};
-              const pc  = v.policyCondition || {};
-              const pol = pc.policy         || {};
-              const state = (pol.violationState || 'INFO').toUpperCase();
-              licViolations.push({
-                projName:    proj.name,
-                projVersion: proj.version || '',
-                component:   [c.name, c.group].filter(Boolean).join('-') || c.name || '',
-                compVersion: c.version                         || '',
-                licenseName: c.resolvedLicense?.name           || '',
-                licenseId:   c.resolvedLicense?.licenseId      || '',
-                license:     pc.value                          || '',
-                policy:      pol.name                          || '',
-                state,
-              });
-              const stLower = state.toLowerCase();
-              if (stLower in counts) counts[stLower]++;
-            });
-            log('info', `Report ${id}: processed ${n} license violations for "${proj.name}"`);
-            licProjectSummary.set(proj.uuid, { name: proj.name, version: proj.version, ...counts });
-            job.progress.license.done++;
-            job.updatedAt = new Date().toISOString();
-            saveRegistry();
-          });
-        }
+          // ── License violations (via violationSema) ─────────────────────
+          riskTypes.includes('license')
+            ? violationSema(async () => {
+                log('info', `Report ${id}: fetching license violations for "${proj.name}" ${proj.version || '(no version)'}`);
+                const counts = { fail: 0, warn: 0, info: 0 };
+                const n = await streamViolationsForProject(apiUrl, apiKey, proj, 'license', job.cancelFlag, (v) => {
+                  const c   = v.component       || {};
+                  const pc  = v.policyCondition || {};
+                  const pol = pc.policy         || {};
+                  const state = (pol.violationState || 'INFO').toUpperCase();
+                  licViolations.push({
+                    projName:    proj.name,
+                    projVersion: proj.version || '',
+                    component:   [c.name, c.group].filter(Boolean).join('-') || c.name || '',
+                    compVersion: c.version                         || '',
+                    licenseName: c.resolvedLicense?.name           || '',
+                    licenseId:   c.resolvedLicense?.licenseId      || '',
+                    license:     pc.value                          || '',
+                    policy:      pol.name                          || '',
+                    state,
+                  });
+                  const stLower = state.toLowerCase();
+                  if (stLower in counts) counts[stLower]++;
+                });
+                log('info', `Report ${id}: processed ${n} license violations for "${proj.name}"`);
+                licProjectSummary.set(proj.uuid, { name: proj.name, version: proj.version, ...counts });
+                job.progress.license.done++;
+                job.updatedAt = new Date().toISOString();
+                saveRegistry();
+              })
+            : Promise.resolve(),
 
-        // ── Operational violations (serial, one project at a time) ────────
-        if (riskTypes.includes('operational')) {
-          await violationSema(async () => {
-            log('info', `Report ${id}: fetching operational violations for "${proj.name}" ${proj.version || '(no version)'}`);
-            const counts = { fail: 0, warn: 0, info: 0 };
-            const n = await streamViolationsForProject(apiUrl, apiKey, proj, 'operational', job.cancelFlag, (v) => {
-              const c   = v.component       || {};
-              const pc  = v.policyCondition || {};
-              const pol = pc.policy         || {};
-              const state = (pol.violationState || 'INFO').toUpperCase();
-              opsViolations.push({
-                projName:    proj.name,
-                projVersion: proj.version || '',
-                component:   [c.name, c.group].filter(Boolean).join('-') || c.name || '',
-                compVersion: c.version  || '',
-                policy:      pol.name   || '',
-                subject:     pc.subject || '',
-                condition:   pc.value   || '',
-                state,
-              });
-              const stLower = state.toLowerCase();
-              if (stLower in counts) counts[stLower]++;
-            });
-            log('info', `Report ${id}: processed ${n} operational violations for "${proj.name}"`);
-            opsProjectSummary.set(proj.uuid, { name: proj.name, version: proj.version, ...counts });
-            job.progress.operational.done++;
-            job.updatedAt = new Date().toISOString();
-            saveRegistry();
-          });
-        }
+          // ── Operational violations (via violationSema) ─────────────────
+          riskTypes.includes('operational')
+            ? violationSema(async () => {
+                log('info', `Report ${id}: fetching operational violations for "${proj.name}" ${proj.version || '(no version)'}`);
+                const counts = { fail: 0, warn: 0, info: 0 };
+                const n = await streamViolationsForProject(apiUrl, apiKey, proj, 'operational', job.cancelFlag, (v) => {
+                  const c   = v.component       || {};
+                  const pc  = v.policyCondition || {};
+                  const pol = pc.policy         || {};
+                  const state = (pol.violationState || 'INFO').toUpperCase();
+                  opsViolations.push({
+                    projName:    proj.name,
+                    projVersion: proj.version || '',
+                    component:   [c.name, c.group].filter(Boolean).join('-') || c.name || '',
+                    compVersion: c.version  || '',
+                    policy:      pol.name   || '',
+                    subject:     pc.subject || '',
+                    condition:   pc.value   || '',
+                    state,
+                  });
+                  const stLower = state.toLowerCase();
+                  if (stLower in counts) counts[stLower]++;
+                });
+                log('info', `Report ${id}: processed ${n} operational violations for "${proj.name}"`);
+                opsProjectSummary.set(proj.uuid, { name: proj.name, version: proj.version, ...counts });
+                job.progress.operational.done++;
+                job.updatedAt = new Date().toISOString();
+                saveRegistry();
+              })
+            : Promise.resolve(),
+        ]);
       })
     );
 
