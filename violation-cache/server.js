@@ -11,6 +11,7 @@
 // Endpoints:
 //   GET    /violation-cache/status              — current state + build progress
 //   GET    /violation-cache/data                — the cached map (only when ready/stale)
+//   GET    /violation-cache/config              — current effective API key (redacted) + whether .env is mounted
 //   POST   /violation-cache/refresh             — trigger a background rebuild
 //   POST   /violation-cache/config              — update DT_API_KEY in .env (persists across restarts)
 //   POST   /violation-cache/report/generate     — start a vulnerability Excel report job
@@ -1181,6 +1182,20 @@ http.createServer(async (req, res) => {
       log('error', `Failed to serve cache file: ${e.message}`);
       jsonReply(res, 500, { error: 'Failed to read cache file' });
     }
+    return;
+  }
+
+  // ── GET /violation-cache/config ───────────────────────────────────────────
+  // Returns the current effective API key (last 4 chars only) and whether the
+  // .env file is mounted.  The dashboard uses this on page load as the
+  // authoritative source of the persisted key so that a token changed via the
+  // UI survives container restarts and takes priority over the startup env var.
+  if (method === 'GET' && url === '/violation-cache/config') {
+    const { apiKey: effectiveKey } = getEffectiveConfig();
+    jsonReply(res, 200, {
+      apiKey:       effectiveKey,
+      envFileMounted: fs.existsSync(ENV_FILE),
+    });
     return;
   }
 
