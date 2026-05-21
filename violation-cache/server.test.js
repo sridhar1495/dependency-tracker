@@ -310,6 +310,43 @@ describe('getEffectiveConfig', () => {
   });
 });
 
+// ── GET /violation-cache/config response shape ─────────────────────────────────
+// Tests for the logic that drives the GET endpoint: getEffectiveConfig() is the
+// source of truth — the endpoint just wraps it.  We verify the three scenarios
+// that matter for the dashboard's key-priority logic.
+describe('GET /violation-cache/config — effective key scenarios', () => {
+  test('returns the .env key when one has been persisted (user-set takes priority over startup)', () => {
+    const file = tmpFile('DT_API_KEY=user-saved-key\n');
+    try {
+      const cfg = getEffectiveConfig(file, 'http://dt:8080', 'startup-env-key');
+      // .env key must win — this is what the GET endpoint returns
+      assert.equal(cfg.apiKey, 'user-saved-key');
+    } finally { cleanup(file); }
+  });
+
+  test('returns the startup key when .env exists but has no DT_API_KEY (install-time only)', () => {
+    const file = tmpFile('DT_API_INTERNAL_URL=http://dt:8080\n');
+    try {
+      const cfg = getEffectiveConfig(file, 'http://dt:8080', 'startup-key');
+      assert.equal(cfg.apiKey, 'startup-key');
+    } finally { cleanup(file); }
+  });
+
+  test('returns empty string when neither .env key nor startup key is present (mock mode)', () => {
+    const cfg = getEffectiveConfig('/nonexistent.env', '', '');
+    assert.equal(cfg.apiKey, '');
+  });
+
+  test('persisted key survives a subsequent patchEnvFile update (round-trip)', () => {
+    const file = tmpFile('DT_API_KEY=original-key\n');
+    try {
+      patchEnvFile(file, { DT_API_KEY: 'updated-key' });
+      const cfg = getEffectiveConfig(file, 'http://dt:8080', 'startup-key');
+      assert.equal(cfg.apiKey, 'updated-key');
+    } finally { cleanup(file); }
+  });
+});
+
 // ── log() ─────────────────────────────────────────────────────────────────────
 describe('log()', () => {
   test('text mode produces readable prefix', () => {
