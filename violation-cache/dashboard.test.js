@@ -548,3 +548,228 @@ describe('reportPreFlight() is unaffected by riskTypes field on jobs', () => {
     assert.equal(r.count, 1);
   });
 });
+
+// ── Project selection helpers (checkbox hierarchy logic) ──────────────────────
+// Pure functions extracted from dashboard/index.html.
+// Any change to the source functions must be mirrored here.
+
+/**
+ * Builds a minimal tree node for testing.
+ * children is an array of child nodes (recursive).
+ */
+function makeNode(uuid, children = []) {
+  return { uuid, children };
+}
+
+/**
+ * Returns all leaf-node UUIDs that are descendants of the given node AND
+ * currently present in visibleUuidSet.
+ */
+function getVisibleLeafDescendants(node, visibleUuidSet) {
+  const result = [];
+  function walk(n) {
+    if (!visibleUuidSet.has(n.uuid)) return;
+    if (n.children.length === 0) {
+      result.push(n.uuid);
+    } else {
+      for (const child of n.children) walk(child);
+    }
+  }
+  walk(node);
+  return result;
+}
+
+/**
+ * Returns the checkbox state for a parent node.
+ * Returns: 'checked' | 'indeterminate' | 'unchecked'
+ */
+function getParentCheckboxState(node, visibleUuidSet, selectedUuids) {
+  const leaves = getVisibleLeafDescendants(node, visibleUuidSet);
+  if (leaves.length === 0) return 'unchecked';
+  const selectedCount = leaves.filter(uuid => selectedUuids.has(uuid)).length;
+  if (selectedCount === 0)             return 'unchecked';
+  if (selectedCount === leaves.length) return 'checked';
+  return 'indeterminate';
+}
+
+describe('getVisibleLeafDescendants', () => {
+  test('returns direct leaf children that are in the visible set', () => {
+    const leaf1 = makeNode('leaf1');
+    const leaf2 = makeNode('leaf2');
+    const parent = makeNode('parent', [leaf1, leaf2]);
+    const visible = new Set(['parent', 'leaf1', 'leaf2']);
+    assert.deepEqual(getVisibleLeafDescendants(parent, visible).sort(), ['leaf1', 'leaf2']);
+  });
+
+  test('omits leaves that are not in the visible set (collapsed / filtered)', () => {
+    const leaf1 = makeNode('leaf1');
+    const leaf2 = makeNode('leaf2');
+    const parent = makeNode('parent', [leaf1, leaf2]);
+    // leaf2 is not visible (e.g. parent is collapsed so child not in visibleNodes)
+    const visible = new Set(['parent', 'leaf1']);
+    assert.deepEqual(getVisibleLeafDescendants(parent, visible), ['leaf1']);
+  });
+
+  test('returns nested leaf descendants recursively', () => {
+    const leaf1 = makeNode('leaf1');
+    const leaf2 = makeNode('leaf2');
+    const mid   = makeNode('mid', [leaf1, leaf2]);
+    const root  = makeNode('root', [mid]);
+    const visible = new Set(['root', 'mid', 'leaf1', 'leaf2']);
+    assert.deepEqual(getVisibleLeafDescendants(root, visible).sort(), ['leaf1', 'leaf2']);
+  });
+
+  test('does not include intermediate parent nodes in the result', () => {
+    const leaf1 = makeNode('leaf1');
+    const mid   = makeNode('mid', [leaf1]);
+    const root  = makeNode('root', [mid]);
+    const visible = new Set(['root', 'mid', 'leaf1']);
+    const result = getVisibleLeafDescendants(root, visible);
+    assert.ok(!result.includes('mid'), 'mid is a parent — should not be returned');
+    assert.ok(!result.includes('root'), 'root is a parent — should not be returned');
+    assert.deepEqual(result, ['leaf1']);
+  });
+
+  test('returns empty array when node itself is not visible', () => {
+    const leaf  = makeNode('leaf');
+    const root  = makeNode('root', [leaf]);
+    // root not in visible set
+    const visible = new Set(['leaf']);
+    assert.deepEqual(getVisibleLeafDescendants(root, visible), []);
+  });
+
+  test('returns empty array for a leaf node when called directly', () => {
+    const leaf = makeNode('leaf');
+    const visible = new Set(['leaf']);
+    assert.deepEqual(getVisibleLeafDescendants(leaf, visible), ['leaf']);
+  });
+});
+
+describe('getParentCheckboxState', () => {
+  test('returns "unchecked" when no leaf descendants are selected', () => {
+    const leaf1 = makeNode('l1');
+    const leaf2 = makeNode('l2');
+    const parent = makeNode('p', [leaf1, leaf2]);
+    const visible = new Set(['p', 'l1', 'l2']);
+    const selected = new Set();
+    assert.equal(getParentCheckboxState(parent, visible, selected), 'unchecked');
+  });
+
+  test('returns "checked" when all visible leaf descendants are selected', () => {
+    const leaf1 = makeNode('l1');
+    const leaf2 = makeNode('l2');
+    const parent = makeNode('p', [leaf1, leaf2]);
+    const visible = new Set(['p', 'l1', 'l2']);
+    const selected = new Set(['l1', 'l2']);
+    assert.equal(getParentCheckboxState(parent, visible, selected), 'checked');
+  });
+
+  test('returns "indeterminate" when only some leaf descendants are selected', () => {
+    const leaf1 = makeNode('l1');
+    const leaf2 = makeNode('l2');
+    const parent = makeNode('p', [leaf1, leaf2]);
+    const visible = new Set(['p', 'l1', 'l2']);
+    const selected = new Set(['l1']);
+    assert.equal(getParentCheckboxState(parent, visible, selected), 'indeterminate');
+  });
+
+  test('returns "unchecked" when all visible leaves are hidden (empty visible leaf set)', () => {
+    const leaf1 = makeNode('l1');
+    const parent = makeNode('p', [leaf1]);
+    // parent visible but leaf not (collapsed)
+    const visible = new Set(['p']);
+    const selected = new Set(['l1']);
+    assert.equal(getParentCheckboxState(parent, visible, selected), 'unchecked');
+  });
+
+  test('returns "checked" for a grandparent when all nested leaves are selected', () => {
+    const leaf1  = makeNode('l1');
+    const leaf2  = makeNode('l2');
+    const mid    = makeNode('mid', [leaf1, leaf2]);
+    const root   = makeNode('root', [mid]);
+    const visible  = new Set(['root', 'mid', 'l1', 'l2']);
+    const selected = new Set(['l1', 'l2']);
+    assert.equal(getParentCheckboxState(root, visible, selected), 'checked');
+  });
+
+  test('returns "indeterminate" for grandparent when only one nested leaf is selected', () => {
+    const leaf1  = makeNode('l1');
+    const leaf2  = makeNode('l2');
+    const mid    = makeNode('mid', [leaf1, leaf2]);
+    const root   = makeNode('root', [mid]);
+    const visible  = new Set(['root', 'mid', 'l1', 'l2']);
+    const selected = new Set(['l1']);
+    assert.equal(getParentCheckboxState(root, visible, selected), 'indeterminate');
+  });
+
+  test('ignores collapsed (invisible) leaves when computing state', () => {
+    const leaf1 = makeNode('l1');
+    const leaf2 = makeNode('l2');
+    const parent = makeNode('p', [leaf1, leaf2]);
+    // leaf2 is not visible (parent collapsed)
+    const visible  = new Set(['p', 'l1']);
+    const selected = new Set(['l1']);
+    // Only l1 is visible and it's selected → should be "checked"
+    assert.equal(getParentCheckboxState(parent, visible, selected), 'checked');
+  });
+});
+
+describe('toggleParentSelection logic', () => {
+  // Pure reimplementation of the toggle logic for unit testing without DOM.
+  function applyToggleParent(node, visibleUuidSet, selectedBefore) {
+    const selected = new Set(selectedBefore);
+    const leaves   = getVisibleLeafDescendants(node, visibleUuidSet);
+    const allSelected = leaves.length > 0 && leaves.every(u => selected.has(u));
+    if (allSelected) {
+      leaves.forEach(u => selected.delete(u));
+    } else {
+      leaves.forEach(u => selected.add(u));
+    }
+    return selected;
+  }
+
+  test('selects all leaves when none are selected', () => {
+    const l1 = makeNode('l1'), l2 = makeNode('l2');
+    const p  = makeNode('p', [l1, l2]);
+    const visible = new Set(['p', 'l1', 'l2']);
+    const result  = applyToggleParent(p, visible, new Set());
+    assert.deepEqual([...result].sort(), ['l1', 'l2']);
+  });
+
+  test('selects all leaves when only some are selected (indeterminate → checked)', () => {
+    const l1 = makeNode('l1'), l2 = makeNode('l2');
+    const p  = makeNode('p', [l1, l2]);
+    const visible = new Set(['p', 'l1', 'l2']);
+    const result  = applyToggleParent(p, visible, new Set(['l1']));
+    assert.deepEqual([...result].sort(), ['l1', 'l2']);
+  });
+
+  test('deselects all leaves when all are selected (checked → unchecked)', () => {
+    const l1 = makeNode('l1'), l2 = makeNode('l2');
+    const p  = makeNode('p', [l1, l2]);
+    const visible = new Set(['p', 'l1', 'l2']);
+    const result  = applyToggleParent(p, visible, new Set(['l1', 'l2']));
+    assert.equal(result.size, 0);
+  });
+
+  test('only affects visible leaves — hidden leaves are not changed', () => {
+    const l1 = makeNode('l1'), l2 = makeNode('l2');
+    const p  = makeNode('p', [l1, l2]);
+    // l2 not visible (parent collapsed so l2 not in visibleNodes)
+    const visible = new Set(['p', 'l1']);
+    const result  = applyToggleParent(p, visible, new Set());
+    assert.ok(result.has('l1'),  'l1 should be selected');
+    assert.ok(!result.has('l2'), 'l2 is hidden — should not be selected');
+  });
+
+  test('does not add parent UUIDs to selection', () => {
+    const l1 = makeNode('l1');
+    const mid = makeNode('mid', [l1]);
+    const root = makeNode('root', [mid]);
+    const visible = new Set(['root', 'mid', 'l1']);
+    const result  = applyToggleParent(root, visible, new Set());
+    assert.ok(!result.has('root'), 'root should not be in selection');
+    assert.ok(!result.has('mid'),  'mid should not be in selection');
+    assert.ok(result.has('l1'),    'l1 should be in selection');
+  });
+});
