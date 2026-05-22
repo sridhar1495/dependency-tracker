@@ -1177,10 +1177,8 @@ function collectVisible(nodes, matchSet) {
 function toggleNode(uuid) {
   if (expandedUuids.has(uuid)) expandedUuids.delete(uuid);
   else                         expandedUuids.add(uuid);
-  renderTree(currentMatchSet);      // skip applyFilters + renderSummary — not needed
+  renderTree(currentMatchSet);  // renderTree calls updateSelectAllCheckbox internally
   updateExpandCollapseBtn();
-  // Header checkbox state depends on which leaf rows are visible after expand/collapse.
-  updateSelectAllCheckbox();
 }
 
 function toggleExpandCollapse() {
@@ -1188,9 +1186,8 @@ function toggleExpandCollapse() {
   const allExpanded = groups.length > 0 && groups.every(p => expandedUuids.has(p.uuid));
   if (allExpanded) expandedUuids.clear();
   else             allProjects.forEach(p => expandedUuids.add(p.uuid));
-  renderTree(currentMatchSet);      // skip applyFilters + renderSummary — not needed
+  renderTree(currentMatchSet);  // renderTree calls updateSelectAllCheckbox internally
   updateExpandCollapseBtn();
-  updateSelectAllCheckbox();
 }
 
 function updateExpandCollapseBtn() {
@@ -1204,11 +1201,64 @@ function updateExpandCollapseBtn() {
 
 // ── Project selection for report ───────────────────────────────────────────
 
+/**
+ * Returns all leaf-node UUIDs that are descendants of the given node AND
+ * currently present in visibleUuidSet (the set of UUIDs in visibleNodes).
+ * Used to propagate parent checkbox clicks down to leaves only.
+ */
+function getVisibleLeafDescendants(node, visibleUuidSet) {
+  const result = [];
+  function walk(n) {
+    if (!visibleUuidSet.has(n.uuid)) return;
+    if (n.children.length === 0) {
+      result.push(n.uuid);
+    } else {
+      for (const child of n.children) walk(child);
+    }
+  }
+  walk(node);
+  return result;
+}
+
+/**
+ * Returns the checkbox state for a parent node based on how many of its
+ * visible leaf descendants are in selectedProjectUuids.
+ * Returns: 'checked' | 'indeterminate' | 'unchecked'
+ */
+function getParentCheckboxState(node, visibleUuidSet) {
+  const leaves = getVisibleLeafDescendants(node, visibleUuidSet);
+  if (leaves.length === 0) return 'unchecked';
+  const selectedCount = leaves.filter(uuid => selectedProjectUuids.has(uuid)).length;
+  if (selectedCount === 0)           return 'unchecked';
+  if (selectedCount === leaves.length) return 'checked';
+  return 'indeterminate';
+}
+
 /** Toggle a single leaf project in/out of the report selection. */
 function toggleProjectSelection(uuid) {
   if (selectedProjectUuids.has(uuid)) selectedProjectUuids.delete(uuid);
   else                                 selectedProjectUuids.add(uuid);
-  updateSelectAllCheckbox();
+  // Re-render to update parent checkbox states (indeterminate may change).
+  renderTree(currentMatchSet);
+  updateGenReportBtn();
+}
+
+/**
+ * Toggle a parent node: if all its visible leaf descendants are selected,
+ * deselect them all; otherwise select them all.
+ */
+function toggleParentSelection(uuid, visibleUuids) {
+  const node = nodeMap.get(uuid);
+  if (!node) return;
+  const visibleSet = new Set(visibleUuids);
+  const leaves = getVisibleLeafDescendants(node, visibleSet);
+  const allSelected = leaves.length > 0 && leaves.every(u => selectedProjectUuids.has(u));
+  if (allSelected) {
+    leaves.forEach(u => selectedProjectUuids.delete(u));
+  } else {
+    leaves.forEach(u => selectedProjectUuids.add(u));
+  }
+  renderTree(currentMatchSet);
   updateGenReportBtn();
 }
 
@@ -1218,16 +1268,17 @@ function toggleProjectSelection(uuid) {
  * headerChecked = false → deselect all visible leaf rows
  */
 function toggleSelectAll(headerChecked) {
-  const rowCbs = document.querySelectorAll('.proj-select-cb');
+  const leafCbs = document.querySelectorAll('.proj-select-cb[data-leaf="1"]');
   selectedProjectUuids.clear();
-  rowCbs.forEach(cb => {
-    cb.checked = headerChecked;
+  leafCbs.forEach(cb => {
     if (headerChecked) selectedProjectUuids.add(cb.dataset.uuid);
   });
-  // Header checkbox is already in the right state from the browser event.
-  // Just clear the indeterminate flag explicitly.
+  // Re-render to update all parent checkbox states.
+  renderTree(currentMatchSet);
+  // Header checkbox is driven by renderTree → updateSelectAllCheckbox; ensure
+  // the indeterminate flag is cleared now since the user explicitly clicked it.
   const hdr = document.getElementById('selectAllCheckbox');
-  if (hdr) hdr.indeterminate = false;
+  if (hdr) { hdr.indeterminate = false; hdr.checked = headerChecked; }
   updateGenReportBtn();
 }
 
@@ -1235,9 +1286,10 @@ function toggleSelectAll(headerChecked) {
 function updateSelectAllCheckbox() {
   const hdr = document.getElementById('selectAllCheckbox');
   if (!hdr) return;
-  const rowCbs = [...document.querySelectorAll('.proj-select-cb')];
-  const total   = rowCbs.length;
-  const checked = rowCbs.filter(c => c.checked).length;
+  // Use only leaf-row checkboxes to determine the global state.
+  const leafCbs = [...document.querySelectorAll('.proj-select-cb[data-leaf="1"]')];
+  const total   = leafCbs.length;
+  const checked = leafCbs.filter(c => c.checked).length;
   if (total === 0 || checked === 0) {
     hdr.indeterminate = false;
     hdr.checked       = false;
@@ -1269,9 +1321,18 @@ function renderTree(matchSet) {
     return;
   }
 
+  // Collect the set of visible UUIDs once — used by parent checkbox state and
+  // passed as a serialised list to toggleParentSelection onclick handlers.
+  const visibleUuidSet = new Set(visibleNodes.map(n => n.uuid));
+  // JSON-encode once; embedded in each parent onclick to avoid per-click DOM walks.
+  const visibleUuidsJson = escHtml(JSON.stringify([...visibleUuidSet]));
+
   // Build all rows off-DOM in a DocumentFragment then append once — reduces
   // browser reflow to a single paint instead of one per row.
   const frag = document.createDocumentFragment();
+  // Track parent <tr> elements so we can set indeterminate after DOM append.
+  const parentRows = [];
+
   visibleNodes.forEach(node => {
     const isGroup    = node.children.length > 0;
     const isExpanded = expandedUuids.has(node.uuid);
@@ -1292,10 +1353,14 @@ function renderTree(matchSet) {
       ? `<span class="data-warn-icon" title="${escHtml(node._dataWarn)}">⚠</span>`
       : '';
 
-    // Only leaf rows have a selection checkbox; group rows get an empty cell.
-    const selectCell = isGroup
-      ? `<td class="select-cell"></td>`
-      : `<td class="select-cell"><input type="checkbox" class="proj-select-cb" data-uuid="${escHtml(node.uuid)}" onchange="toggleProjectSelection('${escHtml(node.uuid)}')" ${selectedProjectUuids.has(node.uuid) ? 'checked' : ''}></td>`;
+    let selectCell;
+    if (isGroup) {
+      // Parent rows get a checkbox that selects/deselects all visible leaf descendants.
+      // data-leaf="0" excludes them from the global leaf count used by updateSelectAllCheckbox.
+      selectCell = `<td class="select-cell"><input type="checkbox" class="proj-select-cb" data-uuid="${escHtml(node.uuid)}" data-leaf="0" onchange="toggleParentSelection('${escHtml(node.uuid)}', JSON.parse(this.dataset.visibleUuids))" data-visible-uuids="${visibleUuidsJson}"></td>`;
+    } else {
+      selectCell = `<td class="select-cell"><input type="checkbox" class="proj-select-cb" data-uuid="${escHtml(node.uuid)}" data-leaf="1" onchange="toggleProjectSelection('${escHtml(node.uuid)}')" ${selectedProjectUuids.has(node.uuid) ? 'checked' : ''}></td>`;
+    }
 
     let html = selectCell;
     html += `<td class="project-name" style="padding-left:${indent + 10}px">${toggle}<span class="proj-name-text" title="${nameInner}">${nameInner}</span>${warnIcon}${navIcon}${vBadge}</td>`;
@@ -1311,10 +1376,23 @@ function renderTree(matchSet) {
 
     const tr = document.createElement('tr');
     tr.innerHTML = html;
-    if (isGroup) tr.classList.add('group-row');
+    if (isGroup) {
+      tr.classList.add('group-row');
+      parentRows.push({ tr, node });
+    }
     frag.appendChild(tr);
   });
   tbody.appendChild(frag);
+
+  // Set checked / indeterminate on parent checkboxes now that the DOM is live.
+  parentRows.forEach(({ tr, node }) => {
+    const cb = tr.querySelector('.proj-select-cb');
+    if (!cb) return;
+    const state = getParentCheckboxState(node, visibleUuidSet);
+    cb.checked       = state === 'checked';
+    cb.indeterminate = state === 'indeterminate';
+  });
+
   updateSelectAllCheckbox();
 }
 
@@ -2863,6 +2941,7 @@ window.toggleTheme          = toggleTheme;
 window.generateReport          = generateReport;
 window.confirmReportOptions    = confirmReportOptions;
 window.toggleProjectSelection  = toggleProjectSelection;
+window.toggleParentSelection   = toggleParentSelection;
 window.toggleSelectAll         = toggleSelectAll;
 window.downloadReport          = downloadReport;
 window.clearReport          = clearReport;
