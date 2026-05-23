@@ -1620,3 +1620,314 @@ describe('performance constants and parallel phase execution', () => {
     assert.ok(!url.includes('pageSize=200'), 'Old pageSize=200 should not appear');
   });
 });
+
+// ── deepMerge ─────────────────────────────────────────────────────────────────
+function deepMerge(target, source) {
+  const out = JSON.parse(JSON.stringify(target));
+  for (const key of Object.keys(source)) {
+    const sv = source[key];
+    const tv = out[key];
+    if (sv !== null && typeof sv === 'object' && !Array.isArray(sv)
+        && tv !== null && typeof tv === 'object' && !Array.isArray(tv)) {
+      out[key] = deepMerge(tv, sv);
+    } else {
+      out[key] = sv;
+    }
+  }
+  return out;
+}
+
+describe('deepMerge()', () => {
+  test('shallow key override', () => {
+    const result = deepMerge({ a: 1, b: 2 }, { b: 99 });
+    assert.equal(result.a, 1);
+    assert.equal(result.b, 99);
+  });
+
+  test('nested object merge does not replace sibling keys', () => {
+    const target = { mail: { host: 'old', port: 25, user: 'u' } };
+    const source = { mail: { host: 'new' } };
+    const result = deepMerge(target, source);
+    assert.equal(result.mail.host, 'new');
+    assert.equal(result.mail.port, 25);
+    assert.equal(result.mail.user, 'u');
+  });
+
+  test('array in source replaces array in target (no element-level merge)', () => {
+    const result = deepMerge({ tags: ['a', 'b'] }, { tags: ['x'] });
+    assert.deepEqual(result.tags, ['x']);
+  });
+
+  test('does not mutate target', () => {
+    const target = { a: { b: 1 } };
+    deepMerge(target, { a: { b: 2 } });
+    assert.equal(target.a.b, 1);
+  });
+
+  test('null source value replaces object target value', () => {
+    const result = deepMerge({ a: { x: 1 } }, { a: null });
+    assert.equal(result.a, null);
+  });
+
+  test('adds keys present only in source', () => {
+    const result = deepMerge({ a: 1 }, { b: 2 });
+    assert.equal(result.a, 1);
+    assert.equal(result.b, 2);
+  });
+
+  test('deeply nested three levels', () => {
+    const target = { a: { b: { c: 1, d: 2 } } };
+    const source = { a: { b: { c: 99 } } };
+    const result = deepMerge(target, source);
+    assert.equal(result.a.b.c, 99);
+    assert.equal(result.a.b.d, 2);
+  });
+});
+
+// ── sanitiseConfigForClient ───────────────────────────────────────────────────
+function sanitiseConfigForClient(cfg) {
+  const out = JSON.parse(JSON.stringify(cfg));
+  if (out.mail && out.mail.smtp) {
+    out.mail.smtp.pass = out.mail.smtp.pass ? '••••••••' : '';
+  }
+  return out;
+}
+
+describe('sanitiseConfigForClient()', () => {
+  test('masks a non-empty smtp.pass with bullet placeholder', () => {
+    const cfg = { mail: { smtp: { host: 'smtp.example.com', pass: 's3cr3t' } } };
+    const out = sanitiseConfigForClient(cfg);
+    assert.equal(out.mail.smtp.pass, '••••••••');
+  });
+
+  test('leaves smtp.pass empty string when not set', () => {
+    const cfg = { mail: { smtp: { pass: '' } } };
+    const out = sanitiseConfigForClient(cfg);
+    assert.equal(out.mail.smtp.pass, '');
+  });
+
+  test('does not mutate the original config', () => {
+    const cfg = { mail: { smtp: { pass: 'secret' } } };
+    sanitiseConfigForClient(cfg);
+    assert.equal(cfg.mail.smtp.pass, 'secret');
+  });
+
+  test('preserves all other fields unchanged', () => {
+    const cfg = {
+      maxReports: 5,
+      mail: { enabled: true, smtp: { host: 'smtp.test', port: 587, pass: 'x' }, from: 'a@b.com' },
+    };
+    const out = sanitiseConfigForClient(cfg);
+    assert.equal(out.maxReports, 5);
+    assert.equal(out.mail.enabled, true);
+    assert.equal(out.mail.smtp.host, 'smtp.test');
+    assert.equal(out.mail.smtp.port, 587);
+    assert.equal(out.mail.from, 'a@b.com');
+  });
+
+  test('handles config with no mail section', () => {
+    const cfg = { maxReports: 10, schedule: { enabled: false } };
+    const out = sanitiseConfigForClient(cfg);
+    assert.equal(out.maxReports, 10);
+    assert.equal(out.schedule.enabled, false);
+  });
+});
+
+// ── loadConfig / saveConfig ───────────────────────────────────────────────────
+const DEFAULT_CONFIG_TEST = {
+  maxReports: 10,
+  mail: {
+    enabled: false,
+    smtp:    { host: '', port: 587, secure: false, user: '', pass: '' },
+    from:    '',
+    to:      [],
+    cc:      [],
+    subject: '',
+    body:    '',
+  },
+  schedule: {
+    enabled:             false,
+    frequency:           'daily',
+    hour:                9,
+    weekDays:            [1],
+    monthDay:            1,
+    projectUuids:        [],
+    riskTypes:           ['security', 'license', 'operational'],
+    lastRun:             null,
+    lastRunStatus:       null,
+    lastRunError:        null,
+    nextRun:             null,
+    failureNotification: null,
+  },
+};
+
+function loadConfigTest(configFile) {
+  try {
+    if (fs.existsSync(configFile)) {
+      const raw = JSON.parse(fs.readFileSync(configFile, 'utf8'));
+      return deepMerge(DEFAULT_CONFIG_TEST, raw);
+    }
+  } catch (_) {}
+  return JSON.parse(JSON.stringify(DEFAULT_CONFIG_TEST));
+}
+
+function saveConfigTest(cfg, configFile, tmpFile2) {
+  fs.writeFileSync(tmpFile2, JSON.stringify(cfg, null, 2), 'utf8');
+  fs.renameSync(tmpFile2, configFile);
+}
+
+describe('loadConfig / saveConfig', () => {
+  let cfgFile, cfgTmp;
+  beforeEach(() => {
+    const base = path.join(os.tmpdir(), `dt-appcfg-${Date.now()}-${Math.random().toString(36).slice(2)}`);
+    cfgFile = `${base}.json`;
+    cfgTmp  = `${base}.tmp.json`;
+  });
+  afterEach(() => {
+    try { fs.unlinkSync(cfgFile); } catch (_) {}
+    try { fs.unlinkSync(cfgTmp);  } catch (_) {}
+  });
+
+  test('returns defaults when file does not exist', () => {
+    const cfg = loadConfigTest(cfgFile);
+    assert.equal(cfg.maxReports, 10);
+    assert.equal(cfg.mail.enabled, false);
+    assert.equal(cfg.schedule.enabled, false);
+    assert.equal(cfg.schedule.frequency, 'daily');
+  });
+
+  test('saves and reloads config round-trip', () => {
+    const cfg = loadConfigTest(cfgFile);
+    cfg.maxReports = 25;
+    cfg.mail.enabled = true;
+    cfg.mail.from = 'test@example.com';
+    saveConfigTest(cfg, cfgFile, cfgTmp);
+    const loaded = loadConfigTest(cfgFile);
+    assert.equal(loaded.maxReports, 25);
+    assert.equal(loaded.mail.enabled, true);
+    assert.equal(loaded.mail.from, 'test@example.com');
+  });
+
+  test('merges partial user config with defaults (missing keys filled from defaults)', () => {
+    fs.writeFileSync(cfgFile, JSON.stringify({ maxReports: 7 }), 'utf8');
+    const cfg = loadConfigTest(cfgFile);
+    assert.equal(cfg.maxReports, 7);
+    assert.equal(cfg.mail.smtp.port, 587);   // default filled in
+    assert.deepEqual(cfg.schedule.weekDays, [1]);  // default weekDays
+  });
+
+  test('persists nested schedule config correctly', () => {
+    const cfg = loadConfigTest(cfgFile);
+    cfg.schedule.enabled = true;
+    cfg.schedule.frequency = 'weekly';
+    cfg.schedule.weekDays = [1, 3, 5];
+    cfg.schedule.hour = 8;
+    saveConfigTest(cfg, cfgFile, cfgTmp);
+    const loaded = loadConfigTest(cfgFile);
+    assert.equal(loaded.schedule.enabled, true);
+    assert.equal(loaded.schedule.frequency, 'weekly');
+    assert.deepEqual(loaded.schedule.weekDays, [1, 3, 5]);
+    assert.equal(loaded.schedule.hour, 8);
+  });
+
+  test('handles corrupted JSON by returning defaults', () => {
+    fs.writeFileSync(cfgFile, '{ invalid json !!!', 'utf8');
+    const cfg = loadConfigTest(cfgFile);
+    assert.equal(cfg.maxReports, 10);
+  });
+
+  test('write is atomic (tmp file used then renamed)', () => {
+    const cfg = loadConfigTest(cfgFile);
+    saveConfigTest(cfg, cfgFile, cfgTmp);
+    assert.ok(fs.existsSync(cfgFile), 'config file should exist after save');
+    assert.ok(!fs.existsSync(cfgTmp), 'tmp file should be gone after rename');
+  });
+});
+
+// ── calcNextRun ───────────────────────────────────────────────────────────────
+function calcNextRun(schedule) {
+  const now = new Date();
+  if (schedule.frequency === 'daily') {
+    const next = new Date(now.getFullYear(), now.getMonth(), now.getDate(), schedule.hour, 0, 0, 0);
+    if (next <= now) next.setDate(next.getDate() + 1);
+    return next;
+  }
+  if (schedule.frequency === 'weekly') {
+    const targetDays = (schedule.weekDays || [1]).sort((a, b) => a - b);
+    for (let d = 1; d <= 8; d++) {
+      const candidate = new Date(
+        now.getFullYear(), now.getMonth(), now.getDate() + d, schedule.hour, 0, 0, 0
+      );
+      if (targetDays.includes(candidate.getDay())) return candidate;
+    }
+    return new Date(now.getFullYear(), now.getMonth(), now.getDate() + 7, schedule.hour, 0, 0, 0);
+  }
+  if (schedule.frequency === 'monthly') {
+    const day  = Math.min(schedule.monthDay || 1, 28);
+    let next   = new Date(now.getFullYear(), now.getMonth(), day, schedule.hour, 0, 0, 0);
+    if (next <= now) next = new Date(now.getFullYear(), now.getMonth() + 1, day, schedule.hour, 0, 0, 0);
+    return next;
+  }
+  return new Date(now.getTime() + 24 * 3_600_000);
+}
+
+describe('calcNextRun()', () => {
+  test('daily: result is always in the future', () => {
+    const next = calcNextRun({ frequency: 'daily', hour: 9 });
+    assert.ok(next > new Date(), 'next run should be in the future');
+  });
+
+  test('daily: result is at the configured hour', () => {
+    const next = calcNextRun({ frequency: 'daily', hour: 14 });
+    assert.equal(next.getHours(), 14);
+    assert.equal(next.getMinutes(), 0);
+    assert.equal(next.getSeconds(), 0);
+  });
+
+  test('daily: no more than 25 hours in the future', () => {
+    const next = calcNextRun({ frequency: 'daily', hour: 9 });
+    const maxMs = 25 * 3_600_000;
+    assert.ok(next.getTime() - Date.now() <= maxMs,
+      `Expected next run within 25 h, got ${next.getTime() - Date.now()} ms`);
+  });
+
+  test('weekly: result falls on one of the configured weekdays', () => {
+    const targetDays = [1, 3]; // Monday, Wednesday
+    const next = calcNextRun({ frequency: 'weekly', hour: 9, weekDays: targetDays });
+    assert.ok(targetDays.includes(next.getDay()),
+      `Expected day ${next.getDay()} to be in [1, 3]`);
+  });
+
+  test('weekly: result is always at least 1 day in the future (never today)', () => {
+    const next = calcNextRun({ frequency: 'weekly', hour: 9, weekDays: [0,1,2,3,4,5,6] });
+    const todayStart = new Date();
+    todayStart.setHours(0, 0, 0, 0);
+    todayStart.setDate(todayStart.getDate() + 1);
+    assert.ok(next >= todayStart, 'weekly next run should be at least tomorrow');
+  });
+
+  test('weekly: result is no more than 8 days away', () => {
+    const next = calcNextRun({ frequency: 'weekly', hour: 9, weekDays: [1] });
+    const maxMs = 8 * 24 * 3_600_000;
+    assert.ok(next.getTime() - Date.now() <= maxMs,
+      `Expected next run within 8 days`);
+  });
+
+  test('monthly: result is always in the future', () => {
+    const next = calcNextRun({ frequency: 'monthly', hour: 9, monthDay: 15 });
+    assert.ok(next > new Date(), 'monthly next run should be in the future');
+  });
+
+  test('monthly: day is capped at 28', () => {
+    const next = calcNextRun({ frequency: 'monthly', hour: 9, monthDay: 31 });
+    assert.ok(next.getDate() <= 28, `Expected date <= 28, got ${next.getDate()}`);
+  });
+
+  test('unknown frequency: returns roughly 24 h from now', () => {
+    const before = Date.now();
+    const next   = calcNextRun({ frequency: 'unknown' });
+    const delta  = next.getTime() - before;
+    assert.ok(delta >= 23 * 3_600_000 && delta <= 25 * 3_600_000,
+      `Expected ~24 h delta, got ${delta} ms`);
+  });
+});

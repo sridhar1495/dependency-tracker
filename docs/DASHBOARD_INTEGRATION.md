@@ -8,8 +8,10 @@
 5. [Violation Cache](#5-violation-cache)
 6. [Data Mapping Reference](#6-data-mapping-reference)
 7. [Filtering and Exporting](#7-filtering-and-exporting)
-8. [Customising the Dashboard](#8-customising-the-dashboard)
-9. [Embedding in Another Application](#9-embedding-in-another-application)
+8. [Vulnerability Reports](#8-vulnerability-reports)
+9. [Email & Scheduled Reports](#9-email--scheduled-reports)
+10. [Customising the Dashboard](#10-customising-the-dashboard)
+11. [Embedding in Another Application](#11-embedding-in-another-application)
 
 ---
 
@@ -106,7 +108,7 @@ Cards are clickable — clicking sets the risk-level filter on the table but doe
 
 ### Project Hyperlinks
 
-Set the **DT Frontend URL** in the "⚙ Connect API" modal to enable clickable project links. Each project name becomes a link to `<DT_FRONTEND_URL>/#/projects/<uuid>`.
+Set the **DT Frontend URL** in **⚙ Settings** to enable clickable project links. Each project name becomes a link to `<DT_FRONTEND_URL>/#/projects/<uuid>`.
 
 ---
 
@@ -116,14 +118,15 @@ Set the **DT Frontend URL** in the "⚙ Connect API" modal to enable clickable p
 
 Run `./install.sh` and enter your API key when prompted. The installer writes `DT_API_KEY` to `.env` — the dashboard **auto-connects on first open**.
 
-### Method B — UI
+### Method B — Settings Panel
 
 1. Open the dashboard (default: http://localhost:3000)
-2. Click **⚙ Connect API**
-3. *(Optional)* Enter the **DT API URL** if you want the browser to call DT directly (leave blank to use the nginx proxy)
-4. *(Optional)* Enter the **DT Frontend URL** for project hyperlinks
-5. Enter your **API Key** (see [Section 4](#4-generating-an-api-key))
-6. Click **Connect**
+2. Click **⚙ Settings** in the top-right header
+3. In the **Connection** section:
+   - *(Optional)* **DT API URL** — leave blank to route through nginx proxy (recommended)
+   - *(Optional)* **DT Frontend URL** — enables clickable project links
+   - **API Key** — your DependencyTrack API key
+4. Click **Connect**
 
 ### Method C — Pre-configure in `.env`
 
@@ -137,13 +140,13 @@ DT_FRONTEND_URL=https://dtrack.company.com
 docker compose --env-file .env up -d
 ```
 
-### Connect modal fields
+### Settings panel — Connection fields
 
 | Field | Required | Description |
 |-------|----------|-------------|
 | DT API URL | No | URL the **browser** uses to reach DT API directly. Leave blank to route via nginx proxy (recommended). |
 | DT Frontend URL | No | URL for the DT web UI. Used only for project hyperlinks. Saved in browser `localStorage`. |
-| API Key | Yes | DependencyTrack API key (masked). |
+| API Key | Yes | DependencyTrack API key (masked). Persisted to the server `.env` file. |
 
 ---
 
@@ -300,7 +303,93 @@ License Fail, License Warn, License Info
 
 ---
 
-## 8. Customising the Dashboard
+## 8. Vulnerability Reports
+
+### Generating a report
+
+1. *(Optional)* Select specific projects using the checkboxes in the table. If no projects are checked, all currently visible projects are included.
+2. Click **📋 Generate Report** in the toolbar.
+3. Choose which risk categories to include (Security, License, Operational) and confirm.
+4. A background job is started. Monitor progress in **📥 Reports** (top-right button).
+5. When the report is `completed`, click **↓ Download** to save the Excel file.
+
+### Report limits
+
+The maximum number of active reports (completed + in-progress) is configurable in **⚙ Settings → Max Report Downloads** (default: 10). When the limit is reached, new reports cannot be created until old ones are cleared.
+
+### Report endpoints
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `POST /violation-cache/report/generate` | POST | Start a report job; returns `{id}` |
+| `GET /violation-cache/report/list` | GET | List all jobs with status and progress |
+| `GET /violation-cache/report/:id/download` | GET | Stream the completed Excel file |
+| `DELETE /violation-cache/report/:id` | DELETE | Delete job and file |
+| `POST /violation-cache/report/:id/cancel` | POST | Request cancellation of a running job |
+
+---
+
+## 9. Email & Scheduled Reports
+
+Automatic email delivery of Excel reports on a recurring schedule.
+
+### Setup
+
+1. Open **⚙ Settings**
+2. Enable **Email & Scheduled Reports** (toggle at the top of that section)
+3. Fill in SMTP credentials:
+   - **Host** — your SMTP server (e.g. `smtp.gmail.com`)
+   - **Port** — typically `587` (STARTTLS) or `465` (TLS)
+   - **TLS** — check for port 465 connections
+   - **Username / Password** — SMTP credentials (password is stored server-side, never returned to the browser)
+4. Fill in **From**, **To**, and optionally **CC**, **Subject**, **Body**
+5. Click **Send Test Email** to verify connectivity
+6. Configure the **Schedule**:
+   - Enable the schedule toggle
+   - Choose **Daily**, **Weekly**, or **Monthly**
+   - Set the **hour** (0–23, server local time)
+   - For weekly: select which day(s) of the week
+   - For monthly: choose a day (1–28)
+   - Select which **risk categories** to include in scheduled reports
+7. Click **Save**
+8. Back in the main dashboard, select the projects to schedule (checkbox or all visible), then click **📅 Schedule Reports** in the toolbar
+
+### Schedule status
+
+While the config panel is open with the schedule section enabled, the **Last run** and **Next run** times are displayed:
+
+- **Last run** — timestamp and success/failure status of the most recent scheduled run
+- **Next run** — the upcoming fire time (computed from the server's local clock)
+
+### Failure notifications
+
+If a scheduled run fails (SMTP error, DT API unreachable, etc.), an error message is stored server-side. On your next page load, a toast notification shows the failure. Acknowledgement is sent automatically so the toast appears only once.
+
+### Cancelling a schedule
+
+Open **⚙ Settings**, scroll to the Schedule section, and click **Cancel Schedule**. This stops future scheduled runs but does not delete previously delivered reports.
+
+### Scheduled report endpoints
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `GET /violation-cache/config` | GET | Returns sanitised config (SMTP password masked) |
+| `POST /violation-cache/config` | POST | Save `{ config: {...} }` or `{ apiKey: "..." }` |
+| `POST /violation-cache/config/test-email` | POST | Send a test email using current SMTP config |
+| `GET /violation-cache/schedule/status` | GET | Current schedule state including last/next run |
+| `DELETE /violation-cache/schedule` | DELETE | Cancel the active schedule |
+| `POST /violation-cache/schedule/ack-notification` | POST | Clear pending failure notification |
+
+### Security notes
+
+- The SMTP password is stored in `/data/app-config.json` on the server.
+- The GET config endpoint always masks the password as `••••••••`.
+- The POST config endpoint detects the `••••••••` placeholder and discards it (preserving the real stored password).
+- To change the password, type a new value into the Password field and save.
+
+---
+
+## 10. Customising the Dashboard
 
 ### Mock data
 
@@ -337,7 +426,7 @@ All colours are CSS custom properties at the top of the `<style>` block. Light m
 
 ---
 
-## 9. Embedding in Another Application
+## 11. Embedding in Another Application
 
 ```html
 <iframe

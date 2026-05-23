@@ -47,14 +47,15 @@ dependency-tracker/
 | Layer | Choice | Reason |
 |---|---|---|
 | Backend HTTP server | Node.js built-in `http`/`https` | Zero external dependencies |
-| Excel generation | `exceljs` ^4.4.0 | Only permitted external npm package |
+| Excel generation | `exceljs` ^4.4.0 | Permitted external npm package |
+| Email delivery | `nodemailer` ^6.10.1 | Permitted external npm package (MIT license) |
 | Frontend | Vanilla HTML5 / CSS3 / ES2020+ (no framework) | Zero build step, instant load, no npm |
 | Frontend PRNG | Linear congruential generator (hand-rolled) | Deterministic mock data, no import |
 | Container | `node:22-alpine` + `nginx:alpine` | Minimal image size |
 | Test runner | Node.js built-in `node:test` | No test-framework install required |
 
 **Hard rules:**
-- Do **not** add npm packages other than `exceljs`.
+- Do **not** add npm packages other than `exceljs` and `nodemailer`.
 - Do **not** introduce a frontend framework (React, Vue, Svelte, etc.) or bundler.
 - Do **not** add a database; file-based persistence (`/data/*.json`) is intentional.
 - Do **not** add a web framework (Express, Fastify, Koa). Use the raw `http` module.
@@ -162,6 +163,8 @@ await sem(() => doWork());
 | `/data/violation-cache.json` | Cached violation counts with `generatedAt`/`expiresAt` |
 | `/data/reports/registry.json` | Report job list (persisted across restarts) |
 | `/data/reports/<id>.xlsx` | Generated Excel reports |
+| `/data/app-config.json` | User-configurable settings (maxReports, mail, schedule) |
+| `/data/scheduled-reports/<id>.xlsx` | Ephemeral Excel files — deleted after email is sent |
 
 **Atomic writes:** always write to a `.tmp` file then `fs.rename()`. Never write
 directly to the target path.
@@ -218,6 +221,81 @@ and returns a job-id immediately (fire-and-forget + polling pattern).
   receives a new key. This function must preserve all existing lines verbatim and
   normalise CRLF to LF (Q7).
 
+### 5.10 App Config (`app-config.json`)
+
+User-configurable settings are stored separately from the DT connection `.env`:
+
+- `loadConfig()` reads `/data/app-config.json`, deep-merging with `DEFAULT_CONFIG`.
+  Always call `loadConfig()` at the top of any function that needs these values —
+  never cache the result in a module-level variable.
+- `saveConfig(cfg)` writes atomically via `.tmp` → `rename`.
+- `sanitiseConfigForClient(cfg)` masks `smtp.pass` to `'••••••••'` before sending
+  to the browser. Never return the raw password in any HTTP response.
+- `deepMerge(target, source)` recursively merges objects. Arrays are replaced (not
+  concatenated). This ensures new DEFAULT_CONFIG keys are always present even in
+  configs saved before a new field was added.
+
+**Schema of `app-config.json`:**
+
+```javascript
+{
+  maxReports: 10,           // combined ceiling for completed + in-progress report jobs
+  mail: {
+    enabled: false,         // master switch — all email sending disabled when false
+    smtp: { host, port, secure, user, pass },
+    from: '',               // envelope From address
+    to:   [],               // array of To addresses
+    cc:   [],               // array of CC addresses (optional)
+    subject: '',            // optional; has a hardcoded default
+    body:    '',            // optional body text
+  },
+  schedule: {
+    enabled:             false,
+    frequency:           'daily',     // 'daily' | 'weekly' | 'monthly'
+    hour:                9,           // 0–23, server local time
+    weekDays:            [1],         // 0=Sun..6=Sat; used when frequency='weekly'
+    monthDay:            1,           // 1–28; used when frequency='monthly' (capped at 28)
+    projectUuids:        [],          // UUIDs stored when user clicks "Schedule Reports"
+    riskTypes:           ['security', 'license', 'operational'],
+    lastRun:             null,        // ISO8601 timestamp updated after each run
+    lastRunStatus:       null,        // 'success' | 'failed'
+    lastRunError:        null,        // human-readable error string on failure
+    nextRun:             null,        // ISO8601 set by armScheduler()
+    failureNotification: null,        // set on failure; cleared when frontend ACKs
+  }
+}
+```
+
+### 5.11 Scheduler
+
+The scheduler is a `setTimeout`-based loop — no cron library required.
+
+- `calcNextRun(schedule)` is a pure function that computes the next fire time from
+  the current wall clock. It is the single source of truth for timing logic.
+  - `daily`: next occurrence of `schedule.hour` (if already past today, tomorrow)
+  - `weekly`: scans next 8 days for a matching `weekDays` entry
+  - `monthly`: `schedule.monthDay` capped at 28; rolls to next month if already past
+- `armScheduler()` clears any pending timer, calls `calcNextRun`, writes `nextRun`
+  to config, then sets a `setTimeout` for that many milliseconds.
+- `runScheduledJob()` is called by the timer, sets `_schedulerRunning = true` for
+  overlap protection, collects data via `collectReportData()`, builds the workbook,
+  emails it, deletes the scheduled-reports file, and updates `lastRun` / `lastRunStatus`.
+- Re-arm is always called from `armScheduler()` after `runScheduledJob()` completes.
+- On failure: the error is written to `schedule.failureNotification` so the dashboard
+  can show a toast on the next page load. The frontend ACKs via `POST /violation-cache/schedule/ack-notification`.
+
+### 5.12 Email (`nodemailer`)
+
+- `sendEmail(mailCfg, attachPath, attachName, overrides)` creates a transporter
+  using `mailCfg.smtp`, sends with the configured from/to/cc/subject/body, and
+  attaches the Excel file at `attachPath`.
+- Use `overrides` to send failure-alert emails with a different subject/body.
+- The `POST /violation-cache/config/test-email` route sends a test email without
+  an attachment to verify SMTP connectivity.
+- The SMTP password placeholder `'••••••••'` (sent by the frontend when the password
+  field was not changed) must be detected in the POST handler and discarded so the
+  real stored password is not overwritten.
+
 ---
 
 ## 6. Frontend Dashboard (`dashboard/index.html`)
@@ -266,6 +344,8 @@ Flat, module-scoped globals (no reactive framework):
 | `summaryTotals` | object | Computed once after load |
 | `flatView` | boolean | Hierarchy vs flat toggle |
 | `selectedProjectUuids` | `Set<uuid>` | Checkbox-selected for report |
+| `_configPanelDirty` | boolean | Unsaved changes in config panel |
+| `_appConfig` | object\|null | Last fetched app-config from server |
 
 Never mutate `allProjects` after initial load. Derive everything else from it.
 
@@ -348,10 +428,21 @@ produces the same mock data. Do **not** replace this with `Math.random()`.
 | `toast(text, level)` | dashboard | Notification pop-up |
 | `throttle(fn, ms)` | dashboard | Rate-limit wrapper |
 | `inferSuffix(name, ver)` | dashboard | Strip version from name |
+| `openConfigPanel()` | dashboard | Open left-side config overlay |
+| `closeConfigPanel(force)` | dashboard | Close overlay; prompts if dirty |
+| `scheduleReports()` | dashboard | Save selected UUIDs and schedule |
 | `makeSemaphore(limit)` | server | Promise concurrency limit |
 | `sleep(ms)` | server | Promise delay |
 | `dtGetWithRetry(...)` | server | Resilient DT API fetch |
 | `log(level, msg, meta)` | server | Structured logger |
+| `deepMerge(target, source)` | server | Recursive object merge (preserves defaults) |
+| `loadConfig()` | server | Read app-config.json merged with defaults |
+| `saveConfig(cfg)` | server | Atomically write app-config.json |
+| `sanitiseConfigForClient(cfg)` | server | Mask smtp.pass before HTTP response |
+| `calcNextRun(schedule)` | server | Pure function: compute next fire time |
+| `armScheduler()` | server | Set up (or re-arm) the scheduled-report timer |
+| `collectReportData(...)` | server | Shared data-collection core for both manual and scheduled reports |
+| `sendEmail(mailCfg, ...)` | server | Deliver Excel report via nodemailer |
 
 ---
 
@@ -423,6 +514,10 @@ No npm test script is defined. Run directly with `node --test`.
   duplicate keys.
 - PRNG: seed determinism, output range, edge seed values.
 - Pure utility functions: `inferSuffix`, `pillFor`, `truncateUrl`.
+- App config helpers: `deepMerge` (nested merge, array replace, no mutation),
+  `loadConfig`/`saveConfig` round-trips, `sanitiseConfigForClient` (password masking).
+- `calcNextRun` for all three frequencies: result is always in the future, correct
+  day/hour, within expected range.
 - Do **not** write integration tests that require a live DT API or Docker.
 
 ---
@@ -491,13 +586,16 @@ No npm test script is defined. Run directly with `node --test`.
 
 Before opening a PR with new functionality:
 
-- [ ] No new npm packages introduced (or explicitly approved).
+- [ ] No new npm packages introduced (or explicitly approved — currently `exceljs` and `nodemailer`).
 - [ ] Backend: new routes follow the `if/else if` routing pattern.
 - [ ] Backend: any new paginated fetch uses `dtGetWithRetry` + semaphore.
 - [ ] Backend: file writes are atomic (write-tmp → rename).
+- [ ] Backend: `sanitiseConfigForClient()` used before returning any config object.
+- [ ] Backend: SMTP password placeholder `'••••••••'` detected and discarded in config POST handler.
 - [ ] Frontend: state stays in module-scoped globals; no external state library.
 - [ ] Frontend: new HTML event handlers are window-exported from the IIFE.
 - [ ] Frontend: new colours use CSS custom properties, not hard-coded hex.
+- [ ] Frontend: config panel always reads from `loadConfigFromServer()` on open.
 - [ ] Tests added for any new pure helper functions.
 - [ ] `log()` used for all server-side output (not bare `console.log`).
 - [ ] Error responses use `jsonReply(res, <status>, { error: '...' })`.
