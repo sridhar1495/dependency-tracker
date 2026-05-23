@@ -804,7 +804,7 @@
       No reports yet — click <strong>📋 Generate Report</strong> in the toolbar to create one.
     </p>
     <div style="margin-top:14px;font-size:11px;color:var(--text-muted)">
-      Reports are stored on the server. Maximum 10 active (completed + in-progress) at a time.
+      Reports are stored on the server. Maximum <span id="reportsMaxLabel">10</span> active (completed + in-progress) at a time.
     </div>
   </div>
 </div>
@@ -890,7 +890,11 @@
     <div class="cfg-section">
       <div class="cfg-section-title" style="margin-bottom:12px">Max Report Downloads</div>
       <label class="cfg-label">Maximum reports kept on server <span style="font-size:10px;color:var(--text-muted)">(completed + in-progress)</span></label>
-      <input id="cfgMaxReports" type="number" min="1" max="100" class="cfg-input" style="width:80px" value="10" oninput="markConfigDirty()" />
+      <div style="display:flex;align-items:center;gap:8px;margin-top:4px">
+        <input id="cfgMaxReports" type="number" min="1" max="100" class="cfg-input" style="width:80px" value="10" oninput="markConfigDirty()" />
+        <button class="btn" style="font-size:12px;height:30px;padding:0 10px" onclick="resetMaxReports()" title="Reset to default (10)">Reset to default</button>
+        <span id="cfgMaxReportsHint" style="font-size:11px;color:var(--text-muted)"></span>
+      </div>
     </div>
 
     <!-- Email & Schedule section -->
@@ -1084,6 +1088,11 @@ function closeConfigPanel(force = false) {
 
 function markConfigDirty() { _configPanelDirty = true; }
 
+function resetMaxReports() {
+  document.getElementById('cfgMaxReports').value = 10;
+  markConfigDirty();
+}
+
 async function loadConfigFromServer() {
   try {
     const r = await fetch('/violation-cache/config');
@@ -1106,6 +1115,14 @@ async function loadConfigFromServer() {
 
     // Max reports
     document.getElementById('cfgMaxReports').value = cfg.maxReports || 10;
+    // Show current usage count in the hint label
+    fetch('/violation-cache/report/list').then(async rr => {
+      if (!rr.ok) return;
+      const jobs = await rr.json();
+      const active = jobs.filter(j => j.status === 'completed' || j.status === 'running').length;
+      const hint = document.getElementById('cfgMaxReportsHint');
+      if (hint) hint.textContent = `(${active} currently active)`;
+    }).catch(() => {});
 
     // Mail
     const mailEnabled = !!(cfg.mail && cfg.mail.enabled);
@@ -1196,44 +1213,65 @@ function onSchedFreqChange() {
 }
 
 async function saveConfigPanel() {
-  const maxReports = parseInt(document.getElementById('cfgMaxReports').value, 10) || 10;
-  const mailEnabled = document.getElementById('cfgMailEnabled').checked;
-  const smtpPass    = document.getElementById('cfgSmtpPass').value;
+  const maxReports   = parseInt(document.getElementById('cfgMaxReports').value, 10) || 10;
+  const mailEnabled  = document.getElementById('cfgMailEnabled').checked;
   const schedEnabled = document.getElementById('cfgSchedEnabled').checked;
-  const weekDays = [];
-  document.querySelectorAll('.cfg-weekday input:checked').forEach(cb => weekDays.push(parseInt(cb.value, 10)));
-  const riskTypes = [];
-  if (document.getElementById('cfgSchedSecurity').checked)    riskTypes.push('security');
-  if (document.getElementById('cfgSchedLicense').checked)     riskTypes.push('license');
-  if (document.getElementById('cfgSchedOperational').checked) riskTypes.push('operational');
 
-  const config = {
-    maxReports,
-    mail: {
-      enabled: mailEnabled,
+  // When a section is hidden (disabled) its form fields are blank — preserve the
+  // existing stored values so saving with email disabled doesn't wipe SMTP config.
+  const existingMail  = (_appConfig && _appConfig.mail)     || {};
+  const existingSched = (_appConfig && _appConfig.schedule) || {};
+
+  let mailConfig;
+  if (mailEnabled) {
+    const smtpPass = document.getElementById('cfgSmtpPass').value;
+    // Only send placeholder when password field is blank AND a password is stored.
+    // If no password was ever stored (relay mode), send empty so it stays empty.
+    const hasStoredPass = !!(existingMail.smtp && existingMail.smtp.pass);
+    const pass = smtpPass || (hasStoredPass ? '••••••••' : '');
+    mailConfig = {
+      enabled: true,
       smtp: {
         host:   document.getElementById('cfgSmtpHost').value.trim(),
         port:   parseInt(document.getElementById('cfgSmtpPort').value, 10) || 587,
         secure: document.getElementById('cfgSmtpSecure').checked,
         user:   document.getElementById('cfgSmtpUser').value.trim(),
-        pass:   smtpPass || '••••••••',
+        pass,
       },
       from:    document.getElementById('cfgMailFrom').value.trim(),
       to:      document.getElementById('cfgMailTo').value.split(',').map(s => s.trim()).filter(Boolean),
       cc:      document.getElementById('cfgMailCc').value.split(',').map(s => s.trim()).filter(Boolean),
       subject: document.getElementById('cfgMailSubject').value.trim(),
       body:    document.getElementById('cfgMailBodyTa').value.trim(),
-    },
-    schedule: {
-      enabled:      schedEnabled,
-      frequency:    document.getElementById('cfgSchedFreq').value,
-      hour:         parseInt(document.getElementById('cfgSchedHour').value, 10) || 9,
+    };
+  } else {
+    // Preserve all SMTP/recipient fields; only flip the enabled flag off.
+    mailConfig = { ...existingMail, enabled: false };
+  }
+
+  let schedConfig;
+  if (schedEnabled) {
+    const weekDays = [];
+    document.querySelectorAll('.cfg-weekday input:checked').forEach(cb => weekDays.push(parseInt(cb.value, 10)));
+    const riskTypes = [];
+    if (document.getElementById('cfgSchedSecurity').checked)    riskTypes.push('security');
+    if (document.getElementById('cfgSchedLicense').checked)     riskTypes.push('license');
+    if (document.getElementById('cfgSchedOperational').checked) riskTypes.push('operational');
+    schedConfig = {
+      ...existingSched,
+      enabled:   true,
+      frequency: document.getElementById('cfgSchedFreq').value,
+      hour:      parseInt(document.getElementById('cfgSchedHour').value, 10) || 9,
       weekDays,
-      monthDay:     parseInt(document.getElementById('cfgSchedMonthDay').value, 10) || 1,
-      projectUuids: (_appConfig && _appConfig.schedule && _appConfig.schedule.projectUuids) || [],
+      monthDay:  parseInt(document.getElementById('cfgSchedMonthDay').value, 10) || 1,
       riskTypes,
-    },
-  };
+    };
+  } else {
+    // Preserve all schedule fields; only flip the enabled flag off.
+    schedConfig = { ...existingSched, enabled: false };
+  }
+
+  const config = { maxReports, mail: mailConfig, schedule: schedConfig };
 
   const apiKeyVal = document.getElementById('cfgApiKey').value.trim();
   const urlVal    = (document.getElementById('cfgApiUrl').value || '').trim().replace(/\/$/, '');
@@ -1335,19 +1373,37 @@ async function cancelSchedule() {
 async function scheduleReports() {
   const leafUuids = selectedProjectUuids.size > 0
     ? [...selectedProjectUuids]
-    : filtered.filter(p => !p._children || p._children.length === 0).map(p => p.uuid);
+    : filtered.filter(p => !parentUuids.has(p.uuid)).map(p => p.uuid);
   if (leafUuids.length === 0) {
     showToast('No projects to schedule — load data first.', 'warn');
     return;
   }
-  // Load current config if not yet cached
-  if (!_appConfig) {
-    try {
-      const r = await fetch('/violation-cache/config');
-      if (r.ok) { const d = await r.json(); _appConfig = d.config || {}; }
-    } catch (_) {}
-  }
+  // Always refresh config so validation is against the current saved state.
+  try {
+    const r = await fetch('/violation-cache/config');
+    if (r.ok) { const d = await r.json(); _appConfig = d.config || {}; }
+  } catch (_) {}
+
   const cfg = _appConfig || {};
+
+  // ── Validation: email and schedule must be configured ─────────────────────
+  const mailOk  = !!(cfg.mail && cfg.mail.enabled && cfg.mail.smtp && cfg.mail.smtp.host && (cfg.mail.to || []).length > 0);
+  const schedOk = !!(cfg.schedule && cfg.schedule.enabled);
+  if (!mailOk || !schedOk) {
+    const missing = [];
+    if (!cfg.mail || !cfg.mail.enabled)  missing.push('• Email is not enabled');
+    if (cfg.mail && cfg.mail.enabled && !(cfg.mail.smtp && cfg.mail.smtp.host)) missing.push('• SMTP host is not configured');
+    if (cfg.mail && cfg.mail.enabled && !(cfg.mail.to || []).length) missing.push('• No recipients (To) configured');
+    if (!cfg.schedule || !cfg.schedule.enabled) missing.push('• Schedule is not enabled');
+    const openSettings = await showConfirm(
+      'Email & Schedule Not Configured',
+      `Before scheduling reports, complete the following in ⚙ Settings:\n\n${missing.join('\n')}\n\nOpen Settings now?`,
+      'Open Settings', 'Close'
+    );
+    if (openSettings) openConfigPanel();
+    return;
+  }
+
   const alreadyScheduled = !!(cfg.schedule && cfg.schedule.enabled && (cfg.schedule.projectUuids || []).length > 0);
   if (alreadyScheduled) {
     const ok = await showConfirm(
@@ -1786,10 +1842,13 @@ function toggleSelectAll(headerChecked) {
   leafCbs.forEach(cb => {
     if (headerChecked) selectedProjectUuids.add(cb.dataset.uuid);
   });
-  // Re-render to update all parent checkbox states.
-  renderTree(currentMatchSet);
-  // Header checkbox is driven by renderTree → updateSelectAllCheckbox; ensure
-  // the indeterminate flag is cleared now since the user explicitly clicked it.
+  // Re-render in the correct mode — renderTree in flat view would reset the view.
+  if (flatView) {
+    renderFlatList();
+  } else {
+    renderTree(currentMatchSet);
+  }
+  // Ensure the indeterminate flag is cleared since the user explicitly clicked.
   const hdr = document.getElementById('selectAllCheckbox');
   if (hdr) { hdr.indeterminate = false; hdr.checked = headerChecked; }
   updateGenReportBtn();
@@ -1927,8 +1986,8 @@ function renderFlatList() {
     const warnIcon = node._dataWarn
       ? `<span class="data-warn-icon" title="${escHtml(node._dataWarn)}">⚠</span>`
       : '';
-    // All rows in flat view are leaves
-    let html = `<td class="select-cell"><input type="checkbox" class="proj-select-cb" data-uuid="${escHtml(node.uuid)}" onchange="toggleProjectSelection('${escHtml(node.uuid)}')" ${selectedProjectUuids.has(node.uuid) ? 'checked' : ''}></td>`;
+    // All rows in flat view are leaves — data-leaf="1" required by toggleSelectAll
+    let html = `<td class="select-cell"><input type="checkbox" class="proj-select-cb" data-uuid="${escHtml(node.uuid)}" data-leaf="1" onchange="toggleProjectSelection('${escHtml(node.uuid)}')" ${selectedProjectUuids.has(node.uuid) ? 'checked' : ''}></td>`;
     html += `<td class="project-name" style="padding-left:10px"><span class="tree-indent"></span><span class="proj-name-text" title="${nameInner}">${nameInner}</span>${warnIcon}${navIcon}${vBadge}</td>`;
     html += `<td class="level-cell">${node.level}</td>`;
     html += `<td>${node.isLatest ? '<input type="checkbox" disabled checked title="Latest version">' : ''}</td>`;
@@ -2707,6 +2766,9 @@ function openModal(id) {
     if (!_reportPollTimer) {
       _reportPollTimer = setInterval(refreshReportsList, 5000);
     }
+    // Keep the "Maximum N active" note in sync with the configured limit.
+    const lbl = document.getElementById('reportsMaxLabel');
+    if (lbl) lbl.textContent = (_appConfig && _appConfig.maxReports) || 10;
   }
 }
 function closeModal(id) {
@@ -3162,10 +3224,11 @@ async function confirmReportOptions() {
   const runningCount   = reports.filter(j => j.status === 'running').length;
 
   // ── Limit check ───────────────────────────────────────────────────────────
-  if (completedCount + runningCount >= 10) {
+  const maxReportsLimit = (_appConfig && _appConfig.maxReports) || 10;
+  if (completedCount + runningCount >= maxReportsLimit) {
     await showConfirm(
       '📋 Report Limit Reached',
-      `You have reached the maximum of 10 active reports ` +
+      `You have reached the maximum of ${maxReportsLimit} active reports ` +
       `(${completedCount} completed + ${runningCount} in-progress). ` +
       `Open the 📥 Reports panel to download or clear existing reports before generating a new one.`,
       'Close',
@@ -3343,6 +3406,7 @@ window.cancelReport         = cancelReport;
 window.openConfigPanel      = openConfigPanel;
 window.closeConfigPanel     = closeConfigPanel;
 window.markConfigDirty      = markConfigDirty;
+window.resetMaxReports      = resetMaxReports;
 window.onMailToggle         = onMailToggle;
 window.onSchedToggle        = onSchedToggle;
 window.onSchedFreqChange    = onSchedFreqChange;

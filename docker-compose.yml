@@ -9,6 +9,9 @@ networks:
   dependency-track:
     driver: bridge
 
+volumes:
+  violation-cache-data:
+
 services:
 
   # ─── Custom Risk Dashboard ────────────────────────────────────────────────────
@@ -82,10 +85,35 @@ services:
       CACHE_TTL_HOURS: "${VIOLATION_CACHE_TTL_HOURS:-24}"
       PORT: "3001"
     volumes:
-      # Persists violation-cache.json across container restarts.
-      - ./violation-cache/data:/data
+      # Persists violation-cache.json, reports, and app-config.json across restarts.
+      - violation-cache-data:/data
       # Bind-mount .env so the service can read updated config and persist
       # API key changes written via POST /violation-cache/config.
       - ./.env:/app/.env
     networks:
       - dependency-track
+
+  # ─── SMTP Relay (Option C1 — internal relay, no credentials needed from app) ──
+  # Uncomment this service to use a self-hosted SMTP relay.
+  # The violation-cache service connects to smtp-relay:25 with no authentication;
+  # the relay handles outbound delivery via the upstream SMTP server configured below.
+  #
+  # In ⚙ Settings, set:
+  #   Host: smtp-relay   Port: 25   TLS: off   Username: (blank)   Password: (blank)
+  #
+  # smtp-relay:
+  #   image: boky/postfix:latest
+  #   container_name: dt-smtp-relay
+  #   restart: unless-stopped
+  #   environment:
+  #     # Upstream SMTP server that will deliver the mail outbound.
+  #     # Format: "[hostname]:port"  (brackets prevent MX lookup)
+  #     RELAYHOST: "[smtp.yourprovider.com]:587"
+  #     RELAYHOST_USERNAME: "relay-user@yourprovider.com"
+  #     RELAYHOST_PASSWORD: "your-relay-password"
+  #     # Allow connections from any RFC-1918 or Docker internal address.
+  #     MYNETWORKS: "172.16.0.0/12 10.0.0.0/8 127.0.0.0/8"
+  #     # Only accept mail from your own domain — adjust to match your From address.
+  #     ALLOWED_SENDER_DOMAINS: "yourcompany.com"
+  #   networks:
+  #     - dependency-track
