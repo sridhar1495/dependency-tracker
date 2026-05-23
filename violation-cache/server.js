@@ -41,7 +41,8 @@ const https   = require('https');
 const fs      = require('fs');
 const path    = require('path');
 const crypto  = require('crypto');
-const ExcelJS = require('exceljs'); // MIT-licensed Excel generation library
+const ExcelJS    = require('exceljs');    // MIT-licensed Excel generation library
+const nodemailer = require('nodemailer'); // Q9: MIT-licensed SMTP email library (approved exception to no-new-packages rule)
 
 // ── Static config (set once at startup, never change at runtime) ──────────────
 const PORT         = parseInt(process.env.PORT || '3001', 10);
@@ -51,6 +52,11 @@ const CACHE_FILE   = path.join(CACHE_DIR, 'violation-cache.json');
 const CACHE_TMP    = path.join(CACHE_DIR, 'violation-cache.tmp.json');
 // Path to the bind-mounted .env file — writable so the config endpoint can persist changes.
 const ENV_FILE     = process.env.ENV_FILE || '/app/.env';
+// User-configurable settings persist in app-config.json (separate from DT connection .env)
+const CONFIG_FILE  = path.join(CACHE_DIR, 'app-config.json');
+const CONFIG_TMP   = path.join(CACHE_DIR, 'app-config.tmp.json');
+// Scheduled report files live here and are deleted after each successful email send
+const SCHED_DIR    = path.join(CACHE_DIR, 'scheduled-reports');
 
 // ── Report generation config ──────────────────────────────────────────────────
 // Static constants — edit here to change behaviour; no env-var override needed.
@@ -62,7 +68,7 @@ const FINDINGS_PAGE_SIZE    = 300;  // DT API page size for findings
 const VIOLATIONS_PAGE_SIZE  = 300;  // DT API page size for violation queries
 const REPORT_CONCURRENCY    = 5;    // projects fetched in parallel for security
 const VIOLATION_CONCURRENCY = 3;    // max concurrent violation fetches (license+operational)
-const MAX_REPORTS           = 10;   // combined completed + running ceiling
+const DEFAULT_MAX_REPORTS   = 10;   // default combined completed + running ceiling (overridden by app config)
 const VALID_RISK_TYPES      = new Set(['security', 'license', 'operational']);
 
 // ── Dynamic config — re-read from .env before every job run ──────────────────
@@ -174,6 +180,94 @@ function getEffectiveConfig() {
   const apiUrl  = (envVars['DT_API_INTERNAL_URL'] || STARTUP_API_URL).replace(/\/$/, '');
   const apiKey  = (envVars['DT_API_KEY'] || STARTUP_API_KEY).replace(/[\x00-\x1F\x7F]/g, '').trim();
   return { apiUrl, apiKey };
+}
+
+// ── App config helpers ────────────────────────────────────────────────────────
+// All user-configurable settings (max downloads, email, schedule) persist in
+// /data/app-config.json.  Loaded fresh before each operation so UI changes take
+// effect without a service restart.
+
+const DEFAULT_CONFIG = {
+  maxReports: 10,
+  mail: {
+    enabled: false,
+    smtp:    { host: '', port: 587, secure: false, user: '', pass: '' },
+    from:    '',
+    to:      [],
+    cc:      [],
+    subject: '',
+    body:    '',
+  },
+  schedule: {
+    enabled:             false,
+    frequency:           'daily',  // 'daily' | 'weekly' | 'monthly'
+    hour:                9,
+    weekDays:            [1],      // 0=Sun..6=Sat; used for 'weekly'
+    monthDay:            1,        // 1-28; used for 'monthly'
+    projectUuids:        [],
+    riskTypes:           ['security', 'license', 'operational'],
+    lastRun:             null,     // ISO8601 — updated after each run
+    lastRunStatus:       null,     // 'success' | 'failed'
+    lastRunError:        null,
+    nextRun:             null,     // ISO8601 — set when scheduler is armed
+    failureNotification: null,     // human-readable message; cleared when frontend ACKs
+  },
+};
+
+function deepMerge(target, source) {
+  const out = JSON.parse(JSON.stringify(target));
+  for (const key of Object.keys(source)) {
+    const sv = source[key];
+    const tv = out[key];
+    if (sv !== null && typeof sv === 'object' && !Array.isArray(sv)
+        && tv !== null && typeof tv === 'object' && !Array.isArray(tv)) {
+      out[key] = deepMerge(tv, sv);
+    } else {
+      out[key] = sv;
+    }
+  }
+  return out;
+}
+
+function loadConfig() {
+  try {
+    if (fs.existsSync(CONFIG_FILE)) {
+      const raw = JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8'));
+      return deepMerge(DEFAULT_CONFIG, raw);
+    }
+  } catch (e) {
+    log('warn', `Could not load app config, using defaults: ${e.message}`);
+  }
+  return JSON.parse(JSON.stringify(DEFAULT_CONFIG));
+}
+
+function saveConfig(cfg) {
+  try {
+    fs.mkdirSync(CACHE_DIR, { recursive: true });
+    fs.writeFileSync(CONFIG_TMP, JSON.stringify(cfg, null, 2), 'utf8');
+    fs.renameSync(CONFIG_TMP, CONFIG_FILE);
+  } catch (e) {
+    log('error', `Failed to save app config: ${e.message}`);
+  }
+}
+
+/** Dynamic max-reports limit — re-read from config so UI changes apply immediately. */
+function getMaxReports() {
+  const n = loadConfig().maxReports;
+  return (typeof n === 'number' && n > 0) ? n : DEFAULT_MAX_REPORTS;
+}
+
+/**
+ * Return a sanitised copy of config safe to send to the browser.
+ * The SMTP password is masked; all other fields are returned as-is.
+ */
+function sanitiseConfigForClient(cfg) {
+  const out = JSON.parse(JSON.stringify(cfg));
+  if (out.mail && out.mail.smtp) {
+    // O4: never expose credentials — indicate presence with a mask
+    out.mail.smtp.pass = out.mail.smtp.pass ? '••••••••' : '';
+  }
+  return out;
 }
 
 // ── Fetch parameters ──────────────────────────────────────────────────────────
@@ -514,6 +608,134 @@ function makeSemaphore(limit) {
       if (active < limit) run();
       else queue.push(run);
     });
+  };
+}
+
+// ── Shared report data collector ─────────────────────────────────────────────
+/**
+ * Fetch security findings, license violations, and operational violations for
+ * a list of projects.  Shared between runReportJob (registry-tracked) and
+ * runScheduledJob (fire-and-email).
+ *
+ * @param {string}   apiUrl
+ * @param {string}   apiKey
+ * @param {Array}    projects    — [{ uuid, name, version }]
+ * @param {string[]} riskTypes   — subset of ['security','license','operational']
+ * @param {{ cancelled: boolean }} cancelFlag
+ * @param {Function} [onProgress]  — called with (riskType) after each project finishes that category
+ * @returns {Promise<object>} collected data maps
+ */
+async function collectReportData(apiUrl, apiKey, projects, riskTypes, cancelFlag, onProgress) {
+  const semaphore     = makeSemaphore(REPORT_CONCURRENCY);
+  const violationSema = makeSemaphore(VIOLATION_CONCURRENCY);
+
+  const secFindings       = [];
+  const secProjectSummary = new Map();
+  const secComponentMap   = new Map();
+  const licViolations     = [];
+  const licProjectSummary = new Map();
+  const opsViolations     = [];
+  const opsProjectSummary = new Map();
+
+  const tasks = projects.map(proj =>
+    semaphore(async () => {
+      if (cancelFlag.cancelled) return;
+
+      await Promise.all([
+        // ── Security findings ───────────────────────────────────────
+        riskTypes.includes('security')
+          ? (async () => {
+              log('info', `[collect] Security findings for "${proj.name}" ${proj.version || ''}`);
+              const findings = await fetchAllFindings(apiUrl, apiKey, proj.name, proj.version || '', cancelFlag);
+              const sev = { critical: 0, high: 0, medium: 0, low: 0, unassigned: 0 };
+              for (const f of findings) {
+                secFindings.push(f);
+                const s = (f.vulnerability?.severity || 'UNASSIGNED').toLowerCase();
+                if (s in sev) sev[s]++; else sev.unassigned++;
+                const c    = f.component || {};
+                const cKey = [c.name, c.group].filter(Boolean).join('-');
+                if (cKey) {
+                  const entry = secComponentMap.get(cKey) || { count: 0, projects: new Set() };
+                  entry.count++;
+                  entry.projects.add(proj.name);
+                  secComponentMap.set(cKey, entry);
+                }
+              }
+              secProjectSummary.set(proj.uuid, { name: proj.name, version: proj.version, ...sev });
+              if (onProgress) onProgress('security');
+            })()
+          : Promise.resolve(),
+
+        // ── License violations ──────────────────────────────────────
+        riskTypes.includes('license')
+          ? violationSema(async () => {
+              log('info', `[collect] License violations for "${proj.name}" ${proj.version || ''}`);
+              const counts = { fail: 0, warn: 0, info: 0 };
+              await streamViolationsForProject(apiUrl, apiKey, proj, 'license', cancelFlag, (v) => {
+                const c   = v.component       || {};
+                const pc  = v.policyCondition || {};
+                const pol = pc.policy         || {};
+                const state = (pol.violationState || 'INFO').toUpperCase();
+                licViolations.push({
+                  projName:    proj.name,
+                  projVersion: proj.version || '',
+                  component:   [c.name, c.group].filter(Boolean).join('-') || c.name || '',
+                  compVersion: c.version                         || '',
+                  licenseName: c.resolvedLicense?.name           || '',
+                  licenseId:   c.resolvedLicense?.licenseId      || '',
+                  license:     pc.value                          || '',
+                  policy:      pol.name                          || '',
+                  state,
+                });
+                const stLower = state.toLowerCase();
+                if (stLower in counts) counts[stLower]++;
+              });
+              licProjectSummary.set(proj.uuid, { name: proj.name, version: proj.version, ...counts });
+              if (onProgress) onProgress('license');
+            })
+          : Promise.resolve(),
+
+        // ── Operational violations ──────────────────────────────────
+        riskTypes.includes('operational')
+          ? violationSema(async () => {
+              log('info', `[collect] Operational violations for "${proj.name}" ${proj.version || ''}`);
+              const counts = { fail: 0, warn: 0, info: 0 };
+              await streamViolationsForProject(apiUrl, apiKey, proj, 'operational', cancelFlag, (v) => {
+                const c   = v.component       || {};
+                const pc  = v.policyCondition || {};
+                const pol = pc.policy         || {};
+                const state = (pol.violationState || 'INFO').toUpperCase();
+                opsViolations.push({
+                  projName:    proj.name,
+                  projVersion: proj.version || '',
+                  component:   [c.name, c.group].filter(Boolean).join('-') || c.name || '',
+                  compVersion: c.version  || '',
+                  policy:      pol.name   || '',
+                  subject:     pc.subject || '',
+                  condition:   pc.value   || '',
+                  state,
+                });
+                const stLower = state.toLowerCase();
+                if (stLower in counts) counts[stLower]++;
+              });
+              opsProjectSummary.set(proj.uuid, { name: proj.name, version: proj.version, ...counts });
+              if (onProgress) onProgress('operational');
+            })
+          : Promise.resolve(),
+      ]);
+    })
+  );
+
+  await Promise.all(tasks);
+
+  if (cancelFlag.cancelled) {
+    throw Object.assign(new Error('__CANCELLED__'), { isCancelled: true });
+  }
+
+  return {
+    secFindings, secProjectSummary, secComponentMap,
+    licViolations, licProjectSummary,
+    opsViolations, opsProjectSummary,
   };
 }
 
@@ -942,33 +1164,25 @@ async function buildExcelReport(filePath, reportData) {
 
 // ── Report job runner ─────────────────────────────────────────────────────────
 /**
- * Background job that fetches data for every project in the list,
- * builds the multi-sheet XLSX for selected risk types, and updates
- * the job registry throughout.
+ * Registry-tracked background job.  Delegates data collection to collectReportData
+ * so the logic is shared with runScheduledJob.
  *
  * @param {string}   id        — job UUID
  * @param {Array}    projects  — [{ uuid, name, version }]
  * @param {string[]} riskTypes — subset of ['security','license','operational']
  */
 async function runReportJob(id, projects, riskTypes) {
-  const job              = reportJobs.get(id);
-  const semaphore        = makeSemaphore(REPORT_CONCURRENCY);
-  // Violations use concurrency=1: each project's pages are processed and GC'd
-  // before the next project starts, keeping at most one page of raw DT objects
-  // in memory at a time.
-  const violationSema    = makeSemaphore(VIOLATION_CONCURRENCY);
+  const job = reportJobs.get(id);
 
   job.status    = 'running';
   job.riskTypes = riskTypes;
-  // One progress counter per selected risk type so the UI can show an
-  // independent bar for each category.
+  // One progress counter per selected risk type so the UI shows an independent bar.
   job.progress  = Object.fromEntries(
     riskTypes.map(rt => [rt, { done: 0, total: projects.length }])
   );
   job.updatedAt = new Date().toISOString();
   saveRegistry();
 
-  // 30-min watchdog — sets cancel flag so the inner loops exit cleanly
   const watchdog = setTimeout(() => {
     log('warn', `Report job ${id} timed out after ${REPORT_TIMEOUT_MS / 60_000} min`);
     job.cancelFlag.cancelled = true;
@@ -979,141 +1193,23 @@ async function runReportJob(id, projects, riskTypes) {
     const { apiUrl, apiKey } = getEffectiveConfig();
     if (!apiKey) throw new Error('DT_API_KEY is not configured on the cache service.');
 
-    // ── Data collectors — populated concurrently per project ─────────────
-    const secFindings       = [];   // security: one entry per finding
-    const secProjectSummary = new Map();  // uuid → { name, version, critical, high, … }
-    const secComponentMap   = new Map();  // component key → { count, projects: Set }
-    const licViolations     = [];   // license: one entry per violation
-    const licProjectSummary = new Map();  // uuid → { name, version, fail, warn, info }
-    const opsViolations     = [];   // operational: one entry per violation
-    const opsProjectSummary = new Map();  // uuid → { name, version, fail, warn, info }
-
-    const tasks = projects.map(proj =>
-      semaphore(async () => {
-        if (job.cancelFlag.cancelled) return;
-
-        // All three phases run concurrently per project.
-        // Security runs directly; license and operational go through violationSema
-        // (concurrency=3) to cap total simultaneous violation fetches across all
-        // project tasks and avoid OOM from accumulating too many raw DT objects.
-        await Promise.all([
-          // ── Security findings ──────────────────────────────────────────
-          riskTypes.includes('security')
-            ? (async () => {
-                log('info', `Report ${id}: fetching security findings for "${proj.name}" ${proj.version || '(no version)'}`);
-                const findings = await fetchAllFindings(apiUrl, apiKey, proj.name, proj.version || '', job.cancelFlag);
-                const sev = { critical: 0, high: 0, medium: 0, low: 0, unassigned: 0 };
-                for (const f of findings) {
-                  secFindings.push(f);
-                  const s = (f.vulnerability?.severity || 'UNASSIGNED').toLowerCase();
-                  if (s in sev) sev[s]++; else sev.unassigned++;
-                  const c    = f.component || {};
-                  const cKey = [c.name, c.group].filter(Boolean).join('-');
-                  if (cKey) {
-                    const entry = secComponentMap.get(cKey) || { count: 0, projects: new Set() };
-                    entry.count++;
-                    entry.projects.add(proj.name);
-                    secComponentMap.set(cKey, entry);
-                  }
-                }
-                secProjectSummary.set(proj.uuid, { name: proj.name, version: proj.version, ...sev });
-                job.progress.security.done++;
-                job.updatedAt = new Date().toISOString();
-                saveRegistry();
-              })()
-            : Promise.resolve(),
-
-          // ── License violations (via violationSema) ─────────────────────
-          riskTypes.includes('license')
-            ? violationSema(async () => {
-                log('info', `Report ${id}: fetching license violations for "${proj.name}" ${proj.version || '(no version)'}`);
-                const counts = { fail: 0, warn: 0, info: 0 };
-                const n = await streamViolationsForProject(apiUrl, apiKey, proj, 'license', job.cancelFlag, (v) => {
-                  const c   = v.component       || {};
-                  const pc  = v.policyCondition || {};
-                  const pol = pc.policy         || {};
-                  const state = (pol.violationState || 'INFO').toUpperCase();
-                  licViolations.push({
-                    projName:    proj.name,
-                    projVersion: proj.version || '',
-                    component:   [c.name, c.group].filter(Boolean).join('-') || c.name || '',
-                    compVersion: c.version                         || '',
-                    licenseName: c.resolvedLicense?.name           || '',
-                    licenseId:   c.resolvedLicense?.licenseId      || '',
-                    license:     pc.value                          || '',
-                    policy:      pol.name                          || '',
-                    state,
-                  });
-                  const stLower = state.toLowerCase();
-                  if (stLower in counts) counts[stLower]++;
-                });
-                log('info', `Report ${id}: processed ${n} license violations for "${proj.name}"`);
-                licProjectSummary.set(proj.uuid, { name: proj.name, version: proj.version, ...counts });
-                job.progress.license.done++;
-                job.updatedAt = new Date().toISOString();
-                saveRegistry();
-              })
-            : Promise.resolve(),
-
-          // ── Operational violations (via violationSema) ─────────────────
-          riskTypes.includes('operational')
-            ? violationSema(async () => {
-                log('info', `Report ${id}: fetching operational violations for "${proj.name}" ${proj.version || '(no version)'}`);
-                const counts = { fail: 0, warn: 0, info: 0 };
-                const n = await streamViolationsForProject(apiUrl, apiKey, proj, 'operational', job.cancelFlag, (v) => {
-                  const c   = v.component       || {};
-                  const pc  = v.policyCondition || {};
-                  const pol = pc.policy         || {};
-                  const state = (pol.violationState || 'INFO').toUpperCase();
-                  opsViolations.push({
-                    projName:    proj.name,
-                    projVersion: proj.version || '',
-                    component:   [c.name, c.group].filter(Boolean).join('-') || c.name || '',
-                    compVersion: c.version  || '',
-                    policy:      pol.name   || '',
-                    subject:     pc.subject || '',
-                    condition:   pc.value   || '',
-                    state,
-                  });
-                  const stLower = state.toLowerCase();
-                  if (stLower in counts) counts[stLower]++;
-                });
-                log('info', `Report ${id}: processed ${n} operational violations for "${proj.name}"`);
-                opsProjectSummary.set(proj.uuid, { name: proj.name, version: proj.version, ...counts });
-                job.progress.operational.done++;
-                job.updatedAt = new Date().toISOString();
-                saveRegistry();
-              })
-            : Promise.resolve(),
-        ]);
-      })
+    const reportData = await collectReportData(
+      apiUrl, apiKey, projects, riskTypes, job.cancelFlag,
+      (rt) => {
+        job.progress[rt].done++;
+        job.updatedAt = new Date().toISOString();
+        saveRegistry();
+      }
     );
 
-    await Promise.all(tasks);
-
-    // Check cancellation after all tasks complete
-    if (job.cancelFlag.cancelled) {
-      throw new Error(
-        job.cancelReason === 'timeout'
-          ? `Report generation timed out after ${REPORT_TIMEOUT_MS / 60_000} minutes.`
-          : 'Report generation was cancelled by the user.'
-      );
-    }
-
-    // Write XLSX
     const ts       = new Date().toISOString().replace(/[:.]/g, '-');
     const filename = `vulnerability_report_${ts}.xlsx`;
     const filePath = path.join(REPORT_DIR, filename);
     fs.mkdirSync(REPORT_DIR, { recursive: true });
 
-    const totalRows = secFindings.length + licViolations.length + opsViolations.length;
-    log('info', `Report ${id}: building Excel workbook (${totalRows} total rows, types: ${riskTypes.join(',')})`);
-    await buildExcelReport(filePath, {
-      riskTypes,
-      secFindings, secProjectSummary, secComponentMap,
-      licViolations, licProjectSummary,
-      opsViolations, opsProjectSummary,
-    });
+    const totalRows = reportData.secFindings.length + reportData.licViolations.length + reportData.opsViolations.length;
+    log('info', `Report ${id}: building Excel (${totalRows} rows, types: ${riskTypes.join(',')})`);
+    await buildExcelReport(filePath, { riskTypes, ...reportData });
 
     clearTimeout(watchdog);
     job.status    = 'completed';
@@ -1142,6 +1238,223 @@ async function runReportJob(id, projects, riskTypes) {
 function jobToApi(job) {
   const { cancelFlag, watchdogId, filePath, ...pub } = job; // eslint-disable-line no-unused-vars
   return pub;
+}
+
+// ── Email helper ──────────────────────────────────────────────────────────────
+/**
+ * Send an email using the SMTP credentials from the app config.
+ * The SMTP password is read from the stored config — never from a GET response.
+ *
+ * @param {object}      mailCfg       — config.mail object
+ * @param {string|null} attachPath    — absolute path to attachment (or null)
+ * @param {string|null} attachName    — filename displayed in email (or null)
+ * @param {object}      [overrides]   — override to/subject/body (used for failure alerts)
+ */
+async function sendEmail(mailCfg, attachPath, attachName, overrides = {}) {
+  const now            = new Date();
+  const defaultSubject = `Dependency-Track Risk Report — ${now.toLocaleDateString()}`;
+  const defaultBody    = `Please find attached the latest Dependency-Track risk report generated on ${now.toLocaleString()}.`;
+
+  const transporter = nodemailer.createTransport({
+    host:   mailCfg.smtp.host,
+    port:   mailCfg.smtp.port,
+    secure: mailCfg.smtp.secure,
+    auth:   mailCfg.smtp.user
+      ? { user: mailCfg.smtp.user, pass: mailCfg.smtp.pass }
+      : undefined,
+  });
+
+  const msg = {
+    from:    mailCfg.from,
+    to:      (overrides.to || mailCfg.to).join(', '),
+    subject: overrides.subject || mailCfg.subject || defaultSubject,
+    text:    overrides.body    || mailCfg.body    || defaultBody,
+  };
+  const cc = (overrides.cc || mailCfg.cc || []);
+  if (cc.length) msg.cc = cc.join(', ');
+
+  if (attachPath && fs.existsSync(attachPath)) {
+    msg.attachments = [{ filename: attachName || path.basename(attachPath), path: attachPath }];
+  }
+
+  log('info', 'Sending email', {
+    to:   msg.to,
+    subj: msg.subject,
+    smtp: `${mailCfg.smtp.host}:${mailCfg.smtp.port}`,
+    attach: attachName || 'none',
+  });
+  await transporter.sendMail(msg);
+  log('info', 'Email sent successfully');
+}
+
+// ── Scheduler ─────────────────────────────────────────────────────────────────
+/**
+ * Calculate the next local-time Date when the job should fire.
+ * Uses server's local timezone (no external timezone library needed).
+ *
+ * @param {object} schedule — config.schedule
+ * @returns {Date}
+ */
+function calcNextRun(schedule) {
+  const now = new Date();
+
+  if (schedule.frequency === 'daily') {
+    const next = new Date(now.getFullYear(), now.getMonth(), now.getDate(), schedule.hour, 0, 0, 0);
+    if (next <= now) next.setDate(next.getDate() + 1);
+    return next;
+  }
+
+  if (schedule.frequency === 'weekly') {
+    const targetDays = (schedule.weekDays || [1]).sort((a, b) => a - b);
+    // Scan the next 8 days to find the first matching weekday that is in the future
+    for (let d = 1; d <= 8; d++) {
+      const candidate = new Date(
+        now.getFullYear(), now.getMonth(), now.getDate() + d, schedule.hour, 0, 0, 0
+      );
+      if (targetDays.includes(candidate.getDay())) return candidate;
+    }
+    // Fallback (shouldn't happen with valid config)
+    return new Date(now.getFullYear(), now.getMonth(), now.getDate() + 7, schedule.hour, 0, 0, 0);
+  }
+
+  if (schedule.frequency === 'monthly') {
+    const day  = Math.min(schedule.monthDay || 1, 28); // cap at 28 — always valid in any month
+    let next   = new Date(now.getFullYear(), now.getMonth(), day, schedule.hour, 0, 0, 0);
+    if (next <= now) next = new Date(now.getFullYear(), now.getMonth() + 1, day, schedule.hour, 0, 0, 0);
+    return next;
+  }
+
+  // Unknown frequency — default to 24 h from now
+  return new Date(now.getTime() + 24 * 3_600_000);
+}
+
+let _schedulerTimer   = null;
+let _schedulerRunning = false;
+
+/** Arm (or re-arm) the scheduler based on the current app config. */
+function armScheduler() {
+  if (_schedulerTimer) { clearTimeout(_schedulerTimer); _schedulerTimer = null; }
+
+  const cfg = loadConfig();
+  if (!cfg.schedule.enabled) {
+    log('info', 'Scheduler disabled — not arming');
+    return;
+  }
+
+  const next    = calcNextRun(cfg.schedule);
+  const msUntil = Math.max(next.getTime() - Date.now(), 1000); // minimum 1 s to avoid tight loops
+
+  cfg.schedule.nextRun = next.toISOString();
+  saveConfig(cfg);
+
+  log('info', 'Scheduler armed', { nextRun: next.toISOString(), msUntil });
+  _schedulerTimer = setTimeout(async () => {
+    _schedulerTimer = null;
+    await runScheduledJob();
+    armScheduler(); // re-arm for the next occurrence after each firing
+  }, msUntil);
+}
+
+async function runScheduledJob() {
+  if (_schedulerRunning) {
+    log('warn', 'Scheduled job already running — skipping this occurrence (overlap protection)');
+    return;
+  }
+
+  _schedulerRunning = true;
+  const cfg = loadConfig();
+  log('info', 'Scheduled report job starting', { projectCount: cfg.schedule.projectUuids.length });
+
+  let reportFilePath = null;
+  let reportFileName = null;
+
+  try {
+    const { apiUrl, apiKey } = getEffectiveConfig();
+    if (!apiKey) throw new Error('DT_API_KEY is not configured');
+    if (!cfg.schedule.projectUuids.length) throw new Error('No project UUIDs stored in schedule config');
+
+    // Resolve stored UUIDs against live DT project list — skip UUIDs that no longer exist
+    const storedSet = new Set(cfg.schedule.projectUuids);
+    const projects  = [];
+    let page = 1;
+    while (true) {
+      const { json } = await dtGetWithRetry(
+        `/api/v1/project?pageSize=500&pageNumber=${page}&onlyRoot=false`, apiUrl, apiKey
+      );
+      const batch = Array.isArray(json) ? json : [];
+      for (const p of batch) {
+        if (storedSet.has(p.uuid)) {
+          projects.push({ uuid: p.uuid, name: p.name, version: p.version || '' });
+        }
+      }
+      if (batch.length < 500) break;
+      page++;
+    }
+    if (projects.length === 0) throw new Error('None of the stored project UUIDs matched live DT data');
+    log('info', `Scheduled job: ${projects.length}/${storedSet.size} UUIDs resolved`);
+
+    fs.mkdirSync(SCHED_DIR, { recursive: true });
+    const ts      = new Date().toISOString().replace(/[:.]/g, '-');
+    reportFileName = `scheduled_report_${ts}.xlsx`;
+    reportFilePath = path.join(SCHED_DIR, reportFileName);
+
+    const riskTypes  = cfg.schedule.riskTypes || ['security', 'license', 'operational'];
+    const cancelFlag = { cancelled: false };
+
+    const reportData = await collectReportData(
+      apiUrl, apiKey, projects, riskTypes, cancelFlag,
+      (rt) => log('info', `Scheduled job progress: ${rt} project done`)
+    );
+
+    await buildExcelReport(reportFilePath, { riskTypes, ...reportData });
+    log('info', `Scheduled job: Excel written (${reportFileName})`);
+
+    // Email if configured
+    if (cfg.mail.enabled) {
+      await sendEmail(cfg.mail, reportFilePath, reportFileName);
+    }
+
+    // Delete the file — it was emailed (or mail was intentionally disabled)
+    try { fs.unlinkSync(reportFilePath); } catch (_) {}
+    reportFilePath = null;
+
+    const newCfg = loadConfig();
+    newCfg.schedule.lastRun             = new Date().toISOString();
+    newCfg.schedule.lastRunStatus       = 'success';
+    newCfg.schedule.lastRunError        = null;
+    newCfg.schedule.failureNotification = null;
+    saveConfig(newCfg);
+    log('info', 'Scheduled job completed successfully');
+
+  } catch (err) {
+    log('error', `Scheduled job failed: ${err.message}`);
+    if (reportFilePath) { try { fs.unlinkSync(reportFilePath); } catch (_) {} }
+
+    const newCfg = loadConfig();
+    newCfg.schedule.lastRun             = new Date().toISOString();
+    newCfg.schedule.lastRunStatus       = 'failed';
+    newCfg.schedule.lastRunError        = err.message;
+    // O3: notification persists until the browser ACKs it (POST /violation-cache/schedule/ack-notification)
+    newCfg.schedule.failureNotification = `Scheduled report failed on ${new Date().toLocaleString()}: ${err.message}`;
+    saveConfig(newCfg);
+
+    // Send failure alert to the From address so someone is notified even without opening the UI
+    try {
+      const freshCfg = loadConfig();
+      if (freshCfg.mail.enabled && freshCfg.mail.from && freshCfg.mail.smtp.host) {
+        await sendEmail(freshCfg.mail, null, null, {
+          to:      [freshCfg.mail.from],
+          cc:      [],
+          subject: 'Dependency-Track Scheduled Report Failed',
+          body:    `The scheduled Dependency-Track report failed on ${new Date().toLocaleString()}.\n\nError: ${err.message}\n\nPlease check the server logs for details.`,
+        });
+      }
+    } catch (emailErr) {
+      log('error', `Failed to send failure alert email: ${emailErr.message}`);
+    }
+  } finally {
+    _schedulerRunning = false;
+  }
 }
 
 http.createServer(async (req, res) => {
@@ -1186,47 +1499,94 @@ http.createServer(async (req, res) => {
   }
 
   // ── GET /violation-cache/config ───────────────────────────────────────────
-  // Returns the current effective API key (last 4 chars only) and whether the
-  // .env file is mounted.  The dashboard uses this on page load as the
-  // authoritative source of the persisted key so that a token changed via the
-  // UI survives container restarts and takes priority over the startup env var.
+  // Returns the full app config (sanitised — SMTP password is masked) plus
+  // the current effective API key and .env mount status.
+  // The dashboard reads this on page load and after the config panel is opened.
   if (method === 'GET' && url === '/violation-cache/config') {
     const { apiKey: effectiveKey } = getEffectiveConfig();
+    const clientCfg = sanitiseConfigForClient(loadConfig());
     jsonReply(res, 200, {
-      apiKey:       effectiveKey,
+      apiKey:         effectiveKey,
       envFileMounted: fs.existsSync(ENV_FILE),
+      ...clientCfg,
     });
     return;
   }
 
   // ── POST /violation-cache/config ──────────────────────────────────────────
-  // Accepts { apiKey } and persists it to the bind-mounted .env file so the
-  // next job run uses the updated key without a container restart.
+  // Accepts:
+  //   { apiKey }          — update DT_API_KEY in .env (backward compat)
+  //   { config: {...} }   — save full app config (maxReports, mail, schedule)
+  //   Both fields may appear together.
   if (method === 'POST' && url === '/violation-cache/config') {
     try {
-      const raw  = await readBody(req);
+      const raw  = await readBody(req, 256 * 1024); // 256 KB — project UUID lists can be large
       const body = JSON.parse(raw);
 
-      if (!body.apiKey || typeof body.apiKey !== 'string') {
-        jsonReply(res, 400, { error: 'apiKey is required' });
-        return;
-      }
-      const cleanKey = body.apiKey.replace(/[\x00-\x1F\x7F]/g, '').trim();
-      if (!cleanKey) {
-        jsonReply(res, 400, { error: 'apiKey is empty after sanitisation' });
-        return;
-      }
-      if (!fs.existsSync(ENV_FILE)) {
-        jsonReply(res, 503, {
-          error: `Config file not found at ${ENV_FILE}. Ensure .env is bind-mounted.`,
-        });
-        return;
+      // ── API key update (existing behaviour) ──────────────────────────
+      if (body.apiKey !== undefined) {
+        if (typeof body.apiKey !== 'string' || !body.apiKey.trim()) {
+          jsonReply(res, 400, { error: 'apiKey must be a non-empty string' });
+          return;
+        }
+        const cleanKey = body.apiKey.replace(/[\x00-\x1F\x7F]/g, '').trim();
+        if (!fs.existsSync(ENV_FILE)) {
+          jsonReply(res, 503, { error: `Config file not found at ${ENV_FILE}. Ensure .env is bind-mounted.` });
+          return;
+        }
+        patchEnvFile(ENV_FILE, { DT_API_KEY: cleanKey });
+        log('info', `DT_API_KEY updated in ${ENV_FILE}`, { key: `***${cleanKey.slice(-4)}` });
       }
 
-      // Q8: handle read and write errors separately
-      patchEnvFile(ENV_FILE, { DT_API_KEY: cleanKey });
-      log('info', `DT_API_KEY updated in ${ENV_FILE}`, { key: `***${cleanKey.slice(-4)}` });
-      jsonReply(res, 200, { ok: true, message: 'API key updated; takes effect on next job run' });
+      // ── Full app config update ────────────────────────────────────────
+      if (body.config !== undefined) {
+        if (typeof body.config !== 'object' || body.config === null) {
+          jsonReply(res, 400, { error: 'config must be an object' });
+          return;
+        }
+        const prevCfg    = loadConfig();
+        const prevMax    = prevCfg.maxReports || DEFAULT_MAX_REPORTS;
+        const newMax     = typeof body.config.maxReports === 'number' && body.config.maxReports > 0
+          ? body.config.maxReports : prevMax;
+
+        // Restore real SMTP password when client sent the masked placeholder
+        if (body.config.mail?.smtp?.pass === '••••••••') {
+          if (body.config.mail) body.config.mail.smtp.pass = prevCfg.mail.smtp.pass;
+        }
+
+        const merged = deepMerge(prevCfg, body.config);
+
+        // Re-arm scheduler if schedule config changed or enabled state changed
+        const schedChanged = JSON.stringify(prevCfg.schedule) !== JSON.stringify(merged.schedule);
+
+        saveConfig(merged);
+        log('info', 'App config updated', {
+          maxReports:  merged.maxReports,
+          mailEnabled: merged.mail.enabled,
+          schedEnabled: merged.schedule.enabled,
+        });
+
+        // Trim oldest completed reports when maxReports decreased
+        if (newMax < prevMax) {
+          const completed = Array.from(reportJobs.values())
+            .filter(j => j.status === 'completed')
+            .sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt)); // oldest first
+          const toDelete = completed.slice(0, Math.max(0, completed.length - newMax));
+          for (const j of toDelete) {
+            if (j.filePath && fs.existsSync(j.filePath)) {
+              try { fs.unlinkSync(j.filePath); } catch (_) {}
+            }
+            reportJobs.delete(j.id);
+            log('info', `Trimmed old report ${j.id} (maxReports reduced to ${newMax})`);
+          }
+          if (toDelete.length) saveRegistry();
+        }
+
+        // Re-arm scheduler based on updated config
+        if (schedChanged) armScheduler();
+      }
+
+      jsonReply(res, 200, { ok: true });
 
     } catch (e) {
       if (e.code === 'PATCH_READ_FAILED') {
@@ -1289,12 +1649,14 @@ http.createServer(async (req, res) => {
       const jobs = Array.from(reportJobs.values());
       const completedCount = jobs.filter(j => j.status === 'completed').length;
       const runningCount   = jobs.filter(j => j.status === 'running').length;
-      if (completedCount + runningCount >= MAX_REPORTS) {
+      const maxReports     = getMaxReports();
+      if (completedCount + runningCount >= maxReports) {
         jsonReply(res, 429, {
-          error: `Report limit reached (${completedCount} completed + ${runningCount} in-progress = ${completedCount + runningCount}). ` +
-                 'Delete existing reports before generating a new one.',
+          error: `Report limit reached (${completedCount} completed + ${runningCount} in-progress = ${completedCount + runningCount} / ${maxReports}). ` +
+                 'Delete existing reports or raise the limit in Settings.',
           completedCount,
           runningCount,
+          maxReports,
         });
         return;
       }
@@ -1336,6 +1698,71 @@ http.createServer(async (req, res) => {
       .map(jobToApi)
       .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
     jsonReply(res, 200, list);
+    return;
+  }
+
+  // ── POST /violation-cache/config/test-email ──────────────────────────────
+  // Sends a plain-text test email using the current SMTP config.
+  if (method === 'POST' && parsedPath === '/violation-cache/config/test-email') {
+    try {
+      const cfg = loadConfig();
+      if (!cfg.mail.enabled) {
+        jsonReply(res, 400, { error: 'Email is not enabled in configuration' });
+        return;
+      }
+      if (!cfg.mail.smtp.host || !cfg.mail.from || !cfg.mail.to.length) {
+        jsonReply(res, 400, { error: 'SMTP host, From address, and at least one To address are required' });
+        return;
+      }
+      await sendEmail(cfg.mail, null, null, {
+        subject: 'Dependency-Track — Test Email',
+        body:    `This is a test email from the Dependency-Track Risk Dashboard sent on ${new Date().toLocaleString()}. Your SMTP configuration is working correctly.`,
+      });
+      jsonReply(res, 200, { ok: true, message: 'Test email sent successfully' });
+    } catch (e) {
+      log('error', `Test email failed: ${e.message}`);
+      jsonReply(res, 500, { error: `Email failed: ${e.message}` });
+    }
+    return;
+  }
+
+  // ── GET /violation-cache/schedule/status ─────────────────────────────────
+  if (method === 'GET' && parsedPath === '/violation-cache/schedule/status') {
+    const cfg = loadConfig();
+    jsonReply(res, 200, {
+      enabled:             cfg.schedule.enabled,
+      frequency:           cfg.schedule.frequency,
+      nextRun:             cfg.schedule.nextRun,
+      lastRun:             cfg.schedule.lastRun,
+      lastRunStatus:       cfg.schedule.lastRunStatus,
+      lastRunError:        cfg.schedule.lastRunError,
+      failureNotification: cfg.schedule.failureNotification,
+      isRunning:           _schedulerRunning,
+      projectCount:        cfg.schedule.projectUuids.length,
+    });
+    return;
+  }
+
+  // ── DELETE /violation-cache/schedule ─────────────────────────────────────
+  // Disables the scheduled job without removing configuration.
+  if (method === 'DELETE' && parsedPath === '/violation-cache/schedule') {
+    const cfg = loadConfig();
+    cfg.schedule.enabled = false;
+    cfg.schedule.nextRun = null;
+    saveConfig(cfg);
+    armScheduler(); // will immediately clear the timer because enabled=false
+    log('info', 'Schedule cancelled via API');
+    jsonReply(res, 200, { ok: true, message: 'Schedule disabled' });
+    return;
+  }
+
+  // ── POST /violation-cache/schedule/ack-notification ──────────────────────
+  // Clears the failureNotification field once the browser has displayed it.
+  if (method === 'POST' && parsedPath === '/violation-cache/schedule/ack-notification') {
+    const cfg = loadConfig();
+    cfg.schedule.failureNotification = null;
+    saveConfig(cfg);
+    jsonReply(res, 200, { ok: true });
     return;
   }
 
@@ -1419,6 +1846,7 @@ http.createServer(async (req, res) => {
   loadRegistry(); // restore persisted report jobs before serving requests
 
   const { apiUrl, apiKey } = getEffectiveConfig();
+  const appCfg = loadConfig();
   log('info', `Violation cache service listening on :${PORT}`);
   log('info', 'Startup configuration', {
     apiUrl,
@@ -1426,8 +1854,14 @@ http.createServer(async (req, res) => {
     cacheTtlHrs:  CACHE_TTL_MS / 3_600_000,
     cacheFile:    CACHE_FILE,
     envFile:      `${ENV_FILE} (${fs.existsSync(ENV_FILE) ? 'mounted ✓' : 'NOT FOUND — config endpoint disabled'})`,
+    maxReports:   appCfg.maxReports,
+    mailEnabled:  appCfg.mail.enabled,
+    schedEnabled: appCfg.schedule.enabled,
     logFormat:    LOG_JSON ? 'json' : 'text',
   });
+
+  // Arm the scheduler if it was enabled before the service restarted
+  armScheduler();
 
   const s = getStatus();
   if (s.status === 'none' || s.status === 'stale') {

@@ -572,6 +572,100 @@
       .search-input { width: 140px; }
       .ctrl-title { font-size: 15px; }
     }
+
+    /* ── Config Panel ────────────────────────────────────────────────────────── */
+    .cfg-backdrop {
+      position: fixed; inset: 0; background: rgba(0,0,0,0.55);
+      z-index: 300; opacity: 0; pointer-events: none;
+      transition: opacity 0.25s;
+    }
+    .cfg-backdrop.open { opacity: 1; pointer-events: all; }
+    .cfg-panel {
+      position: fixed; top: 0; left: 0; bottom: 0; width: 40%;
+      background: var(--surface); border-right: 1px solid var(--border);
+      z-index: 301; display: flex; flex-direction: column;
+      transform: translateX(-100%); transition: transform 0.25s ease;
+      overflow: hidden;
+    }
+    .cfg-panel.open { transform: translateX(0); }
+    .cfg-panel-header {
+      display: flex; align-items: center; justify-content: space-between;
+      padding: 20px 24px 16px; border-bottom: 1px solid var(--border);
+      flex-shrink: 0;
+    }
+    .cfg-panel-header h2 { font-size: 16px; font-weight: 600; }
+    .cfg-close {
+      background: none; border: none; font-size: 22px;
+      color: var(--text-muted); cursor: pointer; line-height: 1; padding: 4px;
+    }
+    .cfg-close:hover { color: var(--text); }
+    .cfg-panel-body {
+      flex: 1; overflow-y: auto; padding: 20px 24px;
+      display: flex; flex-direction: column; gap: 16px;
+    }
+    .cfg-panel-footer {
+      display: flex; gap: 8px; padding: 16px 24px;
+      border-top: 1px solid var(--border); flex-shrink: 0;
+    }
+    .cfg-section {
+      background: var(--surface2); border: 1px solid var(--border);
+      border-radius: 10px; padding: 16px;
+    }
+    .cfg-section-header {
+      display: flex; align-items: center; justify-content: space-between;
+      margin-bottom: 12px;
+    }
+    .cfg-section-title { font-size: 13px; font-weight: 600; color: var(--text); }
+    .cfg-sub-title {
+      font-size: 11px; font-weight: 600; color: var(--text-muted);
+      text-transform: uppercase; letter-spacing: 0.5px;
+      margin: 14px 0 8px; border-top: 1px solid var(--border); padding-top: 12px;
+    }
+    .cfg-label {
+      font-size: 12px; color: var(--text-muted); display: block;
+      margin-bottom: 4px; margin-top: 8px;
+    }
+    .cfg-label:first-child { margin-top: 0; }
+    .cfg-row { display: flex; gap: 8px; align-items: flex-end; margin-bottom: 8px; }
+    .cfg-input {
+      background: var(--surface); border: 1px solid var(--border);
+      border-radius: var(--radius); color: var(--text); font-size: 13px;
+      padding: 7px 10px; outline: none; transition: border-color 0.15s; width: 100%;
+    }
+    .cfg-input:focus { border-color: var(--accent); }
+    .cfg-input::placeholder { color: var(--text-muted); }
+    .cfg-textarea {
+      background: var(--surface); border: 1px solid var(--border);
+      border-radius: var(--radius); color: var(--text); font-size: 13px;
+      padding: 7px 10px; outline: none; transition: border-color 0.15s; width: 100%;
+      min-height: 60px; resize: vertical; font-family: inherit;
+    }
+    .cfg-textarea:focus { border-color: var(--accent); }
+    .cfg-toggle { position: relative; display: inline-block; width: 36px; height: 20px; flex-shrink: 0; cursor: pointer; }
+    .cfg-toggle input { opacity: 0; width: 0; height: 0; }
+    .cfg-toggle-slider {
+      position: absolute; inset: 0; background: var(--border);
+      border-radius: 20px; cursor: pointer; transition: background 0.2s;
+    }
+    .cfg-toggle-slider::before {
+      content: ''; position: absolute; width: 14px; height: 14px;
+      left: 3px; top: 3px; background: #fff; border-radius: 50%;
+      transition: transform 0.2s;
+    }
+    .cfg-toggle input:checked + .cfg-toggle-slider { background: var(--accent); }
+    .cfg-toggle input:checked + .cfg-toggle-slider::before { transform: translateX(16px); }
+    .cfg-weekdays { display: flex; gap: 4px; flex-wrap: wrap; margin-top: 4px; }
+    .cfg-weekday { cursor: pointer; }
+    .cfg-weekday input { display: none; }
+    .cfg-weekday span {
+      display: inline-block; width: 32px; height: 32px; line-height: 32px;
+      text-align: center; border-radius: 50%; font-size: 12px; font-weight: 600;
+      border: 1px solid var(--border); background: var(--surface); color: var(--text-muted);
+      transition: background 0.15s, color 0.15s, border-color 0.15s;
+    }
+    .cfg-weekday input:checked + span { background: var(--accent); color: #fff; border-color: var(--accent); }
+    .cfg-weekday:hover span { border-color: var(--accent); }
+    @media (max-width: 768px) { .cfg-panel { width: 100%; } }
   </style>
 </head>
 <body>
@@ -592,7 +686,7 @@
       <div class="status-dot"></div><span>Mock Data</span>
     </div>
     <button class="btn-theme" id="themeBtn" onclick="toggleTheme()" title="Toggle dark/light mode">🌙</button>
-    <button class="btn" onclick="openModal('apiModal')">⚙ Connect API</button>
+    <button class="btn" id="settingsBtn" onclick="openConfigPanel()">⚙ Settings</button>
     <button class="btn" id="reportsBtn" onclick="openModal('reportsModal')" title="View and download generated vulnerability reports">
       📥 Reports<span id="reportsBadge"></span>
     </button>
@@ -659,6 +753,7 @@
       <div style="flex:1"></div>
       <button class="btn" id="expandCollapseBtn" onclick="toggleExpandCollapse()" title="Expand all groups">▼ Expand All</button>
       <button class="btn" id="genReportBtn" onclick="generateReport()" title="Generate Excel vulnerability report — uses selected projects if any are checked, otherwise all visible projects">📋 Generate Report<span id="genReportCount" style="margin-left:4px;font-size:11px;opacity:0.8"></span></button>
+      <button class="btn" id="schedReportBtn" onclick="scheduleReports()" title="Schedule automatic Excel reports to be emailed on a recurring schedule">📅 Schedule Reports</button>
       <button class="btn export" onclick="exportCSV()">↓ Export CSV</button>
     </div>
 
@@ -694,53 +789,6 @@
       <a href="https://opensource.org/licenses/MIT" target="_blank" style="color:var(--accent)">MIT License</a>
     </div>
   </footer>
-</div>
-
-<!-- ── API Config Modal ─────────────────────────────────────────────────── -->
-<div class="modal-overlay" id="apiModal">
-  <div class="modal">
-    <button class="modal-close" onclick="closeModal('apiModal')">&times;</button>
-    <h2>⚙ Connect to Live DependencyTrack API</h2>
-    <p>Requests go through the <strong>server-side nginx proxy</strong> — no CORS issues.</p>
-    <div class="modal-row">
-      <div style="flex:1">
-        <label>DT API URL <span style="font-size:10px;color:var(--text-muted)">(leave blank to route through the nginx proxy)</span></label>
-        <input id="apiUrlInput" class="search-input" style="width:100%"
-          placeholder="https://dtrack.company.com  or  http://localhost:8081"
-          oninput="scheduleProbe()" />
-      </div>
-    </div>
-    <p id="proxyTargetNote" style="font-size:12px;background:var(--surface2);border:1px solid var(--border);border-radius:6px;padding:8px 12px;margin-bottom:14px">
-      API status: <strong id="proxyTargetDisplay">checking…</strong><br/>
-      <span style="color:var(--text-muted)">Nginx proxy (<code style="display:inline;background:none;border:none;padding:0;color:inherit">DT_API_INTERNAL_URL</code>): <span id="proxyTargetUrl" style="color:var(--text)">—</span></span>
-    </p>
-    <div class="modal-row">
-      <div style="flex:1">
-        <label>DT Frontend URL <span style="font-size:10px;color:var(--text-muted)">(optional — enables clickable project links)</span></label>
-        <input id="dtFrontendUrlInput" class="search-input" style="width:100%"
-          placeholder="http://localhost:8080" />
-      </div>
-    </div>
-    <div id="preConfiguredKeyNote" style="display:none;font-size:12px;background:var(--surface2);border:1px solid var(--border);border-radius:6px;padding:8px 12px;margin-bottom:14px">
-      ✓ <strong>Auto-connected:</strong> API key is pre-configured via the <code style="display:inline;background:none;border:none;padding:0;color:inherit">DT_API_KEY</code> environment variable.
-      Enter a different key below to override for this session.
-    </div>
-    <div class="modal-row">
-      <div style="flex:1">
-        <label>API Key</label>
-        <input id="apiKeyInput" class="search-input" style="width:100%" type="password" placeholder="odt_xxxxxxxxxxxxxxxxxxxxxxxxxx" />
-      </div>
-    </div>
-    <div style="display:flex;gap:8px;margin-top:4px">
-      <button class="btn primary" onclick="connectLiveApi(true)">Connect</button>
-      <button class="btn" onclick="loadMockData(); closeModal('apiModal')">Use Mock Data</button>
-    </div>
-    <p style="margin-top:16px;font-size:12px">Generate an API key:</p>
-    <code>TOKEN=$(curl -sf -X POST http://&lt;DT-HOST&gt;:8081/api/v1/user/login \
-  -d 'username=admin&password=YOUR_PASS') \
-&& curl -sf -H "Authorization: Bearer $TOKEN" \
-  http://&lt;DT-HOST&gt;:8081/api/v1/team | jq -r '.[0].apiKeys[0].key'</code>
-  </div>
 </div>
 
 <!-- ── Reports modal ────────────────────────────────────────────────────── -->
@@ -813,6 +861,148 @@
 <!-- ── Toast container ───────────────────────────────────────────────────── -->
 <div id="toastContainer"></div>
 
+<!-- ── Config Panel (left-side overlay) ──────────────────────────────────── -->
+<div class="cfg-backdrop" id="cfgBackdrop" onclick="closeConfigPanel(false)"></div>
+<div class="cfg-panel" id="configPanel">
+  <div class="cfg-panel-header">
+    <h2>⚙ Settings</h2>
+    <button class="cfg-close" onclick="closeConfigPanel(false)">&times;</button>
+  </div>
+  <div class="cfg-panel-body">
+
+    <!-- Connection section -->
+    <div class="cfg-section">
+      <div class="cfg-section-title" style="margin-bottom:12px">Connection</div>
+      <label class="cfg-label">DT API URL <span style="font-size:10px;color:var(--text-muted)">(blank = nginx proxy)</span></label>
+      <input id="cfgApiUrl" class="cfg-input" placeholder="https://dtrack.company.com" oninput="markConfigDirty()" />
+      <label class="cfg-label">DT Frontend URL <span style="font-size:10px;color:var(--text-muted)">(optional — enables project links)</span></label>
+      <input id="cfgFrontendUrl" class="cfg-input" placeholder="http://localhost:8080" oninput="markConfigDirty()" />
+      <label class="cfg-label">API Key</label>
+      <input id="cfgApiKey" class="cfg-input" type="password" placeholder="odt_xxxxxxxxxxxxxxxxxxxxxxxxxx" oninput="markConfigDirty()" />
+      <div id="cfgAutoKeyNote" style="display:none;margin-top:8px;font-size:12px;padding:6px 10px;background:var(--surface);border:1px solid var(--border);border-radius:6px;color:var(--ok)"></div>
+      <div style="display:flex;gap:8px;margin-top:12px">
+        <button class="btn primary" onclick="connectFromPanel()">Connect</button>
+        <button class="btn" onclick="loadMockData(); closeConfigPanel(true)">Use Mock Data</button>
+      </div>
+    </div>
+
+    <!-- Max Reports section -->
+    <div class="cfg-section">
+      <div class="cfg-section-title" style="margin-bottom:12px">Max Report Downloads</div>
+      <label class="cfg-label">Maximum reports kept on server <span style="font-size:10px;color:var(--text-muted)">(completed + in-progress)</span></label>
+      <input id="cfgMaxReports" type="number" min="1" max="100" class="cfg-input" style="width:80px" value="10" oninput="markConfigDirty()" />
+    </div>
+
+    <!-- Email & Schedule section -->
+    <div class="cfg-section">
+      <div class="cfg-section-header">
+        <div class="cfg-section-title">Email &amp; Scheduled Reports</div>
+        <label class="cfg-toggle">
+          <input type="checkbox" id="cfgMailEnabled" onchange="onMailToggle()">
+          <span class="cfg-toggle-slider"></span>
+        </label>
+      </div>
+      <div id="cfgMailBody" style="display:none">
+
+        <div class="cfg-sub-title" style="margin-top:0;border-top:none;padding-top:0">SMTP Configuration</div>
+        <div class="cfg-row">
+          <div style="flex:1">
+            <label class="cfg-label" style="margin-top:0">Host</label>
+            <input id="cfgSmtpHost" class="cfg-input" placeholder="smtp.gmail.com" oninput="markConfigDirty()" />
+          </div>
+          <div style="width:76px">
+            <label class="cfg-label" style="margin-top:0">Port</label>
+            <input id="cfgSmtpPort" type="number" class="cfg-input" placeholder="587" oninput="markConfigDirty()" />
+          </div>
+          <div style="display:flex;align-items:center;gap:5px;padding-bottom:2px;flex-shrink:0">
+            <input type="checkbox" id="cfgSmtpSecure" onchange="markConfigDirty()" style="accent-color:var(--accent);width:14px;height:14px;cursor:pointer" />
+            <label for="cfgSmtpSecure" style="font-size:12px;color:var(--text-muted);cursor:pointer;white-space:nowrap">TLS</label>
+          </div>
+        </div>
+        <div class="cfg-row">
+          <div style="flex:1">
+            <label class="cfg-label" style="margin-top:0">Username</label>
+            <input id="cfgSmtpUser" class="cfg-input" oninput="markConfigDirty()" />
+          </div>
+          <div style="flex:1">
+            <label class="cfg-label" style="margin-top:0">Password</label>
+            <input id="cfgSmtpPass" class="cfg-input" type="password" placeholder="(unchanged)" oninput="markConfigDirty()" />
+          </div>
+        </div>
+        <label class="cfg-label">From Address</label>
+        <input id="cfgMailFrom" class="cfg-input" style="margin-bottom:6px" placeholder="alerts@company.com" oninput="markConfigDirty()" />
+        <label class="cfg-label">To <span style="font-size:10px">(comma-separated)</span></label>
+        <input id="cfgMailTo" class="cfg-input" style="margin-bottom:6px" placeholder="team@company.com, manager@company.com" oninput="markConfigDirty()" />
+        <label class="cfg-label">CC <span style="font-size:10px">(comma-separated, optional)</span></label>
+        <input id="cfgMailCc" class="cfg-input" style="margin-bottom:6px" oninput="markConfigDirty()" />
+        <label class="cfg-label">Subject <span style="font-size:10px">(optional, has default)</span></label>
+        <input id="cfgMailSubject" class="cfg-input" style="margin-bottom:6px" placeholder="Dependency-Track Risk Report" oninput="markConfigDirty()" />
+        <label class="cfg-label">Body <span style="font-size:10px">(optional)</span></label>
+        <textarea id="cfgMailBodyTa" class="cfg-textarea" style="margin-bottom:10px" oninput="markConfigDirty()"></textarea>
+        <button class="btn" style="margin-bottom:4px" onclick="testEmailFromPanel()">Send Test Email</button>
+
+        <div class="cfg-sub-title">Schedule</div>
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px">
+          <span style="font-size:13px;color:var(--text)">Enable automatic reports</span>
+          <label class="cfg-toggle">
+            <input type="checkbox" id="cfgSchedEnabled" onchange="onSchedToggle()">
+            <span class="cfg-toggle-slider"></span>
+          </label>
+        </div>
+        <div id="cfgSchedBody" style="display:none">
+          <label class="cfg-label" style="margin-top:0">Frequency</label>
+          <select id="cfgSchedFreq" class="cfg-input" style="margin-bottom:8px;cursor:pointer" onchange="onSchedFreqChange()">
+            <option value="daily">Daily</option>
+            <option value="weekly">Weekly</option>
+            <option value="monthly">Monthly</option>
+          </select>
+          <label class="cfg-label">Send at hour <span style="font-size:10px">(0–23, server local time)</span></label>
+          <input id="cfgSchedHour" type="number" min="0" max="23" class="cfg-input" style="width:80px;margin-bottom:8px" value="9" oninput="markConfigDirty()" />
+          <div id="cfgSchedWeekRow" style="display:none;margin-bottom:8px">
+            <label class="cfg-label" style="margin-top:0">Day(s) of week</label>
+            <div class="cfg-weekdays">
+              <label class="cfg-weekday"><input type="checkbox" value="0" onchange="markConfigDirty()"><span>Su</span></label>
+              <label class="cfg-weekday"><input type="checkbox" value="1" onchange="markConfigDirty()"><span>Mo</span></label>
+              <label class="cfg-weekday"><input type="checkbox" value="2" onchange="markConfigDirty()"><span>Tu</span></label>
+              <label class="cfg-weekday"><input type="checkbox" value="3" onchange="markConfigDirty()"><span>We</span></label>
+              <label class="cfg-weekday"><input type="checkbox" value="4" onchange="markConfigDirty()"><span>Th</span></label>
+              <label class="cfg-weekday"><input type="checkbox" value="5" onchange="markConfigDirty()"><span>Fr</span></label>
+              <label class="cfg-weekday"><input type="checkbox" value="6" onchange="markConfigDirty()"><span>Sa</span></label>
+            </div>
+          </div>
+          <div id="cfgSchedMonthRow" style="display:none;margin-bottom:8px">
+            <label class="cfg-label" style="margin-top:0">Day of month <span style="font-size:10px">(1–28)</span></label>
+            <input id="cfgSchedMonthDay" type="number" min="1" max="28" class="cfg-input" style="width:80px" value="1" oninput="markConfigDirty()" />
+          </div>
+          <label class="cfg-label">Risk categories to include</label>
+          <div style="display:flex;gap:14px;margin-bottom:10px;margin-top:4px">
+            <label style="display:flex;align-items:center;gap:5px;font-size:13px;cursor:pointer">
+              <input type="checkbox" id="cfgSchedSecurity" onchange="markConfigDirty()" style="accent-color:var(--accent);cursor:pointer"> Security
+            </label>
+            <label style="display:flex;align-items:center;gap:5px;font-size:13px;cursor:pointer">
+              <input type="checkbox" id="cfgSchedLicense" onchange="markConfigDirty()" style="accent-color:var(--accent);cursor:pointer"> License
+            </label>
+            <label style="display:flex;align-items:center;gap:5px;font-size:13px;cursor:pointer">
+              <input type="checkbox" id="cfgSchedOperational" onchange="markConfigDirty()" style="accent-color:var(--accent);cursor:pointer"> Operational
+            </label>
+          </div>
+          <div id="cfgSchedStatus" style="font-size:12px;background:var(--surface);border:1px solid var(--border);border-radius:6px;padding:10px 12px;margin-bottom:10px;display:none">
+            <div id="cfgSchedLastRun"></div>
+            <div id="cfgSchedNextRun" style="margin-top:4px"></div>
+          </div>
+          <button class="btn" id="cfgCancelSchedBtn" style="display:none;border-color:var(--critical);color:var(--critical)" onclick="cancelSchedule()">Cancel Schedule</button>
+        </div>
+
+      </div><!-- end cfgMailBody -->
+    </div><!-- end Email section -->
+
+  </div><!-- end cfg-panel-body -->
+  <div class="cfg-panel-footer">
+    <button class="btn primary" id="cfgSaveBtn" onclick="saveConfigPanel()">Save</button>
+    <button class="btn" onclick="cancelConfigPanel()">Cancel</button>
+  </div>
+</div>
+
 <!-- SPDX-License-Identifier: MIT -->
 <script>
 // ── Module wrapper ─────────────────────────────────────────────────────────
@@ -870,6 +1060,329 @@ let flatView         = false;  // when true: leaf-only flat list, no hierarchy
 let _searchDebounce    = null;   // timer id for search input debounce (200 ms)
 let _fetchController   = null;   // AbortController — cancelled on every new connect/refresh
 let selectedProjectUuids = new Set(); // UUIDs of leaf projects manually checked for report
+
+// ── Config panel state ─────────────────────────────────────────────────────
+let _configPanelDirty = false;   // true when any config panel field has changed
+let _appConfig        = null;    // last fetched config from /violation-cache/config
+
+// ── Config Panel ──────────────────────────────────────────────────────────────
+function openConfigPanel() {
+  document.getElementById('cfgBackdrop').classList.add('open');
+  document.getElementById('configPanel').classList.add('open');
+  _configPanelDirty = false;
+  loadConfigFromServer();
+}
+
+function closeConfigPanel(force = false) {
+  if (!force && _configPanelDirty) {
+    if (!confirm('You have unsaved changes. Discard them?')) return;
+  }
+  document.getElementById('cfgBackdrop').classList.remove('open');
+  document.getElementById('configPanel').classList.remove('open');
+  _configPanelDirty = false;
+}
+
+function markConfigDirty() { _configPanelDirty = true; }
+
+async function loadConfigFromServer() {
+  try {
+    const r = await fetch('/violation-cache/config');
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    const data = await r.json();
+    const cfg = data.config || {};
+    _appConfig = cfg;
+
+    // Connection
+    document.getElementById('cfgApiUrl').value      = apiBaseUrl || '';
+    document.getElementById('cfgFrontendUrl').value = dtFrontendUrl || '';
+    document.getElementById('cfgApiKey').value      = '';
+    const autoNote = document.getElementById('cfgAutoKeyNote');
+    if (data.apiKey) {
+      autoNote.style.display = '';
+      autoNote.textContent   = '✓ API key configured' + (data.envFileMounted ? ' (from .env file)' : '') + '.';
+    } else {
+      autoNote.style.display = 'none';
+    }
+
+    // Max reports
+    document.getElementById('cfgMaxReports').value = cfg.maxReports || 10;
+
+    // Mail
+    const mailEnabled = !!(cfg.mail && cfg.mail.enabled);
+    document.getElementById('cfgMailEnabled').checked   = mailEnabled;
+    document.getElementById('cfgMailBody').style.display = mailEnabled ? '' : 'none';
+    if (cfg.mail) {
+      const m = cfg.mail; const smtp = m.smtp || {};
+      document.getElementById('cfgSmtpHost').value    = smtp.host || '';
+      document.getElementById('cfgSmtpPort').value    = smtp.port || 587;
+      document.getElementById('cfgSmtpSecure').checked = !!smtp.secure;
+      document.getElementById('cfgSmtpUser').value    = smtp.user || '';
+      document.getElementById('cfgSmtpPass').value    = '';
+      document.getElementById('cfgMailFrom').value    = m.from || '';
+      document.getElementById('cfgMailTo').value      = (m.to || []).join(', ');
+      document.getElementById('cfgMailCc').value      = (m.cc || []).join(', ');
+      document.getElementById('cfgMailSubject').value = m.subject || '';
+      document.getElementById('cfgMailBodyTa').value  = m.body || '';
+    }
+
+    // Schedule
+    const sched = cfg.schedule || {};
+    const schedEnabled = !!sched.enabled;
+    document.getElementById('cfgSchedEnabled').checked    = schedEnabled;
+    document.getElementById('cfgSchedBody').style.display = schedEnabled ? '' : 'none';
+    document.getElementById('cfgSchedFreq').value         = sched.frequency || 'daily';
+    document.getElementById('cfgSchedHour').value         = sched.hour !== undefined ? sched.hour : 9;
+    document.getElementById('cfgSchedMonthDay').value     = sched.monthDay || 1;
+    onSchedFreqChange();
+    const wds = sched.weekDays || [];
+    document.querySelectorAll('.cfg-weekday input').forEach(cb => {
+      cb.checked = wds.includes(parseInt(cb.value, 10));
+    });
+    const rt = sched.riskTypes || [];
+    document.getElementById('cfgSchedSecurity').checked    = rt.includes('security');
+    document.getElementById('cfgSchedLicense').checked     = rt.includes('license');
+    document.getElementById('cfgSchedOperational').checked = rt.includes('operational');
+    renderScheduleStatus(sched);
+    _configPanelDirty = false;
+  } catch (e) {
+    showToast(`Failed to load config: ${e.message}`, 'error');
+  }
+}
+
+function renderScheduleStatus(sched) {
+  const box       = document.getElementById('cfgSchedStatus');
+  const lastEl    = document.getElementById('cfgSchedLastRun');
+  const nextEl    = document.getElementById('cfgSchedNextRun');
+  const cancelBtn = document.getElementById('cfgCancelSchedBtn');
+  if (!sched || !sched.enabled) {
+    box.style.display       = 'none';
+    cancelBtn.style.display = 'none';
+    return;
+  }
+  box.style.display       = '';
+  cancelBtn.style.display = '';
+  const lr = sched.lastRun; const ls = sched.lastRunStatus; const nr = sched.nextRun;
+  if (lr) {
+    let s = `<strong>Last run:</strong> ${new Date(lr).toLocaleString()} — `;
+    if (ls === 'success') s += `<span style="color:var(--ok)">&#10003; Success</span>`;
+    else if (ls === 'failed') s += `<span style="color:var(--critical)">&#10007; Failed${sched.lastRunError ? ': ' + sched.lastRunError : ''}</span>`;
+    else s += ls || '—';
+    lastEl.innerHTML = s;
+  } else {
+    lastEl.innerHTML = '<strong>Last run:</strong> Never';
+  }
+  nextEl.innerHTML = nr
+    ? `<strong>Next run:</strong> ${new Date(nr).toLocaleString()}`
+    : '<strong>Next run:</strong> —';
+}
+
+function onMailToggle() {
+  document.getElementById('cfgMailBody').style.display =
+    document.getElementById('cfgMailEnabled').checked ? '' : 'none';
+  markConfigDirty();
+}
+
+function onSchedToggle() {
+  document.getElementById('cfgSchedBody').style.display =
+    document.getElementById('cfgSchedEnabled').checked ? '' : 'none';
+  markConfigDirty();
+}
+
+function onSchedFreqChange() {
+  const freq = document.getElementById('cfgSchedFreq').value;
+  document.getElementById('cfgSchedWeekRow').style.display  = freq === 'weekly'  ? '' : 'none';
+  document.getElementById('cfgSchedMonthRow').style.display = freq === 'monthly' ? '' : 'none';
+  markConfigDirty();
+}
+
+async function saveConfigPanel() {
+  const maxReports = parseInt(document.getElementById('cfgMaxReports').value, 10) || 10;
+  const mailEnabled = document.getElementById('cfgMailEnabled').checked;
+  const smtpPass    = document.getElementById('cfgSmtpPass').value;
+  const schedEnabled = document.getElementById('cfgSchedEnabled').checked;
+  const weekDays = [];
+  document.querySelectorAll('.cfg-weekday input:checked').forEach(cb => weekDays.push(parseInt(cb.value, 10)));
+  const riskTypes = [];
+  if (document.getElementById('cfgSchedSecurity').checked)    riskTypes.push('security');
+  if (document.getElementById('cfgSchedLicense').checked)     riskTypes.push('license');
+  if (document.getElementById('cfgSchedOperational').checked) riskTypes.push('operational');
+
+  const config = {
+    maxReports,
+    mail: {
+      enabled: mailEnabled,
+      smtp: {
+        host:   document.getElementById('cfgSmtpHost').value.trim(),
+        port:   parseInt(document.getElementById('cfgSmtpPort').value, 10) || 587,
+        secure: document.getElementById('cfgSmtpSecure').checked,
+        user:   document.getElementById('cfgSmtpUser').value.trim(),
+        pass:   smtpPass || '••••••••',
+      },
+      from:    document.getElementById('cfgMailFrom').value.trim(),
+      to:      document.getElementById('cfgMailTo').value.split(',').map(s => s.trim()).filter(Boolean),
+      cc:      document.getElementById('cfgMailCc').value.split(',').map(s => s.trim()).filter(Boolean),
+      subject: document.getElementById('cfgMailSubject').value.trim(),
+      body:    document.getElementById('cfgMailBodyTa').value.trim(),
+    },
+    schedule: {
+      enabled:      schedEnabled,
+      frequency:    document.getElementById('cfgSchedFreq').value,
+      hour:         parseInt(document.getElementById('cfgSchedHour').value, 10) || 9,
+      weekDays,
+      monthDay:     parseInt(document.getElementById('cfgSchedMonthDay').value, 10) || 1,
+      projectUuids: (_appConfig && _appConfig.schedule && _appConfig.schedule.projectUuids) || [],
+      riskTypes,
+    },
+  };
+
+  const apiKeyVal = document.getElementById('cfgApiKey').value.trim();
+  const urlVal    = (document.getElementById('cfgApiUrl').value || '').trim().replace(/\/$/, '');
+  const frontVal  = (document.getElementById('cfgFrontendUrl').value || '').trim().replace(/\/$/, '');
+
+  try {
+    const r = await fetch('/violation-cache/config', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ config }),
+    });
+    if (!r.ok) {
+      const bd = await r.json().catch(() => ({}));
+      showToast(`Save failed: ${bd.error || r.statusText}`, 'error');
+      return;
+    }
+    if (apiKeyVal) {
+      await fetch('/violation-cache/config', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ apiKey: apiKeyVal }),
+      }).catch(() => {});
+      apiKey = apiKeyVal;
+      localStorage.setItem('dt_api_key', apiKey);
+    }
+    apiBaseUrl    = urlVal;
+    dtFrontendUrl = frontVal;
+    if (apiBaseUrl)    localStorage.setItem('dt_api_url', apiBaseUrl);
+    else               localStorage.removeItem('dt_api_url');
+    if (dtFrontendUrl) localStorage.setItem('dt_frontend_url', dtFrontendUrl);
+    else               localStorage.removeItem('dt_frontend_url');
+
+    _configPanelDirty = false;
+    showToast('Settings saved.', 'success');
+    await loadConfigFromServer();
+  } catch (e) {
+    showToast(`Save failed: ${e.message}`, 'error');
+  }
+}
+
+function cancelConfigPanel() { closeConfigPanel(false); }
+
+async function connectFromPanel() {
+  const apiKeyVal = document.getElementById('cfgApiKey').value.trim();
+  if (apiKeyVal) {
+    apiKey = apiKeyVal;
+    preconfiguredKey = false;
+    localStorage.setItem('dt_api_key', apiKey);
+  }
+  const urlVal   = (document.getElementById('cfgApiUrl').value || '').trim().replace(/\/$/, '');
+  const frontVal = (document.getElementById('cfgFrontendUrl').value || '').trim().replace(/\/$/, '');
+  apiBaseUrl    = urlVal;
+  dtFrontendUrl = frontVal;
+  if (apiBaseUrl)    localStorage.setItem('dt_api_url', apiBaseUrl);
+  else               localStorage.removeItem('dt_api_url');
+  if (dtFrontendUrl) localStorage.setItem('dt_frontend_url', dtFrontendUrl);
+  else               localStorage.removeItem('dt_frontend_url');
+  if (apiKeyVal) {
+    fetch('/violation-cache/config', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ apiKey }),
+    }).catch(() => {});
+  }
+  closeConfigPanel(true);
+  await connectLiveApi();
+}
+
+async function testEmailFromPanel() {
+  const btn = document.querySelector('[onclick="testEmailFromPanel()"]');
+  if (btn) { btn.disabled = true; btn.textContent = 'Sending…'; }
+  try {
+    const r  = await fetch('/violation-cache/config/test-email', { method: 'POST' });
+    const bd = await r.json().catch(() => ({}));
+    if (r.ok) showToast('Test email sent successfully.', 'success');
+    else      showToast(`Test email failed: ${bd.error || r.statusText}`, 'error');
+  } catch (e) {
+    showToast(`Test email error: ${e.message}`, 'error');
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = 'Send Test Email'; }
+  }
+}
+
+async function cancelSchedule() {
+  if (!confirm('Cancel the current schedule? Scheduled reports will stop sending.')) return;
+  try {
+    const r = await fetch('/violation-cache/schedule', { method: 'DELETE' });
+    if (!r.ok) {
+      const bd = await r.json().catch(() => ({}));
+      showToast(`Failed to cancel schedule: ${bd.error || r.statusText}`, 'error');
+      return;
+    }
+    showToast('Schedule cancelled.', 'success');
+    await loadConfigFromServer();
+  } catch (e) {
+    showToast(`Error cancelling schedule: ${e.message}`, 'error');
+  }
+}
+
+async function scheduleReports() {
+  const leafUuids = selectedProjectUuids.size > 0
+    ? [...selectedProjectUuids]
+    : filtered.filter(p => !p._children || p._children.length === 0).map(p => p.uuid);
+  if (leafUuids.length === 0) {
+    showToast('No projects to schedule — load data first.', 'warn');
+    return;
+  }
+  // Load current config if not yet cached
+  if (!_appConfig) {
+    try {
+      const r = await fetch('/violation-cache/config');
+      if (r.ok) { const d = await r.json(); _appConfig = d.config || {}; }
+    } catch (_) {}
+  }
+  const cfg = _appConfig || {};
+  const alreadyScheduled = !!(cfg.schedule && cfg.schedule.enabled && (cfg.schedule.projectUuids || []).length > 0);
+  if (alreadyScheduled) {
+    const ok = await showConfirm(
+      'Replace Existing Schedule?',
+      'A schedule is already active. This will replace it with the current project selection. Continue?',
+      'Replace', 'Cancel'
+    );
+    if (!ok) return;
+  }
+  const ok = await showConfirm(
+    'Schedule Reports',
+    `Schedule recurring reports for ${leafUuids.length} project${leafUuids.length !== 1 ? 's' : ''}? Frequency and email settings are configured in Settings (⚙).`,
+    'Schedule', 'Cancel'
+  );
+  if (!ok) return;
+  try {
+    const newCfg = JSON.parse(JSON.stringify(cfg));
+    if (!newCfg.schedule) newCfg.schedule = {};
+    newCfg.schedule.projectUuids = leafUuids;
+    const r = await fetch('/violation-cache/config', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ config: newCfg }),
+    });
+    if (!r.ok) {
+      const bd = await r.json().catch(() => ({}));
+      showToast(`Failed to schedule: ${bd.error || r.statusText}`, 'error');
+      return;
+    }
+    _appConfig = newCfg;
+    showToast(`Scheduled — ${leafUuids.length} project${leafUuids.length !== 1 ? 's' : ''} queued.`, 'success');
+  } catch (e) {
+    showToast(`Error scheduling: ${e.message}`, 'error');
+  }
+}
 
 // ── Mock Data ─────────────────────────────────────────────────────────────
 // Q6: seeded pseudo-random number generator (LCG) so mock data is deterministic
@@ -2124,42 +2637,14 @@ function applyViolationData(map) {
 }
 
 // ── Connect to live API ────────────────────────────────────────────────────
-async function connectLiveApi(fromModal = false) {
+async function connectLiveApi() {
   // Cancel any in-flight load from a previous connect/refresh — prevents races.
   if (_fetchController) _fetchController.abort();
   _fetchController = new AbortController();
 
-  if (fromModal) {
-    const inputKey = document.getElementById('apiKeyInput').value.trim();
-    if (inputKey) {
-      apiKey = inputKey;
-      preconfiguredKey = false;
-      localStorage.setItem('dt_api_key', apiKey);  // persist so page reloads re-connect
-    }
-    const urlVal = (document.getElementById('apiUrlInput').value || '').trim().replace(/\/$/, '');
-    apiBaseUrl = urlVal;
-    if (apiBaseUrl) localStorage.setItem('dt_api_url', apiBaseUrl);
-    else            localStorage.removeItem('dt_api_url');
-
-    const frontendVal = (document.getElementById('dtFrontendUrlInput').value || '').trim().replace(/\/$/, '');
-    dtFrontendUrl = frontendVal;
-    if (dtFrontendUrl) localStorage.setItem('dt_frontend_url', dtFrontendUrl);
-    else               localStorage.removeItem('dt_frontend_url');
-
-    // Persist the API key to the cache service so the next violation fetch
-    // uses the same key the browser is now using, regardless of env vars.
-    if (apiKey) {
-      fetch('/violation-cache/config', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ apiKey }),
-      }).catch(() => { /* non-fatal — cache will use its own configured key */ });
-    }
-  }
+  // Connection state (apiKey, apiBaseUrl, dtFrontendUrl) is set before calling this function.
 
   if (!apiKey) { alert('Please enter an API key.'); return; }
-
-  const warnings = [];  // collects non-fatal errors shown in the banner after load
 
   try {
     // Phase 1 — project hierarchy
@@ -2173,7 +2658,6 @@ async function connectLiveApi(fromModal = false) {
         '✓ Connected — no projects found. Upload an SBOM to get started.';
       document.getElementById('dataBanner').className = 'data-banner live';
       setStatus('Live', 'var(--ok)', false);
-      closeModal('apiModal');
       afterLoad();
       return true;
     }
@@ -2192,7 +2676,6 @@ async function connectLiveApi(fromModal = false) {
       `✓ Live — ${allProjects.length} projects. ⏳ Refetching violations…`;
     document.getElementById('dataBanner').className = 'data-banner';
     setStatus('Live', 'var(--ok)', false);
-    closeModal('apiModal');
     afterLoad();
 
     // Phase 3 — load violation counts from the shared server-side cache service.
@@ -2206,7 +2689,7 @@ async function connectLiveApi(fromModal = false) {
   } catch(err) {
     if (err.name === 'AbortError') return false; // silently cancelled — a new load is starting
     setStatus('Error', 'var(--critical)', false);
-    if (fromModal) alert('Connection failed: ' + err.message);
+    showToast('Connection failed: ' + err.message, 'error');
     return false;
   }
 }
@@ -2223,33 +2706,6 @@ function openModal(id) {
     refreshReportsList();
     if (!_reportPollTimer) {
       _reportPollTimer = setInterval(refreshReportsList, 5000);
-    }
-  }
-  if (id === 'apiModal') {
-    const inp = document.getElementById('apiUrlInput');
-    if (inp && !inp.value) {
-      if (apiBaseUrl) {
-        inp.value = apiBaseUrl;
-      } else if (dtProxyTarget) {
-        inp.placeholder = `${dtProxyTarget}  (nginx proxy — not directly reachable from browser)`;
-      }
-    }
-    // Pre-fill DT Frontend URL from saved value
-    const fInp = document.getElementById('dtFrontendUrlInput');
-    if (fInp && !fInp.value && dtFrontendUrl) fInp.value = dtFrontendUrl;
-    // Update the proxy-target label in the note
-    const el = document.getElementById('proxyTargetUrl');
-    if (el && dtProxyTarget) el.textContent = dtProxyTarget;
-    // Show pre-configured key note and update placeholder
-    const note = document.getElementById('preConfiguredKeyNote');
-    if (note) note.style.display = preconfiguredKey ? '' : 'none';
-    const keyInp = document.getElementById('apiKeyInput');
-    if (keyInp) {
-      keyInp.placeholder = preconfiguredKey
-        ? 'Pre-configured via DT_API_KEY — enter a new key to override'
-        : apiKey
-          ? 'Saved key in use — enter a new key to change'
-          : 'odt_xxxxxxxxxxxxxxxxxxxxxxxxxx';
     }
   }
 }
@@ -2327,24 +2783,10 @@ async function loadDtConfig() {
         const target = cfg.proxyTarget.replace(/\/$/, '');
         dtProxyTarget = target;
 
-        // Show the configured proxy URL in the modal note
-        const el = document.getElementById('proxyTargetUrl');
-        if (el) el.textContent = target;
-
         // If the user hasn't manually saved an API URL and the proxy target is
         // reachable from the browser, pre-fill it (surfaces DT_API_INTERNAL_URL).
         if (!localStorage.getItem('dt_api_url') && isBrowserReachable(target)) {
           apiBaseUrl = target;
-        }
-
-        // Populate the API URL field if it is still blank
-        const inp = document.getElementById('apiUrlInput');
-        if (inp && !inp.value) {
-          if (apiBaseUrl) {
-            inp.value = apiBaseUrl;
-          } else {
-            inp.placeholder = `${target}  (nginx proxy — not directly reachable from browser)`;
-          }
         }
       }
 
@@ -2352,8 +2794,6 @@ async function loadDtConfig() {
       // the user has not already saved a value in localStorage.
       if (cfg.frontendUrl && !localStorage.getItem('dt_frontend_url')) {
         dtFrontendUrl = cfg.frontendUrl.replace(/\/$/, '');
-        const fInp = document.getElementById('dtFrontendUrlInput');
-        if (fInp && !fInp.value) fInp.value = dtFrontendUrl;
       }
 
       if (cfg.apiKey && typeof cfg.apiKey === 'string') {
@@ -2386,50 +2826,6 @@ async function loadDtConfig() {
 
   return false;
 }
-
-// ── Probe the DT API for connectivity (retries every 3s while modal is open) ──
-let _probeRetry   = null;
-let _probeDebounce = null;
-function scheduleProbe() {
-  if (_probeDebounce) clearTimeout(_probeDebounce);
-  _probeDebounce = setTimeout(probeProxyTarget, 500);
-}
-async function probeProxyTarget() {
-  if (_probeRetry) { clearTimeout(_probeRetry); _probeRetry = null; }
-  const modal = document.getElementById('apiModal');
-  const el    = document.getElementById('proxyTargetDisplay');
-  if (!el || !modal.classList.contains('open')) return;
-
-  // Use the URL currently typed in the field, or fall back to stored apiBaseUrl
-  const urlField = document.getElementById('apiUrlInput');
-  const base = (urlField ? urlField.value.trim().replace(/\/$/, '') : '') || apiBaseUrl;
-
-  el.style.color = '';
-  el.textContent = 'checking…';
-  try {
-    const r = await fetch(`${base}/api/version`, { signal: AbortSignal.timeout(4000) });
-    if (r.ok) {
-      const v = await r.json();
-      el.textContent = `DependencyTrack ${v.application||''} ${v.version||'(connected)'}`.trim();
-      return; // success — stop retrying
-    }
-    el.textContent = base ? 'reachable but DT not responding yet' : 'proxy reachable — DT not responding yet';
-  } catch(_) {
-    el.textContent = base
-      ? `not reachable — check the URL above`
-      : 'not reachable — check DT_API_INTERNAL_URL in .env';
-    el.style.color = 'var(--critical)';
-  }
-  // Retry in 3 s if the modal is still open
-  _probeRetry = setTimeout(probeProxyTarget, CONFIG.PROBE_RETRY_MS);
-}
-document.getElementById('apiModal').addEventListener('transitionend', () => {
-  if (document.getElementById('apiModal').classList.contains('open')) {
-    probeProxyTarget();
-  } else {
-    if (_probeRetry) { clearTimeout(_probeRetry); _probeRetry = null; }
-  }
-});
 
 // ── Theme (dark / light) ──────────────────────────────────────────────────
 function initTheme() {
@@ -2933,10 +3329,8 @@ window.onMultiChange        = onMultiChange;
 window.toggleNode           = toggleNode;
 window.toggleExpandCollapse = toggleExpandCollapse;
 window.setRiskFilter        = setRiskFilter;
-window.connectLiveApi       = connectLiveApi;
 window.loadMockData         = loadMockData;
 window.exportCSV            = exportCSV;
-window.scheduleProbe        = scheduleProbe;
 window.toggleTheme          = toggleTheme;
 window.generateReport          = generateReport;
 window.confirmReportOptions    = confirmReportOptions;
@@ -2946,6 +3340,18 @@ window.toggleSelectAll         = toggleSelectAll;
 window.downloadReport          = downloadReport;
 window.clearReport          = clearReport;
 window.cancelReport         = cancelReport;
+window.openConfigPanel      = openConfigPanel;
+window.closeConfigPanel     = closeConfigPanel;
+window.markConfigDirty      = markConfigDirty;
+window.onMailToggle         = onMailToggle;
+window.onSchedToggle        = onSchedToggle;
+window.onSchedFreqChange    = onSchedFreqChange;
+window.saveConfigPanel      = saveConfigPanel;
+window.cancelConfigPanel    = cancelConfigPanel;
+window.connectFromPanel     = connectFromPanel;
+window.testEmailFromPanel   = testEmailFromPanel;
+window.cancelSchedule       = cancelSchedule;
+window.scheduleReports      = scheduleReports;
 
 // ── Init ───────────────────────────────────────────────────────────────────
 initTheme();
@@ -2955,6 +3361,16 @@ buildColHeaders();
 loadDtConfig().then(autoConnected => {
   if (!autoConnected) loadMockData();
 });
+
+// Check for schedule failure notifications from the server
+fetch('/violation-cache/schedule/status').then(async r => {
+  if (!r.ok) return;
+  const s = await r.json();
+  if (s.failureNotification) {
+    showToast(`Scheduled report failed: ${s.failureNotification}`, 'error');
+    fetch('/violation-cache/schedule/ack-notification', { method: 'POST' }).catch(() => {});
+  }
+}).catch(() => {});
 
 })(); // end module IIFE
 </script>
