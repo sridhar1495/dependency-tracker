@@ -673,6 +673,7 @@
     }
     .cfg-toggle input:checked + .cfg-toggle-slider { background: var(--accent); }
     .cfg-toggle input:checked + .cfg-toggle-slider::before { transform: translateX(16px); }
+    .cfg-toggle input:disabled + .cfg-toggle-slider { opacity: 0.35; cursor: not-allowed; }
     .cfg-weekdays { display: flex; gap: 4px; flex-wrap: wrap; margin-top: 4px; }
     .cfg-weekday { cursor: pointer; }
     .cfg-weekday input { display: none; }
@@ -925,7 +926,7 @@
         <div class="cfg-row">
           <div style="flex:1">
             <label class="cfg-label" style="margin-top:0">Host</label>
-            <input id="cfgSmtpHost" class="cfg-input" placeholder="smtp.gmail.com" oninput="markConfigDirty()" />
+            <input id="cfgSmtpHost" class="cfg-input" placeholder="smtp.gmail.com" oninput="markConfigDirty(); updateSchedToggleState()" />
           </div>
           <div style="width:76px">
             <label class="cfg-label" style="margin-top:0">Port</label>
@@ -947,9 +948,9 @@
           </div>
         </div>
         <label class="cfg-label">From Address</label>
-        <input id="cfgMailFrom" class="cfg-input" style="margin-bottom:6px" placeholder="alerts@company.com" oninput="markConfigDirty()" />
+        <input id="cfgMailFrom" class="cfg-input" style="margin-bottom:6px" placeholder="alerts@company.com" oninput="markConfigDirty(); updateSchedToggleState()" />
         <label class="cfg-label">To <span style="font-size:10px">(comma-separated)</span></label>
-        <input id="cfgMailTo" class="cfg-input" style="margin-bottom:6px" placeholder="team@company.com, manager@company.com" oninput="markConfigDirty()" />
+        <input id="cfgMailTo" class="cfg-input" style="margin-bottom:6px" placeholder="team@company.com, manager@company.com" oninput="markConfigDirty(); updateSchedToggleState()" />
         <label class="cfg-label">CC <span style="font-size:10px">(comma-separated, optional)</span></label>
         <input id="cfgMailCc" class="cfg-input" style="margin-bottom:6px" oninput="markConfigDirty()" />
         <label class="cfg-label">Subject <span style="font-size:10px">(optional, has default)</span></label>
@@ -960,12 +961,15 @@
           title="Tests with the values currently on screen — click Save to apply them to the schedule">Send Test Email</button>
 
         <div class="cfg-sub-title">Schedule</div>
-        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px">
+        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px">
           <span style="font-size:13px;color:var(--text)">Enable automatic reports</span>
           <label class="cfg-toggle">
             <input type="checkbox" id="cfgSchedEnabled" onchange="onSchedToggle()">
             <span class="cfg-toggle-slider"></span>
           </label>
+        </div>
+        <div id="cfgSchedHint" style="display:none;font-size:11px;color:var(--text-muted);margin-bottom:10px">
+          ⚠ Configure SMTP host, From address, and To address above first.
         </div>
         <div id="cfgSchedBody" style="display:none">
           <label class="cfg-label" style="margin-top:0">Frequency</label>
@@ -1174,6 +1178,7 @@ async function loadConfigFromServer() {
     document.getElementById('cfgSchedLicense').checked     = rt.includes('license');
     document.getElementById('cfgSchedOperational').checked = rt.includes('operational');
     renderScheduleStatus(sched);
+    updateSchedToggleState();
     _configPanelDirty = false;
   } catch (e) {
     showToast(`Failed to load config: ${e.message}`, 'error');
@@ -1211,6 +1216,30 @@ function onMailToggle() {
   document.getElementById('cfgMailBody').style.display =
     document.getElementById('cfgMailEnabled').checked ? '' : 'none';
   markConfigDirty();
+  updateSchedToggleState();
+}
+
+/** Disable the schedule toggle when required email fields are not yet filled. */
+function updateSchedToggleState() {
+  const mailEnabled = document.getElementById('cfgMailEnabled').checked;
+  const host        = document.getElementById('cfgSmtpHost').value.trim();
+  const from        = document.getElementById('cfgMailFrom').value.trim();
+  const to          = document.getElementById('cfgMailTo').value.trim();
+  const emailReady  = mailEnabled && host && from && to;
+
+  const toggle = document.getElementById('cfgSchedEnabled');
+  const hint   = document.getElementById('cfgSchedHint');
+  if (!emailReady) {
+    toggle.disabled = true;
+    if (toggle.checked) {
+      toggle.checked = false;
+      document.getElementById('cfgSchedBody').style.display = 'none';
+    }
+    if (hint) hint.style.display = '';
+  } else {
+    toggle.disabled = false;
+    if (hint) hint.style.display = 'none';
+  }
 }
 
 function onSchedToggle() {
@@ -1268,19 +1297,42 @@ async function saveConfigPanel() {
 
     let schedConfig;
     if (schedEnabled) {
+      const freq       = document.getElementById('cfgSchedFreq').value;
+      const hourVal    = parseInt(document.getElementById('cfgSchedHour').value, 10);
+      const monthDayVal = parseInt(document.getElementById('cfgSchedMonthDay').value, 10);
+
+      if (isNaN(hourVal) || hourVal < 0 || hourVal > 23) {
+        showToast('Schedule hour must be between 0 and 23.', 'error');
+        return;
+      }
+      if (freq === 'monthly' && (isNaN(monthDayVal) || monthDayVal < 1 || monthDayVal > 28)) {
+        showToast('Day of month must be between 1 and 28.', 'error');
+        return;
+      }
+
       const weekDays = [];
       document.querySelectorAll('.cfg-weekday input:checked').forEach(cb => weekDays.push(parseInt(cb.value, 10)));
+      if (freq === 'weekly' && weekDays.length === 0) {
+        showToast('Please select at least one day of the week.', 'error');
+        return;
+      }
+
       const riskTypes = [];
       if (document.getElementById('cfgSchedSecurity').checked)    riskTypes.push('security');
       if (document.getElementById('cfgSchedLicense').checked)     riskTypes.push('license');
       if (document.getElementById('cfgSchedOperational').checked) riskTypes.push('operational');
+      if (riskTypes.length === 0) {
+        showToast('Please select at least one risk type for the schedule.', 'error');
+        return;
+      }
+
       schedConfig = {
         ...existingSched,
-        enabled:   true,
-        frequency: document.getElementById('cfgSchedFreq').value,
-        hour:      parseInt(document.getElementById('cfgSchedHour').value, 10) || 9,
+        enabled:  true,
+        frequency: freq,
+        hour:      hourVal,
         weekDays,
-        monthDay:  parseInt(document.getElementById('cfgSchedMonthDay').value, 10) || 1,
+        monthDay:  freq === 'monthly' ? monthDayVal : (existingSched.monthDay || 1),
         riskTypes,
       };
     } else {
@@ -3521,9 +3573,10 @@ window.openConfigPanel      = openConfigPanel;
 window.closeConfigPanel     = closeConfigPanel;
 window.markConfigDirty      = markConfigDirty;
 window.resetMaxReports      = resetMaxReports;
-window.onMailToggle         = onMailToggle;
-window.onSchedToggle        = onSchedToggle;
-window.onSchedFreqChange    = onSchedFreqChange;
+window.onMailToggle           = onMailToggle;
+window.updateSchedToggleState = updateSchedToggleState;
+window.onSchedToggle          = onSchedToggle;
+window.onSchedFreqChange      = onSchedFreqChange;
 window.saveConfigPanel      = saveConfigPanel;
 window.cancelConfigPanel    = cancelConfigPanel;
 window.connectFromPanel     = connectFromPanel;
