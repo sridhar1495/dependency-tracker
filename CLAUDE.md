@@ -466,7 +466,7 @@ Key routing decisions:
 - Both services declare `healthcheck` — do not remove.
 - The `.env` file is **bind-mounted** into `dt-violation-cache` so config updates
   survive without a restart.
-- Volume `violation-cache-data` persists `/data` between restarts.
+- `./violation-cache/data` is **bind-mounted** to `/data` so all persisted files survive container restarts without Docker volume management. Do not change this to a named volume.
 
 ### 7.3 Dockerfile
 
