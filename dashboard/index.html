@@ -213,10 +213,25 @@
     /* ── Fixed widths — prevent layout shift when text/options change ──────── */
     #riskFilter       { width: 142px; }
     #categoryFilter   { width: 150px; }
-    #levelFilter      { width: 110px; }
     #latestFilterBtn,
     #flatViewBtn      { min-width: 110px; justify-content: center; }
     #expandCollapseBtn { min-width: 122px; justify-content: center; }
+
+    /* ── Report action dropdown ──────────────────────────────────────────── */
+    .rpt-drop { position: relative; display: inline-block; }
+    .rpt-drop-menu {
+      position: absolute; top: calc(100% + 4px); right: 0;
+      background: var(--surface); border: 1px solid var(--border);
+      border-radius: 6px; min-width: 180px; z-index: 60; display: none;
+      box-shadow: 0 4px 16px rgba(0,0,0,0.3); padding: 4px 0;
+    }
+    .rpt-drop-menu.open { display: block; }
+    .rpt-drop-item {
+      display: block; width: 100%; text-align: left; padding: 9px 14px;
+      background: none; border: none; color: var(--text); font-size: 13px;
+      cursor: pointer; white-space: nowrap;
+    }
+    .rpt-drop-item:hover { background: var(--surface2); }
 
     /* ── Multi-select dropdown ────────────────────────────────────────────── */
     .ms-wrap { position: relative; }
@@ -713,7 +728,7 @@
       <button class="btn" id="latestFilterBtn" onclick="toggleLatestFilter()" title="Show only projects marked as Latest version (+ their parent groups)">★ Latest Only</button>
       <button class="btn" id="flatViewBtn" onclick="toggleFlatView()" title="Show only leaf projects in a flat list (no hierarchy)">⊟ Flat View</button>
 
-      <!-- Dropdowns: Risk → Category → Version → Level (last, hidden in flat view) -->
+      <!-- Dropdowns: Risk → Category → Tags -->
       <select class="filter-select" id="riskFilter" onchange="applyFilters()">
         <option value="all">All risk levels</option>
         <option value="critical">Has Critical</option>
@@ -730,30 +745,33 @@
         <option value="secpolicy">Security Policy</option>
       </select>
 
-      <!-- Version multi-select (OR logic: show projects matching any selected version) -->
-      <div class="ms-wrap" id="versionWrap">
-        <div class="ms-btn" id="versionBtn" onclick="toggleDropdown('versionPanel')">
-          Version <span class="ms-badge" id="versionBadge" style="display:none"></span>
+      <!-- Tags multi-select (AND logic: project must have ALL selected tags) -->
+      <div class="ms-wrap" id="tagWrap">
+        <div class="ms-btn" id="tagBtn" onclick="toggleDropdown('tagPanel')">
+          Tags <span class="ms-badge" id="tagBadge" style="display:none"></span>
           <span class="ms-caret">▾</span>
         </div>
-        <div class="ms-panel" id="versionPanel">
+        <div class="ms-panel" id="tagPanel">
           <div class="ms-panel-header">
-            <span style="font-size:11px;color:var(--text-muted)">Project versions</span>
-            <button onclick="clearFilter('version')">Clear</button>
+            <span style="font-size:11px;color:var(--text-muted)">Filter by tag (AND)</span>
+            <button onclick="clearFilter('tag')">Clear</button>
           </div>
-          <div id="versionOptions"><span class="ms-empty">Load data first</span></div>
+          <div id="tagOptions"><span class="ms-empty">Load data first</span></div>
         </div>
       </div>
 
-      <!-- Level filter last — hidden in flat view so it doesn't shift the layout -->
-      <select class="filter-select" id="levelFilter" onchange="applyFilters()">
-        <option value="all">All levels</option>
-      </select>
-
       <div style="flex:1"></div>
       <button class="btn" id="expandCollapseBtn" onclick="toggleExpandCollapse()" title="Expand all groups">▼ Expand All</button>
-      <button class="btn" id="genReportBtn" onclick="generateReport()" title="Generate Excel vulnerability report — uses selected projects if any are checked, otherwise all visible projects">📋 Generate Report<span id="genReportCount" style="margin-left:4px;font-size:11px;opacity:0.8"></span></button>
-      <button class="btn" id="schedReportBtn" onclick="scheduleReports()" title="Schedule automatic Excel reports to be emailed on a recurring schedule">📅 Schedule Reports</button>
+      <!-- Report dropdown: Generate Report + Schedule Reports combined -->
+      <div class="rpt-drop" id="rptDrop">
+        <button class="btn" id="genReportBtn" onclick="toggleReportDropdown()" title="Generate or schedule Excel reports">
+          📋 Report <span class="ms-caret">▾</span><span id="genReportCount" style="margin-left:4px;font-size:11px;opacity:0.8"></span>
+        </button>
+        <div class="rpt-drop-menu" id="rptDropMenu">
+          <button class="rpt-drop-item" onclick="generateReport(); closeReportDropdown()">📋 Generate Report</button>
+          <button class="rpt-drop-item" onclick="scheduleReports(); closeReportDropdown()">📅 Schedule Reports</button>
+        </div>
+      </div>
       <button class="btn export" onclick="exportCSV()">↓ Export CSV</button>
     </div>
 
@@ -1048,7 +1066,7 @@ let filtered         = [];   // flat array matching current filters (for CSV + c
 let treeRoots        = [];   // root TreeNode[]
 let nodeMap          = new Map(); // uuid → TreeNode
 let expandedUuids    = new Set();
-let selectedVersions = new Set(); // OR logic: show projects whose version is in this set
+let selectedTags     = new Set(); // AND logic: project must have ALL selected tags
 let summaryTotals    = null; // computed once after data load; never recalculated
 let parentUuids      = new Set(); // cached in afterLoad(); never recomputed during filtering
 let currentMatchSet  = null;      // last filter match set; reused by lighter expand/collapse render
@@ -1524,6 +1542,7 @@ function generateMockProjects() {
       parentUuid: parentUuid || null,
       level,
       isLatest:   !hasChildren && !!node.version && (rnd(1) === 1), // use seeded rnd
+      tags:       node.tags || [],
       security:   hasChildren ? mkSec(5,20,40,60,10) : mkSec(3,8,15,20,5),
       operations: hasChildren ? mkPol(2,12,25,2) : mkPol(1,5,10,1),
       license:    hasChildren ? mkPol(1,8,15,2)  : mkPol(1,3,6,1),
@@ -2072,18 +2091,14 @@ function setRiskFilter(val) {
 
 // ── Build filter option panels ─────────────────────────────────────────────
 function buildFilterOptions() {
-  const levels = [...new Set(allProjects.map(p => p.level).filter(l => l != null))].sort((a,b)=>a-b);
-  const lf = document.getElementById('levelFilter');
-  lf.innerHTML = '<option value="all">All levels</option>' +
-    levels.map(l => `<option value="${l}">Level ${l}${l===1?' (Top)':''}</option>`).join('');
+  // Collect all unique tags across every project (including parent group nodes).
+  const allTags = [...new Set(allProjects.flatMap(p => p.tags || []))].sort();
+  const to = document.getElementById('tagOptions');
+  to.innerHTML = allTags.length === 0
+    ? '<span class="ms-empty">No tags found</span>'
+    : allTags.map(t => `<label><input type="checkbox" value="${escHtml(t)}" onchange="onMultiChange('tag')"> ${escHtml(t)}</label>`).join('');
 
-  const versions = [...new Set(allProjects.map(p => p.version).filter(Boolean))].sort();
-  const vo = document.getElementById('versionOptions');
-  vo.innerHTML = versions.length === 0
-    ? '<span class="ms-empty">No versions found</span>'
-    : versions.map(v => `<label><input type="checkbox" value="${escHtml(v)}" onchange="onMultiChange('version')"> ${escHtml(v)}</label>`).join('');
-
-  selectedVersions.clear();
+  selectedTags.clear();
   updateBadges();
 }
 
@@ -2095,10 +2110,9 @@ function debouncedFilter() {
 
 // ── Filters ────────────────────────────────────────────────────────────────
 function applyFilters() {
-  const q        = document.getElementById('searchInput').value.toLowerCase();
-  const risk     = document.getElementById('riskFilter').value;
-  const cat      = document.getElementById('categoryFilter').value;
-  const levelVal = document.getElementById('levelFilter').value;
+  const q    = document.getElementById('searchInput').value.toLowerCase();
+  const risk = document.getElementById('riskFilter').value;
+  const cat  = document.getElementById('categoryFilter').value;
 
   // Use the module-level parentUuids cache (set once in afterLoad) — no per-call rebuild.
   const sourceProjects = flatView ? allProjects.filter(p => !parentUuids.has(p.uuid)) : allProjects;
@@ -2138,11 +2152,11 @@ function applyFilters() {
       const d = proj[cat] || {};
       if (!Object.values(d).some(v => v > 0)) return false;
     }
-    // Level filter is disabled in flat view (level select is hidden)
-    if (!flatView && levelVal !== 'all' && proj.level !== parseInt(levelVal)) return false;
-    // Version filter uses OR logic: show projects whose version matches any selected value.
-    // (A project has exactly one version, so AND across multiple selections would always be empty.)
-    if (selectedVersions.size > 0 && !selectedVersions.has(proj.version || '')) return false;
+    // Tag filter uses AND logic: project must carry ALL selected tags.
+    if (selectedTags.size > 0) {
+      const projTags = proj.tags || [];
+      if (![...selectedTags].every(t => projTags.includes(t))) return false;
+    }
     return true;
   });
 
@@ -2166,7 +2180,7 @@ function applyFilters() {
     filtered = filtered.filter(p => p.isLatest);
   }
 
-  const hasFilter = q || risk !== 'all' || cat !== 'all' || (!flatView && levelVal !== 'all') || selectedVersions.size > 0 || filterLatestOnly;
+  const hasFilter = q || risk !== 'all' || cat !== 'all' || selectedTags.size > 0 || filterLatestOnly;
 
   // Count only leaf projects for the display (issues 2 & 4):
   // In flat view filtered is already all leaves; in hierarchy mode exclude parents.
@@ -2212,16 +2226,13 @@ function toggleLatestFilter() {
 function toggleFlatView() {
   flatView = !flatView;
   document.getElementById('flatViewBtn').classList.toggle('btn-active', flatView);
-  // Hide level filter and expand/collapse button — not applicable in flat view
-  document.getElementById('levelFilter').style.display        = flatView ? 'none' : '';
-  document.getElementById('expandCollapseBtn').style.display  = flatView ? 'none' : '';
+  // Hide expand/collapse button — not applicable in flat view
+  document.getElementById('expandCollapseBtn').style.display = flatView ? 'none' : '';
   if (flatView) {
-    // Reset all filters when entering flat view
+    // Reset non-tag filters when entering flat view (tags work in both modes)
     document.getElementById('searchInput').value    = '';
     document.getElementById('riskFilter').value     = 'all';
     document.getElementById('categoryFilter').value = 'all';
-    document.getElementById('levelFilter').value    = 'all';
-    clearFilter('version');
     filterLatestOnly = false;
     document.getElementById('latestFilterBtn').classList.remove('btn-active');
   }
@@ -2239,22 +2250,39 @@ document.addEventListener('click', e => {
   if (!e.target.closest('.ms-wrap') && !e.target.closest('.ms-btn')) {
     document.querySelectorAll('.ms-panel.open').forEach(p => p.classList.remove('open'));
   }
+  if (!e.target.closest('.rpt-drop')) {
+    document.getElementById('rptDropMenu')?.classList.remove('open');
+  }
 });
+function toggleReportDropdown() {
+  // Close any open tag/version panels first
+  document.querySelectorAll('.ms-panel.open').forEach(p => p.classList.remove('open'));
+  document.getElementById('rptDropMenu').classList.toggle('open');
+}
+function closeReportDropdown() {
+  document.getElementById('rptDropMenu').classList.remove('open');
+}
 function onMultiChange(type) {
-  selectedVersions = new Set([...document.querySelectorAll('#versionOptions input:checked')].map(i => i.value));
+  if (type === 'tag') {
+    selectedTags = new Set([...document.querySelectorAll('#tagOptions input:checked')].map(i => i.value));
+  }
   updateBadges();
   applyFilters();
 }
 function clearFilter(type) {
-  document.querySelectorAll('#versionOptions input').forEach(i => { i.checked = false; });
-  selectedVersions.clear();
+  if (type === 'tag') {
+    document.querySelectorAll('#tagOptions input').forEach(i => { i.checked = false; });
+    selectedTags.clear();
+  }
   updateBadges();
   applyFilters();
 }
 function updateBadges() {
-  const vb = document.getElementById('versionBadge'), vBtn = document.getElementById('versionBtn');
-  if (selectedVersions.size > 0) { vb.textContent = selectedVersions.size; vb.style.display = ''; vBtn.classList.add('active'); }
-  else                           { vb.style.display = 'none'; vBtn.classList.remove('active'); }
+  const tb = document.getElementById('tagBadge'), tBtn = document.getElementById('tagBtn');
+  if (tb && tBtn) {
+    if (selectedTags.size > 0) { tb.textContent = selectedTags.size; tb.style.display = ''; tBtn.classList.add('active'); }
+    else                       { tb.style.display = 'none'; tBtn.classList.remove('active'); }
+  }
 }
 
 // ── Status dot helper ──────────────────────────────────────────────────────
@@ -2459,6 +2487,15 @@ async function fetchAllProjects(key) {
 }
 
 
+// ── Tag normalisation helper ───────────────────────────────────────────────
+// DT API returns tags as [{name:"..."}, ...]; mock data uses plain string arrays.
+// Returns a deduplicated, normalised string[] regardless of input format.
+function extractTags(rawTags) {
+  return [...new Set(
+    (rawTags || []).map(t => (typeof t === 'string' ? t : (t && t.name) || '')).filter(Boolean)
+  )];
+}
+
 // ── Extract metrics synchronously from an embedded project object ─────────
 // Called by Phase 3 after BFS completes. Every project returned by the
 // /project and /project/{uuid}/children endpoints embeds a metrics{} field
@@ -2492,6 +2529,8 @@ function extractMetrics(p, violationMap) {
     version:    p.version || '',
     parentUuid: p.parent?.uuid || p.parentUuid || null,
     isLatest:   p.isLatest === true,
+    // Normalise DT API tag format [{name:"..."}] or plain string array → string[]
+    tags:       extractTags(p.tags),
     security: sec, operations: ops, license: lic, secpolicy: secpol,
     _dataWarn,
     // P4: pre-compute lowercase name once so applyFilters() never calls
@@ -3420,6 +3459,8 @@ window.exportCSV            = exportCSV;
 window.toggleTheme          = toggleTheme;
 window.generateReport          = generateReport;
 window.confirmReportOptions    = confirmReportOptions;
+window.toggleReportDropdown    = toggleReportDropdown;
+window.closeReportDropdown     = closeReportDropdown;
 window.toggleProjectSelection  = toggleProjectSelection;
 window.toggleParentSelection   = toggleParentSelection;
 window.toggleSelectAll         = toggleSelectAll;
