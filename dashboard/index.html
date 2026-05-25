@@ -3417,7 +3417,7 @@ async function clearReport(id) {
 async function clearAllReports() {
   let reports = [];
   try {
-    const r = await fetch('/violation-cache/reports');
+    const r = await fetch('/violation-cache/report/list');
     if (r.ok) reports = await r.json();
   } catch (_) { /* proceed with empty list */ }
 
