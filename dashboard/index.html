@@ -2372,7 +2372,7 @@ function loadMockData() {
   liveMode = false;
   allProjects = generateMockProjects();
   document.getElementById('dataBanner').innerHTML =
-    '⚠ Showing <strong>mock data</strong> — click "Connect Live API" to pull real project risks.';
+    '⚠ Showing <strong>mock data</strong> — click "⚙ Settings" to enter your API key and connect to live data.';
   document.getElementById('dataBanner').className = 'data-banner';
   setStatus('Mock Data', 'var(--medium)', false);
   if (_cachePollTimer) { clearInterval(_cachePollTimer); _cachePollTimer = null; }
