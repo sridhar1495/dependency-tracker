@@ -1931,3 +1931,114 @@ describe('calcNextRun()', () => {
       `Expected ~24 h delta, got ${delta} ms`);
   });
 });
+
+// ── test-email body resolution logic ─────────────────────────────────────────
+// Mirrors the credential-resolution logic in the POST /config/test-email handler.
+// Extracted as a pure helper so it can be unit-tested without HTTP.
+function resolveTestMailConfig(body, savedCfg) {
+  if (body && body.smtp) {
+    const storedPass = savedCfg && savedCfg.mail && savedCfg.mail.smtp
+      ? savedCfg.mail.smtp.pass
+      : '';
+    return {
+      enabled: true,
+      smtp: {
+        host:   body.smtp.host   || '',
+        port:   body.smtp.port   || 587,
+        secure: !!body.smtp.secure,
+        user:   body.smtp.user   || '',
+        pass:   body.useStoredPass ? storedPass : (body.smtp.pass || ''),
+      },
+      from: body.from || '',
+      to:   body.to   || [],
+      cc:   body.cc   || [],
+    };
+  }
+  return savedCfg.mail;
+}
+
+describe('test-email body resolution', () => {
+  const savedCfg = {
+    mail: {
+      enabled: true,
+      smtp: { host: 'saved.smtp.com', port: 465, secure: true, user: 'u', pass: 'real-secret' },
+      from: 'saved@example.com',
+      to:   ['saved-to@example.com'],
+      cc:   [],
+    },
+  };
+
+  test('uses form body smtp credentials when body.smtp is present', () => {
+    const body = {
+      smtp: { host: 'form.smtp.com', port: 587, secure: false, user: 'form-user', pass: 'form-pass' },
+      from: 'form@example.com',
+      to:   ['to@example.com'],
+      cc:   [],
+    };
+    const result = resolveTestMailConfig(body, savedCfg);
+    assert.equal(result.smtp.host, 'form.smtp.com');
+    assert.equal(result.smtp.pass, 'form-pass');
+    assert.equal(result.from, 'form@example.com');
+  });
+
+  test('useStoredPass:true substitutes real stored password', () => {
+    const body = {
+      useStoredPass: true,
+      smtp: { host: 'form.smtp.com', port: 587, secure: false, user: 'u', pass: '' },
+      from: 'form@example.com',
+      to:   ['to@example.com'],
+    };
+    const result = resolveTestMailConfig(body, savedCfg);
+    assert.equal(result.smtp.pass, 'real-secret');
+  });
+
+  test('useStoredPass:false uses the pass value from the body', () => {
+    const body = {
+      useStoredPass: false,
+      smtp: { host: 'h', port: 587, secure: false, user: 'u', pass: 'new-pass' },
+      from: 'f@example.com',
+      to:   ['t@example.com'],
+    };
+    const result = resolveTestMailConfig(body, savedCfg);
+    assert.equal(result.smtp.pass, 'new-pass');
+  });
+
+  test('useStoredPass:true with no stored password yields empty string', () => {
+    const cfgNoPass = { mail: { smtp: { pass: '' } } };
+    const body = {
+      useStoredPass: true,
+      smtp: { host: 'h', port: 587, secure: false, user: 'u', pass: '' },
+      from: 'f@example.com',
+      to:   ['t@example.com'],
+    };
+    const result = resolveTestMailConfig(body, cfgNoPass);
+    assert.equal(result.smtp.pass, '');
+  });
+
+  test('falls back to saved config when no body.smtp supplied', () => {
+    const result = resolveTestMailConfig(null, savedCfg);
+    assert.deepEqual(result, savedCfg.mail);
+  });
+
+  test('defaults port to 587 when body.smtp.port is missing', () => {
+    const body = {
+      smtp: { host: 'h', secure: false, user: 'u', pass: 'p' },
+      from: 'f@example.com',
+      to:   ['t@example.com'],
+    };
+    const result = resolveTestMailConfig(body, savedCfg);
+    assert.equal(result.smtp.port, 587);
+  });
+
+  test('form to/cc are parsed as arrays', () => {
+    const body = {
+      smtp: { host: 'h', port: 25, secure: false, user: '', pass: '' },
+      from: 'f@example.com',
+      to:   ['a@x.com', 'b@x.com'],
+      cc:   ['c@x.com'],
+    };
+    const result = resolveTestMailConfig(body, savedCfg);
+    assert.deepEqual(result.to, ['a@x.com', 'b@x.com']);
+    assert.deepEqual(result.cc, ['c@x.com']);
+  });
+});

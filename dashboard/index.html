@@ -956,7 +956,8 @@
         <input id="cfgMailSubject" class="cfg-input" style="margin-bottom:6px" placeholder="Dependency-Track Risk Report" oninput="markConfigDirty()" />
         <label class="cfg-label">Body <span style="font-size:10px">(optional)</span></label>
         <textarea id="cfgMailBodyTa" class="cfg-textarea" style="margin-bottom:10px" oninput="markConfigDirty()"></textarea>
-        <button class="btn" style="margin-bottom:4px" onclick="testEmailFromPanel()">Send Test Email</button>
+        <button class="btn" style="margin-bottom:4px" onclick="testEmailFromPanel()"
+          title="Tests with the values currently on screen — click Save to apply them to the schedule">Send Test Email</button>
 
         <div class="cfg-sub-title">Schedule</div>
         <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:10px">
@@ -1379,7 +1380,32 @@ async function testEmailFromPanel() {
   const btn = document.querySelector('[onclick="testEmailFromPanel()"]');
   if (btn) { btn.disabled = true; btn.textContent = 'Sending…'; }
   try {
-    const r  = await fetch('/violation-cache/config/test-email', { method: 'POST' });
+    // Read current form values so the test uses what is on screen,
+    // not what was last saved.  The password field shows '••••••••'
+    // when a stored password exists and the user hasn't changed it —
+    // send useStoredPass:true so the server substitutes the real value.
+    const passVal      = document.getElementById('cfgSmtpPass').value;
+    const useStoredPass = passVal === '••••••••';
+    const toRaw  = document.getElementById('cfgMailTo').value.trim();
+    const ccRaw  = document.getElementById('cfgMailCc').value.trim();
+    const body = {
+      useStoredPass,
+      smtp: {
+        host:   document.getElementById('cfgSmtpHost').value.trim(),
+        port:   parseInt(document.getElementById('cfgSmtpPort').value, 10) || 587,
+        secure: document.getElementById('cfgSmtpSecure').checked,
+        user:   document.getElementById('cfgSmtpUser').value.trim(),
+        pass:   useStoredPass ? '' : passVal,
+      },
+      from: document.getElementById('cfgMailFrom').value.trim(),
+      to:   toRaw ? toRaw.split(',').map(s => s.trim()).filter(Boolean) : [],
+      cc:   ccRaw ? ccRaw.split(',').map(s => s.trim()).filter(Boolean) : [],
+    };
+    const r  = await fetch('/violation-cache/config/test-email', {
+      method:  'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body:    JSON.stringify(body),
+    });
     const bd = await r.json().catch(() => ({}));
     if (r.ok) showToast('Test email sent successfully.', 'success');
     else      showToast(`Test email failed: ${bd.error || r.statusText}`, 'error');
