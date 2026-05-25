@@ -811,8 +811,9 @@
     <p id="reportsEmpty" style="text-align:center;color:var(--text-muted);padding:32px 0 16px;display:none">
       No reports yet — click <strong>📋 Generate Report</strong> in the toolbar to create one.
     </p>
-    <div style="margin-top:14px;font-size:11px;color:var(--text-muted)">
-      Reports are stored on the server. Maximum <span id="reportsMaxLabel">10</span> active (completed + in-progress) at a time.
+    <div style="margin-top:14px;display:flex;align-items:center;justify-content:space-between;gap:10px;font-size:11px;color:var(--text-muted)">
+      <span>Reports are stored on the server. Maximum <span id="reportsMaxLabel">10</span> active (completed + in-progress) at a time.</span>
+      <button class="btn-rpt danger" id="clearAllReportsBtn" onclick="clearAllReports()" style="display:none;flex-shrink:0">🗑 Clear All</button>
     </div>
   </div>
 </div>
@@ -860,8 +861,8 @@
     </div>
     <p class="report-options-count" id="reportOptionsCount"></p>
     <div style="display:flex;gap:8px;margin-top:16px">
-      <button class="btn primary" onclick="confirmReportOptions()">Generate</button>
-      <button class="btn" onclick="closeModal('reportOptionsModal')">Cancel</button>
+      <button class="btn primary" id="rptOptGenerateBtn" onclick="confirmReportOptions()">Generate</button>
+      <button class="btn" id="rptOptCancelBtn" onclick="closeModal('reportOptionsModal')">Cancel</button>
     </div>
   </div>
 </div>
@@ -1221,90 +1222,92 @@ function onSchedFreqChange() {
 }
 
 async function saveConfigPanel() {
-  const maxReports   = parseInt(document.getElementById('cfgMaxReports').value, 10) || 10;
-  const mailEnabled  = document.getElementById('cfgMailEnabled').checked;
-  const schedEnabled = document.getElementById('cfgSchedEnabled').checked;
-
-  // When a section is hidden (disabled) its form fields are blank — preserve the
-  // existing stored values so saving with email disabled doesn't wipe SMTP config.
-  const existingMail  = (_appConfig && _appConfig.mail)     || {};
-  const existingSched = (_appConfig && _appConfig.schedule) || {};
-
-  let mailConfig;
-  if (mailEnabled) {
-    const smtpPass = document.getElementById('cfgSmtpPass').value;
-    // Only send placeholder when password field is blank AND a password is stored.
-    // If no password was ever stored (relay mode), send empty so it stays empty.
-    const hasStoredPass = !!(existingMail.smtp && existingMail.smtp.pass);
-    const pass = smtpPass || (hasStoredPass ? '••••••••' : '');
-    mailConfig = {
-      enabled: true,
-      smtp: {
-        host:   document.getElementById('cfgSmtpHost').value.trim(),
-        port:   parseInt(document.getElementById('cfgSmtpPort').value, 10) || 587,
-        secure: document.getElementById('cfgSmtpSecure').checked,
-        user:   document.getElementById('cfgSmtpUser').value.trim(),
-        pass,
-      },
-      from:    document.getElementById('cfgMailFrom').value.trim(),
-      to:      document.getElementById('cfgMailTo').value.split(',').map(s => s.trim()).filter(Boolean),
-      cc:      document.getElementById('cfgMailCc').value.split(',').map(s => s.trim()).filter(Boolean),
-      subject: document.getElementById('cfgMailSubject').value.trim(),
-      body:    document.getElementById('cfgMailBodyTa').value.trim(),
-    };
-  } else {
-    // Preserve all SMTP/recipient fields; only flip the enabled flag off.
-    mailConfig = { ...existingMail, enabled: false };
-  }
-
-  let schedConfig;
-  if (schedEnabled) {
-    const weekDays = [];
-    document.querySelectorAll('.cfg-weekday input:checked').forEach(cb => weekDays.push(parseInt(cb.value, 10)));
-    const riskTypes = [];
-    if (document.getElementById('cfgSchedSecurity').checked)    riskTypes.push('security');
-    if (document.getElementById('cfgSchedLicense').checked)     riskTypes.push('license');
-    if (document.getElementById('cfgSchedOperational').checked) riskTypes.push('operational');
-    schedConfig = {
-      ...existingSched,
-      enabled:   true,
-      frequency: document.getElementById('cfgSchedFreq').value,
-      hour:      parseInt(document.getElementById('cfgSchedHour').value, 10) || 9,
-      weekDays,
-      monthDay:  parseInt(document.getElementById('cfgSchedMonthDay').value, 10) || 1,
-      riskTypes,
-    };
-  } else {
-    // Preserve all schedule fields; only flip the enabled flag off.
-    schedConfig = { ...existingSched, enabled: false };
-  }
-
-  const config = { maxReports, mail: mailConfig, schedule: schedConfig };
-
-  // Before saving a reduced maxReports, warn the user if it would delete existing reports.
+  const saveBtn = document.getElementById('cfgSaveBtn');
+  if (saveBtn) { saveBtn.disabled = true; saveBtn.textContent = 'Saving…'; }
   try {
-    const listR = await fetch('/violation-cache/report/list');
-    if (listR.ok) {
-      const jobs          = await listR.json();
-      const completedCount = jobs.filter(j => j.status === 'completed').length;
-      const deleteCount   = Math.max(0, completedCount - maxReports);
-      if (deleteCount > 0) {
-        const proceed = await showConfirm(
-          'Delete Existing Reports?',
-          `Reducing the limit to ${maxReports} will permanently delete the ${deleteCount} oldest completed report${deleteCount !== 1 ? 's' : ''}.\n\nThis cannot be undone. Proceed?`,
-          'Delete & Save',
-          'Cancel'
-        );
-        if (!proceed) return;
-      }
+    const maxReports   = parseInt(document.getElementById('cfgMaxReports').value, 10) || 10;
+    const mailEnabled  = document.getElementById('cfgMailEnabled').checked;
+    const schedEnabled = document.getElementById('cfgSchedEnabled').checked;
+
+    // When a section is hidden (disabled) its form fields are blank — preserve the
+    // existing stored values so saving with email disabled doesn't wipe SMTP config.
+    const existingMail  = (_appConfig && _appConfig.mail)     || {};
+    const existingSched = (_appConfig && _appConfig.schedule) || {};
+
+    let mailConfig;
+    if (mailEnabled) {
+      const smtpPass = document.getElementById('cfgSmtpPass').value;
+      // Only send placeholder when password field is blank AND a password is stored.
+      // If no password was ever stored (relay mode), send empty so it stays empty.
+      const hasStoredPass = !!(existingMail.smtp && existingMail.smtp.pass);
+      const pass = smtpPass || (hasStoredPass ? '••••••••' : '');
+      mailConfig = {
+        enabled: true,
+        smtp: {
+          host:   document.getElementById('cfgSmtpHost').value.trim(),
+          port:   parseInt(document.getElementById('cfgSmtpPort').value, 10) || 587,
+          secure: document.getElementById('cfgSmtpSecure').checked,
+          user:   document.getElementById('cfgSmtpUser').value.trim(),
+          pass,
+        },
+        from:    document.getElementById('cfgMailFrom').value.trim(),
+        to:      document.getElementById('cfgMailTo').value.split(',').map(s => s.trim()).filter(Boolean),
+        cc:      document.getElementById('cfgMailCc').value.split(',').map(s => s.trim()).filter(Boolean),
+        subject: document.getElementById('cfgMailSubject').value.trim(),
+        body:    document.getElementById('cfgMailBodyTa').value.trim(),
+      };
+    } else {
+      // Preserve all SMTP/recipient fields; only flip the enabled flag off.
+      mailConfig = { ...existingMail, enabled: false };
     }
-  } catch (_) { /* report list unavailable — proceed without check */ }
 
-  const apiKeyVal = document.getElementById('cfgApiKey').value.trim();
-  const urlVal    = (document.getElementById('cfgApiUrl').value || '').trim().replace(/\/$/, '');
-  const frontVal  = (document.getElementById('cfgFrontendUrl').value || '').trim().replace(/\/$/, '');
+    let schedConfig;
+    if (schedEnabled) {
+      const weekDays = [];
+      document.querySelectorAll('.cfg-weekday input:checked').forEach(cb => weekDays.push(parseInt(cb.value, 10)));
+      const riskTypes = [];
+      if (document.getElementById('cfgSchedSecurity').checked)    riskTypes.push('security');
+      if (document.getElementById('cfgSchedLicense').checked)     riskTypes.push('license');
+      if (document.getElementById('cfgSchedOperational').checked) riskTypes.push('operational');
+      schedConfig = {
+        ...existingSched,
+        enabled:   true,
+        frequency: document.getElementById('cfgSchedFreq').value,
+        hour:      parseInt(document.getElementById('cfgSchedHour').value, 10) || 9,
+        weekDays,
+        monthDay:  parseInt(document.getElementById('cfgSchedMonthDay').value, 10) || 1,
+        riskTypes,
+      };
+    } else {
+      // Preserve all schedule fields; only flip the enabled flag off.
+      schedConfig = { ...existingSched, enabled: false };
+    }
 
-  try {
+    const config = { maxReports, mail: mailConfig, schedule: schedConfig };
+
+    // Before saving a reduced maxReports, warn the user if it would delete existing reports.
+    try {
+      const listR = await fetch('/violation-cache/report/list');
+      if (listR.ok) {
+        const jobs           = await listR.json();
+        const completedCount = jobs.filter(j => j.status === 'completed').length;
+        const deleteCount    = Math.max(0, completedCount - maxReports);
+        if (deleteCount > 0) {
+          const proceed = await showConfirm(
+            'Delete Existing Reports?',
+            `Reducing the limit to ${maxReports} will permanently delete the ${deleteCount} oldest completed report${deleteCount !== 1 ? 's' : ''}.\n\nThis cannot be undone. Proceed?`,
+            'Delete & Save',
+            'Cancel'
+          );
+          if (!proceed) return;
+        }
+      }
+    } catch (_) { /* report list unavailable — proceed without check */ }
+
+    const apiKeyVal = document.getElementById('cfgApiKey').value.trim();
+    const urlVal    = (document.getElementById('cfgApiUrl').value || '').trim().replace(/\/$/, '');
+    const frontVal  = (document.getElementById('cfgFrontendUrl').value || '').trim().replace(/\/$/, '');
+
     const r = await fetch('/violation-cache/config', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -1336,6 +1339,8 @@ async function saveConfigPanel() {
     await loadConfigFromServer();
   } catch (e) {
     showToast(`Save failed: ${e.message}`, 'error');
+  } finally {
+    if (saveBtn) { saveBtn.disabled = false; saveBtn.textContent = 'Save'; }
   }
 }
 
@@ -3022,11 +3027,14 @@ function renderReportsList(reports) {
   const visible = reports.filter(r => r.status !== 'pending');
   container.innerHTML = '';
 
+  const clearAllBtn = document.getElementById('clearAllReportsBtn');
   if (visible.length === 0) {
     if (empty) empty.style.display = '';
+    if (clearAllBtn) clearAllBtn.style.display = 'none';
     return;
   }
   if (empty) empty.style.display = 'none';
+  if (clearAllBtn) clearAllBtn.style.display = '';
 
   for (const job of visible) {
     const item = document.createElement('div');
@@ -3234,70 +3242,87 @@ async function confirmReportOptions() {
   if (!_pendingReportProjects) return;
   const projectsToReport = _pendingReportProjects;
   _pendingReportProjects = null;
-  // Close the options modal now so any subsequent confirm dialogs render on top.
-  closeModal('reportOptionsModal');
 
-  // ── Pre-flight: fetch existing jobs ──────────────────────────────────────
-  let reports = [];
+  // Disable Generate button for the duration so the user cannot double-submit.
+  const genBtn    = document.getElementById('rptOptGenerateBtn');
+  const cancelBtn = document.getElementById('rptOptCancelBtn');
+  if (genBtn)    { genBtn.disabled    = true; genBtn.textContent    = 'Generating…'; }
+  if (cancelBtn) { cancelBtn.disabled = true; }
+
+  // closeAfter is set to true when the flow reaches a point where the modal
+  // should be dismissed.  Early-cancel paths leave it false so the user can
+  // adjust their selection and try again.
+  let closeAfter = false;
   try {
-    const r = await fetch('/violation-cache/report/list');
-    if (r.ok) reports = await r.json();
-  } catch (_) { /* service unreachable */ }
+    // ── Pre-flight: fetch existing jobs ──────────────────────────────────
+    let reports = [];
+    try {
+      const r = await fetch('/violation-cache/report/list');
+      if (r.ok) reports = await r.json();
+    } catch (_) { /* service unreachable */ }
 
-  const completedCount = reports.filter(j => j.status === 'completed').length;
-  const runningCount   = reports.filter(j => j.status === 'running').length;
+    const completedCount = reports.filter(j => j.status === 'completed').length;
+    const runningCount   = reports.filter(j => j.status === 'running').length;
 
-  // ── Limit check ───────────────────────────────────────────────────────────
-  const maxReportsLimit = (_appConfig && _appConfig.maxReports) || 10;
-  if (completedCount + runningCount >= maxReportsLimit) {
-    await showConfirm(
-      '📋 Report Limit Reached',
-      `You have reached the maximum of ${maxReportsLimit} active reports ` +
-      `(${completedCount} completed + ${runningCount} in-progress). ` +
-      `Open the 📥 Reports panel to download or clear existing reports before generating a new one.`,
-      'Close',
-      null
-    );
-    showToast('Open 📥 Reports to manage existing reports.', 'info');
-    return;
-  }
-
-  // ── Already running ───────────────────────────────────────────────────────
-  const runningNow = reports.filter(j => j.status === 'running');
-  if (runningNow.length > 0) {
-    const ok = await showConfirm(
-      '⏳ Report Already In Progress',
-      `A report is already being generated (${runningNow.length} job${runningNow.length > 1 ? 's' : ''} running). ` +
-      `Do you want to start another one for the ${projectsToReport.length} currently shown project(s)?`,
-      'Start Another',
-      'Cancel'
-    );
-    if (!ok) {
-      showToast('Open 📥 Reports to track the current report.', 'info');
+    // ── Limit check ────────────────────────────────────────────────────
+    const maxReportsLimit = (_appConfig && _appConfig.maxReports) || 10;
+    if (completedCount + runningCount >= maxReportsLimit) {
+      closeAfter = true;
+      await showConfirm(
+        '📋 Report Limit Reached',
+        `You have reached the maximum of ${maxReportsLimit} active reports ` +
+        `(${completedCount} completed + ${runningCount} in-progress). ` +
+        `Open the 📥 Reports panel to download or clear existing reports before generating a new one.`,
+        'Close',
+        null
+      );
+      showToast('Open 📥 Reports to manage existing reports.', 'info');
       return;
     }
-  } else {
-    // ── Already completed today ─────────────────────────────────────────────
-    const todayStr       = new Date().toISOString().slice(0, 10);
-    const completedToday = reports.filter(
-      j => j.status === 'completed' && (j.createdAt || '').startsWith(todayStr)
-    );
-    if (completedToday.length > 0) {
+
+    // ── Already running ────────────────────────────────────────────────
+    const runningNow = reports.filter(j => j.status === 'running');
+    if (runningNow.length > 0) {
       const ok = await showConfirm(
-        '📋 Report Already Generated Today',
-        `${completedToday.length} report${completedToday.length > 1 ? 's have' : ' has'} already been generated today. ` +
-        `Do you want to create a new one for the ${projectsToReport.length} currently shown project(s)?`,
-        'Create New',
+        '⏳ Report Already In Progress',
+        `A report is already being generated (${runningNow.length} job${runningNow.length > 1 ? 's' : ''} running). ` +
+        `Do you want to start another one for the ${projectsToReport.length} currently shown project(s)?`,
+        'Start Another',
         'Cancel'
       );
       if (!ok) {
-        showToast('Open 📥 Reports to download today\'s report.', 'info');
-        return;
+        showToast('Open 📥 Reports to track the current report.', 'info');
+        return;  // user cancelled — leave modal open
+      }
+    } else {
+      // ── Already completed today ──────────────────────────────────────
+      const todayStr       = new Date().toISOString().slice(0, 10);
+      const completedToday = reports.filter(
+        j => j.status === 'completed' && (j.createdAt || '').startsWith(todayStr)
+      );
+      if (completedToday.length > 0) {
+        const ok = await showConfirm(
+          '📋 Report Already Generated Today',
+          `${completedToday.length} report${completedToday.length > 1 ? 's have' : ' has'} already been generated today. ` +
+          `Do you want to create a new one for the ${projectsToReport.length} currently shown project(s)?`,
+          'Create New',
+          'Cancel'
+        );
+        if (!ok) {
+          showToast('Open 📥 Reports to download today\'s report.', 'info');
+          return;  // user cancelled — leave modal open
+        }
       }
     }
-  }
 
-  await doTriggerReport(projectsToReport, riskTypes);
+    // ── Fire the request; close modal only after response ───────────────
+    closeAfter = true;
+    await doTriggerReport(projectsToReport, riskTypes);
+  } finally {
+    if (genBtn)    { genBtn.disabled    = false; genBtn.textContent    = 'Generate'; }
+    if (cancelBtn) { cancelBtn.disabled = false; }
+    if (closeAfter) closeModal('reportOptionsModal');
+  }
 }
 
 /** Send the generate request to the backend and show a toast. */
@@ -3384,6 +3409,39 @@ async function clearReport(id) {
   }
 }
 
+/** Delete every visible report job in the registry (confirmed before acting). */
+async function clearAllReports() {
+  let reports = [];
+  try {
+    const r = await fetch('/violation-cache/reports');
+    if (r.ok) reports = await r.json();
+  } catch (_) { /* proceed with empty list */ }
+
+  const visible = reports.filter(r => r.status !== 'pending');
+  if (visible.length === 0) { refreshReportsList(); return; }
+
+  const ok = await showConfirm(
+    'Clear All Reports',
+    `Delete all ${visible.length} report${visible.length === 1 ? '' : 's'} from the server? This cannot be undone.`,
+    'Clear All', 'Cancel'
+  );
+  if (!ok) return;
+
+  const btn = document.getElementById('clearAllReportsBtn');
+  if (btn) { btn.disabled = true; btn.textContent = 'Clearing…'; }
+  try {
+    await Promise.all(visible.map(job =>
+      fetch(`/violation-cache/report/${job.id}`, { method: 'DELETE' }).catch(() => {})
+    ));
+    showToast('All reports cleared.', 'success');
+  } catch (e) {
+    showToast(`Error clearing reports: ${e.message}`, 'error');
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = '🗑 Clear All'; }
+  }
+  refreshReportsList();
+}
+
 /** Request cancellation of a running report job. */
 async function cancelReport(id) {
   try {
@@ -3427,6 +3485,7 @@ window.toggleParentSelection   = toggleParentSelection;
 window.toggleSelectAll         = toggleSelectAll;
 window.downloadReport          = downloadReport;
 window.clearReport          = clearReport;
+window.clearAllReports      = clearAllReports;
 window.cancelReport         = cancelReport;
 window.openConfigPanel      = openConfigPanel;
 window.closeConfigPanel     = closeConfigPanel;
