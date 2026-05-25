@@ -858,3 +858,91 @@ describe('tag filter (single-select)', () => {
     assert.ok(!passesTagFilter(['java'], 'python'));
   });
 });
+
+// ── Schedule field validation logic ──────────────────────────────────────────
+// Mirrors the validation in saveConfigPanel() so edge cases are testable
+// without a browser DOM.
+function validateSchedFields({ freq, hourVal, monthDayVal, weekDays, riskTypes }) {
+  if (isNaN(hourVal) || hourVal < 0 || hourVal > 23)
+    return 'Schedule hour must be between 0 and 23.';
+  if (freq === 'monthly' && (isNaN(monthDayVal) || monthDayVal < 1 || monthDayVal > 28))
+    return 'Day of month must be between 1 and 28.';
+  if (freq === 'weekly' && weekDays.length === 0)
+    return 'Please select at least one day of the week.';
+  if (riskTypes.length === 0)
+    return 'Please select at least one risk type for the schedule.';
+  return null;
+}
+
+describe('schedule field validation', () => {
+  const base = { freq: 'daily', hourVal: 9, monthDayVal: 1, weekDays: [1], riskTypes: ['security'] };
+
+  test('valid daily config returns no error', () => {
+    assert.equal(validateSchedFields(base), null);
+  });
+
+  test('hour below 0 is rejected', () => {
+    assert.ok(validateSchedFields({ ...base, hourVal: -1 }));
+  });
+
+  test('hour above 23 is rejected', () => {
+    assert.ok(validateSchedFields({ ...base, hourVal: 24 }));
+  });
+
+  test('hour 0 is accepted', () => {
+    assert.equal(validateSchedFields({ ...base, hourVal: 0 }), null);
+  });
+
+  test('hour 23 is accepted', () => {
+    assert.equal(validateSchedFields({ ...base, hourVal: 23 }), null);
+  });
+
+  test('NaN hour (empty field) is rejected', () => {
+    assert.ok(validateSchedFields({ ...base, hourVal: NaN }));
+  });
+
+  test('monthly: day 0 is rejected', () => {
+    assert.ok(validateSchedFields({ ...base, freq: 'monthly', monthDayVal: 0 }));
+  });
+
+  test('monthly: day 29 is rejected', () => {
+    assert.ok(validateSchedFields({ ...base, freq: 'monthly', monthDayVal: 29 }));
+  });
+
+  test('monthly: day 28 is accepted', () => {
+    assert.equal(validateSchedFields({ ...base, freq: 'monthly', monthDayVal: 28 }), null);
+  });
+
+  test('monthly: day 1 is accepted', () => {
+    assert.equal(validateSchedFields({ ...base, freq: 'monthly', monthDayVal: 1 }), null);
+  });
+
+  test('monthly: negative day is rejected', () => {
+    assert.ok(validateSchedFields({ ...base, freq: 'monthly', monthDayVal: -5 }));
+  });
+
+  test('monthly: NaN day is rejected', () => {
+    assert.ok(validateSchedFields({ ...base, freq: 'monthly', monthDayVal: NaN }));
+  });
+
+  test('weekly: no days selected is rejected', () => {
+    assert.ok(validateSchedFields({ ...base, freq: 'weekly', weekDays: [] }));
+  });
+
+  test('weekly: at least one day selected is accepted', () => {
+    assert.equal(validateSchedFields({ ...base, freq: 'weekly', weekDays: [1] }), null);
+  });
+
+  test('no risk types selected is rejected', () => {
+    assert.ok(validateSchedFields({ ...base, riskTypes: [] }));
+  });
+
+  test('monthly with invalid monthDay is ignored when freq is daily', () => {
+    // monthDayVal out of range but freq is not monthly — should pass
+    assert.equal(validateSchedFields({ ...base, freq: 'daily', monthDayVal: 99 }), null);
+  });
+
+  test('weekly with empty weekDays is ignored when freq is monthly', () => {
+    assert.equal(validateSchedFields({ ...base, freq: 'monthly', weekDays: [], monthDayVal: 15 }), null);
+  });
+});

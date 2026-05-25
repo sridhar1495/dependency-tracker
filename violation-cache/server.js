@@ -1702,19 +1702,49 @@ http.createServer(async (req, res) => {
   }
 
   // ── POST /violation-cache/config/test-email ──────────────────────────────
-  // Sends a plain-text test email using the current SMTP config.
+  // Sends a plain-text test email.
+  // Accepts an optional JSON body with form-level SMTP credentials so the
+  // user can test connectivity before saving.  If useStoredPass:true is set
+  // the real stored password is substituted (the browser never has it).
+  // Falls back to saved config when no body is supplied.
   if (method === 'POST' && parsedPath === '/violation-cache/config/test-email') {
     try {
       const cfg = loadConfig();
-      if (!cfg.mail.enabled) {
-        jsonReply(res, 400, { error: 'Email is not enabled in configuration' });
-        return;
+      let mailCfg;
+
+      const raw = await readBody(req).catch(() => '');
+      const body = raw ? JSON.parse(raw) : null;
+
+      if (body && body.smtp) {
+        // Q10: use form credentials for the test; substitute stored password
+        // when the browser sends useStoredPass:true (placeholder was shown).
+        const storedPass = cfg.mail && cfg.mail.smtp ? cfg.mail.smtp.pass : '';
+        mailCfg = {
+          enabled: true,
+          smtp: {
+            host:   body.smtp.host   || '',
+            port:   body.smtp.port   || 587,
+            secure: !!body.smtp.secure,
+            user:   body.smtp.user   || '',
+            pass:   body.useStoredPass ? storedPass : (body.smtp.pass || ''),
+          },
+          from: body.from || '',
+          to:   body.to   || [],
+          cc:   body.cc   || [],
+        };
+      } else {
+        if (!cfg.mail.enabled) {
+          jsonReply(res, 400, { error: 'Email is not enabled in configuration' });
+          return;
+        }
+        mailCfg = cfg.mail;
       }
-      if (!cfg.mail.smtp.host || !cfg.mail.from || !cfg.mail.to.length) {
+
+      if (!mailCfg.smtp.host || !mailCfg.from || !mailCfg.to.length) {
         jsonReply(res, 400, { error: 'SMTP host, From address, and at least one To address are required' });
         return;
       }
-      await sendEmail(cfg.mail, null, null, {
+      await sendEmail(mailCfg, null, null, {
         subject: 'Dependency-Track — Test Email',
         body:    `This is a test email from the Dependency-Track Risk Dashboard sent on ${new Date().toLocaleString()}. Your SMTP configuration is working correctly.`,
       });
