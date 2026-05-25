@@ -820,48 +820,41 @@ describe('extractTags()', () => {
 });
 
 // ── Tag filter logic ──────────────────────────────────────────────────────────
-// Pure filter predicate extracted from applyFilters() — must match source logic.
-function passesTagFilter(projTags, selectedTags) {
-  if (selectedTags.size === 0) return true;
-  return [...selectedTags].every(t => projTags.includes(t));
+// Pure predicate matching applyFilters(): single-select, project must include the tag.
+function passesTagFilter(projTags, tagVal) {
+  if (tagVal === 'all') return true;
+  return (projTags || []).includes(tagVal);
 }
 
-describe('tag filter (AND logic)', () => {
-  test('no selected tags: always passes', () => {
-    assert.ok(passesTagFilter(['java'], new Set()));
-    assert.ok(passesTagFilter([], new Set()));
+describe('tag filter (single-select)', () => {
+  test('"all" always passes regardless of project tags', () => {
+    assert.ok(passesTagFilter(['java', 'production'], 'all'));
+    assert.ok(passesTagFilter([], 'all'));
   });
 
-  test('single tag selected: passes when project has that tag', () => {
-    assert.ok(passesTagFilter(['java', 'production'], new Set(['java'])));
+  test('passes when project has the selected tag', () => {
+    assert.ok(passesTagFilter(['java', 'production'], 'java'));
+    assert.ok(passesTagFilter(['java', 'production'], 'production'));
   });
 
-  test('single tag selected: fails when project lacks that tag', () => {
-    assert.ok(!passesTagFilter(['python', 'staging'], new Set(['java'])));
+  test('fails when project does not have the selected tag', () => {
+    assert.ok(!passesTagFilter(['python', 'staging'], 'java'));
   });
 
-  test('multiple tags selected (AND): passes when project has ALL of them', () => {
-    assert.ok(passesTagFilter(['java', 'production', 'internal'], new Set(['java', 'production'])));
+  test('fails when project has no tags', () => {
+    assert.ok(!passesTagFilter([], 'java'));
   });
 
-  test('multiple tags selected (AND): fails when project has only some', () => {
-    assert.ok(!passesTagFilter(['java', 'staging'], new Set(['java', 'production'])));
+  test('fails when projTags is null/undefined', () => {
+    assert.ok(!passesTagFilter(null, 'java'));
+    assert.ok(!passesTagFilter(undefined, 'java'));
   });
 
-  test('project with no tags fails any non-empty filter', () => {
-    assert.ok(!passesTagFilter([], new Set(['java'])));
+  test('exact single-tag project: passes on match', () => {
+    assert.ok(passesTagFilter(['java'], 'java'));
   });
 
-  test('exact match — project tags equal selected tags: passes', () => {
-    assert.ok(passesTagFilter(['java', 'production'], new Set(['java', 'production'])));
-  });
-
-  test('filter with all project tags is an exact pass', () => {
-    const tags = ['a', 'b', 'c'];
-    assert.ok(passesTagFilter(tags, new Set(tags)));
-  });
-
-  test('filter with more tags than project has: fails', () => {
-    assert.ok(!passesTagFilter(['java'], new Set(['java', 'production'])));
+  test('exact single-tag project: fails on mismatch', () => {
+    assert.ok(!passesTagFilter(['java'], 'python'));
   });
 });

@@ -745,20 +745,10 @@
         <option value="secpolicy">Security Policy</option>
       </select>
 
-      <!-- Tags multi-select (AND logic: project must have ALL selected tags) -->
-      <div class="ms-wrap" id="tagWrap">
-        <div class="ms-btn" id="tagBtn" onclick="toggleDropdown('tagPanel')">
-          Tags <span class="ms-badge" id="tagBadge" style="display:none"></span>
-          <span class="ms-caret">▾</span>
-        </div>
-        <div class="ms-panel" id="tagPanel">
-          <div class="ms-panel-header">
-            <span style="font-size:11px;color:var(--text-muted)">Filter by tag (AND)</span>
-            <button onclick="clearFilter('tag')">Clear</button>
-          </div>
-          <div id="tagOptions"><span class="ms-empty">Load data first</span></div>
-        </div>
-      </div>
+      <!-- Tags single-select: show projects that carry the chosen tag -->
+      <select class="filter-select" id="tagFilter" onchange="applyFilters()">
+        <option value="all">All tags</option>
+      </select>
 
       <div style="flex:1"></div>
       <button class="btn" id="expandCollapseBtn" onclick="toggleExpandCollapse()" title="Expand all groups">▼ Expand All</button>
@@ -1066,7 +1056,7 @@ let filtered         = [];   // flat array matching current filters (for CSV + c
 let treeRoots        = [];   // root TreeNode[]
 let nodeMap          = new Map(); // uuid → TreeNode
 let expandedUuids    = new Set();
-let selectedTags     = new Set(); // AND logic: project must have ALL selected tags
+
 let summaryTotals    = null; // computed once after data load; never recalculated
 let parentUuids      = new Set(); // cached in afterLoad(); never recomputed during filtering
 let currentMatchSet  = null;      // last filter match set; reused by lighter expand/collapse render
@@ -2091,15 +2081,10 @@ function setRiskFilter(val) {
 
 // ── Build filter option panels ─────────────────────────────────────────────
 function buildFilterOptions() {
-  // Collect all unique tags across every project (including parent group nodes).
   const allTags = [...new Set(allProjects.flatMap(p => p.tags || []))].sort();
-  const to = document.getElementById('tagOptions');
-  to.innerHTML = allTags.length === 0
-    ? '<span class="ms-empty">No tags found</span>'
-    : allTags.map(t => `<label><input type="checkbox" value="${escHtml(t)}" onchange="onMultiChange('tag')"> ${escHtml(t)}</label>`).join('');
-
-  selectedTags.clear();
-  updateBadges();
+  const sel = document.getElementById('tagFilter');
+  sel.innerHTML = '<option value="all">All tags</option>' +
+    allTags.map(t => `<option value="${escHtml(t)}">${escHtml(t)}</option>`).join('');
 }
 
 // ── Search debounce ────────────────────────────────────────────────────────
@@ -2110,9 +2095,10 @@ function debouncedFilter() {
 
 // ── Filters ────────────────────────────────────────────────────────────────
 function applyFilters() {
-  const q    = document.getElementById('searchInput').value.toLowerCase();
-  const risk = document.getElementById('riskFilter').value;
-  const cat  = document.getElementById('categoryFilter').value;
+  const q      = document.getElementById('searchInput').value.toLowerCase();
+  const risk   = document.getElementById('riskFilter').value;
+  const cat    = document.getElementById('categoryFilter').value;
+  const tagVal = document.getElementById('tagFilter').value;
 
   // Use the module-level parentUuids cache (set once in afterLoad) — no per-call rebuild.
   const sourceProjects = flatView ? allProjects.filter(p => !parentUuids.has(p.uuid)) : allProjects;
@@ -2152,11 +2138,8 @@ function applyFilters() {
       const d = proj[cat] || {};
       if (!Object.values(d).some(v => v > 0)) return false;
     }
-    // Tag filter uses AND logic: project must carry ALL selected tags.
-    if (selectedTags.size > 0) {
-      const projTags = proj.tags || [];
-      if (![...selectedTags].every(t => projTags.includes(t))) return false;
-    }
+    // Tag filter: show only projects that carry the selected tag.
+    if (tagVal !== 'all' && !(proj.tags || []).includes(tagVal)) return false;
     return true;
   });
 
@@ -2180,7 +2163,7 @@ function applyFilters() {
     filtered = filtered.filter(p => p.isLatest);
   }
 
-  const hasFilter = q || risk !== 'all' || cat !== 'all' || selectedTags.size > 0 || filterLatestOnly;
+  const hasFilter = q || risk !== 'all' || cat !== 'all' || tagVal !== 'all' || filterLatestOnly;
 
   // Count only leaf projects for the display (issues 2 & 4):
   // In flat view filtered is already all leaves; in hierarchy mode exclude parents.
@@ -2229,10 +2212,10 @@ function toggleFlatView() {
   // Hide expand/collapse button — not applicable in flat view
   document.getElementById('expandCollapseBtn').style.display = flatView ? 'none' : '';
   if (flatView) {
-    // Reset non-tag filters when entering flat view (tags work in both modes)
     document.getElementById('searchInput').value    = '';
     document.getElementById('riskFilter').value     = 'all';
     document.getElementById('categoryFilter').value = 'all';
+    document.getElementById('tagFilter').value      = 'all';
     filterLatestOnly = false;
     document.getElementById('latestFilterBtn').classList.remove('btn-active');
   }
@@ -2262,28 +2245,7 @@ function toggleReportDropdown() {
 function closeReportDropdown() {
   document.getElementById('rptDropMenu').classList.remove('open');
 }
-function onMultiChange(type) {
-  if (type === 'tag') {
-    selectedTags = new Set([...document.querySelectorAll('#tagOptions input:checked')].map(i => i.value));
-  }
-  updateBadges();
-  applyFilters();
-}
-function clearFilter(type) {
-  if (type === 'tag') {
-    document.querySelectorAll('#tagOptions input').forEach(i => { i.checked = false; });
-    selectedTags.clear();
-  }
-  updateBadges();
-  applyFilters();
-}
-function updateBadges() {
-  const tb = document.getElementById('tagBadge'), tBtn = document.getElementById('tagBtn');
-  if (tb && tBtn) {
-    if (selectedTags.size > 0) { tb.textContent = selectedTags.size; tb.style.display = ''; tBtn.classList.add('active'); }
-    else                       { tb.style.display = 'none'; tBtn.classList.remove('active'); }
-  }
-}
+
 
 // ── Status dot helper ──────────────────────────────────────────────────────
 function setStatus(text, color, pulsing) {
@@ -3449,8 +3411,7 @@ window.applyFilters         = applyFilters;
 window.toggleLatestFilter   = toggleLatestFilter;
 window.toggleFlatView       = toggleFlatView;
 window.toggleDropdown       = toggleDropdown;
-window.clearFilter          = clearFilter;
-window.onMultiChange        = onMultiChange;
+
 window.toggleNode           = toggleNode;
 window.toggleExpandCollapse = toggleExpandCollapse;
 window.setRiskFilter        = setRiskFilter;
