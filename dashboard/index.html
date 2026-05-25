@@ -1273,6 +1273,25 @@ async function saveConfigPanel() {
 
   const config = { maxReports, mail: mailConfig, schedule: schedConfig };
 
+  // Before saving a reduced maxReports, warn the user if it would delete existing reports.
+  try {
+    const listR = await fetch('/violation-cache/report/list');
+    if (listR.ok) {
+      const jobs          = await listR.json();
+      const completedCount = jobs.filter(j => j.status === 'completed').length;
+      const deleteCount   = Math.max(0, completedCount - maxReports);
+      if (deleteCount > 0) {
+        const proceed = await showConfirm(
+          'Delete Existing Reports?',
+          `Reducing the limit to ${maxReports} will permanently delete the ${deleteCount} oldest completed report${deleteCount !== 1 ? 's' : ''}.\n\nThis cannot be undone. Proceed?`,
+          'Delete & Save',
+          'Cancel'
+        );
+        if (!proceed) return;
+      }
+    }
+  } catch (_) { /* report list unavailable — proceed without check */ }
+
   const apiKeyVal = document.getElementById('cfgApiKey').value.trim();
   const urlVal    = (document.getElementById('cfgApiUrl').value || '').trim().replace(/\/$/, '');
   const frontVal  = (document.getElementById('cfgFrontendUrl').value || '').trim().replace(/\/$/, '');
@@ -1807,8 +1826,12 @@ function getParentCheckboxState(node, visibleUuidSet) {
 function toggleProjectSelection(uuid) {
   if (selectedProjectUuids.has(uuid)) selectedProjectUuids.delete(uuid);
   else                                 selectedProjectUuids.add(uuid);
-  // Re-render to update parent checkbox states (indeterminate may change).
-  renderTree(currentMatchSet);
+  // Re-render in the correct mode — renderTree in flat view would reset the view.
+  if (flatView) {
+    renderFlatList();
+  } else {
+    renderTree(currentMatchSet);
+  }
   updateGenReportBtn();
 }
 
