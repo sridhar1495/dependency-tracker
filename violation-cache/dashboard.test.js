@@ -773,3 +773,95 @@ describe('toggleParentSelection logic', () => {
     assert.ok(result.has('l1'),    'l1 should be in selection');
   });
 });
+
+// ── extractTags ───────────────────────────────────────────────────────────────
+// Copied from dashboard/index.html — must stay in sync with the source.
+function extractTags(rawTags) {
+  return [...new Set(
+    (rawTags || []).map(t => (typeof t === 'string' ? t : (t && t.name) || '')).filter(Boolean)
+  )];
+}
+
+describe('extractTags()', () => {
+  test('returns empty array for null/undefined input', () => {
+    assert.deepEqual(extractTags(null), []);
+    assert.deepEqual(extractTags(undefined), []);
+    assert.deepEqual(extractTags([]), []);
+  });
+
+  test('normalises DT API [{name}] format to string array', () => {
+    const result = extractTags([{ name: 'java' }, { name: 'production' }]);
+    assert.deepEqual(result, ['java', 'production']);
+  });
+
+  test('passes through plain string arrays unchanged', () => {
+    assert.deepEqual(extractTags(['java', 'production']), ['java', 'production']);
+  });
+
+  test('handles mixed [{name}] and plain strings in same array', () => {
+    const result = extractTags([{ name: 'java' }, 'production']);
+    assert.deepEqual(result, ['java', 'production']);
+  });
+
+  test('deduplicates identical tags', () => {
+    const result = extractTags([{ name: 'java' }, { name: 'java' }, 'java']);
+    assert.deepEqual(result, ['java']);
+  });
+
+  test('filters out entries with empty name', () => {
+    const result = extractTags([{ name: '' }, { name: 'ok' }, null]);
+    assert.deepEqual(result, ['ok']);
+  });
+
+  test('handles objects missing the name property', () => {
+    const result = extractTags([{ label: 'x' }, { name: 'good' }]);
+    assert.deepEqual(result, ['good']);
+  });
+});
+
+// ── Tag filter logic ──────────────────────────────────────────────────────────
+// Pure filter predicate extracted from applyFilters() — must match source logic.
+function passesTagFilter(projTags, selectedTags) {
+  if (selectedTags.size === 0) return true;
+  return [...selectedTags].every(t => projTags.includes(t));
+}
+
+describe('tag filter (AND logic)', () => {
+  test('no selected tags: always passes', () => {
+    assert.ok(passesTagFilter(['java'], new Set()));
+    assert.ok(passesTagFilter([], new Set()));
+  });
+
+  test('single tag selected: passes when project has that tag', () => {
+    assert.ok(passesTagFilter(['java', 'production'], new Set(['java'])));
+  });
+
+  test('single tag selected: fails when project lacks that tag', () => {
+    assert.ok(!passesTagFilter(['python', 'staging'], new Set(['java'])));
+  });
+
+  test('multiple tags selected (AND): passes when project has ALL of them', () => {
+    assert.ok(passesTagFilter(['java', 'production', 'internal'], new Set(['java', 'production'])));
+  });
+
+  test('multiple tags selected (AND): fails when project has only some', () => {
+    assert.ok(!passesTagFilter(['java', 'staging'], new Set(['java', 'production'])));
+  });
+
+  test('project with no tags fails any non-empty filter', () => {
+    assert.ok(!passesTagFilter([], new Set(['java'])));
+  });
+
+  test('exact match — project tags equal selected tags: passes', () => {
+    assert.ok(passesTagFilter(['java', 'production'], new Set(['java', 'production'])));
+  });
+
+  test('filter with all project tags is an exact pass', () => {
+    const tags = ['a', 'b', 'c'];
+    assert.ok(passesTagFilter(tags, new Set(tags)));
+  });
+
+  test('filter with more tags than project has: fails', () => {
+    assert.ok(!passesTagFilter(['java'], new Set(['java', 'production'])));
+  });
+});
