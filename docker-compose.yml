@@ -9,9 +9,6 @@ networks:
   dependency-track:
     driver: bridge
 
-volumes:
-  violation-cache-data:
-
 services:
 
   # ─── Custom Risk Dashboard ────────────────────────────────────────────────────
@@ -86,7 +83,7 @@ services:
       PORT: "3001"
     volumes:
       # Persists violation-cache.json, reports, and app-config.json across restarts.
-      - violation-cache-data:/data
+      - ./violation-cache/data:/data
       # Bind-mount .env so the service can read updated config and persist
       # API key changes written via POST /violation-cache/config.
       - ./.env:/app/.env
