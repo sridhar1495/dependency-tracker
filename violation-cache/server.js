@@ -1508,7 +1508,7 @@ http.createServer(async (req, res) => {
     jsonReply(res, 200, {
       apiKey:         effectiveKey,
       envFileMounted: fs.existsSync(ENV_FILE),
-      ...clientCfg,
+      config:         clientCfg,
     });
     return;
   }
