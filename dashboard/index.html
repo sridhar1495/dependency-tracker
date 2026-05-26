@@ -1548,7 +1548,22 @@ async function scheduleReports() {
       return;
     }
     _appConfig = newCfg;
-    showToast(`Scheduled — ${leafUuids.length} project${leafUuids.length !== 1 ? 's' : ''} queued.`, 'success');
+
+    // Explicitly arm the scheduler now that project UUIDs are saved.
+    // Config saves alone no longer start the timer.
+    const armR = await fetch('/violation-cache/schedule/arm', { method: 'POST' });
+    const armBd = await armR.json().catch(() => ({}));
+    if (!armR.ok) {
+      showToast(`Projects saved but scheduler not started: ${armBd.error || armR.statusText}`, 'warn');
+      return;
+    }
+    const nextRunStr = armBd.nextRun
+      ? `Next run: ${new Date(armBd.nextRun).toLocaleString()}`
+      : '';
+    showToast(
+      `Scheduled — ${leafUuids.length} project${leafUuids.length !== 1 ? 's' : ''} queued.${nextRunStr ? ' ' + nextRunStr : ''}`,
+      'success'
+    );
   } catch (e) {
     showToast(`Error scheduling: ${e.message}`, 'error');
   }
