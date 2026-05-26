@@ -1556,7 +1556,6 @@ http.createServer(async (req, res) => {
 
         const merged = deepMerge(prevCfg, body.config);
 
-        // Re-arm scheduler if schedule config changed or enabled state changed
         const schedChanged = JSON.stringify(prevCfg.schedule) !== JSON.stringify(merged.schedule);
 
         saveConfig(merged);
@@ -1565,6 +1564,12 @@ http.createServer(async (req, res) => {
           mailEnabled: merged.mail.enabled,
           schedEnabled: merged.schedule.enabled,
         });
+
+        // Re-arm only if the scheduler timer was already active so that
+        // config changes take effect on the next run. First-time arming
+        // is done exclusively via POST /violation-cache/schedule/arm,
+        // which is called by the "Schedule Reports" toolbar button.
+        if (schedChanged && _schedulerTimer !== null) armScheduler();
 
         // Trim oldest completed reports when maxReports decreased
         if (newMax < prevMax) {
@@ -1753,6 +1758,26 @@ http.createServer(async (req, res) => {
       log('error', `Test email failed: ${e.message}`);
       jsonReply(res, 500, { error: `Email failed: ${e.message}` });
     }
+    return;
+  }
+
+  // ── POST /violation-cache/schedule/arm ───────────────────────────────────
+  // Explicitly arms the scheduler. Called by the "Schedule Reports" button
+  // after project UUIDs are saved, so saving config alone never starts the timer.
+  if (method === 'POST' && parsedPath === '/violation-cache/schedule/arm') {
+    const cfg = loadConfig();
+    if (!cfg.schedule.enabled) {
+      jsonReply(res, 400, { error: 'Schedule is not enabled — enable it in settings first' });
+      return;
+    }
+    if (!cfg.schedule.projectUuids.length) {
+      jsonReply(res, 400, { error: 'No project UUIDs saved — click Schedule Reports to select projects first' });
+      return;
+    }
+    armScheduler();
+    const updated = loadConfig();
+    log('info', 'Scheduler armed via API', { nextRun: updated.schedule.nextRun });
+    jsonReply(res, 200, { ok: true, nextRun: updated.schedule.nextRun });
     return;
   }
 

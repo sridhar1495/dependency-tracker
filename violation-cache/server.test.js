@@ -2042,3 +2042,58 @@ describe('test-email body resolution', () => {
     assert.deepEqual(result.cc, ['c@x.com']);
   });
 });
+
+// ── schedule/arm trigger logic ────────────────────────────────────────────────
+// Mirrors the condition in POST /violation-cache/config that decides whether
+// to re-arm after a config save, and the guard in POST /violation-cache/schedule/arm.
+function shouldRearmOnConfigSave(schedChanged, timerActive) {
+  return schedChanged && timerActive;
+}
+
+function armEndpointGuard(schedEnabled, projectUuidsLength) {
+  if (!schedEnabled)           return { ok: false, error: 'Schedule is not enabled — enable it in settings first' };
+  if (!projectUuidsLength)     return { ok: false, error: 'No project UUIDs saved — click Schedule Reports to select projects first' };
+  return { ok: true };
+}
+
+describe('schedule arm trigger logic', () => {
+  test('config save re-arms when timer is active and schedule changed', () => {
+    assert.equal(shouldRearmOnConfigSave(true, true), true);
+  });
+
+  test('config save does not arm when timer is inactive (first-time setup)', () => {
+    assert.equal(shouldRearmOnConfigSave(true, false), false);
+  });
+
+  test('config save does not re-arm when schedule did not change', () => {
+    assert.equal(shouldRearmOnConfigSave(false, true), false);
+  });
+
+  test('config save does not arm when both conditions are false', () => {
+    assert.equal(shouldRearmOnConfigSave(false, false), false);
+  });
+});
+
+describe('schedule/arm endpoint guard', () => {
+  test('rejects when schedule is not enabled', () => {
+    const r = armEndpointGuard(false, 5);
+    assert.equal(r.ok, false);
+    assert.ok(r.error.includes('not enabled'));
+  });
+
+  test('rejects when no project UUIDs are stored', () => {
+    const r = armEndpointGuard(true, 0);
+    assert.equal(r.ok, false);
+    assert.ok(r.error.includes('No project UUIDs'));
+  });
+
+  test('allows arm when schedule enabled and projects present', () => {
+    const r = armEndpointGuard(true, 3);
+    assert.equal(r.ok, true);
+  });
+
+  test('rejects when both conditions fail (schedule disabled, no UUIDs)', () => {
+    const r = armEndpointGuard(false, 0);
+    assert.equal(r.ok, false);
+  });
+});
