@@ -754,6 +754,7 @@ async function fetchAllFindings(apiUrl, apiKey, name, version, cancelFlag) {
     'textSearchField=vulnerability_id,vulnerability_title,component_name,component_version,project_name',
     `textSearchInput=${encodeURIComponent(`${name} ${version}`)}`,
     'severity=critical,high,medium,low,unassigned',
+    'analysisStatus=NOT_SET,EXPLOITABLE,IN_TRIAGE',
     `pageSize=${FINDINGS_PAGE_SIZE}`,
   ].join('&');
 
