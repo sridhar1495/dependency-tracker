@@ -2097,3 +2097,184 @@ describe('schedule/arm endpoint guard', () => {
     assert.equal(r.ok, false);
   });
 });
+
+// ── dtGetWithRetry cancellation (Q11) ─────────────────────────────────────────
+// Inline replica of server.js dtGetWithRetry with an injectable dtGet and fast
+// retry delays so no real HTTP requests or multi-second backoffs happen here.
+
+const TEST_MAX_RETRIES = 3;
+
+function makeDtGetWithRetry(dtGet, retryDelays) {
+  const sleep = ms => new Promise(r => setTimeout(r, ms));
+  return async function dtGetWithRetry(urlPath, apiUrl, apiKey, cancelFlag = null, attempt = 0) {
+    try {
+      return await dtGet(urlPath, apiUrl, apiKey);
+    } catch (err) {
+      if (cancelFlag && cancelFlag.cancelled) {
+        throw Object.assign(new Error('__CANCELLED__'), { isCancelled: true });
+      }
+      if (attempt < TEST_MAX_RETRIES - 1) {
+        await sleep(retryDelays[attempt]);
+        if (cancelFlag && cancelFlag.cancelled) {
+          throw Object.assign(new Error('__CANCELLED__'), { isCancelled: true });
+        }
+        return dtGetWithRetry(urlPath, apiUrl, apiKey, cancelFlag, attempt + 1);
+      }
+      throw err;
+    }
+  };
+}
+
+describe('dtGetWithRetry cancellation (Q11)', () => {
+  test('retries transient failures and succeeds when not cancelled', async () => {
+    let calls = 0;
+    const dtGet = async () => {
+      calls++;
+      if (calls < 3) throw new Error('ECONNRESET');
+      return { json: [], headers: {} };
+    };
+    const withRetry = makeDtGetWithRetry(dtGet, [1, 1]);
+    const r = await withRetry('/api/v1/violation', 'http://dt', 'key');
+    assert.deepEqual(r, { json: [], headers: {} });
+    assert.equal(calls, 3);
+  });
+
+  test('exhausts retries and throws the original error when not cancelled', async () => {
+    let calls = 0;
+    const dtGet = async () => { calls++; throw new Error('HTTP 500 for /x'); };
+    const withRetry = makeDtGetWithRetry(dtGet, [1, 1]);
+    await assert.rejects(
+      () => withRetry('/x', 'http://dt', 'key'),
+      { message: 'HTTP 500 for /x' }
+    );
+    assert.equal(calls, TEST_MAX_RETRIES);
+  });
+
+  test('omitting cancelFlag keeps the original 3-argument call working', async () => {
+    const dtGet = async () => ({ json: [1], headers: {} });
+    const withRetry = makeDtGetWithRetry(dtGet, [1, 1]);
+    const r = await withRetry('/x', 'http://dt', 'key');
+    assert.deepEqual(r.json, [1]);
+  });
+
+  test('does not retry when cancelFlag is already set — throws isCancelled after one attempt', async () => {
+    let calls = 0;
+    const dtGet = async () => { calls++; throw new Error('HTTP 500 for /x'); };
+    const withRetry = makeDtGetWithRetry(dtGet, [1000, 1000]);
+    const cancelFlag = { cancelled: true };
+    await assert.rejects(
+      () => withRetry('/x', 'http://dt', 'key', cancelFlag),
+      err => err.isCancelled === true && err.message === '__CANCELLED__'
+    );
+    assert.equal(calls, 1);
+  });
+
+  test('cancellation during the backoff sleep aborts before the next attempt', async () => {
+    let calls = 0;
+    const dtGet = async () => { calls++; throw new Error('ETIMEDOUT'); };
+    const withRetry = makeDtGetWithRetry(dtGet, [30, 30]);
+    const cancelFlag = { cancelled: false };
+    setTimeout(() => { cancelFlag.cancelled = true; }, 5); // fires mid-backoff
+    await assert.rejects(
+      () => withRetry('/x', 'http://dt', 'key', cancelFlag),
+      err => err.isCancelled === true
+    );
+    assert.equal(calls, 1); // no second request after cancellation
+  });
+
+  test('cancellation landing while a request fails throws isCancelled, not the transport error', async () => {
+    let calls = 0;
+    const cancelFlag = { cancelled: false };
+    const dtGet = async () => {
+      calls++;
+      if (calls === 1) cancelFlag.cancelled = true; // user cancels while request 1 is in flight
+      throw new Error('ECONNRESET');
+    };
+    const withRetry = makeDtGetWithRetry(dtGet, [1000, 1000]);
+    await assert.rejects(
+      () => withRetry('/x', 'http://dt', 'key', cancelFlag),
+      err => err.isCancelled === true
+    );
+    assert.equal(calls, 1);
+  });
+});
+
+// ── collectReportData settle-before-status (Q11) ──────────────────────────────
+// Inline replica of the collectReportData termination logic: allSettled waits
+// for every pipeline task to stop, then cancellation wins over individual task
+// failures, then the first genuine failure is rethrown.
+
+async function settleReportTasks(tasks, cancelFlag) {
+  const results = await Promise.allSettled(tasks);
+  if (cancelFlag.cancelled) {
+    throw Object.assign(new Error('__CANCELLED__'), { isCancelled: true });
+  }
+  const firstRejected = results.find(r => r.status === 'rejected');
+  if (firstRejected) throw firstRejected.reason;
+  return results;
+}
+
+const sleepMs = ms => new Promise(r => setTimeout(r, ms));
+
+describe('collectReportData settle-before-status (Q11)', () => {
+  test('resolves only after all tasks settled when nothing failed', async () => {
+    let slowDone = false;
+    const tasks = [
+      sleepMs(1),
+      sleepMs(20).then(() => { slowDone = true; }),
+    ];
+    await settleReportTasks(tasks, { cancelled: false });
+    assert.equal(slowDone, true);
+  });
+
+  test('cancellation is reported only after every pipeline has stopped', async () => {
+    const cancelFlag = { cancelled: true };
+    let slowDone = false;
+    const tasks = [
+      Promise.reject(Object.assign(new Error('__CANCELLED__'), { isCancelled: true })),
+      sleepMs(20).then(() => { slowDone = true; }),
+    ];
+    await assert.rejects(
+      () => settleReportTasks(tasks, cancelFlag),
+      err => err.isCancelled === true
+    );
+    assert.equal(slowDone, true); // slow pipeline finished before the status was raised
+  });
+
+  test('cancellation takes precedence over a genuine task failure', async () => {
+    const cancelFlag = { cancelled: true };
+    const tasks = [
+      Promise.reject(new Error('HTTP 500 for /finding')),
+      Promise.resolve(),
+    ];
+    await assert.rejects(
+      () => settleReportTasks(tasks, cancelFlag),
+      err => err.isCancelled === true && err.message === '__CANCELLED__'
+    );
+  });
+
+  test('first genuine failure is rethrown when not cancelled', async () => {
+    const tasks = [
+      sleepMs(1),
+      Promise.reject(new Error('HTTP 500 for /finding')),
+      Promise.reject(new Error('HTTP 502 for /violation')),
+    ];
+    await assert.rejects(
+      () => settleReportTasks(tasks, { cancelled: false }),
+      { message: 'HTTP 500 for /finding' }
+    );
+  });
+
+  test('genuine failure surfaces only after all other tasks settled', async () => {
+    let slowDone = false;
+    const tasks = [
+      Promise.reject(new Error('boom')),
+      sleepMs(20).then(() => { slowDone = true; }),
+    ];
+    await assert.rejects(
+      () => settleReportTasks(tasks, { cancelled: false }),
+      { message: 'boom' }
+    );
+    assert.equal(slowDone, true);
+  });
+});

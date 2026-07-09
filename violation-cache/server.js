@@ -331,16 +331,28 @@ function dtGet(urlPath, apiUrl, apiKey) {
   });
 }
 
-/** dtGet with per-page exponential-backoff retry. */
-async function dtGetWithRetry(urlPath, apiUrl, apiKey, attempt = 0) {
+/**
+ * dtGet with per-page exponential-backoff retry.
+ * Q11: accepts an optional cancelFlag ({ cancelled: boolean }) so a cancelled
+ * report job stops retrying immediately instead of burning the full backoff
+ * sequence (worst case minutes with request timeouts). Checked before the
+ * retry decision and again after each backoff sleep.
+ */
+async function dtGetWithRetry(urlPath, apiUrl, apiKey, cancelFlag = null, attempt = 0) {
   try {
     return await dtGet(urlPath, apiUrl, apiKey);
   } catch (err) {
+    if (cancelFlag && cancelFlag.cancelled) {
+      throw Object.assign(new Error('__CANCELLED__'), { isCancelled: true });
+    }
     if (attempt < MAX_RETRIES - 1) {
       const delay = RETRY_DELAYS[attempt];
       log('warn', `Retry ${attempt + 1}/${MAX_RETRIES - 1} for ${urlPath} after ${delay}ms`, { error: err.message });
       await sleep(delay);
-      return dtGetWithRetry(urlPath, apiUrl, apiKey, attempt + 1);
+      if (cancelFlag && cancelFlag.cancelled) {
+        throw Object.assign(new Error('__CANCELLED__'), { isCancelled: true });
+      }
+      return dtGetWithRetry(urlPath, apiUrl, apiKey, cancelFlag, attempt + 1);
     }
     throw err;
   }
@@ -726,11 +738,18 @@ async function collectReportData(apiUrl, apiKey, projects, riskTypes, cancelFlag
     })
   );
 
-  await Promise.all(tasks);
+  // Q11: allSettled (not all) so this function only returns once every pipeline
+  // has actually stopped — the job's terminal status is never reported while
+  // fetches are still running in the background.
+  const results = await Promise.allSettled(tasks);
 
   if (cancelFlag.cancelled) {
     throw Object.assign(new Error('__CANCELLED__'), { isCancelled: true });
   }
+
+  // A genuine fetch failure still fails the whole job — rethrow the first one.
+  const firstRejected = results.find(r => r.status === 'rejected');
+  if (firstRejected) throw firstRejected.reason;
 
   return {
     secFindings, secProjectSummary, secComponentMap,
@@ -764,7 +783,7 @@ async function fetchAllFindings(apiUrl, apiKey, name, version, cancelFlag) {
     if (cancelFlag.cancelled) throw Object.assign(new Error('__CANCELLED__'), { isCancelled: true });
     const urlPath = `/api/v1/finding?${baseQs}&pageNumber=${page}`;
     log('info', `[report-fetch] GET ${apiUrl}${urlPath}`);
-    const { json, headers } = await dtGetWithRetry(urlPath, apiUrl, apiKey);
+    const { json, headers } = await dtGetWithRetry(urlPath, apiUrl, apiKey, cancelFlag);
     const batch = Array.isArray(json) ? json : [];
     all.push(...batch);
     const total = parseInt(headers['x-total-count'] || '0', 10);
@@ -807,7 +826,7 @@ async function streamViolationsForProject(apiUrl, apiKey, proj, riskType, cancel
     if (cancelFlag.cancelled) throw Object.assign(new Error('__CANCELLED__'), { isCancelled: true });
     const urlPath = `/api/v1/violation?${baseQs}&pageNumber=${page}`;
     log('info', `[report-fetch] GET ${apiUrl}${urlPath}`);
-    const { json, headers } = await dtGetWithRetry(urlPath, apiUrl, apiKey);
+    const { json, headers } = await dtGetWithRetry(urlPath, apiUrl, apiKey, cancelFlag);
     const batch = Array.isArray(json) ? json : (json?.violations || []);
     for (const v of batch) {
       // Only keep violations whose project UUID matches exactly — guards against
