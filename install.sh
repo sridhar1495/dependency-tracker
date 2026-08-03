@@ -10,8 +10,10 @@
 # Options:
 #   --non-interactive   Skip all prompts and use defaults / .env values
 #   --skip-docker-check Skip Docker version validation
-#   --uninstall | -u    Remove containers, volumes, and networks (keep images)
-#   --all       | -a    Remove containers, volumes, networks, AND images
+#   --uninstall | -u    Remove containers and the network. KEEPS all data on disk
+#                       (database, administrator credentials, .env) and keeps images
+#   --all       | -a    Remove containers, the network and images, AND DELETE the
+#                       data directories. Every user, setting and report is destroyed
 #   --help              Show this help
 # =============================================================================
 
@@ -47,8 +49,20 @@ retry() {
 }
 
 # ─── Uninstall helper ────────────────────────────────────────────────────────
+# Two distinct levels, because "I am done with this container" and "erase every
+# account, report and setting" are very different intentions:
+#
+#   --uninstall  containers + network. All data directories are KEPT, so
+#                re-running install.sh brings the same database back.
+#   --all        the above, plus images, plus the data directories themselves.
+#                This is irreversible.
+#
+# `docker compose down -v` is deliberately NOT used at the plain --uninstall
+# level: -v removes volumes, and the intent there is that nothing on disk is
+# lost. The data directories are bind mounts (CLAUDE.md §9.2), so they survive
+# either way, but the flag would still say the opposite of what we mean.
 do_uninstall() {
-  local remove_images="$1"
+  local remove_all="$1"
 
   step "Uninstalling Risk Dashboard"
 
@@ -67,51 +81,87 @@ do_uninstall() {
   local env_args=()
   [[ -f "$SCRIPT_DIR/.env" ]] && env_args=(--env-file "$SCRIPT_DIR/.env")
 
+  # Named explicitly so the banner can never drift from what is actually removed.
+  local pgdata_dir="$SCRIPT_DIR/violation-cache/pgdata"
+  local data_dir="$SCRIPT_DIR/violation-cache/data"
+
   echo ""
-  echo -e "  ${BOLD}The following will be permanently removed:${RESET}"
-  echo -e "    • Containers : dt-dashboard, dt-violation-cache, dt-postgres"
-  echo -e "    • Network    : dependency-track"
-  echo -e "    • Volumes    : any Docker-managed volumes for these services"
-  if [[ "$remove_images" == "true" ]]; then
-    echo -e "    • Images     : nginx:alpine, postgres:16-alpine, dt-violation-cache (built image)"
-  fi
-  echo ""
-  echo -e "  ${BOLD}The following are bind mounts and are KEPT on disk:${RESET}"
-  echo -e "    • ./violation-cache/pgdata  ${BOLD}(database — all users, settings and reports)${RESET}"
-  echo -e "    • ./violation-cache/data    (administrator credentials file)"
-  echo -e "    • ./.env                    (configuration, including the DB password)"
-  echo -e "  Delete them manually if you intend to discard all data."
+  echo -e "  ${BOLD}Containers${RESET} : dt-dashboard, dt-violation-cache, dt-postgres"
+  echo -e "  ${BOLD}Network${RESET}    : dependency-track"
   echo ""
 
-  if [[ "$NON_INTERACTIVE" == "false" ]]; then
-    read -rp "  Are you sure? This cannot be undone. [y/N]: " _confirm
-    if [[ "$_confirm" != "y" && "$_confirm" != "Y" ]]; then
-      info "Aborted."
-      exit 0
+  if [[ "$remove_all" == "true" ]]; then
+    echo -e "  ${RED}${BOLD}FULL UNINSTALL — the following will be PERMANENTLY DELETED:${RESET}"
+    echo -e "    ${RED}•${RESET} ${pgdata_dir}"
+    echo -e "      ${BOLD}the database: every user account, setting, schedule and report${RESET}"
+    echo -e "    ${RED}•${RESET} ${data_dir}"
+    echo -e "      the administrator credentials file"
+    echo -e "    ${RED}•${RESET} Images: nginx:alpine, postgres:16-alpine, and the built backend image"
+    echo ""
+    echo -e "  ${BOLD}Kept:${RESET} ./.env — it still holds POSTGRES_PASSWORD and SECRET_ENCRYPTION_KEY,"
+    echo -e "  which a fresh install will reuse. Delete it yourself if you want a clean slate."
+    echo ""
+    if [[ "$NON_INTERACTIVE" == "false" ]]; then
+      echo -e "  ${YELLOW}This cannot be undone.${RESET} Type ${BOLD}DELETE${RESET} to confirm, or anything else to abort."
+      read -rp "  > " _confirm
+      if [[ "$_confirm" != "DELETE" ]]; then
+        info "Aborted. Nothing was removed."
+        exit 0
+      fi
+    else
+      warn "--non-interactive --all: deleting all data without confirmation."
+    fi
+  else
+    echo -e "  ${GREEN}${BOLD}Your data is KEPT:${RESET}"
+    echo -e "    ${GREEN}•${RESET} ${pgdata_dir}"
+    echo -e "      the database: users, settings, schedules and reports"
+    echo -e "    ${GREEN}•${RESET} ${data_dir}"
+    echo -e "      the administrator credentials file"
+    echo -e "    ${GREEN}•${RESET} ./.env"
+    echo -e "  Re-running ./install.sh restores the service with all of it intact."
+    echo ""
+    echo -e "  Docker images are kept too. To remove everything including the data, run:"
+    echo -e "    ${BOLD}./install.sh --all${RESET}"
+    echo ""
+    if [[ "$NON_INTERACTIVE" == "false" ]]; then
+      read -rp "  Remove the containers and network? [y/N]: " _confirm
+      if [[ "$_confirm" != "y" && "$_confirm" != "Y" ]]; then
+        info "Aborted."
+        exit 0
+      fi
     fi
   fi
 
-  local down_flags=(-v)
-  [[ "$remove_images" == "true" ]] && down_flags+=(--rmi all)
+  local down_flags=()
+  if [[ "$remove_all" == "true" ]]; then
+    # -v only matters if a future service ever declares an anonymous volume;
+    # at the full level removing it is what the operator asked for.
+    down_flags+=(-v --rmi all)
+  fi
 
-  info "Stopping and removing containers, volumes, and networks…"
+  info "Stopping and removing containers and the network…"
   $COMPOSE_CMD -f "$SCRIPT_DIR/docker-compose.yml" "${env_args[@]}" down "${down_flags[@]}" \
     || warn "docker compose down reported errors — some resources may already be removed"
+
+  if [[ "$remove_all" == "true" ]]; then
+    # ${VAR:?} refuses to expand when the variable is empty, so a bug that blanked
+    # SCRIPT_DIR can never turn this into `rm -rf /violation-cache/pgdata`.
+    info "Deleting data directories…"
+    rm -rf "${SCRIPT_DIR:?}/violation-cache/pgdata"
+    rm -rf "${SCRIPT_DIR:?}/violation-cache/data"
+    success "Data directories deleted"
+  fi
 
   echo ""
   success "Uninstall complete."
   echo ""
-  if [[ "$remove_images" == "true" ]]; then
-    echo -e "  All containers, networks, and images have been removed."
+  if [[ "$remove_all" == "true" ]]; then
+    echo -e "  Containers, network, images and all data have been removed."
+    echo -e "  ./.env was kept; delete it manually to discard the generated secrets too."
   else
-    echo -e "  All containers and networks have been removed."
-    echo -e "  Docker images were kept. To also remove images, run:"
-    echo -e "    ${BOLD}./install.sh --all${RESET}"
+    echo -e "  Containers and the network have been removed. Images and data were kept."
+    echo -e "  Bring it back with: ${BOLD}./install.sh${RESET}"
   fi
-  echo ""
-  echo -e "  ${YELLOW}Database files were NOT deleted.${RESET}"
-  echo -e "  To discard all users, settings and reports as well:"
-  echo -e "    ${BOLD}rm -rf ./violation-cache/pgdata ./violation-cache/data${RESET}"
   echo ""
 }
 
@@ -119,16 +169,16 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 NON_INTERACTIVE=false
 SKIP_DOCKER_CHECK=false
 UNINSTALL=false
-REMOVE_IMAGES=false
+REMOVE_ALL=false
 
 for arg in "$@"; do
   case $arg in
     --non-interactive)   NON_INTERACTIVE=true ;;
     --skip-docker-check) SKIP_DOCKER_CHECK=true ;;
     --uninstall|-u)      UNINSTALL=true ;;
-    --all|-a)            UNINSTALL=true; REMOVE_IMAGES=true ;;
+    --all|-a)            UNINSTALL=true; REMOVE_ALL=true ;;
     --help)
-      sed -n '2,16p' "$0"; exit 0 ;;
+      sed -n '2,19p' "$0"; exit 0 ;;
     *)
       warn "Unknown option: $arg (ignored)" ;;
   esac
@@ -149,7 +199,7 @@ echo ""
 
 # ─── Uninstall dispatch ──────────────────────────────────────────────────────
 if [[ "$UNINSTALL" == "true" ]]; then
-  do_uninstall "$REMOVE_IMAGES"
+  do_uninstall "$REMOVE_ALL"
   exit 0
 fi
 
@@ -224,13 +274,47 @@ if [[ "$NON_INTERACTIVE" == "false" ]]; then
   # each account and is entered in the dashboard after signing in, encrypted at
   # rest with SECRET_ENCRYPTION_KEY (CLAUDE.md §5.6, §7.6).
 
+  # ── Database credentials ──────────────────────────────────────────────
+  # PostgreSQL reads POSTGRES_USER and POSTGRES_PASSWORD only when it
+  # initialises the cluster, so these can be chosen at first install and never
+  # again. Changing them afterwards leaves the service unable to connect, which
+  # is why an existing data directory is detected and the prompts skipped.
+  if [[ -d "$SCRIPT_DIR/violation-cache/pgdata" ]] && [[ -n "$(ls -A "$SCRIPT_DIR/violation-cache/pgdata" 2>/dev/null)" ]]; then
+    info "An existing database was found — keeping its credentials unchanged."
+    info "  To change them you must delete ./violation-cache/pgdata, which destroys all data."
+  else
+    read -rp "  PostgreSQL username          [${POSTGRES_USER:-dtdash}]: " _in
+    [[ -n "$_in" ]] && POSTGRES_USER="$_in"
+    POSTGRES_USER="${POSTGRES_USER:-dtdash}"
+
+    read -rsp "  PostgreSQL password          [generate a strong one]: " _in
+    echo ""
+    if [[ -n "$_in" ]]; then
+      POSTGRES_PASSWORD="$(printf '%s' "$_in" | tr -d '\000-\037\177')"
+      _pg_pass_source="chosen during installation"
+    fi
+
+    read -rp "  PostgreSQL database name     [${POSTGRES_DB:-dtdash}]: " _in
+    [[ -n "$_in" ]] && POSTGRES_DB="$_in"
+    POSTGRES_DB="${POSTGRES_DB:-dtdash}"
+  fi
+
   # Write back (overwrite only the keys we manage). Any legacy DT_* values
   # already in the file are left untouched so an upgrade can still seed them.
-  grep -v "^DT_DASHBOARD_PORT=\|^VIOLATION_CACHE_TTL_HOURS=" \
+  grep -v "^DT_DASHBOARD_PORT=\|^VIOLATION_CACHE_TTL_HOURS=\|^POSTGRES_USER=\|^POSTGRES_DB=" \
     "$ENV_FILE" > "${ENV_FILE}.tmp" && mv "${ENV_FILE}.tmp" "$ENV_FILE"
-  printf 'DT_DASHBOARD_PORT=%s\nVIOLATION_CACHE_TTL_HOURS=%s\n' \
+  printf 'DT_DASHBOARD_PORT=%s\nVIOLATION_CACHE_TTL_HOURS=%s\nPOSTGRES_USER=%s\nPOSTGRES_DB=%s\n' \
     "${DT_DASHBOARD_PORT:-3000}" \
-    "${VIOLATION_CACHE_TTL_HOURS:-24}" >> "$ENV_FILE"
+    "${VIOLATION_CACHE_TTL_HOURS:-24}" \
+    "${POSTGRES_USER:-dtdash}" \
+    "${POSTGRES_DB:-dtdash}" >> "$ENV_FILE"
+
+  # A password typed at the prompt above is written here, not left in the shell.
+  if [[ -n "${POSTGRES_PASSWORD:-}" ]]; then
+    grep -v "^POSTGRES_PASSWORD=" "$ENV_FILE" > "${ENV_FILE}.tmp" && mv "${ENV_FILE}.tmp" "$ENV_FILE"
+    printf 'POSTGRES_PASSWORD=%s\n' "${POSTGRES_PASSWORD}" >> "$ENV_FILE"
+    chmod 600 "$ENV_FILE" 2>/dev/null || true
+  fi
 
   success ".env saved"
 fi
@@ -240,7 +324,9 @@ fi
 # after the data directory exists would leave the service unable to connect,
 # because PostgreSQL only reads POSTGRES_PASSWORD when it initialises the
 # cluster on first start.
+_pg_pass_source="${_pg_pass_source:-already in .env}"
 if [[ -z "${POSTGRES_PASSWORD:-}" ]]; then
+  _pg_pass_source="generated by the installer"
   info "Generating a PostgreSQL password…"
   if command -v openssl &>/dev/null; then
     _pg_pass="$(openssl rand -base64 32 | tr -d '/+=\n' | cut -c1-32)"
@@ -287,6 +373,10 @@ ADMIN_CREDS_FILE="$ADMIN_CREDS_DIR/admin-credentials.json"
 if [[ -f "$ADMIN_CREDS_FILE" ]]; then
   info "Administrator credentials already exist — leaving them unchanged"
   info "  To reset: delete $ADMIN_CREDS_FILE and re-run this installer"
+  # Read the real login ID out of the file rather than guessing from the
+  # environment, so the summary cannot report a name nobody can sign in with.
+  _admin_user="$(sed -n 's/.*"loginId"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$ADMIN_CREDS_FILE" | head -1)"
+  _admin_user="${_admin_user:-${SCA_ADMIN_USER:-admin}}"
 else
   step "Creating the administrator account"
 
@@ -301,10 +391,15 @@ else
     [[ -n "$_in" ]] && _admin_pass="$(printf '%s' "$_in" | tr -d '\000-\037\177')"
   fi
 
+  _admin_pass_source="chosen during installation"
   if [[ -z "$_admin_pass" ]]; then
     _admin_pass="ScaAdmin@dt8624"
+    _admin_pass_source="the documented default"
     warn "Using the default administrator password. Change it after signing in."
   fi
+  # Kept for the summary below so the operator is told once what to record. It
+  # is never written anywhere except the scrypt hash in the credentials file.
+  _admin_pass_shown="$_admin_pass"
 
   mkdir -p "$ADMIN_CREDS_DIR"
 
@@ -440,8 +535,42 @@ echo ""
 echo -e "  ${BOLD}Risk Dashboard${RESET}  → http://localhost:${DT_DASHBOARD_PORT:-3000}"
 echo -e "  ${BOLD}DependencyTrack${RESET} → configured per user, in ⚙ Settings after signing in"
 echo ""
+# ─── Credentials the operator must record ────────────────────────────────────
+# Shown once, here, because there is nowhere to look them up later: the
+# administrator password exists only as a scrypt hash, and printing them at the
+# end of a successful install is the only point at which both are known.
+echo -e "${BOLD}${CYAN}  ┌─ Credentials — record these now ──────────────────────────────┐${RESET}"
+echo ""
+echo -e "  ${BOLD}Administrator (dashboard sign-in, tick \"Administrator login\")${RESET}"
+echo -e "    Username : ${BOLD}${_admin_user:-${SCA_ADMIN_USER:-admin}}${RESET}"
+if [[ -n "${_admin_pass_shown:-}" ]]; then
+  echo -e "    Password : ${BOLD}${_admin_pass_shown}${RESET}   (${_admin_pass_source})"
+else
+  echo -e "    Password : ${YELLOW}unchanged — the credentials file already existed${RESET}"
+fi
+echo ""
+echo -e "  ${BOLD}PostgreSQL (external tools: pgAdmin, DBeaver, psql)${RESET}"
+echo -e "    Host     : ${BOLD}localhost:${POSTGRES_PORT:-5432}${RESET}"
+echo -e "    Database : ${BOLD}${POSTGRES_DB:-dtdash}${RESET}"
+echo -e "    Username : ${BOLD}${POSTGRES_USER:-dtdash}${RESET}"
+echo -e "    Password : ${BOLD}${POSTGRES_PASSWORD}${RESET}   (${_pg_pass_source:-already in .env})"
+echo ""
+echo -e "${BOLD}${CYAN}  └───────────────────────────────────────────────────────────────┘${RESET}"
+echo ""
+echo -e "  ${BOLD}Where to find these later${RESET}"
+echo -e "    • PostgreSQL username, password and database:"
+echo -e "        ${BOLD}grep ^POSTGRES_ ${ENV_FILE}${RESET}"
+echo -e "    • Administrator username:"
+echo -e "        ${BOLD}grep loginId ${ADMIN_CREDS_FILE}${RESET}"
+echo -e "    • Administrator ${BOLD}password${RESET}: ${YELLOW}nowhere — only its scrypt hash is stored.${RESET}"
+echo -e "        Forgotten it? Delete ${BOLD}${ADMIN_CREDS_FILE}${RESET} and re-run this installer;"
+echo -e "        user accounts and all data are untouched by that."
+echo ""
+echo -e "  ${YELLOW}${BOLD}Back up ${ENV_FILE}.${RESET} It holds SECRET_ENCRYPTION_KEY, without which every"
+echo -e "  stored DependencyTrack API key and SMTP password becomes unreadable."
+echo ""
 echo -e "  ${BOLD}Next steps${RESET}"
-echo -e "    1. Open the dashboard and ${BOLD}create an account${RESET} (or sign in as ${BOLD}${SCA_ADMIN_USER:-admin}${RESET})."
+echo -e "    1. Open the dashboard and ${BOLD}create an account${RESET}, or sign in as the administrator above."
 echo -e "    2. Open ${BOLD}⚙ Settings${RESET} and enter your DependencyTrack URL and API key."
 echo -e "       The key is encrypted at rest and is never sent back to the browser."
 echo ""

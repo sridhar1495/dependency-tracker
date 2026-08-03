@@ -2346,3 +2346,350 @@ describe('user settings — maxReports bounds', () => {
     }
   });
 });
+
+// ── Administration routes — read-only, administrator-only ────────────────────
+// The panel exists so an operator can see usage without being handed the keys
+// to everyone's data. These tests pin both halves of that.
+
+const routeAdmin = require('./routes/admin');
+const usersMod   = require('./lib/users');
+const cachesMod2 = require('./lib/caches');
+
+describe('routes — administration is administrator-only', () => {
+  for (const path of ['/admin/users', '/admin/overview']) {
+    test(`an ordinary user gets 403 ADMIN_ONLY on ${path}`, async () => {
+      const restore = stub(usersMod, {
+        listWithStats: async () => { throw new Error('must not query on an unauthorised request'); },
+      });
+      try {
+        const res = makeRes();
+        const handled = await routeAdmin.handle({
+          method: 'GET', url: path, path, res, principal: asUser(USER_A),
+        });
+        assert.equal(handled, true);
+        assert.equal(res.statusCode, 403);
+        assert.equal(res.json.code, 'ADMIN_ONLY');
+      } finally { restore(); }
+    });
+  }
+
+  test('the administration area is 403, not 404 — its existence is not a secret', async () => {
+    // Another user's report is hidden with 404 because confirming it exists
+    // leaks something. An admin area leaks nothing by existing.
+    const restore = stub(usersMod, { listWithStats: async () => [] });
+    try {
+      const res = makeRes();
+      await routeAdmin.handle({
+        method: 'GET', url: '/admin/users', path: '/admin/users', res, principal: asUser(USER_A),
+      });
+      assert.equal(res.statusCode, 403);
+    } finally { restore(); }
+  });
+});
+
+describe('routes — the administration listing exposes no secrets', () => {
+  const sampleRows = () => ([
+    {
+      id: USER_A, loginId: 'alice', email: 'a@x.com', firstName: 'Alice', lastName: 'Ant',
+      createdAt: new Date('2026-01-01'), lastLoginAt: new Date('2026-02-01'),
+      sessionActive: true, lastSeenAt: new Date('2026-02-01'),
+      reportCount: 3, storageBytes: '4096', dtConfigured: true, scheduleEnabled: false,
+    },
+    {
+      id: USER_B, loginId: 'bob', email: null, firstName: 'Bob', lastName: 'Bee',
+      createdAt: new Date('2026-01-02'), lastLoginAt: null,
+      sessionActive: false, lastSeenAt: null,
+      reportCount: 0, storageBytes: '0', dtConfigured: false, scheduleEnabled: true,
+    },
+  ]);
+
+  test('users are returned with counts, and nothing that could authenticate as them', async () => {
+    const restore = stub(usersMod, { listWithStats: async () => sampleRows() });
+    try {
+      const res = makeRes();
+      await routeAdmin.handle({
+        method: 'GET', url: '/admin/users', path: '/admin/users', res, principal: asAdmin(),
+      });
+      assert.equal(res.statusCode, 200);
+      const { users } = res.json;
+      assert.equal(users.length, 2);
+      assert.equal(users[0].loginId, 'alice');
+      assert.equal(users[0].name, 'Alice Ant');
+      assert.equal(users[0].sessionActive, true);
+      assert.equal(users[0].reportCount, 3);
+      assert.equal(users[0].storageBytes, 4096, 'bigint counts are returned as numbers');
+
+      // Nothing that could be replayed, decrypted or used to sign in.
+      for (const forbidden of ['passwordHash', 'password_hash', 'apiKey', 'api_key',
+                               'tokenHash', 'smtpPass', 'fingerprint', 'id']) {
+        assert.equal(forbidden in users[0], false, `${forbidden} must not be in the response`);
+      }
+      assert.doesNotMatch(res.body, /scrypt\$/);
+    } finally { restore(); }
+  });
+
+  test('the overview totals are derived from the same rows', async () => {
+    const restore  = stub(usersMod, { listWithStats: async () => sampleRows() });
+    const restore2 = stub(cachesMod2, { count: async () => 1 });
+    try {
+      const res = makeRes();
+      await routeAdmin.handle({
+        method: 'GET', url: '/admin/overview', path: '/admin/overview', res, principal: asAdmin(),
+      });
+      assert.equal(res.statusCode, 200);
+      assert.deepEqual(res.json, {
+        userCount: 2, activeSessions: 1, reportCount: 3, storageBytes: 4096,
+        dtConfigured: 1, schedulesActive: 1, cacheCount: 1,
+      });
+    } finally { restore(); restore2(); }
+  });
+
+  test('one cache for two configured users is the shared build working', async () => {
+    // The number the operator should watch as accounts are added: caches grow
+    // with distinct DependencyTrack connections, not with users (CLAUDE.md §13).
+    const rows = sampleRows().map(u => ({ ...u, dtConfigured: true }));
+    const restore  = stub(usersMod, { listWithStats: async () => rows });
+    const restore2 = stub(cachesMod2, { count: async () => 1 });
+    try {
+      const res = makeRes();
+      await routeAdmin.handle({
+        method: 'GET', url: '/admin/overview', path: '/admin/overview', res, principal: asAdmin(),
+      });
+      assert.equal(res.json.dtConfigured, 2);
+      assert.equal(res.json.cacheCount, 1);
+    } finally { restore(); restore2(); }
+  });
+
+  test('there is no route that changes anything', async () => {
+    // A write route here would be a much larger blast radius than the panel is
+    // worth. If one is ever added, this test should be the thing that stops it.
+    for (const method of ['POST', 'PUT', 'DELETE', 'PATCH']) {
+      for (const path of ['/admin/users', '/admin/overview', '/admin/users/alice']) {
+        const res = makeRes();
+        const handled = await routeAdmin.handle({
+          method, url: path, path, res, principal: asAdmin(),
+        });
+        assert.equal(handled, false,
+          `${method} ${path} must not be handled — administration is read-only`);
+      }
+    }
+  });
+});
+
+// ── Registration reports every clashing identifier at once ───────────────────
+// Reporting only the login ID made the user fix it, resubmit, and only then
+// discover the email was taken too.
+
+const routeAuth = require('./routes/auth');
+const adminMod  = require('./lib/admin');
+
+describe('routes — registration conflicts', () => {
+  const body = (over = {}) => JSON.stringify({
+    firstName: 'Alice', lastName: 'Ant', loginId: 'alice',
+    email: 'alice@example.com', password: 'password123',
+    confirmPassword: 'password123', ...over,
+  });
+  const post = (raw) => ({
+    method: 'POST', url: '/auth/register', path: '/auth/register',
+    req: Readable.from([raw]), res: makeRes(),
+  });
+
+  test('both a taken login ID and a taken email are reported together', async () => {
+    const restore = stub(usersMod, {
+      findTakenIdentifiers: async () => ({ loginId: true, email: true }),
+      create: async () => { throw new Error('must not insert when both clash'); },
+    });
+    try {
+      const ctx = post(body());
+      await routeAuth.handle(ctx);
+      assert.equal(ctx.res.statusCode, 409);
+      assert.equal(ctx.res.json.code, 'ALREADY_REGISTERED');
+      assert.ok(ctx.res.json.errors.loginId, 'the login ID error must be present');
+      assert.ok(ctx.res.json.errors.email, 'the email error must be present');
+      assert.match(ctx.res.json.error, /both/i, 'the banner should say both');
+    } finally { restore(); }
+  });
+
+  test('only the login ID clashing reports only that field', async () => {
+    const restore = stub(usersMod, {
+      findTakenIdentifiers: async () => ({ loginId: true, email: false }),
+      create: async () => { throw new Error('must not insert'); },
+    });
+    try {
+      const ctx = post(body());
+      await routeAuth.handle(ctx);
+      assert.equal(ctx.res.statusCode, 409);
+      assert.deepEqual(Object.keys(ctx.res.json.errors), ['loginId']);
+      assert.match(ctx.res.json.error, /login ID/i);
+    } finally { restore(); }
+  });
+
+  test('only the email clashing reports only that field', async () => {
+    const restore = stub(usersMod, {
+      findTakenIdentifiers: async () => ({ loginId: false, email: true }),
+      create: async () => { throw new Error('must not insert'); },
+    });
+    try {
+      const ctx = post(body());
+      await routeAuth.handle(ctx);
+      assert.equal(ctx.res.statusCode, 409);
+      assert.deepEqual(Object.keys(ctx.res.json.errors), ['email']);
+    } finally { restore(); }
+  });
+
+  test('neither message says who owns the identifier', async () => {
+    const restore = stub(usersMod, {
+      findTakenIdentifiers: async () => ({ loginId: true, email: true }),
+      create: async () => { throw new Error('must not insert'); },
+    });
+    try {
+      const ctx = post(body());
+      await routeAuth.handle(ctx);
+      // Enumeration guard: the reply confirms the identifier is in use and
+      // nothing else about the account that holds it (CLAUDE.md §12).
+      assert.doesNotMatch(ctx.res.body, /belongs to|owned by|@example\.com/);
+    } finally { restore(); }
+  });
+
+  test('a clash found only by the unique index still names its field', async () => {
+    // The pre-check can be raced. The constraint remains the arbiter, and its
+    // error must still be actionable.
+    const restore = stub(usersMod, {
+      findTakenIdentifiers: async () => ({ loginId: false, email: false }),
+      create: async () => {
+        throw Object.assign(new Error('This login ID is already registered.'),
+          { code: 'ALREADY_REGISTERED', field: 'loginId' });
+      },
+    });
+    try {
+      const ctx = post(body());
+      await routeAuth.handle(ctx);
+      assert.equal(ctx.res.statusCode, 409);
+      assert.ok(ctx.res.json.errors.loginId);
+    } finally { restore(); }
+  });
+
+  test('a free login ID and email proceed to creation', async () => {
+    let created = false;
+    const restore = stub(usersMod, {
+      findTakenIdentifiers: async () => ({ loginId: false, email: false }),
+      create: async () => { created = true; return { id: USER_A, loginId: 'alice' }; },
+    });
+    const restoreAudit = stub(require('./lib/login-audit'), { record: async () => {} });
+    try {
+      const ctx = post(body());
+      await routeAuth.handle(ctx);
+      assert.equal(ctx.res.statusCode, 201, ctx.res.body);
+      assert.equal(created, true);
+    } finally { restore(); restoreAudit(); }
+  });
+});
+
+// ── Administration: one account's detail ─────────────────────────────────────
+describe('routes — administration user detail', () => {
+  const sampleDetail = () => ({
+    id: USER_A, loginId: 'alice', email: 'alice@example.com',
+    firstName: 'Alice', lastName: 'Ant',
+    createdAt: new Date('2026-01-01'), updatedAt: new Date('2026-01-02'),
+    lastLoginAt: new Date('2026-02-01'),
+    sessionIssuedAt: new Date('2026-02-01'), sessionLastSeenAt: new Date('2026-02-01'),
+    sessionExpiresAt: new Date('2026-02-02'), sessionUserAgent: 'Firefox',
+    sessionIpAddress: '10.0.0.9',
+    dtApiUrl: 'https://dt.example.com', dtFrontendUrl: '', dtConfigured: true,
+    dtHasApiKey: true, dtUpdatedAt: new Date('2026-01-03'),
+    maxReports: 10,
+    mailEnabled: true, mailHost: 'smtp.example.com', mailPort: 587,
+    mailFrom: 'alice@example.com', mailRecipients: 2, mailHasPassword: true,
+    scheduleEnabled: true, frequency: 'daily', hour: 9, scheduleProjects: 4,
+    nextRunAt: new Date('2026-02-02'), lastRunAt: new Date('2026-02-01'),
+    lastRunStatus: 'success',
+    reportCount: 5, reportsCompleted: 4, reportsRunning: 0, reportsFailed: 1,
+    storageBytes: '8192', newestReportAt: new Date('2026-02-01'),
+  });
+
+  const get = (loginId, principal) => ({
+    method: 'GET', url: `/admin/users/${loginId}`, path: `/admin/users/${loginId}`,
+    res: makeRes(), principal,
+  });
+
+  test('an ordinary user is refused', async () => {
+    const restore = stub(usersMod, {
+      detailForAdmin: async () => { throw new Error('must not query for a non-administrator'); },
+    });
+    try {
+      const ctx = get('alice', asUser(USER_B));
+      assert.equal(await routeAdmin.handle(ctx), true);
+      assert.equal(ctx.res.statusCode, 403);
+      assert.equal(ctx.res.json.code, 'ADMIN_ONLY');
+    } finally { restore(); }
+  });
+
+  test('the detail is grouped and complete', async () => {
+    const restore = stub(usersMod, { detailForAdmin: async () => sampleDetail() });
+    try {
+      const ctx = get('alice', asAdmin());
+      await routeAdmin.handle(ctx);
+      assert.equal(ctx.res.statusCode, 200);
+      const d = ctx.res.json;
+      assert.equal(d.account.loginId, 'alice');
+      assert.equal(d.session.ipAddress, '10.0.0.9');
+      assert.equal(d.dependencyTrack.configured, true);
+      assert.equal(d.dependencyTrack.hasApiKey, true);
+      assert.equal(d.settings.maxReports, 10);
+      assert.equal(d.mail.recipients, 2);
+      assert.equal(d.schedule.projectCount, 4);
+      assert.equal(d.reports.completed, 4);
+      assert.equal(d.reports.storageBytes, 8192, 'bigint storage is a number');
+    } finally { restore(); }
+  });
+
+  test('no secret is reachable through the detail', async () => {
+    const restore = stub(usersMod, { detailForAdmin: async () => sampleDetail() });
+    try {
+      const ctx = get('alice', asAdmin());
+      await routeAdmin.handle(ctx);
+      const d = ctx.res.json;
+      // The API key and SMTP password are reported as present, never disclosed.
+      assert.equal('apiKey' in d.dependencyTrack, false);
+      assert.equal('password' in d.mail, false);
+      assert.equal(d.mail.hasPassword, true);
+      assert.doesNotMatch(ctx.res.body, /scrypt\$|api_key_ciphertext|passwordHash/);
+      assert.equal('id' in d.account, false, 'the internal user id is not exposed');
+    } finally { restore(); }
+  });
+
+  test('an account with no session or configuration renders as empty, not missing', async () => {
+    const bare = { ...sampleDetail(), sessionIssuedAt: null, dtConfigured: false,
+                   dtApiUrl: null, dtHasApiKey: false, mailEnabled: false, mailHost: null,
+                   scheduleEnabled: false, frequency: null };
+    const restore = stub(usersMod, { detailForAdmin: async () => bare });
+    try {
+      const ctx = get('bob', asAdmin());
+      await routeAdmin.handle(ctx);
+      assert.equal(ctx.res.statusCode, 200);
+      assert.equal(ctx.res.json.session, null);
+      assert.equal(ctx.res.json.dependencyTrack.configured, false);
+      assert.equal(ctx.res.json.dependencyTrack.apiUrl, '');
+      assert.equal(ctx.res.json.mail.enabled, false);
+    } finally { restore(); }
+  });
+
+  test('an unknown account is 404', async () => {
+    const restore = stub(usersMod, { detailForAdmin: async () => null });
+    try {
+      const ctx = get('nobody', asAdmin());
+      await routeAdmin.handle(ctx);
+      assert.equal(ctx.res.statusCode, 404);
+      assert.equal(ctx.res.json.code, 'NOT_FOUND');
+    } finally { restore(); }
+  });
+
+  test('the detail route is read-only too', async () => {
+    for (const method of ['POST', 'PUT', 'DELETE', 'PATCH']) {
+      const ctx = { method, url: '/admin/users/alice', path: '/admin/users/alice',
+                    res: makeRes(), principal: asAdmin() };
+      assert.equal(await routeAdmin.handle(ctx), false,
+        `${method} /admin/users/:loginId must not be handled`);
+    }
+  });
+});

@@ -59,8 +59,8 @@ The installer prompts for your DependencyTrack API URL and (optionally) an API k
 | _(none)_ | Interactive install — prompts for all settings |
 | `--non-interactive` | Skip prompts, use `.env` values / defaults |
 | `--skip-docker-check` | Skip Docker version validation |
-| `--uninstall` / `-u` | Remove containers and network (keep images) |
-| `--all` / `-a` | Remove containers, network, and images |
+| `--uninstall` / `-u` | Remove containers and the network. **Keeps all data**, images and `.env` |
+| `--all` / `-a` | Remove containers, network and images, **and delete the database**. Asks you to type `DELETE` |
 | `--help` | Show usage |
 
 ---
@@ -108,3 +108,4 @@ Copy `.env.example` to `.env` and set:
 
 - [Installation Guide](docs/INSTALLATION.md)
 - [Dashboard Integration Guide](docs/DASHBOARD_INTEGRATION.md)
+- [Performance validation](docs/PERFORMANCE.md) — query plans and load evidence

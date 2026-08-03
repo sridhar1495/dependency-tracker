@@ -30,6 +30,17 @@ server {
         add_header Cache-Control "no-store" always;
     }
 
+    # Read-only administration endpoints. Same backend; listed separately
+    # because the SPA fallback above would otherwise swallow them.
+    location /admin/ {
+        set $vcadmin "http://dt-violation-cache:3001";
+        proxy_pass $vcadmin;
+        proxy_set_header Host $http_host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        add_header Cache-Control "no-store" always;
+    }
+
     location /profile {
         set $vcprofile "http://dt-violation-cache:3001";
         proxy_pass $vcprofile;

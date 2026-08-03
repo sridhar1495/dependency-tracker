@@ -51,12 +51,99 @@
       background: var(--bg); color: var(--text); min-height: 100vh;
       font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
       display: flex; align-items: center; justify-content: center; padding: 24px;
+      position: relative; overflow: hidden;
     }
+
+    /* ── Animated background ────────────────────────────────────────────────
+       Two moods, cross-faded by the Administrator checkbox: indigo for a user
+       sign-in, amber for the administrator, so which one you are about to use
+       is obvious before you type anything.
+
+       Pure CSS — no canvas, no library, no build step. Everything is a
+       transform or an opacity, both of which the compositor animates off the
+       main thread, so the form stays responsive while it runs. */
+    .bg {
+      position: fixed; inset: 0; z-index: -2; overflow: hidden;
+      opacity: 0; transition: opacity 0.8s ease;
+    }
+    .bg.active { opacity: 1; }
+
+    .bg::after {
+      /* A soft vignette keeps the card readable over the brightest blobs. */
+      content: ''; position: absolute; inset: 0;
+      background: radial-gradient(ellipse at center, transparent 35%, var(--bg) 100%);
+      opacity: 0.85;
+    }
+
+    .blob {
+      position: absolute; border-radius: 50%;
+      filter: blur(70px); opacity: 0.55;
+      will-change: transform;
+      animation: drift 26s ease-in-out infinite;
+    }
+    .blob.b2 { animation-duration: 34s; animation-direction: reverse; }
+    .blob.b3 { animation-duration: 42s; animation-delay: -8s; }
+    .blob.b4 { animation-duration: 30s; animation-delay: -15s; animation-direction: reverse; }
+
+    /* User: indigo / violet / cyan. */
+    #bgUser  .b1 { width: 46vmax; height: 46vmax; top: -12vmax; left: -10vmax; background: #6366f1; }
+    #bgUser  .b2 { width: 38vmax; height: 38vmax; bottom: -14vmax; right: -8vmax; background: #8b5cf6; }
+    #bgUser  .b3 { width: 30vmax; height: 30vmax; top: 45%; left: 55%; background: #06b6d4; opacity: 0.35; }
+    #bgUser  .b4 { width: 24vmax; height: 24vmax; top: 8%; right: 18%; background: #3b82f6; opacity: 0.3; }
+
+    /* Administrator: amber / rose — deliberately a different temperature. */
+    #bgAdmin .b1 { width: 46vmax; height: 46vmax; top: -14vmax; right: -10vmax; background: #f59e0b; }
+    #bgAdmin .b2 { width: 38vmax; height: 38vmax; bottom: -12vmax; left: -8vmax; background: #ef4444; }
+    #bgAdmin .b3 { width: 30vmax; height: 30vmax; top: 50%; left: 20%; background: #f97316; opacity: 0.35; }
+    #bgAdmin .b4 { width: 24vmax; height: 24vmax; top: 12%; left: 42%; background: #eab308; opacity: 0.3; }
+
+    @keyframes drift {
+      0%,100% { transform: translate(0, 0) scale(1); }
+      25%     { transform: translate(6vmax, -4vmax) scale(1.12); }
+      50%     { transform: translate(-4vmax, 5vmax) scale(0.94); }
+      75%     { transform: translate(-6vmax, -3vmax) scale(1.06); }
+    }
+
+    /* A slow grid drifting over the blobs, for a little depth. */
+    .bg-grid {
+      position: fixed; inset: -50%; z-index: -1; pointer-events: none;
+      background-image:
+        linear-gradient(var(--grid-line) 1px, transparent 1px),
+        linear-gradient(90deg, var(--grid-line) 1px, transparent 1px);
+      background-size: 54px 54px;
+      opacity: 0.25;
+      animation: grid-pan 60s linear infinite;
+    }
+    :root { --grid-line: rgba(255,255,255,0.05); }
+    [data-theme="light"] { --grid-line: rgba(30,35,51,0.06); }
+
+    @keyframes grid-pan {
+      from { transform: translate(0, 0); }
+      to   { transform: translate(54px, 54px); }
+    }
+
+    /* Anyone who has asked their system not to animate things gets a still
+       gradient. The page must not be a worse experience for saying so. */
+    @media (prefers-reduced-motion: reduce) {
+      .blob, .bg-grid { animation: none; }
+      .bg { transition: none; }
+    }
+
+    /* The card lifts off the moving background rather than sitting flat on it. */
+    .auth-card { position: relative; z-index: 1; }
 
     .auth-card {
       background: var(--surface); border: 1px solid var(--border);
       border-radius: 14px; width: 100%; max-width: 430px;
       padding: 32px; box-shadow: 0 18px 48px rgba(0,0,0,0.28);
+    }
+    /* Progressive enhancement: browsers with backdrop-filter get a frosted
+       card; the rest keep the solid surface above, which is already legible. */
+    @supports (backdrop-filter: blur(12px)) {
+      .auth-card {
+        background: color-mix(in srgb, var(--surface) 88%, transparent);
+        backdrop-filter: blur(14px);
+      }
     }
     .auth-brand { text-align: center; margin-bottom: 22px; }
     .auth-brand h1 { font-size: 20px; font-weight: 700; letter-spacing: -0.2px; }
@@ -168,6 +255,17 @@
 </head>
 <body>
 
+<!-- Two background layers, cross-faded by the Administrator checkbox. -->
+<div class="bg active" id="bgUser" aria-hidden="true">
+  <div class="blob b1"></div><div class="blob b2"></div>
+  <div class="blob b3"></div><div class="blob b4"></div>
+</div>
+<div class="bg" id="bgAdmin" aria-hidden="true">
+  <div class="blob b1"></div><div class="blob b2"></div>
+  <div class="blob b3"></div><div class="blob b4"></div>
+</div>
+<div class="bg-grid" aria-hidden="true"></div>
+
 <button class="theme-btn" id="themeBtn" onclick="toggleTheme()" title="Toggle light / dark theme">🌓</button>
 
 <div class="auth-card">
@@ -184,10 +282,12 @@
     <div class="auth-title">Sign in</div>
     <form id="loginForm" onsubmit="return false;">
       <label class="cfg-label" for="liLoginId">Login ID</label>
-      <input class="cfg-input" id="liLoginId" autocomplete="username" autofocus>
+      <input class="cfg-input" id="liLoginId" autocomplete="username" autofocus
+             placeholder="your login ID">
 
       <label class="cfg-label" for="liPassword">Password</label>
-      <input class="cfg-input" id="liPassword" type="password" autocomplete="current-password">
+      <input class="cfg-input" id="liPassword" type="password" autocomplete="current-password"
+             placeholder="your password">
 
       <label class="admin-toggle" for="liIsAdmin">
         <input type="checkbox" id="liIsAdmin" onchange="onAdminToggle()">
@@ -199,7 +299,7 @@
 
       <button class="btn primary block" id="liSubmit" onclick="doLogin(false)">Sign in</button>
     </form>
-    <div class="auth-alt">
+    <div class="auth-alt" id="loginAlt">
       <button class="link" onclick="showView('forgot')">Forgot password?</button>
       &nbsp;·&nbsp;
       <button class="link" onclick="showView('register')">Create an account</button>
@@ -389,11 +489,26 @@ function showView(name) {
   if (focus) { const el = $(focus); if (el) el.focus(); }
 }
 
+/**
+ * Switch the page between its user and administrator moods.
+ *
+ * The background colour change is the point: it makes which credential set you
+ * are about to use visible before you type, rather than only after a failure.
+ * The placeholders say the same thing in words.
+ */
 function onAdminToggle() {
-  // An administrator cannot register, so steer the wording rather than leaving
-  // a "create an account" invitation that would fail.
   const isAdmin = $('liIsAdmin').checked;
-  $('liLoginId').placeholder = isAdmin ? 'Administrator login ID' : '';
+
+  $('bgUser').classList.toggle('active', !isAdmin);
+  $('bgAdmin').classList.toggle('active', isAdmin);
+
+  $('liLoginId').placeholder  = isAdmin ? 'administrator login ID' : 'your login ID';
+  $('liPassword').placeholder = isAdmin ? 'administrator password' : 'your password';
+  $('liSubmit').textContent   = isAdmin ? 'Sign in as administrator' : 'Sign in';
+
+  // An administrator has no account to create, so stop inviting them to.
+  const alt = $('loginAlt');
+  if (alt) alt.style.display = isAdmin ? 'none' : '';
 }
 
 // ── Sign in ───────────────────────────────────────────────────────────────

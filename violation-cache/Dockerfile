@@ -2,9 +2,12 @@
 # Node 22 LTS (replaces EOL Node 18)
 FROM node:22-alpine
 WORKDIR /app
-# Install production dependencies first (layer cached unless package.json changes)
-COPY package.json ./
-RUN npm install --omit=dev --no-audit --no-fund
+# Install production dependencies first (layer cached unless the manifests change).
+# `npm ci` against the committed lock file, not `npm install`: the image then
+# contains exactly the dependency tree that was tested and audited, rather than
+# whatever the registry resolves to on the day it is built.
+COPY package.json package-lock.json ./
+RUN npm ci --omit=dev --no-audit --no-fund
 # The image copies named paths only — a new directory that is not listed here is
 # silently missing at runtime (CLAUDE.md §9.3). Add a COPY for every new folder.
 COPY server.js ./
