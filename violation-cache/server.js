@@ -40,13 +40,37 @@ const appConfig = require('./lib/app-config');
 const cache     = require('./lib/violation-cache');
 const reports   = require('./lib/reports');
 const scheduler = require('./lib/scheduler');
+const auth      = require('./lib/auth');
+const admin     = require('./lib/admin');
 
 const routeModules = [
+  require('./routes/auth'),
+  require('./routes/profile'),
   require('./routes/cache'),
   require('./routes/config'),
   require('./routes/reports'),
   require('./routes/schedule'),
 ];
+
+// ── Route authentication policy ───────────────────────────────────────────────
+// Routes are authenticated by DEFAULT. Adding a path to PUBLIC_PATHS is an
+// explicit decision that must be justified in the PR (CLAUDE.md §6.6, §12).
+const PUBLIC_PATHS = new Set([
+  '/auth/register',            // creating an account cannot require an account
+  '/auth/check-availability',  // needed during registration; rate limited, reveals no owner
+  '/auth/login',               // the entry point itself
+]);
+
+// Phase 3 deletes this set and every /violation-cache/* route becomes
+// authenticated in the same pull request that teaches the dashboard to send a
+// bearer token. Enforcing it here instead would break the dashboard for
+// everyone between phase 2 and phase 3 merging, leaving main unusable.
+const PENDING_FRONTEND_AUTH_PREFIX = '/violation-cache/';
+
+function isPublic(path) {
+  if (PUBLIC_PATHS.has(path)) return true;
+  return path.startsWith(PENDING_FRONTEND_AUTH_PREFIX);
+}
 
 // ── Boot step 1: read and validate configuration ──────────────────────────────
 // Done before anything else so a misconfigured container fails immediately with
@@ -109,8 +133,10 @@ const server = http.createServer(async (req, res) => {
 
   if (req.method === 'OPTIONS') {
     res.writeHead(204, {
-      'Access-Control-Allow-Methods': 'GET, POST, DELETE, OPTIONS',
-      'Access-Control-Allow-Headers': 'Content-Type',
+      // PUT is required by the profile endpoint; Authorization by every
+      // authenticated route.
+      'Access-Control-Allow-Methods': 'GET, POST, PUT, DELETE, OPTIONS',
+      'Access-Control-Allow-Headers': 'Content-Type, Authorization',
     });
     res.end();
     return;
@@ -121,6 +147,22 @@ const server = http.createServer(async (req, res) => {
   const ctx = { method, url, path: parsedPath, req, res, deps: routeDeps };
 
   try {
+    // ── Authentication, before any route sees the request ────────────────
+    // A missing, malformed, expired or revoked token is a single 401 with a
+    // stable code; the frontend treats any 401 as "go to the login page".
+    if (!isPublic(parsedPath)) {
+      const token = auth.bearerFromRequest(req);
+      const principal = token ? await auth.resolveToken(token) : null;
+      if (!principal) {
+        jsonReply(res, 401, {
+          error: 'Your session is not valid. Please sign in again.',
+          code: 'INVALID_SESSION',
+        });
+        return;
+      }
+      ctx.principal = principal;
+    }
+
     for (const mod of routeModules) {
       if (await mod.handle(ctx)) return;
       // O5: a handler that wrote a response but reported "not mine" would fall
@@ -143,6 +185,8 @@ const server = http.createServer(async (req, res) => {
 });
 
 // ── Boot sequence ─────────────────────────────────────────────────────────────
+let sessionSweeper = null;
+
 async function boot() {
   // Step 2: connection pool.
   pool.init(cfg.db);
@@ -154,11 +198,22 @@ async function boot() {
   // Step 3: migrations. The listener must not start until these complete.
   await migrate({ pool: pool.getPool(), log });
 
-  // Step 4: administrator credentials — phase 2.
+  // Step 4: administrator credentials. Never created here — if the file is
+  // absent, administrator login is disabled and the reason is logged.
+  auth.configure(cfg);
+  admin.load(cfg.paths.adminCreds);
+  if (!cfg.secretEncryptionKey) {
+    log('warn', 'SECRET_ENCRYPTION_KEY is not set — required from phase 4 to store DT API keys');
+  }
 
   // Step 5: restore persisted state and start background timers.
   reports.loadRegistry();
   scheduler.armScheduler();
+  // Sweep expired sessions and stale audit rows so neither table grows without
+  // bound. Runs every 10 minutes, and once shortly after boot.
+  sessionSweeper = setInterval(() => { auth.sweep(); }, 10 * 60_000);
+  if (sessionSweeper.unref) sessionSweeper.unref();
+  setTimeout(() => auth.sweep(), 5_000).unref();
 
   // Step 6: accept requests.
   await new Promise((resolve) => server.listen(cfg.port, resolve));
@@ -166,6 +221,13 @@ async function boot() {
   const { apiUrl, apiKey } = effectiveConfig();
   const appCfg = appConfig.loadConfig();
   log('info', `Violation cache service listening on :${cfg.port}`);
+  log('info', 'Authentication', {
+    adminLogin:    admin.isEnabled() ? 'enabled' : 'DISABLED',
+    sessionHours:  `${cfg.session.absoluteHours} absolute / ${cfg.session.idleHours} idle`,
+    // Honest about the interim state rather than implying full coverage.
+    enforcedOn:    '/auth/*, /profile',
+    pendingPhase3: '/violation-cache/* (enforced once the dashboard sends a token)',
+  });
   log('info', 'Startup configuration', {
     apiUrl,
     apiKey:       apiKey ? `***${apiKey.slice(-4)}` : 'NOT SET',
@@ -194,6 +256,8 @@ async function shutdown(signal) {
   shuttingDown = true;
   log('info', `Received ${signal} — shutting down`);
   scheduler.stop();
+  if (sessionSweeper) clearInterval(sessionSweeper);
+  auth.clearCache();
   server.close();
   try { await pool.close(); } catch (e) { log('warn', `Pool close failed: ${e.message}`); }
   process.exit(0);
