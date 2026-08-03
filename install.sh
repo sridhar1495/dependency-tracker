@@ -184,6 +184,21 @@ else
   die "Docker Compose not found. Install from https://docs.docker.com/compose/install/"
 fi
 
+# Node.js is OPTIONAL. It is only used to hash the administrator password, and
+# the installer falls back to a container when it is missing or too old. Report
+# it so the chosen path is visible rather than surprising.
+if command -v node &>/dev/null; then
+  _probe_major="$(node -p 'process.versions.node.split(".")[0]' 2>/dev/null || echo 0)"
+  if [[ "$_probe_major" =~ ^[0-9]+$ ]] && [[ "$_probe_major" -ge 18 ]]; then
+    success "Node.js (optional): $(node -v) — will be used to hash the admin password"
+  else
+    info "Node.js (optional): $(node -v 2>/dev/null || echo 'unknown') is older than v18 — a container will be used instead"
+  fi
+else
+  info "Node.js (optional): not installed — a container will be used to hash the admin password"
+fi
+unset _probe_major
+
 # ─── Step 2 — Configuration ──────────────────────────────────────────────────
 step "Step 2 — Configuration"
 
@@ -329,21 +344,82 @@ else
 
   mkdir -p "$ADMIN_CREDS_DIR"
 
-  # Hashed with the same scrypt parameters the service uses, by calling the
+  # Hash with the SAME scrypt parameters the service uses, by calling the
   # service's own module — so the installer can never drift from it.
-  if ! ADMIN_USER="$_admin_user" ADMIN_PASS="$_admin_pass" \
-       node -e '
-         const { hashPassword } = require("./violation-cache/lib/crypto");
-         hashPassword(process.env.ADMIN_PASS).then(h => {
-           process.stdout.write(JSON.stringify({
-             loginId: process.env.ADMIN_USER,
-             passwordHash: h,
-             createdAt: new Date().toISOString(),
-           }, null, 2));
-         }).catch(e => { console.error(e.message); process.exit(1); });
-       ' > "${ADMIN_CREDS_FILE}.tmp" 2>/dev/null; then
+  #
+  # CRYPTO_MODULE is an absolute path: a relative require() would resolve against
+  # the caller's working directory, so the installer would only work when run
+  # from the repository root.
+  #
+  # Docker is this installer's only hard prerequisite, so a Node.js runtime on
+  # the host must stay optional. We use the host's Node when it is new enough
+  # because it avoids an image pull, and otherwise run the identical script
+  # inside node:22-alpine — the same base image the service itself uses.
+  _hash_script='
+    const { hashPassword } = require(process.env.CRYPTO_MODULE);
+    hashPassword(process.env.ADMIN_PASS).then(h => {
+      process.stdout.write(JSON.stringify({
+        loginId: process.env.ADMIN_USER,
+        passwordHash: h,
+        createdAt: new Date().toISOString(),
+      }, null, 2));
+    }).catch(e => { console.error(e.message); process.exit(1); });
+  '
+
+  _node_major=0
+  if command -v node &>/dev/null; then
+    _node_major="$(node -p 'process.versions.node.split(".")[0]' 2>/dev/null || echo 0)"
+    [[ "$_node_major" =~ ^[0-9]+$ ]] || _node_major=0
+  fi
+
+  # `2>&1 >file` sends stderr to the command substitution and stdout to the file,
+  # so a real error message is captured instead of being thrown away.
+  _hash_err=""
+  _hash_ok=true
+  if [[ "$_node_major" -ge 18 ]]; then
+    info "Hashing the administrator password (host Node.js v${_node_major})…"
+    _hash_err="$(ADMIN_USER="$_admin_user" ADMIN_PASS="$_admin_pass" \
+        CRYPTO_MODULE="$SCRIPT_DIR/violation-cache/lib/crypto" \
+        node -e "$_hash_script" 2>&1 >"${ADMIN_CREDS_FILE}.tmp")" || _hash_ok=false
+  else
+    if command -v node &>/dev/null; then
+      info "Host Node.js is v${_node_major}; version 18+ is required. Using a container instead…"
+    else
+      info "Node.js is not installed on this host — hashing inside a container instead…"
+    fi
+    _hash_err="$(docker run --rm \
+        -e ADMIN_USER="$_admin_user" \
+        -e ADMIN_PASS="$_admin_pass" \
+        -e CRYPTO_MODULE=/app/lib/crypto \
+        -v "$SCRIPT_DIR/violation-cache:/app:ro" \
+        -w /app node:22-alpine \
+        node -e "$_hash_script" 2>&1 >"${ADMIN_CREDS_FILE}.tmp")" || _hash_ok=false
+  fi
+
+  # A command can exit 0 and still produce nothing usable, so check the output.
+  if [[ "$_hash_ok" == "true" ]] && ! grep -q '"passwordHash"' "${ADMIN_CREDS_FILE}.tmp" 2>/dev/null; then
+    _hash_ok=false
+    [[ -z "$_hash_err" ]] && _hash_err="the command produced no credentials output"
+  fi
+
+  if [[ "$_hash_ok" != "true" ]]; then
     rm -f "${ADMIN_CREDS_FILE}.tmp"
-    die "Could not create administrator credentials. Node.js 18+ must be installed to run the installer."
+    error "Could not create the administrator credentials file."
+    [[ -n "$_hash_err" ]] && error "Reason: ${_hash_err}"
+    echo ""
+    echo -e "  The installer hashes the administrator password using the service's own"
+    echo -e "  crypto module. It tries the host's Node.js (18+) first and falls back to"
+    echo -e "  running ${BOLD}node:22-alpine${RESET} in Docker."
+    echo ""
+    echo -e "  Things to check:"
+    echo -e "    • Docker can pull images:   ${BOLD}docker run --rm node:22-alpine node -v${RESET}"
+    echo -e "    • The module exists:        ${BOLD}ls $SCRIPT_DIR/violation-cache/lib/crypto.js${RESET}"
+    echo -e "    • The data directory is writable: ${BOLD}ls -ld $ADMIN_CREDS_DIR${RESET}"
+    echo ""
+    echo -e "  Everything else installed correctly. You can re-run ${BOLD}./install.sh${RESET} once"
+    echo -e "  this is resolved; administrator login stays disabled until the file exists,"
+    echo -e "  but normal user accounts work regardless."
+    exit 1
   fi
 
   mv "${ADMIN_CREDS_FILE}.tmp" "$ADMIN_CREDS_FILE"
