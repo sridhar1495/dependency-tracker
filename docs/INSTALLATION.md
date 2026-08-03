@@ -69,10 +69,18 @@ Press Enter at any prompt to take the default.
 The installer does **not** ask for a DependencyTrack URL or API key — those belong to
 each user now.
 
-> **The PostgreSQL prompts appear on a first install only.** PostgreSQL reads
-> those values just once, when it initialises the data directory, so once
-> `violation-cache/pgdata` exists the installer keeps the stored credentials and
-> says so. Changing them afterwards would leave the service unable to connect.
+> **Re-running the installer asks the same questions again**, with your current
+> values as the defaults, so pressing Enter through them changes nothing.
+>
+> PostgreSQL reads its credentials only once, when it initialises the data
+> directory. If you type a *different* username, password or database name while
+> `violation-cache/pgdata` already exists, the installer says so and asks whether
+> to write it anyway — the running database would keep its old values and the
+> service would fail to connect. Declining keeps what works.
+>
+> The administrator credential has no such constraint: it is one file, and
+> recreating it touches no account, setting or report. When it already exists the
+> installer offers to reset it.
 
 After the prompts the installer:
 1. Generates `POSTGRES_PASSWORD` and `SECRET_ENCRYPTION_KEY` if they are absent

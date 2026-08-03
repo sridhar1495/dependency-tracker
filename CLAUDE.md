@@ -706,8 +706,21 @@ CMD ["node", "server.js"]
   it silently is a much worse failure than leaving it.
 - Deletions use `${SCRIPT_DIR:?}` so an empty variable cannot turn a cleanup
   into an `rm -rf` of the wrong path.
-- `installer.test.js` pins all of this. It runs offline against a throwaway
-  copy with a stub `docker` on `PATH`.
+- Re-running the installer asks every question again, with the current values as
+  defaults. A PostgreSQL credential that differs from the existing cluster's is
+  challenged before it is written, because PostgreSQL reads those only at data
+  directory initialisation and the service would then fail to connect. The
+  administrator credential has no such constraint and is simply offered as a
+  reset. **Skipping a prompt is not an option** — an operator who is never asked
+  cannot tell the difference between "not supported" and "broken".
+- `installer.test.js` pins all of this. It runs offline against a throwaway copy
+  with a stub `docker` on `PATH`, driven through a pty because bash shows a
+  `read -p` prompt only on a terminal — over a pipe a test cannot tell "asked
+  and answered" from "never asked".
+- **Anything the Dockerfile `COPY`s must not be listed in `.dockerignore`.** The
+  build fails with `failed to compute cache key: ... not found`, which names the
+  file but not the reason. `installer.test.js` checks the two files against each
+  other statically, so this is caught without building an image.
 
 ---
 

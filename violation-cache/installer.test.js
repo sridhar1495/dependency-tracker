@@ -24,6 +24,22 @@ const { execFileSync } = require('node:child_process');
 const REPO_ROOT   = path.join(__dirname, '..');
 const INSTALL_SH  = path.join(REPO_ROOT, 'install.sh');
 
+/**
+ * Can we allocate a pty with GNU `script`?
+ *
+ * Needed because bash only shows a `read -p` prompt on a terminal. util-linux
+ * ships it on every Linux including the CI image; BSD/macOS `script` takes
+ * different flags, so there the interactive suites skip rather than fail — the
+ * static checks below still run everywhere.
+ */
+const PTY = (() => {
+  try {
+    execFileSync('script', ['-qec', 'true', '/dev/null'], { stdio: 'ignore' });
+    return true;
+  } catch (_) { return false; }
+})();
+const NO_PTY = !PTY && 'GNU `script` is unavailable — cannot drive the prompts';
+
 let sandbox;
 
 /**
@@ -83,11 +99,21 @@ function writeDockerStub(dir) {
 // escape codes, so strip them once here rather than in every test.
 const ANSI = /\u001b\[[0-9;]*m/g;
 
-/** Run install.sh in the sandbox. Returns { status, stdout } with ANSI removed. */
+/**
+ * Run install.sh in the sandbox. Returns { status, stdout } with ANSI removed.
+ *
+ * Driven through a pty (`script -qec`) rather than a plain pipe. Bash's
+ * `read -p` displays its prompt ONLY when input comes from a terminal, so over
+ * a pipe the prompts are invisible and a test could not tell "asked and
+ * answered" from "never asked at all" — exactly the regression these tests
+ * exist to catch. The pty also merges stderr, where `read` writes its prompts.
+ */
 function runInstaller(args, { input = '' } = {}) {
   const binDir = path.join(sandbox, 'stubbin');
+  const command = ['bash', path.join(sandbox, 'install.sh'), ...args]
+    .map(a => `'${a.replace(/'/g, `'\\''`)}'`).join(' ');
   try {
-    const stdout = execFileSync('bash', [path.join(sandbox, 'install.sh'), ...args], {
+    const stdout = execFileSync('script', ['-qec', command, '/dev/null'], {
       cwd: sandbox,
       input,
       encoding: 'utf8',
@@ -109,7 +135,7 @@ const dockerCalls = () => {
   return fs.existsSync(f) ? fs.readFileSync(f, 'utf8') : '';
 };
 
-describe('install.sh --uninstall — keeps every byte of data', () => {
+describe('install.sh --uninstall — keeps every byte of data', { skip: NO_PTY }, () => {
   beforeEach(() => { sandbox = makeSandbox(); });
   afterEach(() => { fs.rmSync(sandbox, { recursive: true, force: true }); });
 
@@ -151,7 +177,7 @@ describe('install.sh --uninstall — keeps every byte of data', () => {
   });
 });
 
-describe('install.sh --all — deletes the data directories', () => {
+describe('install.sh --all — deletes the data directories', { skip: NO_PTY }, () => {
   beforeEach(() => { sandbox = makeSandbox(); });
   afterEach(() => { fs.rmSync(sandbox, { recursive: true, force: true }); });
 
@@ -198,7 +224,7 @@ describe('install.sh --all — deletes the data directories', () => {
   });
 });
 
-describe('install.sh — credential prompts on a first install', () => {
+describe('install.sh — credential prompts on a first install', { skip: NO_PTY }, () => {
   beforeEach(() => { sandbox = makeSandbox({ fresh: true }); });
   afterEach(() => { fs.rmSync(sandbox, { recursive: true, force: true }); });
 
@@ -285,35 +311,199 @@ describe('install.sh — credential prompts on a first install', () => {
   });
 });
 
-describe('install.sh — an existing database is never re-credentialled', () => {
+describe('install.sh — an existing database is still asked about, then protected', { skip: NO_PTY }, () => {
   beforeEach(() => { sandbox = makeSandbox(); });   // pgdata already populated
   afterEach(() => { fs.rmSync(sandbox, { recursive: true, force: true }); });
 
-  test('the PostgreSQL prompts are skipped and the stored password is kept', () => {
-    // PostgreSQL reads these only when initialising the cluster, so asking again
-    // would collect an answer that silently does nothing — and changing the
-    // value would break the connection to the existing data.
-    const r = runInstaller([], { input: '\n\n\n' });
+  const envText = () => fs.readFileSync(path.join(sandbox, '.env'), 'utf8');
+
+  // Prompt order with an existing database and an existing administrator file:
+  // port, pg user, pg password, pg database, [confirm if changed], reset admin?
+  const answers = (a) => a.join('\n') + '\n';
+
+  test('the credentials are still offered, not silently skipped', () => {
+    // Skipping the questions leaves an operator wondering why they were never
+    // asked. They are shown, with the current values as defaults.
+    const r = runInstaller([], { input: answers(['', '', '', '', '']) });
     assert.equal(r.status, 0, r.stdout);
-    assert.match(r.stdout, /keeping its credentials unchanged/);
-    const envText = fs.readFileSync(path.join(sandbox, '.env'), 'utf8');
-    assert.match(envText, /POSTGRES_PASSWORD=sandbox/, 'the existing password survives');
+    assert.match(r.stdout, /PostgreSQL username/);
+    assert.match(r.stdout, /PostgreSQL password/);
+    assert.match(r.stdout, /PostgreSQL database name/);
+    assert.match(r.stdout, /An existing database was found/);
   });
 
-  test('an existing administrator file is left alone and reported by name', () => {
-    fs.writeFileSync(
-      path.join(sandbox, 'violation-cache', 'data', 'admin-credentials.json'),
-      JSON.stringify({ loginId: 'existing-admin', passwordHash: 'scrypt$16384$8$1$a$b' }));
-    const r = runInstaller([], { input: '\n\n\n' });
+  test('pressing Enter through them changes nothing and warns about nothing', () => {
+    const r = runInstaller([], { input: answers(['', '', '', '', '']) });
     assert.equal(r.status, 0, r.stdout);
-    assert.match(r.stdout, /already exist — leaving them unchanged/);
-    assert.match(r.stdout, /Username : existing-admin/,
-      'the summary must report the login ID from the file, not a guess');
-    assert.match(r.stdout, /unchanged — the credentials file already existed/);
+    assert.match(envText(), /POSTGRES_PASSWORD=sandbox/, 'the stored password survives');
+    assert.doesNotMatch(r.stdout, /Write the new values anyway/,
+      'an unchanged answer must not trigger the confirmation');
+  });
+
+  test('changing a value is challenged, and declining reverts it', () => {
+    // PostgreSQL reads these only at cluster initialisation, so writing a new
+    // one against an existing database would break the connection.
+    const r = runInstaller([], { input: answers(['', 'newuser', '', '', 'n', '']) });
+    assert.equal(r.status, 0, r.stdout);
+    assert.match(r.stdout, /You changed the PostgreSQL username/);
+    assert.match(r.stdout, /would keep its old values and the service would fail to connect/);
+    assert.match(r.stdout, /permanently erases every account, setting and report/);
+    assert.match(r.stdout, /Keeping the existing database credentials/);
+    assert.doesNotMatch(envText(), /POSTGRES_USER=newuser/, 'the change must not be written');
+  });
+
+  test('confirming the change writes it, with the consequence stated', () => {
+    const r = runInstaller([], { input: answers(['', 'newuser', '', '', 'y', '']) });
+    assert.equal(r.status, 0, r.stdout);
+    assert.match(r.stdout, /will not start until .*pgdata is deleted/);
+    assert.match(envText(), /POSTGRES_USER=newuser/);
+  });
+
+  test('a changed database name is challenged too', () => {
+    const r = runInstaller([], { input: answers(['', '', '', 'otherdb', 'n', '']) });
+    assert.equal(r.status, 0, r.stdout);
+    assert.match(r.stdout, /You changed the PostgreSQL database name/);
+    assert.doesNotMatch(envText(), /POSTGRES_DB=otherdb/);
   });
 });
 
-describe('install.sh --help', () => {
+describe('install.sh — an existing administrator can be reset', { skip: NO_PTY }, () => {
+  beforeEach(() => {
+    sandbox = makeSandbox();
+    fs.writeFileSync(
+      path.join(sandbox, 'violation-cache', 'data', 'admin-credentials.json'),
+      JSON.stringify({ loginId: 'existing-admin', passwordHash: 'scrypt$16384$8$1$a$b' }));
+  });
+  afterEach(() => { fs.rmSync(sandbox, { recursive: true, force: true }); });
+
+  const creds = () => fs.readFileSync(
+    path.join(sandbox, 'violation-cache', 'data', 'admin-credentials.json'), 'utf8');
+  const answers = (a) => a.join('\n') + '\n';
+
+  test('a reset is offered rather than the question being skipped', () => {
+    // Unlike the database credentials this one is safe to change at any time:
+    // it is a single file, and recreating it touches no account or report.
+    const r = runInstaller([], { input: answers(['', '', '', '', 'n']) });
+    assert.equal(r.status, 0, r.stdout);
+    assert.match(r.stdout, /An administrator account already exists: existing-admin/);
+    assert.match(r.stdout, /user accounts, settings/);
+    assert.match(r.stdout, /Reset the administrator login ID and password\?/);
+  });
+
+  test('declining keeps the existing credentials and reports them by name', () => {
+    const r = runInstaller([], { input: answers(['', '', '', '', 'n']) });
+    assert.match(r.stdout, /Keeping the existing administrator credentials/);
+    assert.match(creds(), /"loginId": ?"existing-admin"/, 'the file is untouched');
+    assert.match(r.stdout, /Username : existing-admin/,
+      'the summary reports the login ID from the file, not a guess');
+    assert.match(r.stdout, /unchanged — the credentials file already existed/);
+  });
+
+  test('accepting replaces them with the new values', () => {
+    const r = runInstaller([], { input: answers(['', '', '', '', 'y', 'newadmin', 'Br@ndNewPass1']) });
+    assert.equal(r.status, 0, r.stdout);
+    assert.match(r.stdout, /Resetting the administrator account/);
+    assert.match(r.stdout, /Administrator account reset: newadmin/);
+    assert.match(creds(), /"loginId": "newadmin"/);
+    assert.match(creds(), /"passwordHash": "scrypt\$16384\$8\$1\$/);
+    assert.doesNotMatch(creds(), /Br@ndNewPass1/, 'the plaintext never reaches the file');
+    assert.match(r.stdout, /Username : newadmin/);
+    assert.match(r.stdout, /Password : Br@ndNewPass1/, 'printed once so it can be recorded');
+  });
+
+  test('the reset prompt defaults to the existing login ID', () => {
+    const r = runInstaller([], { input: answers(['', '', '', '', 'y', '', 'Br@ndNewPass1']) });
+    assert.equal(r.status, 0, r.stdout);
+    assert.match(r.stdout, /Administrator login ID       \[existing-admin\]/);
+    assert.match(creds(), /"loginId": "existing-admin"/, 'Enter keeps the same name');
+  });
+
+  test('a non-interactive run never resets it', () => {
+    // Automation must not silently invalidate the administrator credential.
+    const r = runInstaller(['--non-interactive']);
+    assert.equal(r.status, 0, r.stdout);
+    assert.match(creds(), /"loginId": ?"existing-admin"/);
+    assert.match(creds(), /scrypt\$16384\$8\$1\$a\$b/, 'the original hash is untouched');
+  });
+});
+
+// ── Dockerfile and .dockerignore must agree ─────────────────────────────────
+// A path the Dockerfile COPYs but .dockerignore excludes fails the build with
+// "failed to compute cache key: ... not found". That happened for real when
+// package-lock.json was added to the Dockerfile for `npm ci` while it was still
+// listed in .dockerignore, and no test caught it because nothing here builds an
+// image. This check is static, so it catches the whole class offline.
+describe('Dockerfile and .dockerignore agree', () => {
+  const svcDir     = path.join(REPO_ROOT, 'violation-cache');
+  const dockerfile = fs.readFileSync(path.join(svcDir, 'Dockerfile'), 'utf8');
+  const ignoreFile = fs.readFileSync(path.join(svcDir, '.dockerignore'), 'utf8');
+
+  /** Source paths named by COPY lines, excluding the destination argument. */
+  const copiedPaths = dockerfile
+    .split('\n')
+    .filter(l => /^\s*COPY\s/i.test(l))
+    .flatMap(l => l.replace(/^\s*COPY\s+/i, '').trim().split(/\s+/).slice(0, -1));
+
+  const ignorePatterns = ignoreFile
+    .split('\n').map(l => l.trim())
+    .filter(l => l && !l.startsWith('#'));
+
+  /** Does an ignore pattern exclude this exact path? */
+  const excludes = (pattern, filePath) => {
+    const clean = filePath.replace(/\/$/, '');
+    const pat   = pattern.replace(/\/$/, '');
+    if (pat === clean) return true;
+    if (pat.startsWith('*.')) return clean.endsWith(pat.slice(1));
+    return false;
+  };
+
+  test('the Dockerfile COPYs at least the manifests and the source directories', () => {
+    // Guards the guard: if COPY parsing silently returned nothing, every
+    // assertion below would pass vacuously.
+    assert.ok(copiedPaths.includes('package.json'), copiedPaths.join(', '));
+    assert.ok(copiedPaths.includes('server.js'));
+    for (const dir of ['db/', 'lib/', 'routes/']) {
+      assert.ok(copiedPaths.includes(dir), `${dir} must be COPYed — ${copiedPaths.join(', ')}`);
+    }
+  });
+
+  test('no COPYed path is excluded by .dockerignore', () => {
+    for (const copied of copiedPaths) {
+      for (const pattern of ignorePatterns) {
+        assert.equal(excludes(pattern, copied), false,
+          `Dockerfile COPYs "${copied}" but .dockerignore excludes it via "${pattern}" — ` +
+          'the build will fail with "failed to compute cache key"');
+      }
+    }
+  });
+
+  test('npm ci has its lock file available in the build context', () => {
+    // `npm ci` fails outright without package-lock.json, so this pair has to
+    // stay consistent (CLAUDE.md §9.3).
+    if (!/npm ci/.test(dockerfile)) return;
+    assert.ok(copiedPaths.includes('package-lock.json'),
+      'the Dockerfile runs `npm ci` but never COPYs package-lock.json');
+    assert.ok(fs.existsSync(path.join(svcDir, 'package-lock.json')),
+      'package-lock.json must be committed for `npm ci` to work');
+    assert.equal(ignorePatterns.includes('package-lock.json'), false,
+      '.dockerignore must not exclude the lock file that `npm ci` reads');
+  });
+
+  test('every backend directory in the repository is COPYed into the image', () => {
+    // A new directory that nobody adds a COPY for is silently missing at
+    // runtime rather than failing the build (CLAUDE.md §9.3).
+    const backendDirs = fs.readdirSync(svcDir, { withFileTypes: true })
+      .filter(e => e.isDirectory())
+      .map(e => e.name)
+      .filter(n => !['node_modules', 'data', 'pgdata'].includes(n));
+    for (const dir of backendDirs) {
+      assert.ok(copiedPaths.includes(`${dir}/`) || copiedPaths.includes(dir),
+        `violation-cache/${dir} exists but the Dockerfile never COPYs it`);
+    }
+  });
+});
+
+describe('install.sh --help', { skip: NO_PTY }, () => {
   beforeEach(() => { sandbox = makeSandbox(); });
   afterEach(() => { fs.rmSync(sandbox, { recursive: true, force: true }); });
 

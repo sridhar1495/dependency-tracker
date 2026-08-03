@@ -275,29 +275,75 @@ if [[ "$NON_INTERACTIVE" == "false" ]]; then
   # rest with SECRET_ENCRYPTION_KEY (CLAUDE.md §5.6, §7.6).
 
   # ── Database credentials ──────────────────────────────────────────────
-  # PostgreSQL reads POSTGRES_USER and POSTGRES_PASSWORD only when it
-  # initialises the cluster, so these can be chosen at first install and never
-  # again. Changing them afterwards leaves the service unable to connect, which
-  # is why an existing data directory is detected and the prompts skipped.
+  # Always asked. PostgreSQL reads POSTGRES_USER, POSTGRES_PASSWORD and
+  # POSTGRES_DB only when it initialises its data directory, so on a rebuild
+  # a changed answer would not reach the running cluster and the service would
+  # then fail to connect. Rather than skipping the questions — which leaves an
+  # operator wondering why they were never asked — the prompts are always shown
+  # and a value that cannot take effect is challenged before it is written.
+  _pg_existing=false
   if [[ -d "$SCRIPT_DIR/violation-cache/pgdata" ]] && [[ -n "$(ls -A "$SCRIPT_DIR/violation-cache/pgdata" 2>/dev/null)" ]]; then
-    info "An existing database was found — keeping its credentials unchanged."
-    info "  To change them you must delete ./violation-cache/pgdata, which destroys all data."
-  else
-    read -rp "  PostgreSQL username          [${POSTGRES_USER:-dtdash}]: " _in
-    [[ -n "$_in" ]] && POSTGRES_USER="$_in"
-    POSTGRES_USER="${POSTGRES_USER:-dtdash}"
-
-    read -rsp "  PostgreSQL password          [generate a strong one]: " _in
+    _pg_existing=true
     echo ""
-    if [[ -n "$_in" ]]; then
-      POSTGRES_PASSWORD="$(printf '%s' "$_in" | tr -d '\000-\037\177')"
+    info "An existing database was found at ./violation-cache/pgdata."
+    info "  Its credentials were fixed when it was first created. You can review them"
+    info "  below; changing one needs the database to be recreated, which erases it."
+  fi
+
+  _pg_user_before="${POSTGRES_USER:-dtdash}"
+  _pg_db_before="${POSTGRES_DB:-dtdash}"
+
+  read -rp "  PostgreSQL username          [${_pg_user_before}]: " _in
+  [[ -n "$_in" ]] && POSTGRES_USER="$_in"
+  POSTGRES_USER="${POSTGRES_USER:-dtdash}"
+
+  read -rsp "  PostgreSQL password          [$([[ -n "${POSTGRES_PASSWORD:-}" ]] && echo 'keep current' || echo 'generate a strong one')]: " _in
+  echo ""
+  if [[ -n "$_in" ]]; then
+    _pg_pass_new="$(printf '%s' "$_in" | tr -d '\000-\037\177')"
+  fi
+
+  read -rp "  PostgreSQL database name     [${_pg_db_before}]: " _in
+  [[ -n "$_in" ]] && POSTGRES_DB="$_in"
+  POSTGRES_DB="${POSTGRES_DB:-dtdash}"
+
+  if [[ "$_pg_existing" == "true" ]]; then
+    # Only challenge answers that actually differ — pressing Enter through the
+    # prompts must stay silent and change nothing.
+    _pg_changed=()
+    [[ "$POSTGRES_USER" != "$_pg_user_before" ]] && _pg_changed+=("username")
+    [[ "$POSTGRES_DB"   != "$_pg_db_before"   ]] && _pg_changed+=("database name")
+    [[ -n "${_pg_pass_new:-}" && "${_pg_pass_new}" != "${POSTGRES_PASSWORD:-}" ]] && _pg_changed+=("password")
+
+    if (( ${#_pg_changed[@]} > 0 )); then
+      echo ""
+      warn "You changed the PostgreSQL ${_pg_changed[*]}, but a database already exists."
+      warn "PostgreSQL only reads these when it creates its data directory, so the running"
+      warn "database would keep its old values and the service would fail to connect."
+      echo ""
+      echo -e "  To actually change them you must delete ${BOLD}./violation-cache/pgdata${RESET},"
+      echo -e "  which ${BOLD}permanently erases every account, setting and report${RESET}."
+      echo ""
+      read -rp "  Write the new values anyway? [y/N]: " _in
+      if [[ "$_in" == "y" || "$_in" == "Y" ]]; then
+        warn "Writing them. The service will not start until ./violation-cache/pgdata is deleted."
+        [[ -n "${_pg_pass_new:-}" ]] && POSTGRES_PASSWORD="$_pg_pass_new"
+      else
+        POSTGRES_USER="$_pg_user_before"
+        POSTGRES_DB="$_pg_db_before"
+        _pg_pass_new=""
+        info "Keeping the existing database credentials."
+      fi
+    else
+      [[ -n "${_pg_pass_new:-}" ]] && POSTGRES_PASSWORD="$_pg_pass_new"
+    fi
+  else
+    if [[ -n "${_pg_pass_new:-}" ]]; then
+      POSTGRES_PASSWORD="$_pg_pass_new"
       _pg_pass_source="chosen during installation"
     fi
-
-    read -rp "  PostgreSQL database name     [${POSTGRES_DB:-dtdash}]: " _in
-    [[ -n "$_in" ]] && POSTGRES_DB="$_in"
-    POSTGRES_DB="${POSTGRES_DB:-dtdash}"
   fi
+  unset _pg_pass_new
 
   # Write back (overwrite only the keys we manage). Any legacy DT_* values
   # already in the file are left untouched so an upgrade can still seed them.
@@ -370,17 +416,40 @@ fi
 ADMIN_CREDS_DIR="$SCRIPT_DIR/violation-cache/data"
 ADMIN_CREDS_FILE="$ADMIN_CREDS_DIR/admin-credentials.json"
 
+# Read the real login ID out of any existing file rather than guessing from the
+# environment, so the summary cannot report a name nobody can sign in with.
+_admin_existing_user=""
 if [[ -f "$ADMIN_CREDS_FILE" ]]; then
-  info "Administrator credentials already exist — leaving them unchanged"
-  info "  To reset: delete $ADMIN_CREDS_FILE and re-run this installer"
-  # Read the real login ID out of the file rather than guessing from the
-  # environment, so the summary cannot report a name nobody can sign in with.
-  _admin_user="$(sed -n 's/.*"loginId"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$ADMIN_CREDS_FILE" | head -1)"
-  _admin_user="${_admin_user:-${SCA_ADMIN_USER:-admin}}"
-else
-  step "Creating the administrator account"
+  _admin_existing_user="$(sed -n 's/.*"loginId"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "$ADMIN_CREDS_FILE" | head -1)"
+  _admin_existing_user="${_admin_existing_user:-${SCA_ADMIN_USER:-admin}}"
+fi
 
-  _admin_user="${SCA_ADMIN_USER:-admin}"
+# Unlike the database credentials, the administrator one can be changed safely
+# at any time: it lives in a single file, and recreating it touches no user
+# account, setting or report. So an existing file is an offer to reset, not a
+# reason to skip the question.
+_admin_reset=false
+if [[ -f "$ADMIN_CREDS_FILE" ]]; then
+  if [[ "$NON_INTERACTIVE" == "false" ]]; then
+    echo ""
+    info "An administrator account already exists: ${BOLD}${_admin_existing_user}${RESET}"
+    info "  Resetting it only replaces this one credential — user accounts, settings"
+    info "  and reports are not affected."
+    read -rp "  Reset the administrator login ID and password? [y/N]: " _in
+    [[ "$_in" == "y" || "$_in" == "Y" ]] && _admin_reset=true
+  fi
+  if [[ "$_admin_reset" == "false" ]]; then
+    info "Keeping the existing administrator credentials."
+    _admin_user="$_admin_existing_user"
+  fi
+fi
+
+if [[ -f "$ADMIN_CREDS_FILE" && "$_admin_reset" == "false" ]]; then
+  : # keeping what is already there
+else
+  step "$([[ "$_admin_reset" == "true" ]] && echo "Resetting the administrator account" || echo "Creating the administrator account")"
+
+  _admin_user="${_admin_existing_user:-${SCA_ADMIN_USER:-admin}}"
   _admin_pass="${SCA_ADMIN_PASSWORD:-}"
 
   if [[ "$NON_INTERACTIVE" == "false" && -z "$_admin_pass" ]]; then
@@ -484,7 +553,11 @@ else
   mv "${ADMIN_CREDS_FILE}.tmp" "$ADMIN_CREDS_FILE"
   chmod 600 "$ADMIN_CREDS_FILE"
   unset _admin_pass
-  success "Administrator account created: ${_admin_user}"
+  if [[ "$_admin_reset" == "true" ]]; then
+    success "Administrator account reset: ${_admin_user}"
+  else
+    success "Administrator account created: ${_admin_user}"
+  fi
   info "  Stored at $ADMIN_CREDS_FILE (mode 0600, password hashed with scrypt)"
 fi
 
