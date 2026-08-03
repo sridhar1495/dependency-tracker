@@ -268,3 +268,371 @@ describe('pool tx() helper', { skip: !ENABLED && 'TEST_DATABASE_URL not set' }, 
     assert.equal(out, 42);
   });
 });
+
+// ── Schema and data-access tier (phase 1) ────────────────────────────────────
+// These exercise the real modules against a real database. The pool singleton is
+// initialised once here; every test scopes its own data and cleans up after.
+
+describe('schema and data access', { skip: !ENABLED && 'TEST_DATABASE_URL not set' }, () => {
+  let pool, users, sessions, audit;
+
+  // A 32-byte SHA-256-shaped hash, as the token_hash CHECK requires.
+  const hashOf = (s) => require('node:crypto').createHash('sha256').update(s).digest();
+
+  before(async () => {
+    const url = new URL(DB_URL);
+    process.env.POSTGRES_HOST     = url.hostname;
+    process.env.POSTGRES_PORT     = url.port || '5432';
+    process.env.POSTGRES_USER     = decodeURIComponent(url.username);
+    process.env.POSTGRES_PASSWORD = decodeURIComponent(url.password) || 'x';
+    process.env.POSTGRES_DB       = url.pathname.replace(/^\//, '');
+
+    const { parseConfig } = require('./lib/config');
+    pool = require('./db/pool');
+    pool.init(parseConfig(process.env).db);
+
+    await migrate({ pool: pool.getPool(), dir: MIGRATIONS_DIR });
+
+    users    = require('./lib/users');
+    sessions = require('./lib/sessions');
+    audit    = require('./lib/login-audit');
+  });
+
+  after(async () => {
+    if (pool) {
+      await pool.query("DELETE FROM users WHERE login_id LIKE 'zz_%'");
+      await pool.query("DELETE FROM login_audit WHERE login_id_attempted LIKE 'zz_%'");
+      await pool.query("DELETE FROM user_sessions WHERE principal_type = 'admin'");
+      await pool.close();
+    }
+  });
+
+  const newUser = (suffix, email) => ({
+    loginId: `zz_${suffix}`,
+    email: email === undefined ? `zz_${suffix}@example.com` : email,
+    firstName: 'Ada', lastName: 'Lovelace', passwordHash: 'scrypt$16384$8$1$c2FsdA==$ZGs=',
+  });
+
+  test('create() seeds every dependent configuration row in one transaction', async () => {
+    const u = await users.create(newUser('seed'));
+    assert.ok(u.id);
+    assert.equal(u.loginId, 'zz_seed');
+    assert.equal(u.firstName, 'Ada');
+    assert.equal(u.passwordHash, undefined, 'password hash must not be returned');
+
+    for (const t of ['dt_connections', 'user_settings', 'mail_settings', 'schedules']) {
+      const { rows } = await pool.query(`SELECT 1 FROM ${t} WHERE user_id = $1`, [u.id]);
+      assert.equal(rows.length, 1, `${t} row should have been seeded`);
+    }
+
+    const cfg = await pool.query(
+      'SELECT is_configured AS c FROM dt_connections WHERE user_id = $1', [u.id]
+    );
+    assert.equal(cfg.rows[0].c, false, 'a new account starts unconfigured, so it sees mock data');
+
+    const st = await pool.query('SELECT max_reports AS m FROM user_settings WHERE user_id = $1', [u.id]);
+    assert.equal(st.rows[0].m, 10);
+  });
+
+  test('duplicate login ID is rejected with a field-aware error', async () => {
+    await users.create(newUser('dup', null));
+    await assert.rejects(
+      () => users.create({ ...newUser('other', null), loginId: 'zz_dup' }),
+      (e) => e.code === 'ALREADY_REGISTERED' && e.field === 'loginId'
+    );
+  });
+
+  test('duplicate login ID differing only in case is rejected (citext)', async () => {
+    await assert.rejects(
+      () => users.create({ ...newUser('other2', null), loginId: 'ZZ_DUP' }),
+      (e) => e.code === 'ALREADY_REGISTERED' && e.field === 'loginId'
+    );
+  });
+
+  test('duplicate email is rejected and names the email field', async () => {
+    await users.create(newUser('mail1', 'shared@example.com'));
+    await assert.rejects(
+      () => users.create({ ...newUser('mail2', 'SHARED@example.com') }),
+      (e) => e.code === 'ALREADY_REGISTERED' && e.field === 'email'
+    );
+  });
+
+  test('a rejected registration leaves no partial rows behind', async () => {
+    const before = await pool.query('SELECT count(*)::int n FROM dt_connections');
+    await assert.rejects(() => users.create({ ...newUser('x', null), loginId: 'zz_dup' }));
+    const after = await pool.query('SELECT count(*)::int n FROM dt_connections');
+    assert.equal(after.rows[0].n, before.rows[0].n, 'the transaction must have rolled back');
+  });
+
+  test('multiple accounts may omit the email address', async () => {
+    await users.create(newUser('noemail1', null));
+    await users.create(newUser('noemail2', null));
+    const { rows } = await pool.query(
+      "SELECT count(*)::int n FROM users WHERE login_id LIKE 'zz_noemail%' AND email IS NULL"
+    );
+    assert.equal(rows[0].n, 2, 'NULL emails must not collide');
+  });
+
+  test('availability checks are case-insensitive', async () => {
+    assert.equal(await users.isLoginIdAvailable('zz_dup'), false);
+    assert.equal(await users.isLoginIdAvailable('ZZ_DUP'), false);
+    assert.equal(await users.isLoginIdAvailable('zz_definitely_free'), true);
+    assert.equal(await users.isEmailAvailable('shared@example.com'), false);
+    assert.equal(await users.isEmailAvailable('free@example.com'), true);
+    assert.equal(await users.isEmailAvailable(null), true, 'no email is always available');
+  });
+
+  test('updateProfile changes names but ignores login ID and email', async () => {
+    const u = await users.create(newUser('profile', null));
+    const updated = await users.updateProfile(u.id, {
+      firstName: 'Grace', lastName: 'Hopper',
+      loginId: 'zz_hacked', email: 'hacked@example.com', // must be ignored
+    });
+    assert.equal(updated.firstName, 'Grace');
+    assert.equal(updated.lastName, 'Hopper');
+    assert.equal(updated.loginId, 'zz_profile', 'login ID must not be changeable');
+    assert.equal(updated.email, null, 'email must not be changeable');
+  });
+
+  test('verifyLookup returns the hash, findByLoginId never does', async () => {
+    const v = await users.verifyLookup('zz_profile');
+    assert.match(v.passwordHash, /^scrypt\$/);
+    const f = await users.findByLoginId('zz_profile');
+    assert.equal(f.passwordHash, undefined);
+  });
+
+  test('deleting an account cascades to owned rows but preserves the audit trail', async () => {
+    const u = await users.create(newUser('cascade', null));
+    await sessions.create({
+      tokenHash: hashOf(`tok-${u.id}`), userId: u.id,
+      principalType: 'user', absoluteHours: 8,
+    });
+    await pool.query("INSERT INTO reports (user_id, risk_types) VALUES ($1, '{security}')", [u.id]);
+    await pool.query(
+      "INSERT INTO report_file_chunks (report_id, seq, chunk) SELECT id, 0, '\\x00' FROM reports WHERE user_id = $1",
+      [u.id]
+    );
+    await audit.record({ userId: u.id, loginIdAttempted: 'zz_cascade', event: 'login' });
+
+    assert.equal(await users.deleteById(u.id), true);
+
+    for (const t of ['user_sessions', 'dt_connections', 'user_settings', 'mail_settings',
+                     'schedules', 'reports']) {
+      const { rows } = await pool.query(`SELECT count(*)::int n FROM ${t} WHERE user_id = $1`, [u.id]);
+      assert.equal(rows[0].n, 0, `${t} rows should have cascaded away`);
+    }
+    const chunks = await pool.query('SELECT count(*)::int n FROM report_file_chunks');
+    assert.equal(chunks.rows[0].n, 0, 'report bytes should cascade with the report');
+
+    const trail = await pool.query(
+      "SELECT user_id, login_id_attempted FROM login_audit WHERE login_id_attempted = 'zz_cascade'"
+    );
+    assert.equal(trail.rowCount, 1, 'the audit row must survive');
+    assert.equal(trail.rows[0].user_id, null, 'its user_id must be nulled');
+    assert.equal(trail.rows[0].login_id_attempted, 'zz_cascade', 'the attempted login ID is retained');
+  });
+});
+
+describe('session lifecycle', { skip: !ENABLED && 'TEST_DATABASE_URL not set' }, () => {
+  let pool, users, sessions;
+  const crypto = require('node:crypto');
+  const hashOf = (s) => crypto.createHash('sha256').update(s).digest();
+  let user;
+
+  before(async () => {
+    pool = require('./db/pool');
+    if (!pool.isReady()) {
+      const url = new URL(DB_URL);
+      process.env.POSTGRES_HOST = url.hostname;
+      process.env.POSTGRES_PORT = url.port || '5432';
+      process.env.POSTGRES_USER = decodeURIComponent(url.username);
+      process.env.POSTGRES_PASSWORD = decodeURIComponent(url.password) || 'x';
+      process.env.POSTGRES_DB = url.pathname.replace(/^\//, '');
+      const { parseConfig } = require('./lib/config');
+      pool.init(parseConfig(process.env).db);
+      await migrate({ pool: pool.getPool(), dir: MIGRATIONS_DIR });
+    }
+    users = require('./lib/users');
+    sessions = require('./lib/sessions');
+    await pool.query("DELETE FROM users WHERE login_id = 'zz_sess'");
+    user = await users.create({
+      loginId: 'zz_sess', email: null, firstName: 'Session', lastName: 'Tester',
+      passwordHash: 'scrypt$16384$8$1$c2FsdA==$ZGs=',
+    });
+  });
+
+  after(async () => {
+    if (pool && pool.isReady()) {
+      await pool.query("DELETE FROM users WHERE login_id = 'zz_sess'");
+      await pool.query("DELETE FROM user_sessions WHERE principal_type = 'admin'");
+      await pool.close();
+    }
+  });
+
+  test('a live session resolves from its token hash', async () => {
+    const th = hashOf('token-alpha');
+    await sessions.create({ tokenHash: th, userId: user.id, principalType: 'user', absoluteHours: 8 });
+    const found = await sessions.findLiveByTokenHash(th, 2);
+    assert.ok(found);
+    assert.equal(found.userId, user.id);
+    assert.equal(found.loginId, 'zz_sess');
+    assert.equal(found.principalType, 'user');
+  });
+
+  test('a second live session for the same user is rejected by the database', async () => {
+    await assert.rejects(
+      () => sessions.create({
+        tokenHash: hashOf('token-beta'), userId: user.id,
+        principalType: 'user', absoluteHours: 8,
+      }),
+      (e) => e.code === 'SESSION_EXISTS'
+    );
+  });
+
+  test('after revocation a new session may be issued', async () => {
+    assert.equal(await sessions.revokeByTokenHash(hashOf('token-alpha')), true);
+    assert.equal(await sessions.findLiveByTokenHash(hashOf('token-alpha'), 2), null,
+      'a revoked token must not resolve');
+
+    const th = hashOf('token-gamma');
+    await sessions.create({ tokenHash: th, userId: user.id, principalType: 'user', absoluteHours: 8 });
+    assert.ok(await sessions.findLiveByTokenHash(th, 2));
+  });
+
+  test('an unknown token resolves to null', async () => {
+    assert.equal(await sessions.findLiveByTokenHash(hashOf('never-issued'), 2), null);
+  });
+
+  test('an expired session does not resolve', async () => {
+    const th = hashOf('token-expired');
+    await sessions.revokeAllForUser(user.id);
+    await sessions.create({ tokenHash: th, userId: user.id, principalType: 'user', absoluteHours: 8 });
+    // Backdate issue and expiry together: the sessions_expiry_after_issue CHECK
+    // correctly forbids a row that expires before it was issued.
+    await pool.query(
+      `UPDATE user_sessions
+          SET issued_at = now() - interval '10 hours', expires_at = now() - interval '1 minute'
+        WHERE token_hash = $1`, [th]
+    );
+    assert.equal(await sessions.findLiveByTokenHash(th, 2), null, 'absolute expiry must be enforced in SQL');
+  });
+
+  test('an idle session does not resolve even when within its absolute lifetime', async () => {
+    const th = hashOf('token-idle');
+    await sessions.revokeAllForUser(user.id);
+    await sessions.create({ tokenHash: th, userId: user.id, principalType: 'user', absoluteHours: 8 });
+    await pool.query("UPDATE user_sessions SET last_seen_at = now() - interval '3 hours' WHERE token_hash = $1", [th]);
+    assert.equal(await sessions.findLiveByTokenHash(th, 2), null, 'idle window must be enforced');
+
+    await sessions.touch((await sessions.findLiveForUser(user.id)).id);
+    assert.ok(await sessions.findLiveByTokenHash(th, 2), 'touch() should revive it within the absolute window');
+  });
+
+  test('findLiveForUser describes the session for the force-disconnect prompt', async () => {
+    const live = await sessions.findLiveForUser(user.id);
+    assert.ok(live.issuedAt instanceof Date);
+    assert.ok(live.lastSeenAt instanceof Date);
+    assert.equal(live.principalType, 'user');
+  });
+
+  test('the administrator principal has its own single-session rule', async () => {
+    await sessions.revokeAdmin();
+    await sessions.create({ tokenHash: hashOf('admin-1'), principalType: 'admin', absoluteHours: 8 });
+    await assert.rejects(
+      () => sessions.create({ tokenHash: hashOf('admin-2'), principalType: 'admin', absoluteHours: 8 }),
+      (e) => e.code === 'SESSION_EXISTS'
+    );
+    const a = await sessions.findLiveByTokenHash(hashOf('admin-1'), 2);
+    assert.equal(a.principalType, 'admin');
+    assert.equal(a.userId, null, 'the administrator is not a database user');
+  });
+
+  test('sweepExpired removes only rows that can never authenticate again', async () => {
+    await pool.query(
+      `INSERT INTO user_sessions (principal_type, token_hash, issued_at, expires_at, revoked_at)
+       VALUES ('admin', $1, now() - interval '31 days', now() - interval '30 days',
+               now() - interval '30 days')`,
+      [hashOf('ancient')]
+    );
+    const removed = await sessions.sweepExpired(7);
+    assert.ok(removed >= 1, 'the ancient row should have been swept');
+    const live = await sessions.findLiveByTokenHash(hashOf('admin-1'), 2);
+    assert.ok(live, 'a live session must survive the sweep');
+  });
+});
+
+describe('login audit', { skip: !ENABLED && 'TEST_DATABASE_URL not set' }, () => {
+  let pool, audit;
+
+  before(async () => {
+    pool = require('./db/pool');
+    if (!pool.isReady()) {
+      const url = new URL(DB_URL);
+      process.env.POSTGRES_HOST = url.hostname;
+      process.env.POSTGRES_PORT = url.port || '5432';
+      process.env.POSTGRES_USER = decodeURIComponent(url.username);
+      process.env.POSTGRES_PASSWORD = decodeURIComponent(url.password) || 'x';
+      process.env.POSTGRES_DB = url.pathname.replace(/^\//, '');
+      const { parseConfig } = require('./lib/config');
+      pool.init(parseConfig(process.env).db);
+      await migrate({ pool: pool.getPool(), dir: MIGRATIONS_DIR });
+    }
+    audit = require('./lib/login-audit');
+    await pool.query("DELETE FROM login_audit WHERE login_id_attempted LIKE 'zz_%'");
+  });
+
+  after(async () => {
+    if (pool && pool.isReady()) {
+      await pool.query("DELETE FROM login_audit WHERE login_id_attempted LIKE 'zz_%'");
+      await pool.close();
+    }
+  });
+
+  test('records an event with no user id (unknown account)', async () => {
+    await audit.record({ loginIdAttempted: 'zz_ghost', event: 'failed', ipAddress: '10.0.0.1' });
+    assert.equal(await audit.recentFailures('zz_ghost', '10.0.0.1'), 1);
+  });
+
+  test('rejects an unknown event name rather than writing junk', async () => {
+    await assert.rejects(
+      () => audit.record({ loginIdAttempted: 'zz_ghost', event: 'hacked' }),
+      (e) => e.code === 'AUDIT_BAD_EVENT'
+    );
+  });
+
+  test('counts failures per login ID and address for the lockout rule', async () => {
+    for (let i = 0; i < 4; i++) {
+      await audit.record({ loginIdAttempted: 'zz_brute', event: 'failed', ipAddress: '10.0.0.2' });
+    }
+    assert.equal(await audit.recentFailures('zz_brute', '10.0.0.2'), 4);
+    assert.equal(await audit.recentFailures('zz_brute', '10.0.0.9'), 0, 'a different address is a different bucket');
+    assert.equal(await audit.recentFailures('zz_other', '10.0.0.2'), 0, 'a different login is a different bucket');
+  });
+
+  test('clearFailures resets the streak after a successful login', async () => {
+    await audit.clearFailures('zz_brute', '10.0.0.2');
+    assert.equal(await audit.recentFailures('zz_brute', '10.0.0.2'), 0);
+  });
+
+  test('failures outside the window do not count', async () => {
+    await audit.record({ loginIdAttempted: 'zz_old', event: 'failed', ipAddress: '10.0.0.3' });
+    await pool.query(
+      "UPDATE login_audit SET created_at = now() - interval '30 minutes' WHERE login_id_attempted = 'zz_old'"
+    );
+    assert.equal(await audit.recentFailures('zz_old', '10.0.0.3', 15), 0);
+    assert.equal(await audit.recentFailures('zz_old', '10.0.0.3', 60), 1);
+  });
+
+  test('purgeOlderThan removes entries past the retention period', async () => {
+    await audit.record({ loginIdAttempted: 'zz_ancient', event: 'login' });
+    await pool.query(
+      "UPDATE login_audit SET created_at = now() - interval '100 days' WHERE login_id_attempted = 'zz_ancient'"
+    );
+    const removed = await audit.purgeOlderThan(90);
+    assert.ok(removed >= 1);
+    const { rowCount } = await pool.query(
+      "SELECT 1 FROM login_audit WHERE login_id_attempted = 'zz_ancient'"
+    );
+    assert.equal(rowCount, 0);
+  });
+});

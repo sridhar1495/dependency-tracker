@@ -55,9 +55,9 @@ write code that assumes a later phase has landed.
 
 | Phase | Scope | Status |
 |---|---|---|
-| — | Coding standards (this file) | **In review** |
-| 0 | Postgres service, migration runner, connection pool, module split | Not started |
-| 1 | Schema, indexes, data-access modules | Not started |
+| — | Coding standards (this file) | **Merged** |
+| 0 | Postgres service, migration runner, connection pool, module split | **Merged** |
+| 1 | Schema, indexes, data-access modules | **In review** |
 | 2 | Authentication backend | Not started |
 | 3 | Authentication frontend (`login.html`, `apiFetch`, profile) | Not started |
 | 4 | Per-user DT connection | Not started |
