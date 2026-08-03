@@ -3,19 +3,75 @@
 This document captures the architecture, conventions, and design decisions of the
 **dependency-tracker** project. Every AI-assisted change must follow these rules.
 
+> **Revision 2.0 — multi-user migration.** The project is moving from a single-tenant,
+> file-backed appliance to a multi-user application with authentication and a
+> PostgreSQL system of record. This revision reverses several previously hard rules.
+> Read [§0 What Changed](#0-what-changed-in-revision-20) and
+> [§1.2 Migration Status](#12-migration-status) before making any change.
+
+---
+
+## 0. What Changed in Revision 2.0
+
+| Rule in revision 1 | Rule now | Why |
+|---|---|---|
+| "Do **not** add a database" | PostgreSQL 16 is the system of record | Multi-user operation requires per-user data isolation, transactional integrity and concurrent-safe queue semantics that files cannot provide. |
+| "No npm packages other than `exceljs` and `nodemailer`" | `pg` is added — and nothing else | Authentication uses Node's built-in `crypto`; no bcrypt, argon2 or JWT library. |
+| File persistence under `/data/*.json` | Database tables; `/data` keeps only the admin credentials file | Files have no ownership model and no atomic multi-row updates. |
+| No authentication | Bearer-token sessions on every endpoint | The service currently returns the DT API key to any unauthenticated caller. |
+| DT connection configured in `.env` at install time | Per-user connection stored encrypted in the database | Each user has their own DependencyTrack connection. |
+| `server.js` is a single ~1,900-line file | Split into `db/`, `lib/`, `routes/` | The file would exceed 4,000 lines otherwise. **The frontend single-file rule is unchanged.** |
+| "Do **not** write integration tests that require Docker" | A database integration tier exists, opt-in via `TEST_DATABASE_URL` | The default `node --test` run stays offline and dependency-free. |
+
+Rules **not** changed: no frontend framework, no bundler, no web framework (Express
+et al.), raw `http` module only, no build step, `node --test` as the only test runner.
+
 ---
 
 ## 1. Project Overview
 
-A two-container Docker stack that adds a hierarchical dashboard and violation-cache
-service on top of an existing [OWASP DependencyTrack](https://dependencytrack.org/)
-(DT) deployment.
+A three-container Docker stack that adds a multi-user hierarchical dashboard,
+violation-cache service and reporting engine on top of an existing
+[OWASP DependencyTrack](https://dependencytrack.org/) (DT) deployment.
 
 ```
 docker-compose.yml
-├── dt-dashboard          nginx:alpine — serves dashboard/index.html; reverse-proxies /api/* to DT
-└── dt-violation-cache    node:22-alpine — caches violation counts; generates Excel reports
+├── dt-dashboard          nginx:alpine     — serves login.html + index.html; proxies /api/* and /violation-cache/*
+├── dt-violation-cache    node:22-alpine   — auth, caching, reports, scheduler
+└── dt-postgres           postgres:16-alpine — system of record
 ```
+
+### 1.1 Design authority
+
+The full design is `docs/DependencyTrack-Dashboard-Multi-User-Architecture-Plan.docx`.
+Where this file and that document disagree, **this file wins for coding conventions**
+and the plan wins for architecture and sequencing. Raise the conflict rather than
+silently choosing.
+
+### 1.2 Migration status
+
+The codebase is in transition. Each phase ships as its own pull request. Do not
+write code that assumes a later phase has landed.
+
+| Phase | Scope | Status |
+|---|---|---|
+| — | Coding standards (this file) | **In review** |
+| 0 | Postgres service, migration runner, connection pool, module split | Not started |
+| 1 | Schema, indexes, data-access modules | Not started |
+| 2 | Authentication backend | Not started |
+| 3 | Authentication frontend (`login.html`, `apiFetch`, profile) | Not started |
+| 4 | Per-user DT connection | Not started |
+| 5 | Per-user settings, mail, multi-tenant scheduler | Not started |
+| 6 | Reports in the database | Not started |
+| 7 | Shared violation cache | Not started |
+| 8 | Installer, infrastructure, documentation | Not started |
+| 9 | Administration panel (read-only) | Not started |
+| 10 | Performance validation | Not started |
+
+**Milestone M1 = phases 0–3.** At the end of M1 the dashboard is gated behind login
+but still uses one shared DT connection. That interim state is a demo checkpoint and
+is **not** released to users, so no backwards-compatibility shims or feature flags
+are to be written for it.
 
 ---
 
@@ -24,18 +80,29 @@ docker-compose.yml
 ```
 dependency-tracker/
 ├── dashboard/
-│   ├── index.html              # Single-file SPA (HTML + CSS + JS, ~3 000 lines)
+│   ├── index.html              # Single-file dashboard SPA (~3 600 lines)
+│   ├── login.html              # Single-file login/register page  [phase 3]
 │   └── nginx.conf.template     # nginx config with envsubst placeholders
 ├── violation-cache/
-│   ├── server.js               # Node.js HTTP service (~1 400 lines)
-│   ├── server.test.js          # Unit tests for server helpers (~1 600 lines)
-│   ├── dashboard.test.js       # Unit tests for dashboard helpers (~800 lines)
-│   ├── package.json            # One dependency: exceljs
+│   ├── server.js               # Routing + boot only (~400 lines after phase 0)
+│   ├── db/
+│   │   ├── pool.js             # pg.Pool wrapper: query(), tx()
+│   │   ├── migrate.js          # Migration runner (advisory-locked)
+│   │   └── migrations/         # 001_init.sql, 002_*.sql — append only
+│   ├── lib/
+│   │   ├── crypto.js           # scrypt, token mint/hash, AES-256-GCM
+│   │   ├── auth.js             # Sessions, token cache, rate limiting
+│   │   ├── validate.js         # Field validators (mirrored in the frontend)
+│   │   ├── users.js settings.js reports.js caches.js schedules.js
+│   │   └── dt-fetch.js excel.js mail.js
+│   ├── routes/                 # auth.js profile.js config.js reports.js …
+│   ├── server.test.js          # Unit tests for server helpers
+│   ├── dashboard.test.js       # Unit tests for dashboard helpers
+│   ├── db.test.js              # DB integration tier (opt-in)  [phase 1]
+│   ├── package.json            # Dependencies: exceljs, nodemailer, pg
 │   └── Dockerfile
 ├── docs/
-│   ├── INSTALLATION.md
-│   └── DASHBOARD_INTEGRATION.md
-├── install.sh                  # Bash installer / uninstaller
+├── install.sh
 ├── docker-compose.yml
 └── .env.example
 ```
@@ -46,19 +113,29 @@ dependency-tracker/
 
 | Layer | Choice | Reason |
 |---|---|---|
-| Backend HTTP server | Node.js built-in `http`/`https` | Zero external dependencies |
-| Excel generation | `exceljs` ^4.4.0 | Permitted external npm package |
-| Email delivery | `nodemailer` ^6.10.1 | Permitted external npm package (MIT license) |
-| Frontend | Vanilla HTML5 / CSS3 / ES2020+ (no framework) | Zero build step, instant load, no npm |
-| Frontend PRNG | Linear congruential generator (hand-rolled) | Deterministic mock data, no import |
-| Container | `node:22-alpine` + `nginx:alpine` | Minimal image size |
-| Test runner | Node.js built-in `node:test` | No test-framework install required |
+| Backend HTTP server | Node.js built-in `http`/`https` | No web framework |
+| Database | PostgreSQL 16 (`postgres:16-alpine`) | PostgreSQL Licence; JSONB, partial indexes, `FOR UPDATE SKIP LOCKED` |
+| Database driver | `pg` ^8.13 | MIT; pure JavaScript, no native build step |
+| Password hashing | Built-in `crypto.scrypt` | OWASP-recommended KDF, zero dependencies |
+| Session tokens | Built-in `crypto.randomBytes` + SHA-256 | Revocable, no JWT library |
+| Secret encryption | Built-in AES-256-GCM | Protects DT API keys and SMTP passwords at rest |
+| Excel generation | `exceljs` ^4.4.0 | MIT |
+| Email delivery | `nodemailer` ^6.10.1 | MIT |
+| Frontend | Vanilla HTML5 / CSS3 / ES2020+ | Zero build step, no npm |
+| Frontend PRNG | Linear congruential generator (hand-rolled) | Deterministic mock data |
+| Containers | `node:22-alpine`, `nginx:alpine`, `postgres:16-alpine` | Minimal image size |
+| Test runner | Node.js built-in `node:test` | No test framework installed |
 
 **Hard rules:**
-- Do **not** add npm packages other than `exceljs` and `nodemailer`.
-- Do **not** introduce a frontend framework (React, Vue, Svelte, etc.) or bundler.
-- Do **not** add a database; file-based persistence (`/data/*.json`) is intentional.
+
+- Do **not** add npm packages other than `exceljs`, `nodemailer` and `pg`.
+  Adding a fourth requires explicit approval and a licence check recorded in the PR.
+- Do **not** add an authentication library. Use `node:crypto` as specified in §7.
+- Do **not** add an ORM or query builder. Write parameterised SQL.
+- Do **not** introduce a frontend framework (React, Vue, Svelte) or a bundler.
 - Do **not** add a web framework (Express, Fastify, Koa). Use the raw `http` module.
+- Every new dependency PR must record `npm ls --omit=dev` and a clean
+  `npm audit --omit=dev` in its description.
 
 ---
 
@@ -85,7 +162,10 @@ dependency-tracker/
 | Variables, functions | `camelCase` | `loadData`, `summaryTotals` |
 | Constants | `SCREAMING_SNAKE_CASE` | `PAGE_SIZE`, `CACHE_TTL_MS` |
 | Private/internal fields | leading underscore | `_nameLower`, `_incomplete`, `_cachePollTimer` |
-| Short loop variables | single letter or 2-char abbreviation | `i`, `p`, `ck` (category key), `sk` (severity key) |
+| Short loop variables | single letter or 2-char abbreviation | `i`, `p`, `ck`, `sk` |
+| SQL identifiers | `snake_case` | `user_sessions`, `last_seen_at` |
+| SQL keywords | UPPERCASE in multi-line statements | `SELECT … FROM … WHERE` |
+| Migration files | `NNN_snake_case.sql`, zero-padded | `001_init.sql` |
 | DT = DependencyTrack | always abbreviate in code comments | `// fetch from DT API` |
 
 ### 4.4 Section Dividers
@@ -100,84 +180,154 @@ Use the dash-banner style to separate logical sections inside a file:
 
 Inline comments use lettered prefixes to trace design decisions:
 
-- **Q-numbers** — design/architecture rationale (e.g., `// Q4: tuneable constants at top of file`)
-- **P-numbers** — performance optimisations (e.g., `// P4: pre-computed lowercase for search`)
-- **O-numbers** — observability notes (e.g., `// O3: JSON log format for log aggregators`)
+- **Q-numbers** — design/architecture rationale (`// Q4: tuneable constants at top of file`)
+- **P-numbers** — performance optimisations (`// P4: pre-computed lowercase for search`)
+- **O-numbers** — observability notes (`// O3: JSON log format for log aggregators`)
+- **S-numbers** — security rationale (`// S2: token hashed before storage`) — **new in revision 2**
 
-When adding new logic that involves a non-obvious trade-off, add a new Q/P/O comment.
+Highest numbers currently in use on `main`: **Q10, P5, O4**; no S-numbers yet, so
+start at **S1**. When adding logic with a non-obvious trade-off, add the next number
+in the appropriate series. Check the current maximum before assigning — parallel
+branches can claim the same number.
+
+### 4.6 Module Style (backend)
+
+- CommonJS (`require` / `module.exports`) — matches the existing codebase.
+- One concern per module. A module that needs another module's private state is
+  a sign the split is wrong.
+- Modules export named functions, never a default object literal of everything.
+- No module performs I/O at require time. Connecting, migrating and listening all
+  happen from the explicit boot sequence in `server.js`.
 
 ---
 
-## 5. Backend Service (`violation-cache/server.js`)
+## 5. Database
 
-### 5.1 File Structure Order
+### 5.1 Access rules
 
-Follow this top-to-bottom order:
+- **All** database access goes through `db/pool.js`. No module creates its own
+  `Client` or `Pool`.
+- Every query is **parameterised** (`$1`, `$2`). String concatenation or template
+  interpolation of values into SQL is prohibited without exception.
+- Multi-statement writes use the `tx()` helper so they commit or roll back as a unit:
 
-1. Tuneable constants (`PAGE_SIZE`, `RETRY_*`, concurrency limits)
-2. HTTP keep-alive agents (`http.Agent` / `https.Agent`)
-3. `.env` helpers (`parseEnvFile`, `patchEnvFile`, `getEffectiveConfig`)
-4. Low-level HTTP fetch helpers (`dtGet`, `dtGetWithRetry`)
-5. Cache I/O helpers (read, write, `getStatus`)
-6. `runJob()` — violation cache build
-7. Report job helpers (semaphore, registry, workbook builder)
-8. `runReportJob()` — Excel report build
-9. HTTP server and route handlers
-10. Startup / boot sequence
+```javascript
+await tx(async (client) => {
+  const { rows } = await client.query('INSERT INTO users (...) VALUES ($1) RETURNING id', [v]);
+  await client.query('INSERT INTO user_settings (user_id) VALUES ($1)', [rows[0].id]);
+});
+```
 
-### 5.2 HTTP Fetch Helpers
+- Never `SELECT *` on a table that holds a `bytea` column. Name the columns.
+- Every query that reads user-owned data is scoped by `user_id`. There is no
+  "trusted" read path.
+
+### 5.2 Pool configuration
+
+- `max: 15`, against a server `max_connections` of 50.
+- `statement_timeout: 30000` and `idle_in_transaction_session_timeout: 30000`.
+- The pool is created once at boot and closed on `SIGTERM`.
+
+### 5.3 Migrations
+
+- Plain `.sql` files in `db/migrations/`, numbered and **append-only**. A migration
+  that has been merged is never edited — write a new one.
+- The runner applies pending migrations inside a transaction, guarded by
+  `pg_advisory_lock`, so concurrent container starts cannot race.
+- Applied versions are recorded in `schema_migrations`.
+- Migrations run automatically at boot, before the HTTP listener starts.
+- Every migration must be **idempotent at the file level** (`CREATE TABLE IF NOT
+  EXISTS`, `CREATE INDEX IF NOT EXISTS`) so a partially-applied state can recover.
+- Destructive statements (`DROP`, `ALTER … DROP COLUMN`) require an explicit note
+  in the PR description explaining the data impact.
+
+### 5.4 Schema conventions
+
+- Primary keys are `uuid` generated with `gen_random_uuid()`, except append-only
+  audit and history tables which use `bigserial`.
+- Timestamps are `timestamptz`, never `timestamp`. Default `now()`.
+- Case-insensitive unique text (login IDs, email addresses) uses the `citext`
+  extension rather than functional lower() indexes.
+- Foreign keys to `users(id)` are `ON DELETE CASCADE`, except audit tables which
+  are `ON DELETE SET NULL` so the trail survives account deletion.
+- Constraints belong in the database, not only in application code. If a rule can
+  be expressed as a `CHECK` or a partial unique index, express it there as well.
+- Indexes are added only when a query in the design needs them. No speculative
+  indexes; each one is justified in the migration's comment header.
+
+### 5.5 What lives in the database
+
+| Table | Purpose |
+|---|---|
+| `users` | Accounts, credentials |
+| `user_sessions` | Bearer-token sessions (one live per user) |
+| `login_audit` | Authentication event trail |
+| `dt_connections` | Per-user DT URL and encrypted API key |
+| `user_settings` | Per-user preferences (`max_reports`) |
+| `mail_settings` | Per-user SMTP configuration |
+| `schedules`, `schedule_projects`, `schedule_runs` | Scheduled reports |
+| `reports`, `report_file_chunks` | Report metadata and file bytes |
+| `violation_caches` | Shared violation cache, keyed by connection fingerprint |
+| `schema_migrations` | Migration ledger |
+
+### 5.6 What remains on disk
+
+Only `/data/admin-credentials.json` (mode `0600`), created by `install.sh`.
+Nothing else. The `.env` file holds infrastructure configuration only — never DT
+connection values, and never user data.
+
+---
+
+## 6. Backend Service
+
+### 6.1 Boot sequence (`server.js`)
+
+Strict order. Each step must complete before the next begins:
+
+1. Read and validate environment configuration; fail fast with a clear message on
+   anything missing or malformed.
+2. Create the connection pool.
+3. Run pending migrations.
+4. Load the admin credentials file if present (see §7.4).
+5. Start background timers (session sweeper, scheduler poller).
+6. Start the HTTP listener.
+
+The process must not accept requests before migrations complete.
+
+### 6.2 HTTP fetch helpers
 
 All DT API calls go through `dtGetWithRetry()`:
 
-- 3 attempts maximum.
-- Delays: 2 s → 4 s → 8 s (exponential backoff).
-- Only retry on network errors and 5xx responses; surface 4xx immediately.
+- 3 attempts maximum; delays 2 s → 4 s → 8 s.
+- Only retry on network errors and 5xx; surface 4xx immediately.
+- Accepts an optional `cancelFlag`; a cancelled job stops retrying instead of
+  burning the full backoff sequence.
 
-Do **not** add new ad-hoc `fetch`/`https.get` calls outside this helper.
+Do **not** add ad-hoc `fetch`/`https.get` calls outside this helper.
 
-### 5.3 Concurrent Pipelines
+### 6.3 Concurrent pipelines
 
-The violation cache builds via 9 independent parallel pipelines:
-3 risk types (`ops`, `lic`, `secpolicy`) × 3 violation states (`FAIL`, `WARN`, `INFO`).
+The violation cache builds via 9 parallel pipelines: 3 risk types
+(`ops`, `lic`, `secpolicy`) × 3 states (`FAIL`, `WARN`, `INFO`).
 
-Pattern:
 1. **Phase 1** — fire all pipelines in parallel to get page counts (accurate progress).
-2. **Phase 2** — fetch pages 2+ with a `makeSemaphore` to limit concurrent requests.
+2. **Phase 2** — fetch pages 2+ with a `makeSemaphore` to limit concurrency.
 
 Preserve this two-phase structure for any new paginated fetch logic.
 
-### 5.4 Semaphore
+### 6.4 Semaphore
 
 `makeSemaphore(limit)` is the single concurrency-limiting primitive. Use it whenever
-spawning multiple async tasks that hit the external DT API.
+spawning multiple async tasks against the external DT API.
 
 ```javascript
 const sem = makeSemaphore(5);
 await sem(() => doWork());
 ```
 
-### 5.5 File Persistence
+### 6.5 Logging
 
-| File | Purpose |
-|---|---|
-| `/data/violation-cache.json` | Cached violation counts with `generatedAt`/`expiresAt` |
-| `/data/reports/registry.json` | Report job list (persisted across restarts) |
-| `/data/reports/<id>.xlsx` | Generated Excel reports |
-| `/data/app-config.json` | User-configurable settings (maxReports, mail, schedule) |
-| `/data/scheduled-reports/<id>.xlsx` | Ephemeral Excel files — deleted after email is sent |
-
-**Atomic writes:** always write to a `.tmp` file then `fs.rename()`. Never write
-directly to the target path.
-
-```javascript
-await fs.promises.writeFile(tmpPath, data);
-await fs.promises.rename(tmpPath, targetPath);
-```
-
-### 5.6 Logging
-
-Use the `log(level, message, meta)` helper exclusively. Do not use `console.log`
-directly.
+Use `log(level, message, meta)` exclusively. Never `console.log`.
 
 ```javascript
 log('info',  'Cache built', { projectCount: 42 });
@@ -185,127 +335,145 @@ log('warn',  'Partial failure', { failed: 3 });
 log('error', 'Job crashed', { err: e.message });
 ```
 
-Output format is controlled by `LOG_FORMAT` env variable (`text` or `json`).
+Output format is controlled by `LOG_FORMAT` (`text` or `json`).
 
-### 5.7 HTTP Route Pattern
+**Never log:** passwords, password hashes, session tokens, token hashes, SMTP
+passwords, DT API keys in full, or the secret encryption key. DT API keys are
+redacted to `***` plus the last four characters. Log a `user_id`, never a login ID
+together with a credential.
 
-Each route is a plain `if/else if` block keyed on `method + url`:
+### 6.6 HTTP route pattern
+
+Each route is a plain `if` block keyed on `method + path`, returning early:
 
 ```javascript
 if (method === 'GET' && path === '/violation-cache/status') {
   jsonReply(res, 200, getStatus());
-} else if (...) {
-  ...
-} else {
-  jsonReply(res, 404, { error: 'Not found' });
+  return;
 }
 ```
 
-Routes must not block the event loop. Long work always runs in a background closure
-and returns a job-id immediately (fire-and-forget + polling pattern).
+- Routes must not block the event loop. Long work runs in a background closure and
+  returns a job id immediately (fire-and-forget + polling).
+- Every route handler that awaits is wrapped in `try/catch` replying 500.
+- Authentication is applied centrally **before** route dispatch (§7.3), not
+  per-route. A new route is authenticated by default; making one public requires
+  adding it to the explicit public list and justifying it in the PR.
 
-### 5.8 Report Jobs
+### 6.7 Report jobs
 
-- Maximum 10 active entries in the registry (completed + in-progress).
 - Status transitions: `pending` → `running` → `completed` | `failed`.
-- Every transition must call `saveRegistry()`.
 - Cancellation uses a `cancelFlag` object (`{ cancelled: false }`) passed by
-  reference into `runReportJob()`. Set `cancelFlag.cancelled = true` to stop.
-- A 30-minute watchdog resets stale `running` jobs to `failed` on startup.
+  reference. Set `cancelFlag.cancelled = true` to stop.
+- `collectReportData()` awaits `Promise.allSettled` so a job reaches its terminal
+  status only after every pipeline has actually stopped.
+- Progress is persisted **at most once per second**, never per project.
+- A 30-minute watchdog fails stale `running` jobs; a startup sweep does the same
+  for jobs orphaned by a restart.
 
-### 5.9 `.env` Handling
+### 6.8 Scheduler
 
-- Parse `.env` with `parseEnvFile()` before every job (not cached in process memory)
-  so that UI-updated keys take effect without restart.
-- Patch `.env` with `patchEnvFile()` when the `/violation-cache/config` endpoint
-  receives a new key. This function must preserve all existing lines verbatim and
-  normalise CRLF to LF (Q7).
+- `calcNextRun(schedule)` is a pure function and the single source of truth for
+  timing. Do not duplicate its logic.
+  - `daily`: next occurrence of `hour` (tomorrow if already past)
+  - `weekly`: scans the next 8 days for a matching `weekDays` entry
+  - `monthly`: `monthDay` capped at 28; rolls to next month if already past
+- Scheduling is driven by **one poller** that ticks every 60 seconds and claims due
+  rows with `FOR UPDATE SKIP LOCKED`. Never create one timer per user.
+- Per-user overlap protection is the `running_since` column, not a process variable.
+- Scheduled reports are built in memory and emailed; they are never written to disk.
 
-### 5.10 App Config (`app-config.json`)
+### 6.9 Email (`nodemailer`)
 
-User-configurable settings are stored separately from the DT connection `.env`:
-
-- `loadConfig()` reads `/data/app-config.json`, deep-merging with `DEFAULT_CONFIG`.
-  Always call `loadConfig()` at the top of any function that needs these values —
-  never cache the result in a module-level variable.
-- `saveConfig(cfg)` writes atomically via `.tmp` → `rename`.
-- `sanitiseConfigForClient(cfg)` masks `smtp.pass` to `'••••••••'` before sending
-  to the browser. Never return the raw password in any HTTP response.
-- `deepMerge(target, source)` recursively merges objects. Arrays are replaced (not
-  concatenated). This ensures new DEFAULT_CONFIG keys are always present even in
-  configs saved before a new field was added.
-
-**Schema of `app-config.json`:**
-
-```javascript
-{
-  maxReports: 10,           // combined ceiling for completed + in-progress report jobs
-  mail: {
-    enabled: false,         // master switch — all email sending disabled when false
-    smtp: { host, port, secure, user, pass },
-    from: '',               // envelope From address
-    to:   [],               // array of To addresses
-    cc:   [],               // array of CC addresses (optional)
-    subject: '',            // optional; has a hardcoded default
-    body:    '',            // optional body text
-  },
-  schedule: {
-    enabled:             false,
-    frequency:           'daily',     // 'daily' | 'weekly' | 'monthly'
-    hour:                9,           // 0–23, server local time
-    weekDays:            [1],         // 0=Sun..6=Sat; used when frequency='weekly'
-    monthDay:            1,           // 1–28; used when frequency='monthly' (capped at 28)
-    projectUuids:        [],          // UUIDs stored when user clicks "Schedule Reports"
-    riskTypes:           ['security', 'license', 'operational'],
-    lastRun:             null,        // ISO8601 timestamp updated after each run
-    lastRunStatus:       null,        // 'success' | 'failed'
-    lastRunError:        null,        // human-readable error string on failure
-    nextRun:             null,        // ISO8601 set by armScheduler()
-    failureNotification: null,        // set on failure; cleared when frontend ACKs
-  }
-}
-```
-
-### 5.11 Scheduler
-
-The scheduler is a `setTimeout`-based loop — no cron library required.
-
-- `calcNextRun(schedule)` is a pure function that computes the next fire time from
-  the current wall clock. It is the single source of truth for timing logic.
-  - `daily`: next occurrence of `schedule.hour` (if already past today, tomorrow)
-  - `weekly`: scans next 8 days for a matching `weekDays` entry
-  - `monthly`: `schedule.monthDay` capped at 28; rolls to next month if already past
-- `armScheduler()` clears any pending timer, calls `calcNextRun`, writes `nextRun`
-  to config, then sets a `setTimeout` for that many milliseconds.
-- `runScheduledJob()` is called by the timer, sets `_schedulerRunning = true` for
-  overlap protection, collects data via `collectReportData()`, builds the workbook,
-  emails it, deletes the scheduled-reports file, and updates `lastRun` / `lastRunStatus`.
-- Re-arm is always called from `armScheduler()` after `runScheduledJob()` completes.
-- On failure: the error is written to `schedule.failureNotification` so the dashboard
-  can show a toast on the next page load. The frontend ACKs via `POST /violation-cache/schedule/ack-notification`.
-
-### 5.12 Email (`nodemailer`)
-
-- `sendEmail(mailCfg, attachPath, attachName, overrides)` creates a transporter
-  using `mailCfg.smtp`, sends with the configured from/to/cc/subject/body, and
-  attaches the Excel file at `attachPath`.
-- Use `overrides` to send failure-alert emails with a different subject/body.
-- The `POST /violation-cache/config/test-email` route sends a test email without
-  an attachment to verify SMTP connectivity.
-- The SMTP password placeholder `'••••••••'` (sent by the frontend when the password
-  field was not changed) must be detected in the POST handler and discarded so the
-  real stored password is not overwritten.
+- `sendEmail(mailCfg, attachment, overrides)` builds a transporter from the user's
+  decrypted SMTP settings.
+- The SMTP password placeholder `'••••••••'` sent by the frontend must be detected
+  and discarded so the stored password is not overwritten.
+- Never return a password in any HTTP response.
 
 ---
 
-## 6. Frontend Dashboard (`dashboard/index.html`)
+## 7. Authentication & Multi-Tenancy
 
-### 6.1 Single-File Architecture
+### 7.1 Passwords
 
-All code lives in one HTML file. Do **not** split into multiple JS/CSS files — the
-no-build-step constraint requires this.
+- `crypto.scrypt`, N=16384, r=8, p=1, 16-byte random salt, 64-byte derived key.
+- Stored as `scrypt$N$r$p$<base64 salt>$<base64 dk>` so parameters can be raised later.
+- **Always the asynchronous `crypto.scrypt`. `scryptSync` is prohibited** — it blocks
+  the event loop for ~100 ms per call and a login burst would stall the whole service.
+- Comparison uses `crypto.timingSafeEqual`.
 
-Structure inside the file:
+### 7.2 Session tokens
+
+- `crypto.randomBytes(32)` encoded base64url.
+- Only the **SHA-256 of the token** is stored. The token itself never touches the
+  database or a log line.
+- Sent by the browser as `Authorization: Bearer <token>`.
+- Stored client-side in `localStorage` under `dt_session_token` — shared across tabs
+  of one browser, not across browsers, which is the required behaviour.
+- Expiry: absolute (`SESSION_ABSOLUTE_HOURS`, default 8) and idle
+  (`SESSION_IDLE_HOURS`, default 2).
+- One live session per user, enforced by a **partial unique index**, not by
+  application logic.
+
+### 7.3 Request authentication
+
+- A single check runs before route dispatch: hash the bearer token, look it up,
+  attach the principal to the request.
+- An in-process cache holds validated tokens for 60 seconds to avoid a database
+  round trip per request. Revocation (logout, force-disconnect, deletion) must
+  **explicitly evict** the cache entry.
+- `last_seen_at` is flushed at most once per minute per session, never per request.
+- Missing, malformed, expired or revoked tokens all return **401** with a stable
+  code. The frontend treats any 401 as "go to the login page".
+
+### 7.4 Administrator principal
+
+- Validated against `/data/admin-credentials.json`, never against the database.
+- Created by `install.sh`. If the file is absent the service starts normally with
+  administrator login **disabled**, logs a warning at boot, and returns an
+  actionable error to anyone attempting an administrator login. It must never be
+  created silently at runtime.
+- Registration must reject the configured administrator login ID plus `root` and
+  `system`, otherwise a database user can shadow the administrator.
+
+### 7.5 Multi-tenancy rules
+
+These are the rules that make the service safe for concurrent users. Violating one
+is a correctness bug, not a style issue.
+
+- **No per-user state in module scope.** Process-global mutable variables may hold
+  only genuinely global state (the pool, the token cache, the scheduler timer).
+  Anything belonging to a user lives in the database.
+- **Every read and write is scoped by `user_id`.** No exceptions, including
+  administrator paths.
+- **Cross-user access returns 404, not 403.** Never confirm that another user's
+  resource exists.
+- **Quotas are per user** (report limits, storage), never global counters.
+- **Shared caches are keyed by a fingerprint**, never by user, so that users with
+  identical upstream credentials share one build. Single-builder election uses
+  `pg_try_advisory_lock`.
+
+### 7.6 Secrets at rest
+
+- DT API keys and SMTP passwords are encrypted with AES-256-GCM using
+  `SECRET_ENCRYPTION_KEY`, with a per-record nonce and the auth tag stored alongside.
+- A decryption failure surfaces to the user as "re-enter your API key". It must
+  never crash a request or be logged with the ciphertext.
+- **The DT API key is never returned in any HTTP response.** The UI is told only
+  whether a key is configured.
+
+---
+
+## 8. Frontend
+
+### 8.1 Two single-file pages
+
+The dashboard is `index.html`; the login/registration page is `login.html`. Each is
+a self-contained HTML file with inline `<style>` and a single `<script>`.
+
+**Do not split either file into separate JS/CSS assets** — the no-build-step
+constraint requires this. Adding a *page* is allowed; splitting a *page* is not.
 
 ```
 <style>   — CSS custom properties + all rules
@@ -313,25 +481,35 @@ Structure inside the file:
 <script>  — IIFE wrapping all state and logic
 ```
 
-### 6.2 IIFE + Window Exports
+`login.html` reuses the same CSS custom properties and form classes as `index.html`
+so the two are visually identical. Duplicating a small amount of CSS between the two
+files is accepted and preferred over introducing a shared asset.
 
-All JavaScript is wrapped in an immediately-invoked function expression to avoid
-polluting the global scope. `onclick=""` handlers in HTML call functions exposed
-through `window.*` exports at the bottom of the IIFE.
+### 8.2 IIFE + window exports
 
-```javascript
-(function () {
-  // ... all state and functions ...
+All JavaScript is wrapped in an IIFE. `onclick=""` handlers call functions exposed
+through `window.*` exports at the bottom of the IIFE. Any new handler must be added
+to that export block or it will silently fail.
 
-  window.toggleTheme   = toggleTheme;
-  window.applyFilters  = applyFilters;
-  // etc.
-})();
-```
+### 8.3 Backend calls go through `apiFetch()`
 
-### 6.3 State Management
+Every call to `/violation-cache/*` uses the `apiFetch(path, opts)` wrapper, which:
 
-Flat, module-scoped globals (no reactive framework):
+1. attaches the `Authorization: Bearer` header,
+2. redirects to `login.html` when no token is present,
+3. clears the token and redirects on any 401.
+
+**Never call `fetch()` directly against a backend route.** Direct calls to the DT
+API (`/api/*`) still use `X-Api-Key` and are the one exception.
+
+### 8.4 Auth gate
+
+`index.html` validates the session before any data loading, theme initialisation or
+rendering. An unauthenticated visitor never sees dashboard chrome.
+
+### 8.5 State management
+
+Flat, module-scoped globals, no reactive framework.
 
 | Variable | Type | Role |
 |---|---|---|
@@ -340,16 +518,16 @@ Flat, module-scoped globals (no reactive framework):
 | `treeRoots` | `TreeNode[]` | Rendered hierarchy |
 | `nodeMap` | `Map<uuid, TreeNode>` | Fast UUID lookup |
 | `expandedUuids` | `Set<uuid>` | Open group rows |
-| `selectedVersions` | `Set<string>` | Multi-select filter |
 | `summaryTotals` | object | Computed once after load |
 | `flatView` | boolean | Hierarchy vs flat toggle |
 | `selectedProjectUuids` | `Set<uuid>` | Checkbox-selected for report |
 | `_configPanelDirty` | boolean | Unsaved changes in config panel |
-| `_appConfig` | object\|null | Last fetched app-config from server |
+| `_appConfig` | object \| null | Last fetched app config |
+| `_currentUser` | object \| null | Authenticated principal |
 
 Never mutate `allProjects` after initial load. Derive everything else from it.
 
-### 6.4 Data Model
+### 8.6 Data model
 
 ```javascript
 // Project (leaf data shape)
@@ -370,105 +548,93 @@ Never mutate `allProjects` after initial load. Derive everything else from it.
 }
 ```
 
-### 6.5 Tree Building Rules
+### 8.7 Tree building, filtering, mock data
 
-- `buildTree(projects)` converts the flat `allProjects` array into a hierarchy using
-  `parentUuid` links.
-- `inferParentUuids(projects)` runs before `buildTree` to assign `parentUuid` when
-  DT doesn't supply it (name-match fallback).
-- Siblings are sorted alphabetically.
-- Aggregate parent rows show summed risk counts from all descendants.
+- `inferParentUuids(projects)` runs before `buildTree(projects)`; siblings sort
+  alphabetically; parent rows aggregate descendant counts.
+- `applyFilters()` always operates on `allProjects`, never on a previous result.
+  Parent rows are auto-included when a child matches.
+- `generateMockProjects()` uses `makeLCG(seed)` (Q6) for deterministic output.
+  Do **not** replace this with `Math.random()`.
 
-### 6.6 Filtering
+### 8.8 Validation mirroring
 
-`applyFilters()` always operates on `allProjects` (never on a previous filter result).
+Field validation rules exist in two places: `lib/validate.js` (authority) and the
+frontend (immediate feedback). **They must be changed together in the same commit.**
+The frontend never performs uniqueness checks — those are backend-only, via
+`POST /auth/check-availability` fired on blur and again on submit.
 
-Active filters:
+### 8.9 Performance conventions
 
-| Filter | Logic |
-|---|---|
-| Text search | substring, case-insensitive, min 2 chars, uses `_nameLower` |
-| Risk level | `has-critical`, `has-high`, etc. |
-| Category | security / operations / license / secpolicy |
-| Tags | AND logic (all selected tags must be present) |
-| Versions | OR logic (any selected version matches) |
-| Level | exact hierarchy depth |
-| Latest-only | `isLatest === true` + full ancestor chain is shown |
-
-Auto-include parent rows when a child matches (to maintain hierarchy context).
-
-### 6.7 Mock Data Generator
-
-`generateMockProjects()` uses `makeLCG(seed)` (Q6) so that the same seed always
-produces the same mock data. Do **not** replace this with `Math.random()`.
-
-### 6.8 Performance Conventions
-
-- `_nameLower` — computed once per project on data load; reuse for every search.
-- Search input is debounced at `SEARCH_DEBOUNCE_MS` (200 ms).
-- `throttle(fn, ms)` for high-frequency UI events (window resize, etc.).
-- `inferSuffix(name, version)` strips trailing version using char-level scan, not
+- `_nameLower` — computed once per project on load; reuse for every search.
+- Search input debounced at `SEARCH_DEBOUNCE_MS` (200 ms), minimum 2 characters.
+- `inferSuffix(name, version)` strips a trailing version by character scan, not
   regex (P3).
 
-### 6.9 CSS Conventions
+### 8.10 CSS conventions
 
-- Theme is driven by CSS custom properties defined on `:root` (dark) and overridden
-  inside `.light` class on `<body>`.
-- Severity colours are defined as variables: `--color-critical`, `--color-high`, etc.
-- Accent colour: `--accent: #6366f1` (indigo-500).
-- Do not hard-code colour hex values inside component rules; always use a variable.
+- Theme driven by CSS custom properties on `:root`, overridden under
+  `[data-theme="light"]`.
+- Accent colour `--accent: #6366f1`. Severity colours are variables
+  (`--critical`, `--high`, …).
+- Never hard-code a colour hex inside a component rule.
 - Responsive breakpoints: 1200 px → 900 px → 768 px.
 
-### 6.10 Utility Helpers (do not duplicate)
+### 8.11 Utility helpers (do not duplicate)
 
 | Helper | Location | Purpose |
 |---|---|---|
-| `makeLCG(seed)` | dashboard | Seeded PRNG |
-| `pillFor(n, level)` | dashboard | Severity badge HTML |
-| `toast(text, level)` | dashboard | Notification pop-up |
-| `throttle(fn, ms)` | dashboard | Rate-limit wrapper |
-| `inferSuffix(name, ver)` | dashboard | Strip version from name |
-| `openConfigPanel()` | dashboard | Open left-side config overlay |
-| `closeConfigPanel(force)` | dashboard | Close overlay; prompts if dirty |
-| `scheduleReports()` | dashboard | Save selected UUIDs and schedule |
+| `apiFetch(path, opts)` | frontend | Authenticated backend call — use for all backend routes |
+| `makeLCG(seed)` | frontend | Seeded PRNG |
+| `pillFor(n, level)` | frontend | Severity badge HTML |
+| `showToast(text, type)` | frontend | Notification pop-up |
+| `showConfirm(title, msg, ok, cancel)` | frontend | Promise-based confirm dialog |
+| `openModal(id)` / `closeModal(id)` | frontend | Modal show/hide |
+| `escHtml(s)` | frontend | Escape before `innerHTML` interpolation |
+| `inferSuffix(name, ver)` | frontend | Strip version from name |
+| `query(sql, params)` / `tx(fn)` | server | All database access |
 | `makeSemaphore(limit)` | server | Promise concurrency limit |
 | `sleep(ms)` | server | Promise delay |
 | `dtGetWithRetry(...)` | server | Resilient DT API fetch |
 | `log(level, msg, meta)` | server | Structured logger |
-| `deepMerge(target, source)` | server | Recursive object merge (preserves defaults) |
-| `loadConfig()` | server | Read app-config.json merged with defaults |
-| `saveConfig(cfg)` | server | Atomically write app-config.json |
-| `sanitiseConfigForClient(cfg)` | server | Mask smtp.pass before HTTP response |
-| `calcNextRun(schedule)` | server | Pure function: compute next fire time |
-| `armScheduler()` | server | Set up (or re-arm) the scheduled-report timer |
-| `collectReportData(...)` | server | Shared data-collection core for both manual and scheduled reports |
-| `sendEmail(mailCfg, ...)` | server | Deliver Excel report via nodemailer |
+| `hashPassword` / `verifyPassword` | server | scrypt wrappers |
+| `mintToken` / `hashToken` | server | Session token helpers |
+| `encryptSecret` / `decryptSecret` | server | AES-256-GCM wrappers |
+| `calcNextRun(schedule)` | server | Pure function: next fire time |
+| `collectReportData(...)` | server | Shared collection core for manual and scheduled reports |
+| `sendEmail(mailCfg, ...)` | server | Deliver report via nodemailer |
 
 ---
 
-## 7. Infrastructure
+## 9. Infrastructure
 
-### 7.1 nginx Config Template
+### 9.1 nginx config template
 
 `dashboard/nginx.conf.template` uses `envsubst` placeholders (`${VAR_NAME}`).
 
-Key routing decisions:
-- `/api/*` → DT API server (upstream resolved at request time — not at startup — to
-  tolerate startup ordering).
+- `/api/*` → DT API server (upstream resolved at request time, not startup).
 - `/violation-cache/*` → `dt-violation-cache:3001`.
-- `/dt-config` — inline JSON block exposing proxy target and optional API key.
-- SPA routing: `try_files $uri $uri/ /index.html`.
+- SPA routing: `try_files $uri $uri/ /index.html`; `login.html` served directly.
+- The `/dt-config` block is **removed** in phase 4 — DT configuration is per-user
+  and no longer baked into nginx.
 
-### 7.2 docker-compose.yml Conventions
+### 9.2 docker-compose.yml conventions
 
-- Service names: `dt-dashboard`, `dt-violation-cache`.
-- Expose only the port declared in `.env` (`DT_DASHBOARD_PORT`).
-- Both services declare `healthcheck` — do not remove.
-- The `.env` file is **bind-mounted** into `dt-violation-cache` so config updates
-  survive without a restart.
-- `./violation-cache/data` is **bind-mounted** to `/data` so all persisted files survive container restarts without Docker volume management. Do not change this to a named volume.
+- Service names: `dt-dashboard`, `dt-violation-cache`, `dt-postgres`.
+- All services declare a `healthcheck` — do not remove. Convention:
+  `interval: 30s`, `timeout: 5s`, `retries: 3`; `start_period` reflects boot time.
+- `restart: unless-stopped`, `json-file` logging with `max-file: "5"`.
+- `dt-violation-cache` depends on `dt-postgres` with `condition: service_healthy`.
+- **Bind mounts only. Never a named volume.** `install.sh` runs
+  `docker compose down -v` unconditionally on uninstall, which would destroy a named
+  volume without warning. `./violation-cache/pgdata` and `./violation-cache/data`
+  are bind mounts for exactly this reason.
+- Expose `DT_DASHBOARD_PORT` and `POSTGRES_PORT` only.
 
-### 7.3 Dockerfile
+### 9.3 Dockerfile
+
+Every new backend directory needs an explicit `COPY`. The image copies named paths
+only — a new directory that is not listed is silently missing at runtime.
 
 ```dockerfile
 FROM node:22-alpine
@@ -476,128 +642,230 @@ WORKDIR /app
 COPY package.json ./
 RUN npm install --omit=dev --no-audit --no-fund
 COPY server.js ./
+COPY db/ ./db/
+COPY lib/ ./lib/
+COPY routes/ ./routes/
 RUN mkdir -p /data
 EXPOSE 3001
 CMD ["node", "server.js"]
 ```
 
-Do not add a package-lock.json copy step before `npm install` unless you intend to
-lock versions (currently not locked in production image).
+### 9.4 Installer
+
+- `install.sh` creates `/data/admin-credentials.json` from `SCA_ADMIN_USER` /
+  `SCA_ADMIN_PASSWORD` (defaults `admin` / `ScaAdmin@dt8624`), hashed, mode `0600`.
+- It generates `POSTGRES_PASSWORD` and `SECRET_ENCRYPTION_KEY` when absent.
+- It no longer prompts for or writes any DT connection value.
+- The uninstall confirmation must name every container and data directory it
+  destroys. Update it whenever a service or bind mount is added.
 
 ---
 
-## 8. Testing
+## 10. Testing
 
-### 8.1 Test Runner
+### 10.1 Test runner
 
 ```bash
 node --test violation-cache/server.test.js
 node --test violation-cache/dashboard.test.js
+
+# opt-in database tier
+TEST_DATABASE_URL=postgres://… node --test violation-cache/db.test.js
 ```
 
-No npm test script is defined. Run directly with `node --test`.
+No npm test script is defined. The default run must stay offline: it requires no
+database, no Docker and no network.
 
-### 8.2 Test File Conventions
+### 10.2 Three tiers
 
-- Tests for `server.js` helpers live in `server.test.js`.
-- Tests for `dashboard/index.html` JS helpers live in `dashboard.test.js`.
-- **Do not import `server.js`** inside `server.test.js` — doing so would start the
-  HTTP server. Duplicate the helper functions under test instead.
-- Use `node:assert/strict` for all assertions.
-- Use `node:test` (`test()`, `describe()`, `beforeEach()`, `afterEach()`).
-- Create temp files with a helper that tracks paths for cleanup in `afterEach`.
+| Tier | File | Requirement |
+|---|---|---|
+| Pure unit | `server.test.js`, `dashboard.test.js` | Always runs. No I/O beyond temp files. |
+| Database integration | `db.test.js` | Skipped unless `TEST_DATABASE_URL` is set. |
+| Route / authorisation | `server.test.js` | Always runs, with a stubbed data layer. |
+
+### 10.3 Conventions
+
+- **Do not import `server.js`** in a test — it would start the HTTP server.
+  Duplicate the helper under test, or re-implement it taking its dependencies as
+  parameters. This convention is unchanged.
+- Modules under `lib/` that perform no I/O at require time **may** be imported
+  directly. This is the preferred approach for new pure helpers.
+- Use `node:assert/strict` and `node:test` (`test`, `describe`, `beforeEach`, `afterEach`).
+- Temp files go under `os.tmpdir()` and are cleaned in `afterEach`.
 - Mock HTTP request streams with `Readable` from `node:stream`.
+- Integration tests create their own schema via the migration runner and drop it
+  afterwards. They never assume pre-existing data.
 
-### 8.3 What to Test
+### 10.4 What to test
 
-- All `.env` parsing edge cases: CRLF, quoted values, comment lines, missing `=`,
-  duplicate keys.
-- PRNG: seed determinism, output range, edge seed values.
-- Pure utility functions: `inferSuffix`, `pillFor`, `truncateUrl`.
-- App config helpers: `deepMerge` (nested merge, array replace, no mutation),
-  `loadConfig`/`saveConfig` round-trips, `sanitiseConfigForClient` (password masking).
-- `calcNextRun` for all three frequencies: result is always in the future, correct
-  day/hour, within expected range.
-- Do **not** write integration tests that require a live DT API or Docker.
-
----
-
-## 9. Error Handling
-
-### 9.1 Backend
-
-- Return typed error objects: `{ code: 'SYMBOLIC_NAME', cause: originalError }`.
-- HTTP status codes: 400 (bad request), 401 (missing/invalid key), 409 (conflict —
-  job already running), 429 (rate limit), 500 (internal).
-- Wrap async route handlers with a top-level `try/catch` that replies `500`.
-- Never let an unhandled rejection crash the process; attach to the job's `failed`
-  state instead.
-
-### 9.2 Frontend
-
-- Use `toast(message, 'error')` for user-visible errors.
-- Mark per-project failures with `_incomplete: true`; surface a banner warning.
-- Never swallow errors silently — at minimum `log` them in the browser console.
-- Graceful degradation: if the DT API is unreachable, show mock data with a clear
-  "using demo data" notice.
+- `.env` parsing edge cases: CRLF, quoted values, comments, missing `=`, duplicates.
+- Every validation rule, including boundary lengths and rejected characters.
+- Password hashing round-trip, and rejection of a tampered hash.
+- Token minting and hashing; encryption round-trip and auth-tag failure.
+- `calcNextRun` for all three frequencies.
+- **Database tier:** migrations apply and are idempotent; the single-live-session
+  index rejects a second session; cascade deletion removes all owned rows;
+  chunked byte round-trips are identical; `SKIP LOCKED` claims each row once.
+- **Authorisation:** every route rejects a missing or invalid token with 401;
+  cross-user access returns 404; the profile endpoint ignores login ID and email.
+- Do **not** write tests that require a live DT API.
 
 ---
 
-## 10. Security Considerations
+## 11. Error Handling
 
-- The API key is stored in browser `localStorage` (`dt_api_key`) and sent as an
-  `X-Api-Key` header. Do not log it verbatim — redact to `****` in log output.
-- CORS is globally open (`Access-Control-Allow-Origin: *`) — this is intentional for
-  the private-network deployment model. Do not tighten it without understanding the
-  iframe-embedding use case.
-- `readBody()` enforces a 64 KB limit on request bodies. Do not raise this without
-  justification.
-- The `.env` file is bind-mounted read/write. `patchEnvFile()` must validate that
-  the supplied API key contains no shell-injection characters before writing.
+### 11.1 Backend
+
+- Typed error objects: `{ code: 'SYMBOLIC_NAME', cause: originalError }`.
+- Status codes:
+
+| Code | Meaning |
+|---|---|
+| 400 | Malformed request or failed field validation |
+| 401 | Missing, invalid, expired or revoked session |
+| 403 | Authenticated but not permitted (administrator-only routes) |
+| 404 | Not found — **also used for another user's resource** |
+| 409 | Conflict: job already running, or an active session exists at login |
+| 429 | Rate limited, or a per-user quota reached |
+| 500 | Internal error |
+
+- Error responses always use `jsonReply(res, status, { error: '...' })`, plus a
+  stable `code` where the frontend must branch on it (`SESSION_EXISTS`,
+  `INVALID_SESSION`, `INVALID_CREDENTIALS`).
+- Authentication failures must not reveal which factor was wrong, or whether an
+  account exists.
+- Wrap async route handlers in `try/catch` replying 500.
+- Never let an unhandled rejection crash the process.
+
+### 11.2 Frontend
+
+- `showToast(message, 'error')` for user-visible errors.
+- Mark per-project failures with `_incomplete: true` and surface a banner.
+- Never swallow errors silently — at minimum log them to the console.
+- Graceful degradation: with no DT connection configured, show mock data and a
+  clear "demo data" notice.
 
 ---
 
-## 11. Environment Variables
+## 12. Security
+
+- **Authentication is mandatory on every backend route.** New routes are
+  authenticated by default; a public route must be listed explicitly and justified.
+- Secrets never appear in responses or logs (§6.5, §7.6).
+- Parameterised SQL only (§5.1).
+- `crypto.timingSafeEqual` for all credential and token comparisons.
+- Brute-force protection: five failures per `(login_id, ip)` triggers a
+  fifteen-minute lockout; every attempt is written to `login_audit`.
+- The availability-check endpoint is rate limited and never identifies the owner of
+  an existing identifier.
+- `readBody()` enforces a 64 KB default limit. Overrides are per route and must be
+  justified (256 KB config, 5 MB report generation).
+- CORS stays open (`Access-Control-Allow-Origin: *`) for the documented
+  iframe-embedding model. This is acceptable **only because** bearer-token
+  authentication now gates the data behind it. Do not remove one without the other.
+- `escHtml()` before interpolating any user-supplied text into `innerHTML`.
+
+---
+
+## 13. Performance by Design
+
+The service must not degrade as users are added. These are requirements, not
+aspirations, and each is verifiable.
+
+- **No N-times-per-user upstream work.** Users sharing a DT connection share one
+  cache build (§7.5).
+- **No per-request database write.** `last_seen_at` and job progress are throttled.
+- **No unbounded in-memory accumulation.** Paged fetches stream and discard; report
+  bytes are chunked at 4 MB.
+- **No blocking crypto on the event loop.** Async `scrypt` only.
+- **No sequential scans on a hot path.** Every hot query is index-backed, evidenced
+  by `EXPLAIN (ANALYZE, BUFFERS)` attached to the PR that introduces it.
+- **No unbounded table growth.** Sessions are swept; audit and run history are
+  retained 90 days.
+- **Bounded concurrency everywhere.** Pool 15, scheduler 5, report fetches 5,
+  violation fetches 3.
+
+---
+
+## 14. Environment Variables
 
 | Variable | Used by | Purpose |
 |---|---|---|
 | `DT_DASHBOARD_PORT` | compose / nginx | External port for the dashboard |
-| `DT_API_INTERNAL_URL` | nginx / server | DT API base URL (container-internal) |
-| `DT_API_KEY` | nginx / server | DT API key |
-| `DT_FRONTEND_URL` | nginx | DT UI URL for deep links |
+| `POSTGRES_USER` | compose / server | Database role (default `dtdash`) |
+| `POSTGRES_PASSWORD` | compose / server | Database password (generated at install) |
+| `POSTGRES_DB` | compose / server | Database name (default `dtdash`) |
+| `POSTGRES_HOST` | server | Database host (default `dt-postgres`) |
+| `POSTGRES_PORT` | compose | Host port exposed for external DB tooling (default 5432) |
+| `SECRET_ENCRYPTION_KEY` | server | AES-256-GCM key for stored secrets (generated at install) |
+| `SCA_ADMIN_USER` | install.sh | Administrator login ID (default `admin`) |
+| `SCA_ADMIN_PASSWORD` | install.sh | Administrator password (default `ScaAdmin@dt8624`) |
+| `SESSION_ABSOLUTE_HOURS` | server | Absolute session lifetime (default 8) |
+| `SESSION_IDLE_HOURS` | server | Idle session lifetime (default 2) |
 | `VIOLATION_CACHE_TTL_HOURS` | server | Cache expiry in hours (default 24) |
 | `PORT` | server | Cache service listen port (default 3001) |
-| `REPORT_CONCURRENCY` | server | Max parallel project fetches in reports (default 5) |
-| `VIOLATION_CONCURRENCY` | server | Max parallel violation fetches per project (default 3) |
+| `REPORT_CONCURRENCY` | server | Max parallel project fetches (default 5) |
+| `VIOLATION_CONCURRENCY` | server | Max parallel violation fetches (default 3) |
 | `LOG_FORMAT` | server | `text` (default) or `json` |
+| `TEST_DATABASE_URL` | tests | Enables the database integration tier |
+
+Removed in phase 4: `DT_API_INTERNAL_URL`, `DT_API_KEY`, `DT_FRONTEND_URL` — these
+become per-user database values.
 
 ---
 
-## 12. Git & Branch Workflow
+## 15. Git & Branch Workflow
 
-- Active development branch: `claude/loving-goodall-Ig9hm`.
-- Commit messages: imperative mood, concise first line, no emoji.
+- One pull request per migration phase. Do not combine phases.
+- Branch naming: `claude/<phase>-<short-topic>`, e.g. `claude/phase0-db-foundations`.
+- Each phase branches from `main` after the previous phase has merged. If the
+  previous phase is still in review, stack on its branch and say so in the PR.
+- Commit messages: imperative mood, concise first line, no emoji, body explains why.
 - Do not push directly to `main`/`master`.
 - Always `git push -u origin <branch>`.
+- Do not commit generated binaries, `.env`, `pgdata/`, or `admin-credentials.json`.
 
 ---
 
-## 13. Adding New Features — Checklist
+## 16. Adding New Features — Checklist
 
-Before opening a PR with new functionality:
+Before opening a pull request:
 
-- [ ] No new npm packages introduced (or explicitly approved — currently `exceljs` and `nodemailer`).
-- [ ] Backend: new routes follow the `if/else if` routing pattern.
-- [ ] Backend: any new paginated fetch uses `dtGetWithRetry` + semaphore.
-- [ ] Backend: file writes are atomic (write-tmp → rename).
-- [ ] Backend: `sanitiseConfigForClient()` used before returning any config object.
-- [ ] Backend: SMTP password placeholder `'••••••••'` detected and discarded in config POST handler.
-- [ ] Frontend: state stays in module-scoped globals; no external state library.
-- [ ] Frontend: new HTML event handlers are window-exported from the IIFE.
-- [ ] Frontend: new colours use CSS custom properties, not hard-coded hex.
-- [ ] Frontend: config panel always reads from `loadConfigFromServer()` on open.
-- [ ] Tests added for any new pure helper functions.
-- [ ] `log()` used for all server-side output (not bare `console.log`).
-- [ ] Error responses use `jsonReply(res, <status>, { error: '...' })`.
-- [ ] `.env.example` updated if new environment variables are introduced.
-- [ ] `docs/` updated if user-visible behaviour changes.
+**Dependencies and standards**
+- [ ] No new npm package (approved: `exceljs`, `nodemailer`, `pg`).
+- [ ] `npm ls --omit=dev` and `npm audit --omit=dev` recorded if dependencies changed.
+- [ ] This file updated if a convention changed.
+
+**Database**
+- [ ] All access through `db/pool.js`; every query parameterised.
+- [ ] Multi-row writes wrapped in `tx()`.
+- [ ] New migration is append-only, numbered, idempotent, and comments its indexes.
+- [ ] No `SELECT *` on a table containing `bytea`.
+
+**Authentication and isolation**
+- [ ] New routes are authenticated; any public route justified in the PR.
+- [ ] Every query scoped by `user_id`; cross-user access returns 404.
+- [ ] No per-user state in module scope.
+- [ ] No secret in a response body or a log line.
+- [ ] Quotas enforced per user.
+
+**Backend**
+- [ ] Routes follow the early-return `if` pattern.
+- [ ] New paginated fetches use `dtGetWithRetry` + semaphore.
+- [ ] `log()` used for all output; no bare `console.log`.
+- [ ] Errors use `jsonReply(res, status, { error, code })`.
+
+**Frontend**
+- [ ] Backend calls go through `apiFetch()`, never bare `fetch()`.
+- [ ] New handlers window-exported from the IIFE.
+- [ ] New colours use CSS custom properties.
+- [ ] Validation changes applied to `lib/validate.js` and the frontend together.
+- [ ] User-supplied text passed through `escHtml()` before `innerHTML`.
+
+**Verification**
+- [ ] Tests added for new pure helpers; database tier updated for schema changes.
+- [ ] Full default test run green.
+- [ ] `EXPLAIN (ANALYZE, BUFFERS)` attached for any new hot-path query.
+- [ ] `.env.example` updated for new environment variables.
+- [ ] `docs/` updated if user-visible behaviour changed.
