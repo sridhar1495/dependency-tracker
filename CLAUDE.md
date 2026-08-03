@@ -60,10 +60,10 @@ write code that assumes a later phase has landed.
 | 1 | Schema, indexes, data-access modules | **Merged** |
 | 2 | Authentication backend | **Merged** |
 | 3 | Authentication frontend (`login.html`, `apiFetch`, profile) | **Merged** |
-| 4 | Per-user DT connection | **In review** |
-| 5 | Per-user settings, mail, multi-tenant scheduler | **In review** |
-| 6 | Reports in the database | **In review** |
-| 7 | Shared violation cache | **In review** |
+| 4 | Per-user DT connection | **Merged** |
+| 5 | Per-user settings, mail, multi-tenant scheduler | **Merged** |
+| 6 | Reports in the database | **Merged** |
+| 7 | Shared violation cache | **Merged** |
 | 8 | Installer, infrastructure, documentation | **In review** |
 | 9 | Administration panel (read-only) | **In review** |
 | 10 | Performance validation | **In review** |
