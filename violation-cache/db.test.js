@@ -636,3 +636,220 @@ describe('login audit', { skip: !ENABLED && 'TEST_DATABASE_URL not set' }, () =>
     assert.equal(rowCount, 0);
   });
 });
+
+// ── Authentication layer (phase 2) ───────────────────────────────────────────
+// Exercises lib/auth.js against a real database: token cache behaviour,
+// revocation eviction, and the force-disconnect path.
+
+describe('auth token cache and revocation', { skip: !ENABLED && 'TEST_DATABASE_URL not set' }, () => {
+  let pool, users, auth, dtCrypto;
+  let user;
+
+  before(async () => {
+    pool = require('./db/pool');
+    if (!pool.isReady()) {
+      const url = new URL(DB_URL);
+      process.env.POSTGRES_HOST = url.hostname;
+      process.env.POSTGRES_PORT = url.port || '5432';
+      process.env.POSTGRES_USER = decodeURIComponent(url.username);
+      process.env.POSTGRES_PASSWORD = decodeURIComponent(url.password) || 'x';
+      process.env.POSTGRES_DB = url.pathname.replace(/^\//, '');
+      const { parseConfig } = require('./lib/config');
+      pool.init(parseConfig(process.env).db);
+      await migrate({ pool: pool.getPool(), dir: MIGRATIONS_DIR });
+    }
+    users     = require('./lib/users');
+    auth      = require('./lib/auth');
+    dtCrypto  = require('./lib/crypto');
+    auth.configure({ session: { absoluteHours: 8, idleHours: 2 } });
+
+    await pool.query("DELETE FROM users WHERE login_id = 'zz_auth'");
+    user = await users.create({
+      loginId: 'zz_auth', email: null, firstName: 'Auth', lastName: 'Tester',
+      passwordHash: await dtCrypto.hashPassword('password123'),
+    });
+  });
+
+  after(async () => {
+    if (pool && pool.isReady()) {
+      auth.clearCache();
+      await pool.query("DELETE FROM users WHERE login_id = 'zz_auth'");
+      await pool.query("DELETE FROM user_sessions WHERE principal_type = 'admin'");
+      await pool.close();
+    }
+  });
+
+  test('issueSession returns a token that resolves to the right principal', async () => {
+    auth.clearCache();
+    const { token } = await auth.issueSession({ userId: user.id, principalType: 'user' });
+    const p = await auth.resolveToken(token);
+    assert.ok(p);
+    assert.equal(p.userId, user.id);
+    assert.equal(p.loginId, 'zz_auth');
+    assert.equal(p.isAdmin, false);
+  });
+
+  test('the resolved token is cached, so repeat calls avoid the database', async () => {
+    auth.clearCache();
+    const { token } = await auth.issueSession({ userId: user.id, principalType: 'user', force: true });
+    assert.equal(auth.cacheSize(), 0);
+    await auth.resolveToken(token);
+    assert.equal(auth.cacheSize(), 1, 'first resolve populates the cache');
+    await auth.resolveToken(token);
+    await auth.resolveToken(token);
+    assert.equal(auth.cacheSize(), 1, 'repeat resolves reuse the entry');
+  });
+
+  test('a second session is refused unless force is used', async () => {
+    await assert.rejects(
+      () => auth.issueSession({ userId: user.id, principalType: 'user' }),
+      (e) => e.code === 'SESSION_EXISTS'
+    );
+  });
+
+  test('force revokes the previous session AND evicts it from the cache', async () => {
+    auth.clearCache();
+    const first = await auth.issueSession({ userId: user.id, principalType: 'user', force: true });
+    assert.ok(await auth.resolveToken(first.token));
+    assert.equal(auth.cacheSize(), 1);
+
+    const second = await auth.issueSession({ userId: user.id, principalType: 'user', force: true });
+
+    // The critical property: revocation must be immediate, not delayed by the
+    // 60-second cache window.
+    assert.equal(await auth.resolveToken(first.token), null, 'old token must be dead at once');
+    assert.ok(await auth.resolveToken(second.token), 'new token must work');
+  });
+
+  test('revokeToken kills the session and evicts the cache entry', async () => {
+    auth.clearCache();
+    const { token } = await auth.issueSession({ userId: user.id, principalType: 'user', force: true });
+    await auth.resolveToken(token);
+    assert.equal(auth.cacheSize(), 1);
+
+    assert.equal(await auth.revokeToken(token), true);
+    assert.equal(auth.cacheSize(), 0, 'cache entry must be evicted on revocation');
+    assert.equal(await auth.resolveToken(token), null);
+  });
+
+  test('an unknown or malformed token resolves to null without throwing', async () => {
+    assert.equal(await auth.resolveToken('not-a-real-token'), null);
+    assert.equal(await auth.resolveToken(''), null);
+    assert.equal(await auth.resolveToken(null), null);
+    assert.equal(await auth.resolveToken(undefined), null);
+  });
+
+  test('deleting the user makes the token unusable', async () => {
+    auth.clearCache();
+    const victim = await users.create({
+      loginId: 'zz_victim', email: null, firstName: 'Victim', lastName: 'User',
+      passwordHash: await dtCrypto.hashPassword('password123'),
+    });
+    const { token } = await auth.issueSession({ userId: victim.id, principalType: 'user' });
+    assert.ok(await auth.resolveToken(token));
+
+    await auth.revokeUserSessions(victim.id);
+    await users.deleteById(victim.id);
+    auth.evictUser(victim.id);
+
+    assert.equal(await auth.resolveToken(token), null);
+  });
+
+  test('the administrator session is independent of user sessions', async () => {
+    auth.clearCache();
+    const userSession  = await auth.issueSession({ userId: user.id, principalType: 'user', force: true });
+    const adminSession = await auth.issueSession({ principalType: 'admin', force: true });
+
+    const up = await auth.resolveToken(userSession.token);
+    const ap = await auth.resolveToken(adminSession.token);
+    assert.equal(up.isAdmin, false);
+    assert.equal(ap.isAdmin, true);
+    assert.equal(ap.userId, null, 'the administrator is not a database user');
+
+    // Revoking the administrator must not disturb the user.
+    await auth.revokeToken(adminSession.token);
+    assert.equal(await auth.resolveToken(adminSession.token), null);
+    assert.ok(await auth.resolveToken(userSession.token), 'user session must survive');
+  });
+
+  test('isLockedOut trips after the configured number of failures', async () => {
+    const audit = require('./lib/login-audit');
+    await audit.clearFailures('zz_lock', '10.9.9.9');
+    assert.equal(await auth.isLockedOut('zz_lock', '10.9.9.9'), false);
+
+    for (let i = 0; i < auth.LOCKOUT_THRESHOLD; i++) {
+      await audit.record({ loginIdAttempted: 'zz_lock', event: 'failed', ipAddress: '10.9.9.9' });
+    }
+    assert.equal(await auth.isLockedOut('zz_lock', '10.9.9.9'), true);
+    assert.equal(await auth.isLockedOut('zz_lock', '10.9.9.8'), false, 'a different address is separate');
+
+    await audit.clearFailures('zz_lock', '10.9.9.9');
+    assert.equal(await auth.isLockedOut('zz_lock', '10.9.9.9'), false, 'a success clears the streak');
+  });
+
+  test('sweep removes dead sessions without disturbing live ones', async () => {
+    auth.clearCache();
+    const live = await auth.issueSession({ userId: user.id, principalType: 'user', force: true });
+    await pool.query(
+      `INSERT INTO user_sessions (principal_type, token_hash, issued_at, expires_at, revoked_at)
+       VALUES ('admin', $1, now() - interval '40 days', now() - interval '39 days',
+               now() - interval '39 days')`,
+      [dtCrypto.hashToken('dead-session')]
+    );
+    await auth.sweep();
+    assert.ok(await auth.resolveToken(live.token), 'the live session must survive the sweep');
+  });
+});
+
+describe('admin credential file', { skip: !ENABLED && 'TEST_DATABASE_URL not set' }, () => {
+  const admin = require('./lib/admin');
+  const dtCrypto = require('./lib/crypto');
+
+  test('a missing file disables administrator login with an actionable reason', () => {
+    const r = admin.load('/nonexistent/admin-credentials.json');
+    assert.equal(r.enabled, false);
+    assert.equal(admin.isEnabled(), false);
+    assert.match(admin.disabledReason(), /install\.sh/);
+  });
+
+  test('malformed JSON disables login rather than crashing', () => {
+    const f = path.join(os.tmpdir(), `admin-bad-${Date.now()}.json`);
+    fs.writeFileSync(f, '{not json');
+    try {
+      assert.equal(admin.load(f).enabled, false);
+      assert.match(admin.disabledReason(), /valid JSON/);
+    } finally { fs.unlinkSync(f); }
+  });
+
+  test('a file missing passwordHash disables login', () => {
+    const f = path.join(os.tmpdir(), `admin-part-${Date.now()}.json`);
+    fs.writeFileSync(f, JSON.stringify({ loginId: 'admin' }));
+    try {
+      assert.equal(admin.load(f).enabled, false);
+      assert.match(admin.disabledReason(), /passwordHash/);
+    } finally { fs.unlinkSync(f); }
+  });
+
+  test('a valid file enables login and verifies the password', async () => {
+    const f = path.join(os.tmpdir(), `admin-ok-${Date.now()}.json`);
+    fs.writeFileSync(f, JSON.stringify({
+      loginId: 'sysadmin',
+      passwordHash: await dtCrypto.hashPassword('Str0ngAdminPass'),
+      createdAt: new Date().toISOString(),
+    }), { mode: 0o600 });
+    try {
+      const r = admin.load(f);
+      assert.equal(r.enabled, true);
+      assert.equal(r.loginId, 'sysadmin');
+      assert.equal(await admin.verify('sysadmin', 'Str0ngAdminPass'), true);
+      assert.equal(await admin.verify('SYSADMIN', 'Str0ngAdminPass'), true, 'login ID is case-insensitive');
+      assert.equal(await admin.verify('sysadmin', 'wrong'), false);
+      assert.equal(await admin.verify('someoneelse', 'Str0ngAdminPass'), false);
+    } finally { fs.unlinkSync(f); admin._setForTest(null); }
+  });
+
+  test('verify returns false when administrator login is disabled', async () => {
+    admin._setForTest(null);
+    assert.equal(await admin.verify('admin', 'anything'), false);
+  });
+});

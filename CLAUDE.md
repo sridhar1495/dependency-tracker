@@ -57,8 +57,8 @@ write code that assumes a later phase has landed.
 |---|---|---|
 | — | Coding standards (this file) | **Merged** |
 | 0 | Postgres service, migration runner, connection pool, module split | **Merged** |
-| 1 | Schema, indexes, data-access modules | **In review** |
-| 2 | Authentication backend | Not started |
+| 1 | Schema, indexes, data-access modules | **Merged** |
+| 2 | Authentication backend | **In review** |
 | 3 | Authentication frontend (`login.html`, `apiFetch`, profile) | Not started |
 | 4 | Per-user DT connection | Not started |
 | 5 | Per-user settings, mail, multi-tenant scheduler | Not started |

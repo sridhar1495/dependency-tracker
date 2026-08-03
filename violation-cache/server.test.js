@@ -2247,3 +2247,428 @@ describe('parseConfig — fail-fast validation', () => {
     assert.equal(c.session.idleHours, 4);
   });
 });
+
+// ── lib/crypto.js — password hashing, tokens, encryption ─────────────────────
+// Imported directly: the module does no I/O at require time (CLAUDE.md §10.3).
+
+const dtCrypto = require('./lib/crypto');
+const nodeCrypto = require('node:crypto');
+
+describe('hashPassword / verifyPassword', () => {
+  test('produces the documented parameterised format', async () => {
+    const h = await dtCrypto.hashPassword('correct horse battery');
+    const parts = h.split('$');
+    assert.equal(parts.length, 6);
+    assert.equal(parts[0], 'scrypt');
+    assert.equal(Number(parts[1]), dtCrypto.SCRYPT_N);
+    assert.equal(Number(parts[2]), dtCrypto.SCRYPT_R);
+    assert.equal(Number(parts[3]), dtCrypto.SCRYPT_P);
+    assert.equal(Buffer.from(parts[4], 'base64').length, 16, 'salt should be 16 bytes');
+    assert.equal(Buffer.from(parts[5], 'base64').length, 64, 'derived key should be 64 bytes');
+  });
+
+  test('round-trips the correct password and rejects a wrong one', async () => {
+    const h = await dtCrypto.hashPassword('s3cret-pass');
+    assert.equal(await dtCrypto.verifyPassword('s3cret-pass', h), true);
+    assert.equal(await dtCrypto.verifyPassword('s3cret-pasS', h), false);
+    assert.equal(await dtCrypto.verifyPassword('', h), false);
+  });
+
+  test('the same password hashes differently each time (random salt)', async () => {
+    const [a, b] = await Promise.all([
+      dtCrypto.hashPassword('same-password'), dtCrypto.hashPassword('same-password'),
+    ]);
+    assert.notEqual(a, b, 'salts must differ');
+    assert.equal(await dtCrypto.verifyPassword('same-password', a), true);
+    assert.equal(await dtCrypto.verifyPassword('same-password', b), true);
+  });
+
+  test('a tampered derived key is rejected', async () => {
+    const h = await dtCrypto.hashPassword('tamper-me');
+    const parts = h.split('$');
+    const dk = Buffer.from(parts[5], 'base64');
+    dk[0] ^= 0xff;
+    parts[5] = dk.toString('base64');
+    assert.equal(await dtCrypto.verifyPassword('tamper-me', parts.join('$')), false);
+  });
+
+  test('a tampered salt is rejected', async () => {
+    const h = await dtCrypto.hashPassword('tamper-salt');
+    const parts = h.split('$');
+    const salt = Buffer.from(parts[4], 'base64');
+    salt[0] ^= 0xff;
+    parts[4] = salt.toString('base64');
+    assert.equal(await dtCrypto.verifyPassword('tamper-salt', parts.join('$')), false);
+  });
+
+  test('malformed stored hashes return false rather than throwing', async () => {
+    for (const bad of ['', 'not-a-hash', 'scrypt$x$y$z$a$b', 'bcrypt$1$2$3$aa$bb',
+                       'scrypt$16384$8$1$onlyfiveparts', 'scrypt$0$0$0$c2FsdA==$ZGs=']) {
+      assert.equal(await dtCrypto.verifyPassword('anything', bad), false, `for ${JSON.stringify(bad)}`);
+    }
+    assert.equal(await dtCrypto.verifyPassword(null, null), false);
+    assert.equal(await dtCrypto.verifyPassword(undefined, undefined), false);
+  });
+
+  test('rejects an empty password at hashing time', async () => {
+    await assert.rejects(() => dtCrypto.hashPassword(''), (e) => e.code === 'BAD_PASSWORD');
+  });
+
+  test('embedded parameters are honoured, so they can be raised later', async () => {
+    // A hash produced with weaker parameters must still verify.
+    const salt = Buffer.from('0123456789abcdef');
+    const dk = nodeCrypto.scryptSync('legacy-pass', salt, 64, { N: 1024, r: 8, p: 1 });
+    const legacy = `scrypt$1024$8$1$${salt.toString('base64')}$${dk.toString('base64')}`;
+    assert.equal(await dtCrypto.verifyPassword('legacy-pass', legacy), true);
+    assert.equal(await dtCrypto.verifyPassword('wrong', legacy), false);
+  });
+});
+
+describe('session tokens', () => {
+  test('mintToken produces 256 bits as base64url', () => {
+    const t = dtCrypto.mintToken();
+    assert.equal(typeof t, 'string');
+    assert.equal(t.length, 43, '32 bytes base64url is 43 characters');
+    assert.match(t, /^[A-Za-z0-9_-]+$/, 'base64url has no +, / or = characters');
+  });
+
+  test('tokens are unique across many mints', () => {
+    const seen = new Set();
+    for (let i = 0; i < 500; i++) seen.add(dtCrypto.mintToken());
+    assert.equal(seen.size, 500);
+  });
+
+  test('hashToken is a deterministic 32-byte SHA-256', () => {
+    const h1 = dtCrypto.hashToken('abc');
+    const h2 = dtCrypto.hashToken('abc');
+    assert.ok(Buffer.isBuffer(h1));
+    assert.equal(h1.length, 32);
+    assert.deepEqual(h1, h2);
+    assert.notDeepEqual(h1, dtCrypto.hashToken('abd'));
+  });
+
+  test('hashToken output matches a known SHA-256 vector', () => {
+    assert.equal(
+      dtCrypto.hashToken('abc').toString('hex'),
+      'ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad'
+    );
+  });
+
+  test('safeEqual compares equal buffers and rejects mismatched ones', () => {
+    assert.equal(dtCrypto.safeEqual(Buffer.from('abc'), Buffer.from('abc')), true);
+    assert.equal(dtCrypto.safeEqual(Buffer.from('abc'), Buffer.from('abd')), false);
+    assert.equal(dtCrypto.safeEqual(Buffer.from('abc'), Buffer.from('abcd')), false);
+    assert.equal(dtCrypto.safeEqual('abc', 'abc'), false, 'non-buffers are rejected');
+  });
+});
+
+describe('secret encryption (AES-256-GCM)', () => {
+  const key = nodeCrypto.randomBytes(32);
+
+  test('accepts a 64-character hex key', () => {
+    const k = dtCrypto.parseEncryptionKey('a'.repeat(64));
+    assert.equal(k.length, 32);
+  });
+
+  test('accepts a base64 key of 32 bytes', () => {
+    const k = dtCrypto.parseEncryptionKey(nodeCrypto.randomBytes(32).toString('base64'));
+    assert.equal(k.length, 32);
+  });
+
+  test('rejects a missing or wrong-length key with an actionable message', () => {
+    assert.throws(() => dtCrypto.parseEncryptionKey(''), (e) => e.code === 'ENCRYPTION_KEY_MISSING');
+    assert.throws(() => dtCrypto.parseEncryptionKey(undefined), (e) => e.code === 'ENCRYPTION_KEY_MISSING');
+    assert.throws(() => dtCrypto.parseEncryptionKey('too-short'), (e) => {
+      assert.equal(e.code, 'ENCRYPTION_KEY_INVALID');
+      assert.match(e.message, /install\.sh/);
+      return true;
+    });
+  });
+
+  test('round-trips a secret', () => {
+    const sealed = dtCrypto.encryptSecret('odt_super_secret_api_key', key);
+    assert.ok(Buffer.isBuffer(sealed.ciphertext));
+    assert.equal(sealed.nonce.length, 12);
+    assert.equal(sealed.tag.length, 16);
+    assert.equal(dtCrypto.decryptSecret(sealed, key), 'odt_super_secret_api_key');
+  });
+
+  test('the same plaintext encrypts differently each time (random nonce)', () => {
+    const a = dtCrypto.encryptSecret('same', key);
+    const b = dtCrypto.encryptSecret('same', key);
+    assert.notDeepEqual(a.nonce, b.nonce);
+    assert.notDeepEqual(a.ciphertext, b.ciphertext);
+  });
+
+  test('a tampered authentication tag fails closed', () => {
+    const sealed = dtCrypto.encryptSecret('integrity-matters', key);
+    sealed.tag[0] ^= 0xff;
+    assert.throws(() => dtCrypto.decryptSecret(sealed, key), (e) => e.code === 'DECRYPT_FAILED');
+  });
+
+  test('tampered ciphertext fails closed', () => {
+    const sealed = dtCrypto.encryptSecret('integrity-matters', key);
+    sealed.ciphertext[0] ^= 0xff;
+    assert.throws(() => dtCrypto.decryptSecret(sealed, key), (e) => e.code === 'DECRYPT_FAILED');
+  });
+
+  test('the wrong key fails closed rather than returning garbage', () => {
+    const sealed = dtCrypto.encryptSecret('secret', key);
+    assert.throws(
+      () => dtCrypto.decryptSecret(sealed, nodeCrypto.randomBytes(32)),
+      (e) => e.code === 'DECRYPT_FAILED'
+    );
+  });
+
+  test('empty string round-trips', () => {
+    const sealed = dtCrypto.encryptSecret('', key);
+    assert.equal(dtCrypto.decryptSecret(sealed, key), '');
+  });
+});
+
+describe('connectionFingerprint', () => {
+  test('is stable and 64 hex characters', () => {
+    const a = dtCrypto.connectionFingerprint('https://dt.example.com', 'key1');
+    assert.match(a, /^[0-9a-f]{64}$/);
+    assert.equal(a, dtCrypto.connectionFingerprint('https://dt.example.com', 'key1'));
+  });
+
+  test('ignores a trailing slash so equivalent URLs share one cache', () => {
+    assert.equal(
+      dtCrypto.connectionFingerprint('https://dt.example.com/', 'key1'),
+      dtCrypto.connectionFingerprint('https://dt.example.com', 'key1')
+    );
+  });
+
+  test('a different key yields a different fingerprint', () => {
+    assert.notEqual(
+      dtCrypto.connectionFingerprint('https://dt.example.com', 'key1'),
+      dtCrypto.connectionFingerprint('https://dt.example.com', 'key2')
+    );
+  });
+
+  test('a different host yields a different fingerprint', () => {
+    assert.notEqual(
+      dtCrypto.connectionFingerprint('https://a.example.com', 'k'),
+      dtCrypto.connectionFingerprint('https://b.example.com', 'k')
+    );
+  });
+});
+
+// ── lib/validate.js — field rules (mirrored in the frontend in phase 3) ──────
+
+const v = require('./lib/validate');
+
+describe('validate — names', () => {
+  test('accepts a plain name', () => {
+    assert.equal(v.validateFirstName('Alice'), null);
+    assert.equal(v.validateLastName('Smith'), null);
+  });
+
+  test('accepts single spaces between words', () => {
+    assert.equal(v.validateFirstName('Mary Jane'), null);
+    assert.equal(v.validateLastName('van der Berg'), null);
+  });
+
+  test('accepts non-ASCII letters', () => {
+    assert.equal(v.validateFirstName('José'), null);
+    assert.equal(v.validateLastName('Müller'), null);
+    assert.equal(v.validateFirstName('Σωκράτης'), null);
+    assert.equal(v.validateLastName('山田太郎'), null, 'CJK characters are letters');
+    assert.equal(v.validateFirstName('Владимир'), null, 'Cyrillic characters are letters');
+  });
+
+  // Pins a consequence of the specified 3-character minimum that is easy to miss:
+  // two-character names are common (Li, Wu, Bo, Ed, and many CJK surnames) and
+  // are rejected. The rule is implemented as specified; this test makes the
+  // trade-off visible so changing the minimum is a deliberate decision.
+  test('the 3-character minimum rejects genuine two-character names', () => {
+    for (const short of ['Li', 'Wu', 'Bo', 'Ed', '田中']) {
+      assert.match(v.validateLastName(short), /at least 3 characters/,
+        `${short} is rejected by the specified minimum length`);
+    }
+  });
+
+  test('rejects a leading or trailing space', () => {
+    assert.match(v.validateFirstName(' Alice'), /space/);
+    assert.match(v.validateFirstName('Alice '), /space/);
+  });
+
+  test('rejects a double space between words', () => {
+    assert.ok(v.validateFirstName('Mary  Jane'));
+  });
+
+  test('enforces the length bounds', () => {
+    assert.ok(v.validateFirstName('Al'), 'two characters is too short');
+    assert.equal(v.validateFirstName('Ali'), null, 'three is the minimum');
+    assert.equal(v.validateFirstName('A'.repeat(128)), null, '128 is the maximum');
+    assert.ok(v.validateFirstName('A'.repeat(129)), '129 is too long');
+  });
+
+  test('rejects digits, punctuation and symbols', () => {
+    for (const bad of ['Al1ce', 'Alice!', "O'Brien", 'Smith-Jones', 'Alice_B', '<script>']) {
+      assert.ok(v.validateFirstName(bad), `${bad} should be rejected`);
+    }
+  });
+
+  test('rejects empty and non-string input', () => {
+    assert.ok(v.validateFirstName(''));
+    assert.ok(v.validateFirstName(null));
+    assert.ok(v.validateFirstName(42));
+  });
+});
+
+describe('validate — login ID', () => {
+  const reserved = v.reservedLoginIds('admin');
+
+  test('accepts the permitted character set', () => {
+    for (const good of ['alice', 'alice.smith', 'alice_smith', 'alice-smith', 'user123', 'a.b-c_1']) {
+      assert.equal(v.validateLoginId(good, reserved), null, `${good} should be accepted`);
+    }
+  });
+
+  test('rejects spaces and disallowed characters', () => {
+    for (const bad of ['al ice', 'alice@host', 'alice!', 'alice/smith', 'alice+1']) {
+      assert.ok(v.validateLoginId(bad, reserved), `${bad} should be rejected`);
+    }
+  });
+
+  test('enforces the length bounds', () => {
+    assert.ok(v.validateLoginId('ab', reserved));
+    assert.equal(v.validateLoginId('abc', reserved), null);
+    assert.equal(v.validateLoginId('a'.repeat(64), reserved), null);
+    assert.ok(v.validateLoginId('a'.repeat(65), reserved));
+  });
+
+  test('rejects reserved identifiers regardless of case', () => {
+    for (const bad of ['admin', 'ADMIN', 'Admin', 'root', 'ROOT', 'system', 'administrator']) {
+      assert.match(v.validateLoginId(bad, reserved), /reserved/, `${bad} should be reserved`);
+    }
+  });
+
+  test('reserves whatever administrator login ID is configured', () => {
+    const custom = v.reservedLoginIds('superuser');
+    assert.match(v.validateLoginId('superuser', custom), /reserved/);
+    assert.equal(v.validateLoginId('admin', custom), null,
+      'with a custom admin ID, "admin" is only reserved if it is in ALWAYS_RESERVED');
+  });
+});
+
+describe('validate — email', () => {
+  test('is optional', () => {
+    assert.equal(v.validateEmail(undefined), null);
+    assert.equal(v.validateEmail(null), null);
+    assert.equal(v.validateEmail(''), null);
+  });
+
+  test('accepts ordinary and special-character addresses', () => {
+    for (const good of ['a@b.co', 'first.last@example.com', 'user+tag@example.co.uk',
+                        "o'brien@example.com", 'user_name-1@sub.example.org']) {
+      assert.equal(v.validateEmail(good), null, `${good} should be accepted`);
+    }
+  });
+
+  test('rejects malformed addresses', () => {
+    for (const bad of ['nope', 'a@b', '@example.com', 'a@@b.co', 'a b@c.co', 'a@b c.co', 'a@.com']) {
+      assert.ok(v.validateEmail(bad), `${bad} should be rejected`);
+    }
+  });
+
+  test('rejects a space anywhere', () => {
+    assert.match(v.validateEmail(' a@b.co'), /space/);
+    assert.match(v.validateEmail('a@b.co '), /space/);
+  });
+
+  test('enforces the maximum length', () => {
+    assert.ok(v.validateEmail(`${'a'.repeat(250)}@b.co`));
+  });
+});
+
+describe('validate — password', () => {
+  test('accepts eight characters or more, with any non-space character', () => {
+    assert.equal(v.validatePassword('password'), null);
+    assert.equal(v.validatePassword('p@$$w0rd!#%^&*()'), null);
+    assert.equal(v.validatePassword('日本語パスワード'), null);
+  });
+
+  test('rejects anything shorter than eight', () => {
+    assert.ok(v.validatePassword('passwor'));
+    assert.equal(v.validatePassword('passwor8'), null);
+  });
+
+  test('rejects spaces and tabs', () => {
+    assert.match(v.validatePassword('pass word'), /space/);
+    assert.match(v.validatePassword('pass\tword'), /space/);
+  });
+
+  test('enforces the maximum length', () => {
+    assert.equal(v.validatePassword('a'.repeat(128)), null);
+    assert.ok(v.validatePassword('a'.repeat(129)));
+  });
+
+  test('confirmation must match exactly', () => {
+    assert.equal(v.validatePasswordConfirm('secret123', 'secret123'), null);
+    assert.match(v.validatePasswordConfirm('secret123', 'Secret123'), /do not match/);
+    assert.ok(v.validatePasswordConfirm('secret123', ''));
+  });
+});
+
+describe('validate — whole payloads', () => {
+  const reserved = v.reservedLoginIds('admin');
+  const good = {
+    firstName: 'Alice', lastName: 'Smith', loginId: 'alice',
+    email: 'alice@example.com', password: 'password123', confirmPassword: 'password123',
+  };
+
+  test('accepts a complete valid registration', () => {
+    const r = v.validateRegistration(good, { reserved });
+    assert.equal(r.valid, true);
+    assert.deepEqual(r.errors, {});
+  });
+
+  test('accepts a registration with no email', () => {
+    const r = v.validateRegistration({ ...good, email: '' }, { reserved });
+    assert.equal(r.valid, true);
+  });
+
+  test('reports every bad field at once, keyed by field name', () => {
+    const r = v.validateRegistration(
+      { firstName: 'A', lastName: '', loginId: 'x', email: 'bad', password: 'short' },
+      { reserved }
+    );
+    assert.equal(r.valid, false);
+    assert.deepEqual(Object.keys(r.errors).sort(),
+      ['email', 'firstName', 'lastName', 'loginId', 'password']);
+  });
+
+  test('does not report a confirmation mismatch while the password itself is invalid', () => {
+    const r = v.validateRegistration(
+      { ...good, password: 'short', confirmPassword: 'different' }, { reserved }
+    );
+    assert.ok(r.errors.password);
+    assert.equal(r.errors.confirmPassword, undefined,
+      'one clear error beats two confusing ones');
+  });
+
+  test('profile update accepts a partial patch', () => {
+    assert.equal(v.validateProfileUpdate({ firstName: 'Grace' }).valid, true);
+    assert.equal(v.validateProfileUpdate({}).valid, true, 'an empty patch is structurally valid');
+  });
+
+  test('profile update validates a supplied password and its confirmation', () => {
+    assert.equal(v.validateProfileUpdate({ password: 'short' }).valid, false);
+    assert.equal(
+      v.validateProfileUpdate({ password: 'longenough1', confirmPassword: 'mismatch' }).valid,
+      false
+    );
+    assert.equal(
+      v.validateProfileUpdate({ password: 'longenough1', confirmPassword: 'longenough1' }).valid,
+      true
+    );
+  });
+
+  test('profile update ignores login ID and email entirely', () => {
+    const r = v.validateProfileUpdate({ loginId: 'anything at all!', email: 'not-an-email' });
+    assert.equal(r.valid, true, 'identity fields are not validated because they are not accepted');
+  });
+});

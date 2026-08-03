@@ -108,12 +108,19 @@ function parseConfig(env) {
     reportConcurrency:    positiveInt(env, 'REPORT_CONCURRENCY', { min: 1, max: 50 }),
     violationConcurrency: positiveInt(env, 'VIOLATION_CONCURRENCY', { min: 1, max: 50 }),
 
-    // S1: session lifetimes are read here but not enforced until phase 2, so a
-    // deployment can be configured ahead of the auth rollout without a restart.
+    // S1: session lifetimes, enforced from phase 2 onward.
     session: {
       absoluteHours: positiveInt(env, 'SESSION_ABSOLUTE_HOURS', { min: 1, max: 720 }),
       idleHours:     positiveInt(env, 'SESSION_IDLE_HOURS', { min: 1, max: 720 }),
     },
+
+    // S16: AES-256-GCM key for DT API keys and SMTP passwords.
+    // Optional in phase 2 because nothing is encrypted yet — making it mandatory
+    // now would stop an already-running deployment from restarting. Phase 4
+    // stores the first encrypted secret and requires it. When it IS supplied the
+    // format is validated immediately, so a malformed key is caught at boot
+    // rather than at the moment a user first saves an API key.
+    secretEncryptionKey: env.SECRET_ENCRYPTION_KEY || null,
 
     db: {
       host:     raw(env, 'POSTGRES_HOST'),
@@ -142,6 +149,21 @@ function parseConfig(env) {
       `SESSION_IDLE_HOURS (${cfg.session.idleHours}) cannot exceed ` +
       `SESSION_ABSOLUTE_HOURS (${cfg.session.absoluteHours}) — the idle window would never be reached`
     );
+  }
+
+  // Validate the encryption key's shape now if one was supplied, so a malformed
+  // value fails at boot rather than when a user first saves a secret.
+  if (cfg.secretEncryptionKey !== null) {
+    const raw = String(cfg.secretEncryptionKey).trim();
+    const bytes = /^[0-9a-fA-F]{64}$/.test(raw)
+      ? 32
+      : Buffer.from(raw, 'base64').length;
+    if (bytes !== 32) {
+      throw new ConfigError(
+        'SECRET_ENCRYPTION_KEY must decode to 32 bytes — supply 64 hex characters ' +
+        'or a base64 value of 32 bytes. install.sh generates one.'
+      );
+    }
   }
 
   return Object.freeze(cfg);

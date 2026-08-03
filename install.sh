@@ -277,6 +277,82 @@ else
   info "POSTGRES_PASSWORD already set — leaving it unchanged"
 fi
 
+# ─── Secret encryption key ───────────────────────────────────────────────────
+# Protects DT API keys and SMTP passwords at rest (AES-256-GCM). Losing or
+# rotating it makes every stored secret undecryptable, so it is generated once
+# and never replaced automatically.
+if [[ -z "${SECRET_ENCRYPTION_KEY:-}" ]]; then
+  info "Generating a secret encryption key…"
+  if command -v openssl &>/dev/null; then
+    _enc_key="$(openssl rand -hex 32)"
+  else
+    _enc_key="$(head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+  fi
+  grep -v "^SECRET_ENCRYPTION_KEY=" "$ENV_FILE" > "${ENV_FILE}.tmp" && mv "${ENV_FILE}.tmp" "$ENV_FILE"
+  printf 'SECRET_ENCRYPTION_KEY=%s\n' "$_enc_key" >> "$ENV_FILE"
+  unset _enc_key
+  chmod 600 "$ENV_FILE" 2>/dev/null || true
+  success "SECRET_ENCRYPTION_KEY generated and saved to .env"
+  warn "Back up .env — losing this key makes stored API keys and SMTP passwords unrecoverable."
+else
+  info "SECRET_ENCRYPTION_KEY already set — leaving it unchanged"
+fi
+
+# ─── Administrator account ───────────────────────────────────────────────────
+# The administrator is authenticated against this file, never against the
+# database, so a database user cannot impersonate it. The service never creates
+# the file itself: if it is missing, administrator login is simply disabled.
+ADMIN_CREDS_DIR="$SCRIPT_DIR/violation-cache/data"
+ADMIN_CREDS_FILE="$ADMIN_CREDS_DIR/admin-credentials.json"
+
+if [[ -f "$ADMIN_CREDS_FILE" ]]; then
+  info "Administrator credentials already exist — leaving them unchanged"
+  info "  To reset: delete $ADMIN_CREDS_FILE and re-run this installer"
+else
+  step "Creating the administrator account"
+
+  _admin_user="${SCA_ADMIN_USER:-admin}"
+  _admin_pass="${SCA_ADMIN_PASSWORD:-}"
+
+  if [[ "$NON_INTERACTIVE" == "false" && -z "$_admin_pass" ]]; then
+    read -rp "  Administrator login ID       [${_admin_user}]: " _in
+    [[ -n "$_in" ]] && _admin_user="$_in"
+    read -rsp "  Administrator password       [use default]: " _in
+    echo ""
+    [[ -n "$_in" ]] && _admin_pass="$(printf '%s' "$_in" | tr -d '\000-\037\177')"
+  fi
+
+  if [[ -z "$_admin_pass" ]]; then
+    _admin_pass="ScaAdmin@dt8624"
+    warn "Using the default administrator password. Change it after signing in."
+  fi
+
+  mkdir -p "$ADMIN_CREDS_DIR"
+
+  # Hashed with the same scrypt parameters the service uses, by calling the
+  # service's own module — so the installer can never drift from it.
+  if ! ADMIN_USER="$_admin_user" ADMIN_PASS="$_admin_pass" \
+       node -e '
+         const { hashPassword } = require("./violation-cache/lib/crypto");
+         hashPassword(process.env.ADMIN_PASS).then(h => {
+           process.stdout.write(JSON.stringify({
+             loginId: process.env.ADMIN_USER,
+             passwordHash: h,
+             createdAt: new Date().toISOString(),
+           }, null, 2));
+         }).catch(e => { console.error(e.message); process.exit(1); });
+       ' > "${ADMIN_CREDS_FILE}.tmp" 2>/dev/null; then
+    rm -f "${ADMIN_CREDS_FILE}.tmp"
+    die "Could not create administrator credentials. Node.js 18+ must be installed to run the installer."
+  fi
+
+  mv "${ADMIN_CREDS_FILE}.tmp" "$ADMIN_CREDS_FILE"
+  chmod 600 "$ADMIN_CREDS_FILE"
+  unset _admin_pass
+  success "Administrator account created: ${_admin_user}"
+  info "  Stored at $ADMIN_CREDS_FILE (mode 0600, password hashed with scrypt)"
+fi
+
 # Re-load finalized env
 set -a; source "$ENV_FILE"; set +a
 
