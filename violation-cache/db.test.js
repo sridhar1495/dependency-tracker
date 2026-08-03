@@ -22,6 +22,11 @@ const path   = require('node:path');
 const DB_URL  = process.env.TEST_DATABASE_URL;
 const ENABLED = Boolean(DB_URL);
 
+// lib/config.js requires an encryption key from phase 4 onward. Any valid
+// 32-byte value works here — these tests exercise storage and isolation, not
+// the key material itself.
+process.env.SECRET_ENCRYPTION_KEY = process.env.SECRET_ENCRYPTION_KEY || 'f'.repeat(64);
+
 // Modules under test perform no I/O at require time, so importing them directly
 // is safe and is the preferred approach for new code (CLAUDE.md §10.3).
 const { migrate, listMigrations, MIGRATIONS_DIR } = require('./db/migrate');
@@ -851,5 +856,451 @@ describe('admin credential file', { skip: !ENABLED && 'TEST_DATABASE_URL not set
   test('verify returns false when administrator login is disabled', async () => {
     admin._setForTest(null);
     assert.equal(await admin.verify('admin', 'anything'), false);
+  });
+});
+
+// ── Multi-tenant data layer (phase 4–7) ──────────────────────────────────────
+// The isolation guarantees that make the service safe for concurrent users:
+// per-user scoping, encrypted secrets, chunked report bytes, a shared cache
+// keyed by connection fingerprint, and single-claim scheduling.
+
+describe('multi-tenant data access', { skip: !ENABLED && 'TEST_DATABASE_URL not set' }, () => {
+  let pool, users, dtCrypto, dtConnections, userSettings, mailSettings,
+      schedulesDb, reportsDb, caches;
+  let alice, bob;
+
+  // Real DependencyTrack project ids are uuids, and so is schedule_projects.project_uuid.
+  const PROJ_1 = 'aaaaaaaa-1111-4111-8111-aaaaaaaaaaaa';
+  const PROJ_2 = 'bbbbbbbb-2222-4222-8222-bbbbbbbbbbbb';
+  const PROJ_3 = 'cccccccc-3333-4333-8333-cccccccccccc';
+
+  before(async () => {
+    pool = require('./db/pool');
+    if (!pool.isReady()) {
+      const url = new URL(DB_URL);
+      process.env.POSTGRES_HOST     = url.hostname;
+      process.env.POSTGRES_PORT     = url.port || '5432';
+      process.env.POSTGRES_USER     = decodeURIComponent(url.username);
+      process.env.POSTGRES_PASSWORD = decodeURIComponent(url.password) || 'x';
+      process.env.POSTGRES_DB       = url.pathname.replace(/^\//, '');
+      const { parseConfig } = require('./lib/config');
+      pool.init(parseConfig(process.env).db);
+      await migrate({ pool: pool.getPool(), dir: MIGRATIONS_DIR });
+    }
+
+    users         = require('./lib/users');
+    dtCrypto      = require('./lib/crypto');
+    dtConnections = require('./lib/dt-connections');
+    userSettings  = require('./lib/user-settings');
+    mailSettings  = require('./lib/mail-settings');
+    schedulesDb   = require('./lib/schedules');
+    reportsDb     = require('./lib/reports-db');
+    caches        = require('./lib/caches');
+
+    const key = dtCrypto.parseEncryptionKey(process.env.SECRET_ENCRYPTION_KEY);
+    dtConnections.configure(key);
+    mailSettings.configure(key);
+
+    await pool.query("DELETE FROM users WHERE login_id IN ('zz_alice', 'zz_bob')");
+    const hash = await dtCrypto.hashPassword('password123');
+    alice = await users.create({ loginId: 'zz_alice', email: null, firstName: 'Alice', lastName: 'Ant', passwordHash: hash });
+    bob   = await users.create({ loginId: 'zz_bob',   email: null, firstName: 'Bob',   lastName: 'Bee', passwordHash: hash });
+  });
+
+  after(async () => {
+    if (pool && pool.isReady()) {
+      await pool.query("DELETE FROM users WHERE login_id IN ('zz_alice', 'zz_bob')");
+      await pool.query("DELETE FROM violation_caches WHERE fingerprint LIKE 'zz%'");
+      await pool.query("DELETE FROM system_state WHERE key = 'legacy_dt_connection_migrated'");
+      await pool.close();
+    }
+  });
+
+  // ── dt_connections ─────────────────────────────────────────────────────
+  test('registration seeds exactly one row in each per-user table', async () => {
+    for (const table of ['dt_connections', 'user_settings', 'mail_settings', 'schedules']) {
+      const { rows } = await pool.query(
+        `SELECT count(*)::int AS n FROM ${table} WHERE user_id = $1`, [alice.id]
+      );
+      assert.equal(rows[0].n, 1, `${table} should have been seeded at registration`);
+    }
+  });
+
+  test('a new account starts unconfigured, so the dashboard shows demo data', async () => {
+    const conn = await dtConnections.getForClient(alice.id);
+    assert.equal(conn.isConfigured, false);
+    assert.equal(conn.hasApiKey, false);
+  });
+
+  test('the API key round-trips through encryption but never appears in the client view', async () => {
+    await dtConnections.save(alice.id, {
+      apiUrl: 'https://dt.example.com/', apiKey: 'odt_alice_key_1234', frontendUrl: 'https://ui.example.com/',
+    });
+
+    const client = await dtConnections.getForClient(alice.id);
+    assert.equal(client.apiUrl, 'https://dt.example.com', 'the trailing slash is normalised away');
+    assert.equal(client.frontendUrl, 'https://ui.example.com');
+    assert.equal(client.isConfigured, true);
+    assert.equal(client.hasApiKey, true);
+    assert.equal(client.apiKey, undefined, 'the key must not be in the client projection');
+    assert.doesNotMatch(JSON.stringify(client), /odt_alice_key_1234/);
+
+    const resolved = await dtConnections.getResolved(alice.id);
+    assert.equal(resolved.apiKey, 'odt_alice_key_1234');
+
+    // The stored bytes must not be the plaintext.
+    const { rows } = await pool.query(
+      'SELECT api_key_ciphertext AS ct FROM dt_connections WHERE user_id = $1', [alice.id]
+    );
+    assert.doesNotMatch(rows[0].ct.toString('utf8'), /odt_alice_key_1234/);
+  });
+
+  test('saving without a key keeps the stored one and updates the URLs', async () => {
+    await dtConnections.save(alice.id, { apiUrl: 'https://dt2.example.com', frontendUrl: 'https://ui2.example.com' });
+    const resolved = await dtConnections.getResolved(alice.id);
+    assert.equal(resolved.apiKey, 'odt_alice_key_1234', 'the key survives a URL-only save');
+    assert.equal(resolved.apiUrl, 'https://dt2.example.com');
+    assert.equal(resolved.frontendUrl, 'https://ui2.example.com');
+  });
+
+  test('identical credentials produce one fingerprint, different ones do not', async () => {
+    await dtConnections.save(alice.id, { apiUrl: 'https://shared.example.com', apiKey: 'same_key' });
+    await dtConnections.save(bob.id,   { apiUrl: 'https://shared.example.com', apiKey: 'same_key' });
+    const a = await dtConnections.getForClient(alice.id);
+    const b = await dtConnections.getForClient(bob.id);
+    assert.equal(a.fingerprint, b.fingerprint, 'shared credentials must share one cache row');
+
+    await dtConnections.save(bob.id, { apiUrl: 'https://shared.example.com', apiKey: 'different_key' });
+    const b2 = await dtConnections.getForClient(bob.id);
+    assert.notEqual(b2.fingerprint, a.fingerprint);
+  });
+
+  test('clearing the key marks the connection unconfigured and drops the fingerprint', async () => {
+    await dtConnections.clearKey(bob.id);
+    const conn = await dtConnections.getForClient(bob.id);
+    assert.equal(conn.hasApiKey, false);
+    assert.equal(conn.isConfigured, false);
+    assert.equal(conn.fingerprint, null);
+    // Restore for later tests.
+    await dtConnections.save(bob.id, { apiUrl: 'https://bob.example.com', apiKey: 'bob_key' });
+  });
+
+  test('the legacy .env migration runs at most once', async () => {
+    await pool.query("DELETE FROM system_state WHERE key = 'legacy_dt_connection_migrated'");
+    const first  = await dtConnections.migrateLegacyConnection({ apiUrl: 'https://legacy', apiKey: 'legacy_key' });
+    const second = await dtConnections.migrateLegacyConnection({ apiUrl: 'https://legacy', apiKey: 'legacy_key' });
+    assert.equal(first.ran, true);
+    assert.equal(second.ran, false, 'a second boot must not re-seed anyone');
+  });
+
+  // ── user_settings ──────────────────────────────────────────────────────
+  test('the report ceiling is per user', async () => {
+    await userSettings.setMaxReports(alice.id, 3);
+    assert.equal(await userSettings.getMaxReports(alice.id), 3);
+    assert.equal(await userSettings.getMaxReports(bob.id), userSettings.DEFAULT_MAX_REPORTS,
+      "changing one user's limit must not touch anybody else's");
+  });
+
+  // ── mail_settings ──────────────────────────────────────────────────────
+  test('the SMTP password is encrypted, masked to the client and kept on a placeholder save', async () => {
+    await mailSettings.save(alice.id, {
+      enabled: true,
+      smtp: { host: 'smtp.example.com', port: 587, secure: false, user: 'alice', pass: 'sup3rsecret' },
+      from: 'alice@example.com', to: 'ops@example.com, dev@example.com', cc: '',
+    });
+
+    const client = await mailSettings.getForClient(alice.id);
+    assert.equal(client.smtp.pass, mailSettings.PASSWORD_PLACEHOLDER);
+    assert.deepEqual(client.to, ['ops@example.com', 'dev@example.com']);
+    assert.doesNotMatch(JSON.stringify(client), /sup3rsecret/);
+
+    // Saving the placeholder back must not overwrite the stored password.
+    await mailSettings.save(alice.id, {
+      enabled: true,
+      smtp: { host: 'smtp.example.com', port: 2525, secure: true, user: 'alice', pass: mailSettings.PASSWORD_PLACEHOLDER },
+      from: 'alice@example.com', to: ['ops@example.com'], cc: [],
+    });
+    const resolved = await mailSettings.getResolved(alice.id);
+    assert.equal(resolved.smtp.pass, 'sup3rsecret');
+    assert.equal(resolved.smtp.port, 2525, 'the rest of the form still saved');
+  });
+
+  test('an out-of-range SMTP port is rejected before any write', async () => {
+    await assert.rejects(
+      () => mailSettings.save(alice.id, { smtp: { port: 99999 } }),
+      (e) => e.code === 'VALIDATION_FAILED' && e.field === 'smtpPort'
+    );
+  });
+
+  // ── reports + chunked bytes ────────────────────────────────────────────
+  test('a report round-trips through chunked storage byte for byte', async () => {
+    const report = await reportsDb.create(alice.id, { riskTypes: ['security'], projectCount: 2 });
+    // Deliberately larger than CHUNK_BYTES so more than one row is written.
+    const payload = require('node:crypto').randomBytes(reportsDb.CHUNK_BYTES * 2 + 1234);
+
+    await reportsDb.storeFile(report.id, payload, 'report.xlsx');
+
+    const chunks = await reportsDb.chunkCount(report.id);
+    assert.equal(chunks, 3, 'a 2-and-a-bit chunk payload must occupy three rows');
+
+    const parts = [];
+    for (let seq = 0; seq < chunks; seq++) parts.push(await reportsDb.getChunk(report.id, seq));
+    assert.ok(Buffer.concat(parts).equals(payload), 'the reassembled file must be identical');
+
+    const meta = await reportsDb.getForUser(alice.id, report.id);
+    assert.equal(meta.status, 'completed');
+    assert.equal(Number(meta.fileSizeBytes), payload.length);
+    assert.equal(meta.chunk, undefined, 'listing projections never carry bytes');
+
+    await reportsDb.deleteForUser(alice.id, report.id);
+    assert.equal(await reportsDb.chunkCount(report.id), 0, 'chunks cascade with the report');
+  });
+
+  test("one user cannot read or delete another user's report", async () => {
+    const report = await reportsDb.create(alice.id, { riskTypes: ['security'], projectCount: 1 });
+    try {
+      assert.equal(await reportsDb.getForUser(bob.id, report.id), null,
+        "Bob must not be able to read Alice's report");
+      assert.equal(await reportsDb.deleteForUser(bob.id, report.id), false);
+      assert.ok(await reportsDb.getForUser(alice.id, report.id), 'and it must still be there for Alice');
+    } finally {
+      await reportsDb.deleteForUser(alice.id, report.id);
+    }
+  });
+
+  test('the active count and the trim are both scoped to one user', async () => {
+    const mine = [];
+    for (let i = 0; i < 3; i++) {
+      const r = await reportsDb.create(alice.id, { riskTypes: ['security'], projectCount: 1 });
+      await reportsDb.storeFile(r.id, Buffer.from(`report ${i}`), `r${i}.xlsx`);
+      mine.push(r.id);
+    }
+    const theirs = await reportsDb.create(bob.id, { riskTypes: ['security'], projectCount: 1 });
+    await reportsDb.storeFile(theirs.id, Buffer.from('bob'), 'bob.xlsx');
+    try {
+      assert.equal((await reportsDb.activeCount(alice.id)).completed, 3);
+      assert.equal((await reportsDb.activeCount(bob.id)).completed, 1);
+
+      const removed = await reportsDb.trimToLimit(alice.id, 1);
+      assert.equal(removed, 2);
+      assert.equal((await reportsDb.activeCount(alice.id)).completed, 1);
+      assert.equal((await reportsDb.activeCount(bob.id)).completed, 1,
+        "trimming Alice's reports must not touch Bob's");
+    } finally {
+      for (const id of mine) await reportsDb.deleteForUser(alice.id, id);
+      await reportsDb.deleteForUser(bob.id, theirs.id);
+    }
+  });
+
+  test('progress writes are throttled to at most one a second', async () => {
+    const r = await reportsDb.create(alice.id, { riskTypes: ['security'], projectCount: 1 });
+    try {
+      assert.equal(await reportsDb.writeProgress(r.id, { security: { done: 1, total: 9 } }), true);
+      assert.equal(await reportsDb.writeProgress(r.id, { security: { done: 2, total: 9 } }), false,
+        'a second write inside the interval is skipped');
+      assert.equal(await reportsDb.writeProgress(r.id, { security: { done: 3, total: 9 } }, { force: true }), true);
+
+      const meta = await reportsDb.getForUser(alice.id, r.id);
+      assert.equal(meta.progress.security.done, 3);
+    } finally {
+      reportsDb.forgetProgress(r.id);
+      await reportsDb.deleteForUser(alice.id, r.id);
+    }
+  });
+
+  test('reports left running by a restart are failed, not left stuck', async () => {
+    const r = await reportsDb.create(alice.id, { riskTypes: ['security'], projectCount: 1 });
+    try {
+      await reportsDb.setStatus(r.id, 'running');
+      await reportsDb.failOrphaned();
+      const meta = await reportsDb.getForUser(alice.id, r.id);
+      assert.equal(meta.status, 'failed');
+      assert.match(meta.error, /restarted/);
+    } finally { await reportsDb.deleteForUser(alice.id, r.id); }
+  });
+
+  test('deleting an account removes everything it owned', async () => {
+    const hash = await dtCrypto.hashPassword('password123');
+    const doomed = await users.create({
+      loginId: 'zz_doomed', email: null, firstName: 'Doo', lastName: 'Med', passwordHash: hash,
+    });
+    const report = await reportsDb.create(doomed.id, { riskTypes: ['security'], projectCount: 1 });
+    await reportsDb.storeFile(report.id, Buffer.from('bytes'), 'x.xlsx');
+
+    await pool.query('DELETE FROM users WHERE id = $1', [doomed.id]);
+
+    for (const [table, column] of [
+      ['dt_connections', 'user_id'], ['user_settings', 'user_id'], ['mail_settings', 'user_id'],
+      ['schedules', 'user_id'], ['reports', 'user_id'],
+    ]) {
+      const { rows } = await pool.query(`SELECT count(*)::int AS n FROM ${table} WHERE ${column} = $1`, [doomed.id]);
+      assert.equal(rows[0].n, 0, `${table} should have cascaded`);
+    }
+    const { rows } = await pool.query(
+      'SELECT count(*)::int AS n FROM report_file_chunks WHERE report_id = $1', [report.id]
+    );
+    assert.equal(rows[0].n, 0, 'report bytes should have cascaded too');
+  });
+
+  // ── schedules ──────────────────────────────────────────────────────────
+  test('a due schedule is claimed exactly once, even by concurrent pollers', async () => {
+    await schedulesDb.save(alice.id, {
+      enabled: true, frequency: 'daily', hour: 9, riskTypes: ['security'],
+    });
+    await schedulesDb.setProjects(alice.id, [{ uuid: PROJ_1, name: 'svc', version: '1.0' }]);
+    // Backdate the due time so the row is claimable right now.
+    await pool.query("UPDATE schedules SET next_run_at = now() - interval '1 minute', running_since = NULL WHERE user_id = $1", [alice.id]);
+
+    const [first, second] = await Promise.all([schedulesDb.claimDue(5), schedulesDb.claimDue(5)]);
+    const claimed = [...first, ...second].filter(r => r.userId === alice.id);
+    assert.equal(claimed.length, 1, 'FOR UPDATE SKIP LOCKED must hand the row to one poller only');
+
+    await schedulesDb.finishRun(alice.id, { status: 'success', nextRunAt: new Date(Date.now() + 86_400_000) });
+    const after = await schedulesDb.get(alice.id);
+    assert.equal(after.runningSince, null, 'the claim is released when the run finishes');
+    assert.equal(after.lastRunStatus, 'success');
+  });
+
+  test('a disabled schedule is never claimed', async () => {
+    await schedulesDb.disable(alice.id);
+    await pool.query("UPDATE schedules SET next_run_at = now() - interval '1 minute' WHERE user_id = $1", [alice.id]);
+    const due = await schedulesDb.claimDue(5);
+    assert.equal(due.filter(r => r.userId === alice.id).length, 0);
+  });
+
+  test('a claim orphaned by a crash is released after the stale window', async () => {
+    await schedulesDb.save(alice.id, { enabled: true, frequency: 'daily', hour: 9 });
+    await pool.query("UPDATE schedules SET running_since = now() - interval '2 hours' WHERE user_id = $1", [alice.id]);
+    const released = await schedulesDb.releaseStaleClaims(45);
+    assert.ok(released >= 1);
+    assert.equal((await schedulesDb.get(alice.id)).runningSince, null);
+  });
+
+  test('a failed run leaves a notice the dashboard can acknowledge', async () => {
+    await schedulesDb.finishRun(alice.id, { status: 'failed', error: 'SMTP refused', nextRunAt: new Date(Date.now() + 3600_000) });
+    let sched = await schedulesDb.get(alice.id);
+    assert.match(sched.failureNotification, /SMTP refused/);
+    await schedulesDb.ackNotification(alice.id);
+    sched = await schedulesDb.get(alice.id);
+    assert.equal(sched.failureNotification, null);
+  });
+
+  test('schedule projects are replaced wholesale and scoped by user', async () => {
+    await schedulesDb.setProjects(alice.id, [
+      { uuid: PROJ_1, name: 'a', version: '1' }, { uuid: PROJ_2, name: 'b', version: '2' },
+    ]);
+    await schedulesDb.setProjects(bob.id, [{ uuid: PROJ_3, name: 'z', version: '9' }]);
+
+    await schedulesDb.setProjects(alice.id, [{ uuid: PROJ_2, name: 'c', version: '3' }]);
+    assert.deepEqual((await schedulesDb.getProjects(alice.id)).map(p => p.uuid), [PROJ_2]);
+    assert.deepEqual((await schedulesDb.getProjects(bob.id)).map(p => p.uuid), [PROJ_3],
+      "replacing Alice's selection must not touch Bob's");
+  });
+
+  test('a malformed project uuid is dropped instead of failing the whole save', async () => {
+    // The list comes from the browser; one bad entry must not cost the user
+    // their entire selection.
+    const kept = await schedulesDb.setProjects(alice.id, [
+      { uuid: PROJ_1, name: 'good', version: '1' },
+      { uuid: 'not-a-uuid', name: 'bad', version: '1' },
+      { name: 'missing uuid' },
+    ]);
+    assert.deepEqual(kept.map(p => p.uuid), [PROJ_1]);
+  });
+
+  test('run history is recorded and purged by age', async () => {
+    const runId = await schedulesDb.startRun(alice.id);
+    await schedulesDb.completeRun(runId, { status: 'success', fileSizeBytes: 4096 });
+    const recent = await schedulesDb.recentRuns(alice.id, 5);
+    assert.equal(recent[0].status, 'success');
+    assert.equal(Number(recent[0].fileSizeBytes), 4096);
+
+    await pool.query("UPDATE schedule_runs SET started_at = now() - interval '200 days' WHERE id = $1", [runId]);
+    assert.ok(await schedulesDb.purgeRunsOlderThan(90) >= 1);
+  });
+
+  // ── violation_caches ───────────────────────────────────────────────────
+  test('exactly one builder is elected per fingerprint', async () => {
+    const fp = 'zz' + 'a'.repeat(62);
+    const first = await caches.acquireBuildLock(fp);
+    try {
+      assert.equal(first.acquired, true);
+      const second = await caches.acquireBuildLock(fp);
+      assert.equal(second.acquired, false, 'a second builder must lose the election, not wait');
+      await second.release();
+    } finally { await first.release(); }
+
+    // Once released, the next caller may build.
+    const third = await caches.acquireBuildLock(fp);
+    assert.equal(third.acquired, true);
+    await third.release();
+  });
+
+  test('different fingerprints build concurrently', async () => {
+    const a = await caches.acquireBuildLock('zz' + 'b'.repeat(62));
+    const b = await caches.acquireBuildLock('zz' + 'c'.repeat(62));
+    try {
+      assert.equal(a.acquired, true);
+      assert.equal(b.acquired, true, 'unrelated connections must not block each other');
+    } finally { await a.release(); await b.release(); }
+  });
+
+  test('a stored map round-trips through gzip and reports its metadata', async () => {
+    const fp  = 'zz' + 'd'.repeat(62);
+    // A realistic map: the compression saving comes from the repetition across
+    // hundreds of projects, which is exactly why the payload is stored gzipped.
+    const map = {};
+    for (let i = 0; i < 300; i++) {
+      map[`0000${String(i).padStart(4, '0')}-0000-4000-8000-000000000000`] = {
+        ops: { fail: 2, warn: 0, info: 1, unassigned: 0 },
+        lic: { fail: 0, warn: 1, info: 0, unassigned: 0 },
+        secpolicy: { fail: 0, warn: 0, info: 0, unassigned: 0 },
+      };
+    }
+    await caches.markBuilding(fp);
+    assert.equal(caches.deriveStatus(await caches.getMeta(fp)), 'building');
+
+    await caches.storeResult(fp, map, { projectCount: 300, failedPipelines: 0, ttlMs: 3600_000 });
+    const meta = await caches.getMeta(fp);
+    assert.equal(caches.deriveStatus(meta), 'ready');
+    assert.equal(meta.projectCount, 300);
+    assert.deepEqual(await caches.getPayload(fp), map);
+
+    // The gzipped bytes are what the route streams; they must be smaller than
+    // the JSON they encode for the transfer saving to be real.
+    const gz = await caches.getPayloadGzip(fp);
+    assert.ok(gz.length < JSON.stringify(map).length);
+  });
+
+  test('an expired cache reads as stale rather than ready', async () => {
+    const fp = 'zz' + 'e'.repeat(62);
+    await caches.markBuilding(fp);
+    await caches.storeResult(fp, {}, { projectCount: 0, failedPipelines: 0, ttlMs: -1000 });
+    assert.equal(caches.deriveStatus(await caches.getMeta(fp)), 'stale');
+  });
+
+  test('a failed build keeps the previous payload', async () => {
+    const fp = 'zz' + 'f'.repeat(62);
+    await caches.markBuilding(fp);
+    await caches.storeResult(fp, { a: 1 }, { projectCount: 1, failedPipelines: 0, ttlMs: 3600_000 });
+    await caches.markFailed(fp, 'upstream exploded');
+    const meta = await caches.getMeta(fp);
+    assert.equal(meta.status, 'failed');
+    assert.deepEqual(await caches.getPayload(fp), { a: 1 },
+      'a failed rebuild must not discard data the dashboard could still show');
+  });
+
+  test('caches nobody points at any more are swept away', async () => {
+    const orphan = 'zz' + '0'.repeat(62);
+    await caches.markBuilding(orphan);
+    await caches.sweepOrphaned();
+    assert.equal(await caches.getMeta(orphan), null);
+
+    // A cache still referenced by a configured connection survives.
+    const conn = await dtConnections.getForClient(alice.id);
+    await caches.markBuilding(conn.fingerprint);
+    await caches.sweepOrphaned();
+    assert.ok(await caches.getMeta(conn.fingerprint), 'a live connection keeps its cache');
+    await pool.query('DELETE FROM violation_caches WHERE fingerprint = $1', [conn.fingerprint]);
   });
 });

@@ -2,9 +2,13 @@
 // Copyright (c) 2024 Dependency-Track Risk Dashboard contributors
 'use strict';
 
-// ── .env helpers (Q7, Q8) ─────────────────────────────────────────────────────
-// The bind-mounted .env file currently carries the shared DT connection. Phase 4
-// moves that per-user into the database and these helpers are retired with it.
+// ── .env reader (Q7) ──────────────────────────────────────────────────────────
+// Read-only. The DependencyTrack connection is per-user and lives encrypted in
+// the database (CLAUDE.md §5.6), so nothing writes to .env any more — the patch
+// helper that used to live here went with the single-tenant config endpoint.
+//
+// The one remaining caller is the boot-time legacy migration, which reads a
+// pre-multi-user .env once to seed existing accounts.
 
 const fs = require('fs');
 
@@ -26,64 +30,23 @@ function parseEnvFile(filePath) {
 }
 
 /**
- * Write key=value updates into a .env file, preserving all other lines.
- * Q7: normalises CRLF before splitting.
- * Q8: throws typed errors for read and write failures so callers can log them separately.
- */
-function patchEnvFile(filePath, updates) {
-  // Q8: separate read error
-  let content;
-  try {
-    content = fs.existsSync(filePath)
-      ? fs.readFileSync(filePath, 'utf8').replace(/\r\n/g, '\n') // Q7
-      : '';
-  } catch (e) {
-    throw Object.assign(
-      new Error(`Failed to read ${filePath}: ${e.message}`),
-      { code: 'PATCH_READ_FAILED', cause: e }
-    );
-  }
-
-  const remaining = new Set(Object.keys(updates));
-  const lines = content.split('\n').map(line => {
-    const eqIdx = line.indexOf('=');
-    if (eqIdx < 1) return line;
-    const key = line.slice(0, eqIdx).trim();
-    if (key in updates) {
-      remaining.delete(key);
-      return `${key}=${updates[key]}`;
-    }
-    return line;
-  });
-
-  // Append any keys that were not already in the file
-  for (const key of remaining) lines.push(`${key}=${updates[key]}`);
-
-  // Q8: separate write error
-  try {
-    fs.writeFileSync(filePath, lines.join('\n'), 'utf8');
-  } catch (e) {
-    throw Object.assign(
-      new Error(`Failed to write ${filePath}: ${e.message}`),
-      { code: 'PATCH_WRITE_FAILED', cause: e }
-    );
-  }
-}
-
-/**
- * Read the effective DT_API_URL and DT_API_KEY.
- * Priority: .env file (if mounted and readable) > values captured at startup.
- * Called before every job so changes written via /config are picked up immediately.
+ * Read the DependencyTrack connection a single-tenant deployment was using.
+ *
+ * Values in the bind-mounted .env win over the ones captured from the process
+ * environment at startup, because the retired config endpoint used to write
+ * them there.
  *
  * @param {string} envFile
- * @param {string} startupApiUrl
- * @param {string} startupApiKey
+ * @param {{apiUrl: string, apiKey: string, frontendUrl: string}} fallback
+ * @returns {{apiUrl: string, apiKey: string, frontendUrl: string}}
  */
-function getEffectiveConfig(envFile, startupApiUrl, startupApiKey) {
+function readLegacyConnection(envFile, fallback = {}) {
   const envVars = parseEnvFile(envFile);
-  const apiUrl  = (envVars['DT_API_INTERNAL_URL'] || startupApiUrl || '').replace(/\/$/, '');
-  const apiKey  = (envVars['DT_API_KEY'] || startupApiKey || '').replace(/[\x00-\x1F\x7F]/g, '').trim();
-  return { apiUrl, apiKey };
+  return {
+    apiUrl: (envVars['DT_API_INTERNAL_URL'] || fallback.apiUrl || '').replace(/\/$/, ''),
+    apiKey: (envVars['DT_API_KEY'] || fallback.apiKey || '').replace(/[\x00-\x1F\x7F]/g, '').trim(),
+    frontendUrl: (envVars['DT_FRONTEND_URL'] || fallback.frontendUrl || '').replace(/\/$/, ''),
+  };
 }
 
-module.exports = { parseEnvFile, patchEnvFile, getEffectiveConfig };
+module.exports = { parseEnvFile, readLegacyConnection };

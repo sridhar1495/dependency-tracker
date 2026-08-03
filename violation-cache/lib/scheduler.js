@@ -2,37 +2,41 @@
 // Copyright (c) 2024 Dependency-Track Risk Dashboard contributors
 'use strict';
 
-// Scheduled report timing and execution.
+// ── Multi-tenant scheduler ────────────────────────────────────────────────────
+// One poller ticks every 60 seconds and claims due schedules with
+// FOR UPDATE SKIP LOCKED. There is never one timer per user (CLAUDE.md §6.8):
+// with N users that would mean N timers, and a restart would lose all of them.
 //
-// calcNextRun is a pure function and the single source of truth for timing
-// (CLAUDE.md §6.8). Phase 5 replaces the single setTimeout with one poller that
-// claims due rows using FOR UPDATE SKIP LOCKED.
+// calcNextRun is unchanged from the single-tenant version — it is a pure
+// function, the single source of truth for timing, and already well covered by
+// tests. Only its caller changed.
+//
+// Per-user overlap protection is the schedules.running_since column, not a
+// process variable, so one user's long-running report never blocks another's.
 
-const fs   = require('fs');
-const path = require('path');
 const { log } = require('./log');
 const { dtGetWithRetry } = require('./dt-fetch');
 const { buildExcelReport } = require('./excel');
 const { sendEmail } = require('./mail');
 const { collectReportData } = require('./reports');
-const { loadConfig, saveConfig } = require('./app-config');
+const { makeSemaphore } = require('./async-utils');
+const schedulesDb = require('./schedules');
+const mailSettings = require('./mail-settings');
+const dtConnections = require('./dt-connections');
 
-// Injected at boot: { schedDir, getEffectiveConfig }
-let _deps = null;
+const POLL_INTERVAL_MS  = 60_000;  // one tick a minute
+const MAX_CONCURRENT    = 5;       // bounded concurrency (CLAUDE.md §13)
+const STALE_CLAIM_MINS  = 45;      // longer than the 30-minute report watchdog
 
-function configure(d) { _deps = d; }
+let _pollTimer = null;
+let _ticking   = false;
 
-function deps() {
-  if (!_deps) throw new Error('scheduler has not been configured — call configure() during boot');
-  return _deps;
-}
-
-// ── Scheduler ─────────────────────────────────────────────────────────────────
+// ── Timing ────────────────────────────────────────────────────────────────────
 /**
  * Calculate the next local-time Date when the job should fire.
- * Uses server's local timezone (no external timezone library needed).
+ * Uses the server's local timezone (no external timezone library needed).
  *
- * @param {object} schedule — config.schedule
+ * @param {object} schedule — frequency, hour, weekDays, monthDay
  * @returns {Date}
  */
 function calcNextRun(schedule) {
@@ -68,144 +72,148 @@ function calcNextRun(schedule) {
   return new Date(now.getTime() + 24 * 3_600_000);
 }
 
-let _schedulerTimer   = null;
-let _schedulerRunning = false;
-
-/** Arm (or re-arm) the scheduler based on the current app config. */
-function armScheduler() {
-  if (_schedulerTimer) { clearTimeout(_schedulerTimer); _schedulerTimer = null; }
-
-  const cfg = loadConfig();
-  if (!cfg.schedule.enabled) {
-    log('info', 'Scheduler disabled — not arming');
-    return;
-  }
-
-  const next    = calcNextRun(cfg.schedule);
-  const msUntil = Math.max(next.getTime() - Date.now(), 1000); // minimum 1 s to avoid tight loops
-
-  cfg.schedule.nextRun = next.toISOString();
-  saveConfig(cfg);
-
-  log('info', 'Scheduler armed', { nextRun: next.toISOString(), msUntil });
-  _schedulerTimer = setTimeout(async () => {
-    _schedulerTimer = null;
-    await runScheduledJob();
-    armScheduler(); // re-arm for the next occurrence after each firing
-  }, msUntil);
-}
-
-async function runScheduledJob() {
-  if (_schedulerRunning) {
-    log('warn', 'Scheduled job already running — skipping this occurrence (overlap protection)');
-    return;
-  }
-
-  _schedulerRunning = true;
-  const cfg = loadConfig();
-  log('info', 'Scheduled report job starting', { projectCount: cfg.schedule.projectUuids.length });
-
-  let reportFilePath = null;
-  let reportFileName = null;
+// ── One scheduled run ─────────────────────────────────────────────────────────
+/**
+ * Build and email one user's scheduled report.
+ *
+ * Everything is scoped to that user: their DT connection, their project
+ * selection, their mail settings. The workbook is built in memory and emailed;
+ * scheduled reports are never written to disk (CLAUDE.md §6.8).
+ */
+async function runScheduledJob(schedule) {
+  const userId = schedule.userId;
+  const runId  = await schedulesDb.startRun(userId);
+  let fileSize = null;
 
   try {
-    const { apiUrl, apiKey } = deps().getEffectiveConfig();
-    if (!apiKey) throw new Error('DT_API_KEY is not configured');
-    if (!cfg.schedule.projectUuids.length) throw new Error('No project UUIDs stored in schedule config');
+    const conn = await dtConnections.getResolved(userId);
+    if (!conn || !conn.isConfigured) {
+      throw new Error('No DependencyTrack connection is configured for this account.');
+    }
 
-    // Resolve stored UUIDs against live DT project list — skip UUIDs that no longer exist
-    const storedSet = new Set(cfg.schedule.projectUuids);
-    const projects  = [];
+    const selected = await schedulesDb.getProjects(userId);
+    if (selected.length === 0) throw new Error('No projects are selected for this schedule.');
+
+    // Resolve stored UUIDs against live DT data — a project may have been
+    // removed since the schedule was created.
+    const wanted = new Set(selected.map(p => p.uuid));
+    const projects = [];
     let page = 1;
     while (true) {
       const { json } = await dtGetWithRetry(
-        `/api/v1/project?pageSize=500&pageNumber=${page}&onlyRoot=false`, apiUrl, apiKey
+        `/api/v1/project?pageSize=500&pageNumber=${page}&onlyRoot=false`, conn.apiUrl, conn.apiKey
       );
       const batch = Array.isArray(json) ? json : [];
       for (const p of batch) {
-        if (storedSet.has(p.uuid)) {
-          projects.push({ uuid: p.uuid, name: p.name, version: p.version || '' });
-        }
+        if (wanted.has(p.uuid)) projects.push({ uuid: p.uuid, name: p.name, version: p.version || '' });
       }
       if (batch.length < 500) break;
       page++;
     }
-    if (projects.length === 0) throw new Error('None of the stored project UUIDs matched live DT data');
-    log('info', `Scheduled job: ${projects.length}/${storedSet.size} UUIDs resolved`);
+    if (projects.length === 0) {
+      throw new Error('None of the selected projects were found in DependencyTrack.');
+    }
+    log('info', 'Scheduled report starting', {
+      userId, selected: selected.length, resolved: projects.length,
+    });
 
-    fs.mkdirSync(deps().schedDir, { recursive: true });
-    const ts      = new Date().toISOString().replace(/[:.]/g, '-');
-    reportFileName = `scheduled_report_${ts}.xlsx`;
-    reportFilePath = path.join(deps().schedDir, reportFileName);
-
-    const riskTypes  = cfg.schedule.riskTypes || ['security', 'license', 'operational'];
+    const riskTypes  = (schedule.riskTypes && schedule.riskTypes.length)
+      ? schedule.riskTypes : ['security', 'license', 'operational'];
     const cancelFlag = { cancelled: false };
 
     const reportData = await collectReportData(
-      apiUrl, apiKey, projects, riskTypes, cancelFlag,
-      (rt) => log('info', `Scheduled job progress: ${rt} project done`)
+      conn.apiUrl, conn.apiKey, projects, riskTypes, cancelFlag
     );
+    const buffer = await buildExcelReport(null, { riskTypes, ...reportData });
+    fileSize = buffer.length;
 
-    await buildExcelReport(reportFilePath, { riskTypes, ...reportData });
-    log('info', `Scheduled job: Excel written (${reportFileName})`);
-
-    // Email if configured
-    if (cfg.mail.enabled) {
-      await sendEmail(cfg.mail, reportFilePath, reportFileName);
+    const mail = await mailSettings.getResolved(userId);
+    if (mail && mail.enabled) {
+      const ts = new Date().toISOString().replace(/[:.]/g, '-');
+      await sendEmail(mail, { filename: `scheduled_report_${ts}.xlsx`, content: buffer });
+      log('info', 'Scheduled report emailed', { userId, bytes: buffer.length });
+    } else {
+      log('warn', 'Scheduled report built but email is disabled — nothing was sent', { userId });
     }
 
-    // Delete the file — it was emailed (or mail was intentionally disabled)
-    try { fs.unlinkSync(reportFilePath); } catch (_) {}
-    reportFilePath = null;
-
-    const newCfg = loadConfig();
-    newCfg.schedule.lastRun             = new Date().toISOString();
-    newCfg.schedule.lastRunStatus       = 'success';
-    newCfg.schedule.lastRunError        = null;
-    newCfg.schedule.failureNotification = null;
-    saveConfig(newCfg);
-    log('info', 'Scheduled job completed successfully');
+    await schedulesDb.completeRun(runId, { status: 'success', fileSizeBytes: fileSize });
+    await schedulesDb.finishRun(userId, {
+      status: 'success', nextRunAt: calcNextRun(schedule),
+    });
+    return { ok: true };
 
   } catch (err) {
-    log('error', `Scheduled job failed: ${err.message}`);
-    if (reportFilePath) { try { fs.unlinkSync(reportFilePath); } catch (_) {} }
+    log('error', `Scheduled report failed: ${err.message}`, { userId });
+    await schedulesDb.completeRun(runId, { status: 'failed', error: err.message, fileSizeBytes: fileSize });
+    await schedulesDb.finishRun(userId, {
+      status: 'failed', error: err.message, nextRunAt: calcNextRun(schedule),
+    });
 
-    const newCfg = loadConfig();
-    newCfg.schedule.lastRun             = new Date().toISOString();
-    newCfg.schedule.lastRunStatus       = 'failed';
-    newCfg.schedule.lastRunError        = err.message;
-    // O3: notification persists until the browser ACKs it (POST /violation-cache/schedule/ack-notification)
-    newCfg.schedule.failureNotification = `Scheduled report failed on ${new Date().toLocaleString()}: ${err.message}`;
-    saveConfig(newCfg);
-
-    // Send failure alert to the From address so someone is notified even without opening the UI
+    // Best-effort alert to the From address, so a failure is noticed without
+    // opening the dashboard. Never let this throw into the poller.
     try {
-      const freshCfg = loadConfig();
-      if (freshCfg.mail.enabled && freshCfg.mail.from && freshCfg.mail.smtp.host) {
-        await sendEmail(freshCfg.mail, null, null, {
-          to:      [freshCfg.mail.from],
-          cc:      [],
+      const mail = await mailSettings.getResolved(userId);
+      if (mail && mail.enabled && mail.from && mail.smtp.host) {
+        await sendEmail(mail, null, {
+          to: [mail.from], cc: [],
           subject: 'Dependency-Track Scheduled Report Failed',
-          body:    `The scheduled Dependency-Track report failed on ${new Date().toLocaleString()}.\n\nError: ${err.message}\n\nPlease check the server logs for details.`,
+          body: `The scheduled report failed on ${new Date().toLocaleString()}.\n\n`
+              + `Error: ${err.message}\n\nCheck the dashboard for details.`,
         });
       }
-    } catch (emailErr) {
-      log('error', `Failed to send failure alert email: ${emailErr.message}`);
+    } catch (alertErr) {
+      log('error', `Failure alert email could not be sent: ${alertErr.message}`, { userId });
     }
-  } finally {
-    _schedulerRunning = false;
+    return { ok: false, error: err.message };
   }
 }
 
-/** True when a timer is currently armed. Used to decide whether a config save re-arms. */
-function isArmed() { return _schedulerTimer !== null; }
+// ── Poller ────────────────────────────────────────────────────────────────────
+/**
+ * One tick: claim what is due and run it, bounded to MAX_CONCURRENT.
+ *
+ * Exported so tests can drive a tick directly instead of waiting a minute.
+ */
+async function tick() {
+  if (_ticking) return { skipped: true };   // a slow tick must not overlap itself
+  _ticking = true;
+  try {
+    const due = await schedulesDb.claimDue(MAX_CONCURRENT);
+    if (due.length === 0) return { claimed: 0 };
 
-/** True while a scheduled job is executing (overlap protection). */
-function isRunning() { return _schedulerRunning; }
-
-/** Clear any pending timer. Called from the SIGTERM handler. */
-function stop() {
-  if (_schedulerTimer) { clearTimeout(_schedulerTimer); _schedulerTimer = null; }
+    log('info', `Scheduler claimed ${due.length} due schedule(s)`);
+    const sem = makeSemaphore(MAX_CONCURRENT);
+    await Promise.all(due.map(s => sem(() => runScheduledJob(s))));
+    return { claimed: due.length };
+  } catch (err) {
+    log('error', `Scheduler tick failed: ${err.message}`);
+    return { error: err.message };
+  } finally {
+    _ticking = false;
+  }
 }
 
-module.exports = { configure, calcNextRun, armScheduler, runScheduledJob, isArmed, isRunning, stop };
+/** Start the poller. Called once from the boot sequence. */
+async function start() {
+  // A crash mid-run would otherwise leave running_since set forever, wedging
+  // that user's schedule permanently.
+  const released = await schedulesDb.releaseStaleClaims(STALE_CLAIM_MINS);
+  if (released) log('info', `Released ${released} stale schedule claim(s) from a previous run`);
+
+  if (_pollTimer) clearInterval(_pollTimer);
+  _pollTimer = setInterval(() => { tick(); }, POLL_INTERVAL_MS);
+  if (_pollTimer.unref) _pollTimer.unref();
+  log('info', 'Scheduler poller started', { intervalSeconds: POLL_INTERVAL_MS / 1000, maxConcurrent: MAX_CONCURRENT });
+}
+
+/** Stop the poller. Called from the SIGTERM handler. */
+function stop() {
+  if (_pollTimer) { clearInterval(_pollTimer); _pollTimer = null; }
+}
+
+function isRunning() { return _ticking; }
+
+module.exports = {
+  calcNextRun, runScheduledJob, tick, start, stop, isRunning,
+  POLL_INTERVAL_MS, MAX_CONCURRENT, STALE_CLAIM_MINS,
+};

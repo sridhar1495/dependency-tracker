@@ -8,18 +8,26 @@
 // (CLAUDE.md §2, §6.1).
 //
 // Endpoints:
-//   GET    /violation-cache/status              — current state + build progress
-//   GET    /violation-cache/data                — the cached map (only when ready/stale)
-//   GET    /violation-cache/config              — effective API key (redacted) + app config
-//   POST   /violation-cache/config              — update DT_API_KEY and/or app config
-//   POST   /violation-cache/config/test-email   — send a test email
+//   POST   /auth/register  /auth/login  /auth/logout  /auth/check-availability
+//   GET    /auth/me
+//   DELETE /auth/account
+//   GET    /profile                             — signed-in user's details
+//   PUT    /profile                             — update name / password
+//   GET    /violation-cache/status              — build state for this user's connection
+//   GET    /violation-cache/data                — the cached map (gzipped)
 //   POST   /violation-cache/refresh             — trigger a background rebuild
-//   POST   /violation-cache/report/generate     — start a vulnerability Excel report job
-//   GET    /violation-cache/report/list         — list all report jobs with status
-//   DELETE /violation-cache/report/:id          — delete a report job + file
-//   GET    /violation-cache/report/:id/download — stream the completed Excel file
-//   POST   /violation-cache/report/:id/cancel   — cancel a running report job
-//   POST   /violation-cache/schedule/arm        — arm the scheduler
+//   GET    /violation-cache/config              — connection + settings + mail + schedule
+//   POST   /violation-cache/config              — save any subset of the above
+//   DELETE /violation-cache/config/dt-key       — forget the stored DT API key
+//   POST   /violation-cache/config/test-connection — probe DT before saving
+//   POST   /violation-cache/config/test-email   — send a test email
+//   GET    /violation-cache/dt/api/v1/…         — read proxy to this user's DT
+//   POST   /violation-cache/report/generate     — start a report job
+//   GET    /violation-cache/report/list         — this user's reports
+//   DELETE /violation-cache/report/:id          — delete a report and its bytes
+//   GET    /violation-cache/report/:id/download — stream the workbook
+//   POST   /violation-cache/report/:id/cancel   — cancel a running job
+//   POST   /violation-cache/schedule/arm        — arm this user's schedule
 //   GET    /violation-cache/schedule/status     — schedule state
 //   DELETE /violation-cache/schedule            — disable the schedule
 //   POST   /violation-cache/schedule/ack-notification — clear a failure notice
@@ -31,21 +39,27 @@ const http = require('http');
 const { load: loadEnvConfig, ConfigError } = require('./lib/config');
 const { log, configure: configureLog }     = require('./lib/log');
 const { jsonReply }                        = require('./lib/http-util');
-const { getEffectiveConfig }               = require('./lib/env-file');
+const { readLegacyConnection }             = require('./lib/env-file');
 
 const pool        = require('./db/pool');
 const { migrate } = require('./db/migrate');
 
-const appConfig = require('./lib/app-config');
-const cache     = require('./lib/violation-cache');
-const reports   = require('./lib/reports');
-const scheduler = require('./lib/scheduler');
-const auth      = require('./lib/auth');
-const admin     = require('./lib/admin');
+const cryptoLib     = require('./lib/crypto');
+const cache         = require('./lib/violation-cache');
+const caches        = require('./lib/caches');
+const reports       = require('./lib/reports');
+const reportsDb     = require('./lib/reports-db');
+const scheduler     = require('./lib/scheduler');
+const schedulesDb   = require('./lib/schedules');
+const auth          = require('./lib/auth');
+const admin         = require('./lib/admin');
+const dtConnections = require('./lib/dt-connections');
+const mailSettings  = require('./lib/mail-settings');
 
 const routeModules = [
   require('./routes/auth'),
   require('./routes/profile'),
+  require('./routes/dt-proxy'),
   require('./routes/cache'),
   require('./routes/config'),
   require('./routes/reports'),
@@ -61,8 +75,6 @@ const PUBLIC_PATHS = new Set([
   '/auth/login',               // the entry point itself
 ]);
 
-// Everything else — including every /violation-cache/* route — now requires a
-// bearer token. The dashboard sends one via apiFetch() as of phase 3.
 function isPublic(path) {
   return PUBLIC_PATHS.has(path);
 }
@@ -82,47 +94,20 @@ try {
 }
 configureLog(cfg.logFormat);
 
-// One bound accessor for the shared DT connection, injected into every module
-// that needs it. Phase 4 replaces this with a per-user lookup.
-const effectiveConfig = () =>
-  getEffectiveConfig(cfg.envFile, cfg.dt.startupApiUrl, cfg.dt.startupApiKey);
-
-appConfig.configure({
-  cacheDir:   cfg.cacheDir,
-  configFile: cfg.paths.configFile,
-  configTmp:  cfg.paths.configTmp,
-});
-cache.configure({
-  cacheDir:   cfg.cacheDir,
-  cacheFile:  cfg.paths.cacheFile,
-  cacheTmp:   cfg.paths.cacheTmp,
-  cacheTtlMs: cfg.cacheTtlMs,
-  getEffectiveConfig: effectiveConfig,
-});
+cache.configure({ cacheTtlMs: cfg.cacheTtlMs });
 reports.configure({
-  reportDir:      cfg.paths.reportDir,
-  reportRegistry: require('path').join(cfg.paths.reportDir, 'registry.json'),
-  reportTmp:      require('path').join(cfg.paths.reportDir, 'registry.tmp.json'),
   reportConcurrency:    cfg.reportConcurrency,
   violationConcurrency: cfg.violationConcurrency,
-  getEffectiveConfig: effectiveConfig,
-});
-scheduler.configure({
-  schedDir: cfg.paths.schedDir,
-  getEffectiveConfig: effectiveConfig,
 });
 
-// Context handed to every route module.
-const routeDeps = {
-  paths:   cfg.paths,
-  envFile: cfg.envFile,
-  getEffectiveConfig: effectiveConfig,
-};
+// Context handed to every route module. Per-user values are never put here —
+// module scope holds only genuinely global state (CLAUDE.md §7.5).
+const routeDeps = { paths: cfg.paths };
 
 // ── Request dispatch ──────────────────────────────────────────────────────────
 // Each route module is asked in turn and returns true once it has answered.
-// Phase 2 inserts the authentication check here, before the first module runs,
-// so a new route is authenticated by default (CLAUDE.md §6.6).
+// Authentication runs before the first module, so a new route is authenticated
+// by default (CLAUDE.md §6.6).
 const server = http.createServer(async (req, res) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
 
@@ -179,9 +164,26 @@ const server = http.createServer(async (req, res) => {
   }
 });
 
-// ── Boot sequence ─────────────────────────────────────────────────────────────
-let sessionSweeper = null;
+// ── Housekeeping ──────────────────────────────────────────────────────────────
+// One timer for all retention work. Nothing here is per-user: with N users this
+// is still one timer, which is the whole point (CLAUDE.md §13).
+const HOUSEKEEPING_INTERVAL_MS = 10 * 60_000;
+const RUN_HISTORY_RETENTION_DAYS = 90;
 
+let housekeepingTimer = null;
+
+async function housekeeping() {
+  await auth.sweep();
+  try {
+    const runs = await schedulesDb.purgeRunsOlderThan(RUN_HISTORY_RETENTION_DAYS);
+    const swept = await caches.sweepOrphaned();
+    if (runs || swept) log('info', 'Housekeeping complete', { scheduleRuns: runs, caches: swept });
+  } catch (e) {
+    log('warn', `Housekeeping failed: ${e.message}`);
+  }
+}
+
+// ── Boot sequence ─────────────────────────────────────────────────────────────
 async function boot() {
   // Step 2: connection pool.
   pool.init(cfg.db);
@@ -193,28 +195,33 @@ async function boot() {
   // Step 3: migrations. The listener must not start until these complete.
   await migrate({ pool: pool.getPool(), log });
 
-  // Step 4: administrator credentials. Never created here — if the file is
-  // absent, administrator login is disabled and the reason is logged.
+  // Step 4: credentials and secrets.
   auth.configure(cfg);
   admin.load(cfg.paths.adminCreds);
-  if (!cfg.secretEncryptionKey) {
-    log('warn', 'SECRET_ENCRYPTION_KEY is not set — required from phase 4 to store DT API keys');
-  }
 
-  // Step 5: restore persisted state and start background timers.
-  reports.loadRegistry();
-  scheduler.armScheduler();
-  // Sweep expired sessions and stale audit rows so neither table grows without
-  // bound. Runs every 10 minutes, and once shortly after boot.
-  sessionSweeper = setInterval(() => { auth.sweep(); }, 10 * 60_000);
-  if (sessionSweeper.unref) sessionSweeper.unref();
-  setTimeout(() => auth.sweep(), 5_000).unref();
+  // S23: the encryption key is parsed once and handed to the two modules that
+  // store secrets. Nothing else in the process holds it.
+  const encryptionKey = cryptoLib.parseEncryptionKey(cfg.secretEncryptionKey);
+  dtConnections.configure(encryptionKey);
+  mailSettings.configure(encryptionKey);
+
+  // Step 4b: one-shot seed of existing accounts from a pre-multi-user .env, so
+  // upgrading a working deployment does not silently drop everyone back to
+  // demo data. Guarded by system_state — it can only ever run once.
+  const legacy = readLegacyConnection(cfg.envFile, cfg.legacyDt);
+  const seeded = await dtConnections.migrateLegacyConnection(legacy);
+  if (seeded.ran) log('info', 'Legacy DT connection migrated', { accounts: seeded.seeded });
+
+  // Step 5: recover from a restart, then start background timers.
+  await reportsDb.failOrphaned();
+  await scheduler.start();
+  housekeepingTimer = setInterval(() => { housekeeping(); }, HOUSEKEEPING_INTERVAL_MS);
+  if (housekeepingTimer.unref) housekeepingTimer.unref();
+  setTimeout(() => housekeeping(), 5_000).unref();
 
   // Step 6: accept requests.
   await new Promise((resolve) => server.listen(cfg.port, resolve));
 
-  const { apiUrl, apiKey } = effectiveConfig();
-  const appCfg = appConfig.loadConfig();
   log('info', `Violation cache service listening on :${cfg.port}`);
   log('info', 'Authentication', {
     adminLogin:   admin.isEnabled() ? 'enabled' : 'DISABLED',
@@ -223,24 +230,15 @@ async function boot() {
     publicPaths:  [...PUBLIC_PATHS].join(', '),
   });
   log('info', 'Startup configuration', {
-    apiUrl,
-    apiKey:       apiKey ? `***${apiKey.slice(-4)}` : 'NOT SET',
-    cacheTtlHrs:  cfg.cacheTtlMs / 3_600_000,
-    cacheFile:    cfg.paths.cacheFile,
-    envFile:      `${cfg.envFile} (${require('fs').existsSync(cfg.envFile) ? 'mounted ✓' : 'NOT FOUND — config endpoint disabled'})`,
-    maxReports:   appCfg.maxReports,
-    mailEnabled:  appCfg.mail.enabled,
-    schedEnabled: appCfg.schedule.enabled,
-    logFormat:    cfg.logFormat,
+    cacheTtlHrs:          cfg.cacheTtlMs / 3_600_000,
+    reportConcurrency:    cfg.reportConcurrency,
+    violationConcurrency: cfg.violationConcurrency,
+    schedulerPollSeconds: scheduler.POLL_INTERVAL_MS / 1000,
+    logFormat:            cfg.logFormat,
+    // Connections are per-user now; there is no service-wide DT URL or key to
+    // report, and none is ever logged (CLAUDE.md §6.5).
+    dtConnections:        'per user (encrypted at rest)',
   });
-
-  const s = cache.getStatus();
-  if (s.status === 'none' || s.status === 'stale') {
-    log('info', `Auto-triggering cache build (status: ${s.status})`);
-    cache.runJob().catch(err => log('error', `Startup job error: ${err.message}`));
-  } else {
-    log('info', `Cache status on startup: ${s.status}`);
-  }
 }
 
 // ── Shutdown ──────────────────────────────────────────────────────────────────
@@ -250,7 +248,7 @@ async function shutdown(signal) {
   shuttingDown = true;
   log('info', `Received ${signal} — shutting down`);
   scheduler.stop();
-  if (sessionSweeper) clearInterval(sessionSweeper);
+  if (housekeepingTimer) clearInterval(housekeepingTimer);
   auth.clearCache();
   server.close();
   try { await pool.close(); } catch (e) { log('warn', `Pool close failed: ${e.message}`); }

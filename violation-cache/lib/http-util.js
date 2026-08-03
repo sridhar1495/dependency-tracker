@@ -42,4 +42,44 @@ function readBody(req, maxBytes = 64 * 1024) {
   });
 }
 
-module.exports = { jsonReply, readBody };
+/**
+ * Read and parse a JSON request body, replying 400 itself on failure.
+ *
+ * @returns {Promise<object|null>} the parsed body, or null once a reply is sent
+ */
+async function readJson(req, res, maxBytes = 64 * 1024) {
+  let raw;
+  try {
+    raw = await readBody(req, maxBytes);
+  } catch (e) {
+    jsonReply(res, 400, { error: e.message, code: 'BODY_TOO_LARGE' });
+    return null;
+  }
+  if (!raw || !raw.trim()) return {};
+  try {
+    return JSON.parse(raw);
+  } catch (_) {
+    jsonReply(res, 400, { error: 'Request body is not valid JSON.', code: 'BAD_JSON' });
+    return null;
+  }
+}
+
+/**
+ * Resolve the owning user for a per-user route.
+ *
+ * The administrator principal has no `userId` and therefore no data of its own;
+ * every per-user route is scoped by `user_id` without exception (CLAUDE.md §7.5),
+ * so there is nothing sensible to return.
+ *
+ * @returns {string|null} the user id, or null once a 403 has been sent
+ */
+function requireUser(principal, res) {
+  if (principal && principal.userId) return principal.userId;
+  jsonReply(res, 403, {
+    error: 'This is a per-user setting and the administrator account has none.',
+    code: 'USER_ONLY',
+  });
+  return null;
+}
+
+module.exports = { jsonReply, readBody, readJson, requireUser };

@@ -39,13 +39,18 @@ served by an nginx container on port `3000`. It provides:
 
 ### How network calls work
 
-| Mode | When | How |
-|------|------|-----|
-| **nginx proxy** (default) | DT API URL field left blank in Connect modal | Browser calls `/api/*` on the dashboard origin; nginx forwards to `DT_API_INTERNAL_URL` — no CORS needed |
-| **Direct** | DT API URL filled in the Connect modal | Browser calls the URL directly — requires CORS enabled on DT or same-origin |
+Every call the dashboard makes goes to its own origin with a
+`Authorization: Bearer <session token>` header:
 
-The `DT_API_INTERNAL_URL` env var (set at deploy time) controls only the nginx
-proxy target. It is separate from any URL typed in the Connect modal UI.
+| Path | Handled by | Notes |
+|------|-----------|-------|
+| `/auth/*`, `/profile` | backend | Registration, sign-in, session, profile |
+| `/violation-cache/*` | backend | Configuration, reports, schedule, cache |
+| `/violation-cache/dt/api/v1/…` | backend → DependencyTrack | The backend attaches **your** stored API key and forwards the request |
+
+The browser holds no DependencyTrack credentials: no `X-Api-Key` header is ever sent
+and no key is kept in `localStorage`. CORS on DependencyTrack is irrelevant, because
+the browser never talks to it.
 
 ---
 
@@ -114,29 +119,27 @@ Set the **DT Frontend URL** in **⚙ Settings** to enable clickable project link
 
 ## 3. Connecting to Live Data
 
-### Method A — Installer (recommended)
+The connection belongs to your account, so it is configured in the dashboard — not
+in `.env` and not by the installer.
 
-Run `./install.sh` and enter your API key when prompted. The installer writes `DT_API_KEY` to `.env` — the dashboard **auto-connects on first open**.
-
-### Method B — Settings Panel
-
-1. Open the dashboard (default: http://localhost:3000)
+1. Open the dashboard (default: http://localhost:3000) and sign in
 2. Click **⚙ Settings** in the top-right header
 3. In the **Connection** section:
-   - *(Optional)* **DT API URL** — leave blank to route through nginx proxy (recommended)
+   - **DT API URL** — your DependencyTrack API server, e.g. `https://dtrack.company.com`
    - *(Optional)* **DT Frontend URL** — enables clickable project links
    - **API Key** — your DependencyTrack API key
-4. Click **Connect**
+4. Click **Test Connection** to check it, then **Connect**
 
-### Method C — Pre-configure in `.env`
+The key is encrypted with `SECRET_ENCRYPTION_KEY` before it is written, and is never
+returned in any response. The field shows blank on every later visit with a
+"✓ API key configured" note; leave it blank to keep the stored key, or type a new one
+to replace it.
 
-```dotenv
-DT_API_INTERNAL_URL=https://dtrack.company.com
-DT_API_KEY=odt_your_key
-DT_FRONTEND_URL=https://dtrack.company.com
-```
+Two users who enter the same URL and key share one violation-cache build, so adding
+users does not multiply the load on DependencyTrack.
 
 ```bash
+# Only needed after changing infrastructure settings in .env
 docker compose --env-file .env up -d
 ```
 
@@ -200,27 +203,31 @@ compact per-project count map in a JSON file, and serves only that file to the b
 | Endpoint | Method | Description |
 |----------|--------|-------------|
 | `/violation-cache/status` | GET | `{status, progress: {pagesDone, pagesTotal}}` |
-| `/violation-cache/data` | GET | Full cached map `{generatedAt, expiresAt, map:{uuid:…}}` |
+| `/violation-cache/data` | GET | The cached map `{uuid: {ops, lic, secpolicy}}`, served gzipped. Build metadata comes from `/status` |
 | `/violation-cache/refresh` | POST | Trigger a background rebuild (409 if already running) |
 
 ### Manual operations
 
+All backend routes require a bearer token; the examples below assume `$TOKEN` holds
+one (read it from `localStorage.dt_session_token` in the browser console).
+
 ```bash
 # Check cache status
-curl http://localhost:3000/violation-cache/status
+curl -H "Authorization: Bearer $TOKEN" http://localhost:3000/violation-cache/status
 
 # Trigger a rebuild
-curl -X POST http://localhost:3000/violation-cache/refresh
+curl -X POST -H "Authorization: Bearer $TOKEN" http://localhost:3000/violation-cache/refresh
 
-# Clear the cache file (forces rebuild on next page load)
-rm violation-cache/data/violation-cache.json
-docker compose restart dt-violation-cache
+# Discard every cached build (they rebuild on next page load)
+docker exec dt-postgres psql -U dtdash -d dtdash -c 'DELETE FROM violation_caches;'
 ```
 
 ### TTL and rebuild
 
 - Default TTL: **24 hours** (configurable via `VIOLATION_CACHE_TTL_HOURS` in `.env`)
-- On startup: if no cache file exists or TTL has expired, a rebuild starts automatically
+- On page load: if no cache row exists for your connection, a rebuild starts automatically.
+  `pg_try_advisory_lock` elects exactly one builder, so simultaneous visitors trigger
+  one crawl between them, not one each
 - On page load: if cache is stale, the old data is shown immediately while a rebuild runs in the background
 - The banner **↻ Refresh** button triggers a violation-only rebuild without re-fetching projects
 
@@ -232,9 +239,9 @@ docker compose restart dt-violation-cache
 
 | Section | Endpoint | Purpose |
 |---------|----------|---------|
-| Hierarchy (roots) | `GET /api/v1/project?onlyRoot=true` | All root-level projects (paginated) |
-| Hierarchy (children) | `GET /api/v1/project/{uuid}/children` | Children per project (paginated) |
-| Config | `GET /dt-config` | Reads `DT_API_INTERNAL_URL` + `DT_API_KEY` to pre-fill the Connect modal |
+| Hierarchy (roots) | `GET /violation-cache/dt/api/v1/project?onlyRoot=true` | All root-level projects (paginated), proxied with your stored key |
+| Hierarchy (children) | `GET /violation-cache/dt/api/v1/project/{uuid}/children` | Children per project (paginated) |
+| Config | `GET /violation-cache/config` | Your connection (never the key), settings, mail and schedule |
 | Violation cache | `GET /violation-cache/status` | Cache state and build progress |
 | Violation cache | `GET /violation-cache/data` | Cached per-project violation counts |
 
@@ -382,7 +389,8 @@ Open **⚙ Settings**, scroll to the Schedule section, and click **Cancel Schedu
 
 ### Security notes
 
-- The SMTP password is stored in `/data/app-config.json` on the server.
+- The SMTP password is stored AES-256-GCM encrypted in the `mail_settings` table,
+  scoped to your account.
 - The GET config endpoint always masks the password as `••••••••`.
 - The POST config endpoint detects the `••••••••` placeholder and discards it (preserving the real stored password).
 - To change the password, type a new value into the Password field and save.
@@ -438,7 +446,8 @@ All colours are CSS custom properties at the top of the `<style>` block. Light m
 </iframe>
 ```
 
-To serve without Docker (mock data only — `/api/*` proxy requires nginx):
+To serve the pages without Docker (demo data only — signing in and live data need
+the backend and the database):
 
 ```bash
 cd dashboard && python3 -m http.server 3000

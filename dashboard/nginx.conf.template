@@ -5,16 +5,11 @@ server {
     root /usr/share/nginx/html;
     index index.html;
 
-    # Resolve upstream hostnames per-request rather than at startup.
-    # This lets nginx start (and serve the static dashboard) even when
-    # DT_API_INTERNAL_URL points to a container that is not yet reachable.
+    # Resolve upstream hostnames per-request rather than at startup, so nginx
+    # starts (and serves the static dashboard) even when the cache service is
+    # not yet reachable.
     # 127.0.0.11 = Docker's embedded DNS  |  8.8.8.8 = public fallback
     resolver 127.0.0.11 8.8.8.8 valid=10s ipv6=off;
-
-    # $upstream is filled in by envsubst at container start.
-    # Using a nginx variable defers DNS lookup to request time (not config load),
-    # so the server block stays valid even if the upstream host is unreachable.
-    set $upstream "${DT_API_INTERNAL_URL}";
 
     # Serve the dashboard SPA
     # login.html is a real file, so try_files serves it directly before the
@@ -44,16 +39,6 @@ server {
         add_header Cache-Control "no-store" always;
     }
 
-    # Expose server-side config to the browser.
-    # proxyTarget: the nginx proxy target URL (informational, used to pre-fill the modal)
-    # apiKey:      optional pre-configured DT API key (set DT_API_KEY in .env to enable
-    #              automatic data load on page open without requiring manual Connect step)
-    location = /dt-config {
-        default_type application/json;
-        return 200 '{"proxyTarget":"${DT_API_INTERNAL_URL}","apiKey":"${DT_API_KEY}","frontendUrl":"${DT_FRONTEND_URL}"}';
-        add_header Cache-Control "no-store";
-    }
-
     # Proxy violation cache service requests to the dt-violation-cache container.
     # Uses a variable so nginx doesn't fail on startup if the container isn't up yet.
     location /violation-cache/ {
@@ -64,33 +49,11 @@ server {
         add_header Cache-Control "no-store" always;
     }
 
-    # Proxy API calls to DependencyTrack.
-    # Target is set by DT_API_INTERNAL_URL (injected at container start via envsubst).
-    #   Local Docker:  http://dtrack-apiserver:8080   (default)
-    #   Production:    https://dtrack.company.com
-    # The browser always calls /api/* on this same origin — no CORS from the browser side.
-    location /api/ {
-        proxy_pass $upstream;
-        proxy_set_header Host $http_host;
-        proxy_set_header X-Real-IP $remote_addr;
-        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-        proxy_read_timeout 60s;
-
-        # Handle pre-flight OPTIONS requests
-        if ($request_method = 'OPTIONS') {
-            add_header 'Access-Control-Allow-Origin'  '*';
-            add_header 'Access-Control-Allow-Methods' 'GET, POST, PUT, DELETE, OPTIONS';
-            add_header 'Access-Control-Allow-Headers' 'Authorization, Content-Type, X-Api-Key';
-            add_header 'Access-Control-Max-Age'       1728000;
-            add_header 'Content-Type'                 'text/plain; charset=utf-8';
-            add_header 'Content-Length'               0;
-            return 204;
-        }
-
-        add_header 'Access-Control-Allow-Origin'  '*'                                         always;
-        add_header 'Access-Control-Allow-Methods' 'GET, POST, PUT, DELETE, OPTIONS'           always;
-        add_header 'Access-Control-Allow-Headers' 'Authorization, Content-Type, X-Api-Key'   always;
-    }
+    # DependencyTrack is NOT proxied here any more.
+    # The dashboard reaches it through /violation-cache/dt/, where the cache
+    # service attaches the signed-in user's own API key. Forwarding /api/*
+    # straight to one shared DependencyTrack instance would defeat both the
+    # per-user connection and the rule that a DT key never reaches a browser.
 
     # Cache static assets
     location ~* \.(js|css|png|jpg|gif|ico|svg|woff2?)$ {

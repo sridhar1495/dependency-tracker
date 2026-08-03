@@ -78,7 +78,7 @@ do_uninstall() {
   echo ""
   echo -e "  ${BOLD}The following are bind mounts and are KEPT on disk:${RESET}"
   echo -e "    • ./violation-cache/pgdata  ${BOLD}(database — all users, settings and reports)${RESET}"
-  echo -e "    • ./violation-cache/data    (violation cache, report files, app config)"
+  echo -e "    • ./violation-cache/data    (administrator credentials file)"
   echo -e "    • ./.env                    (configuration, including the DB password)"
   echo -e "  Delete them manually if you intend to discard all data."
   echo ""
@@ -220,52 +220,16 @@ if [[ "$NON_INTERACTIVE" == "false" ]]; then
   read -rp "  Dashboard port               [${DT_DASHBOARD_PORT:-3000}]: " _in
   [[ -n "$_in" ]] && DT_DASHBOARD_PORT="$_in"
 
-  _default_api="${DT_API_INTERNAL_URL:-http://dtrack-apiserver:8080}"
-  read -rp "  DependencyTrack API URL      [${_default_api}]: " _in
-  [[ -n "$_in" ]] && DT_API_INTERNAL_URL="$_in" || DT_API_INTERNAL_URL="$_default_api"
+  # The DependencyTrack connection is NOT asked for here any more. It belongs to
+  # each account and is entered in the dashboard after signing in, encrypted at
+  # rest with SECRET_ENCRYPTION_KEY (CLAUDE.md §5.6, §7.6).
 
-  DT_FRONTEND_URL="${DT_FRONTEND_URL:-}"
-  read -rp "  Configure DT URL for project links? [y/N]: " _in
-  if [[ "$_in" == "y" || "$_in" == "Y" || "$_in" == "yes" ]]; then
-    read -rp "  DT Frontend URL              [${DT_FRONTEND_URL:-}]: " _in
-    [[ -n "$_in" ]] && DT_FRONTEND_URL="$_in"
-  fi
-
-  DT_API_KEY="${DT_API_KEY:-}"
-  read -rsp "  DependencyTrack API key      [${DT_API_KEY:+(set)}]: " _in
-  echo ""
-  # Strip control characters (newlines, carriage returns, etc.) from the key
-  if [[ -n "$_in" ]]; then
-    DT_API_KEY="$(printf '%s' "$_in" | tr -d '\000-\037\177')"
-  fi
-
-  # O4: Validate API key against DependencyTrack before saving
-  if [[ -n "$DT_API_KEY" && -n "$DT_API_INTERNAL_URL" ]]; then
-    info "Validating API key against DependencyTrack…"
-    _api_test_url="${DT_API_INTERNAL_URL%/}/api/v1/project?pageSize=1"
-    _http_status=$(curl -sk -o /dev/null -w "%{http_code}" \
-      -H "X-Api-Key: ${DT_API_KEY}" "$_api_test_url" 2>/dev/null || echo "000")
-    if [[ "$_http_status" == "200" ]]; then
-      success "API key validated (HTTP 200)"
-    elif [[ "$_http_status" == "401" || "$_http_status" == "403" ]]; then
-      warn "API key validation failed (HTTP ${_http_status}) — key may be incorrect or lack VIEW_PORTFOLIO permission"
-      warn "Continuing anyway; you can update DT_API_KEY in .env after installation"
-    elif [[ "$_http_status" == "000" ]]; then
-      warn "Could not reach DT API at ${DT_API_INTERNAL_URL} — skipping key validation"
-      warn "Ensure DT_API_INTERNAL_URL is reachable from this host, or update .env after install"
-    else
-      warn "Unexpected HTTP ${_http_status} from DT API — continuing without validation"
-    fi
-  fi
-
-  # Write back (overwrite only the keys we manage)
-  grep -v "^DT_DASHBOARD_PORT=\|^DT_API_INTERNAL_URL=\|^DT_FRONTEND_URL=\|^DT_API_KEY=\|^VIOLATION_CACHE_TTL_HOURS=" \
+  # Write back (overwrite only the keys we manage). Any legacy DT_* values
+  # already in the file are left untouched so an upgrade can still seed them.
+  grep -v "^DT_DASHBOARD_PORT=\|^VIOLATION_CACHE_TTL_HOURS=" \
     "$ENV_FILE" > "${ENV_FILE}.tmp" && mv "${ENV_FILE}.tmp" "$ENV_FILE"
-  printf 'DT_DASHBOARD_PORT=%s\nDT_API_INTERNAL_URL=%s\nDT_FRONTEND_URL=%s\nDT_API_KEY=%s\nVIOLATION_CACHE_TTL_HOURS=%s\n' \
+  printf 'DT_DASHBOARD_PORT=%s\nVIOLATION_CACHE_TTL_HOURS=%s\n' \
     "${DT_DASHBOARD_PORT:-3000}" \
-    "${DT_API_INTERNAL_URL}" \
-    "${DT_FRONTEND_URL:-}" \
-    "${DT_API_KEY:-}" \
     "${VIOLATION_CACHE_TTL_HOURS:-24}" >> "$ENV_FILE"
 
   success ".env saved"
@@ -474,17 +438,19 @@ fi
 step "Installation Complete!"
 echo ""
 echo -e "  ${BOLD}Risk Dashboard${RESET}  → http://localhost:${DT_DASHBOARD_PORT:-3000}"
-echo -e "  ${BOLD}Proxying to${RESET}     → ${DT_API_INTERNAL_URL:-http://dtrack-apiserver:8080}"
+echo -e "  ${BOLD}DependencyTrack${RESET} → configured per user, in ⚙ Settings after signing in"
 echo ""
-if [[ -z "${DT_API_KEY:-}" ]]; then
-  echo -e "  ${YELLOW}No API key configured.${RESET}"
-  echo -e "  Open the dashboard and click ${BOLD}⚙ Connect API${RESET} to enter your key."
-  echo -e "  Or add ${BOLD}DT_API_KEY=<your-key>${RESET} to .env and run:"
-  echo -e "    docker compose restart dt-dashboard dt-violation-cache"
-else
-  echo -e "  ${GREEN}API key configured — dashboard will auto-connect on open.${RESET}"
+echo -e "  ${BOLD}Next steps${RESET}"
+echo -e "    1. Open the dashboard and ${BOLD}create an account${RESET} (or sign in as ${BOLD}${SCA_ADMIN_USER:-admin}${RESET})."
+echo -e "    2. Open ${BOLD}⚙ Settings${RESET} and enter your DependencyTrack URL and API key."
+echo -e "       The key is encrypted at rest and is never sent back to the browser."
+echo ""
+if [[ -n "${DT_API_KEY:-}" ]]; then
+  echo -e "  ${YELLOW}A legacy DT_API_KEY was found in .env.${RESET}"
+  echo -e "  It will be copied onto existing accounts once, at first start, and then ignored."
+  echo -e "  You can remove it from .env afterwards."
+  echo ""
 fi
-echo ""
 echo -e "  ${BOLD}Docs:${RESET}  ./docs/INSTALLATION.md"
 echo ""
 success "Done!"

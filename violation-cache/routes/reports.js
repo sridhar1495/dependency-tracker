@@ -2,167 +2,238 @@
 // Copyright (c) 2024 Dependency-Track Risk Dashboard contributors
 'use strict';
 
-// Report endpoints: creation, listing, download, cancellation and deletion.
+// ── Report endpoints ──────────────────────────────────────────────────────────
+//   POST   /violation-cache/report/generate      start a job
+//   GET    /violation-cache/report/list          this user's reports
+//   GET    /violation-cache/report/:id/download  stream the workbook
+//   POST   /violation-cache/report/:id/cancel    stop a running job
+//   DELETE /violation-cache/report/:id           delete metadata and bytes
+//
+// Reports live in the database, owned by a user. Every query is scoped by
+// user_id, and someone else's report is reported as not found rather than
+// forbidden — confirming its existence would leak information (CLAUDE.md §7.5).
 
-const fs     = require('fs');
-const crypto = require('crypto');
 const { log } = require('../lib/log');
-const { jsonReply, readBody } = require('../lib/http-util');
-const { getMaxReports } = require('../lib/app-config');
-const {
-  reportJobs, saveRegistry, jobToApi, runReportJob, VALID_RISK_TYPES,
-} = require('../lib/reports');
+const { jsonReply, readJson, requireUser } = require('../lib/http-util');
+const reportsDb     = require('../lib/reports-db');
+const reports       = require('../lib/reports');
+const userSettings  = require('../lib/user-settings');
+const dtConnections = require('../lib/dt-connections');
 
-async function handle({ method, path: parsedPath, req, res }) {
-    // POST /violation-cache/report/generate
-    if (method === 'POST' && parsedPath === '/violation-cache/report/generate') {
-      try {
-        const raw  = await readBody(req, 5 * 1024 * 1024); // 5 MB — project list can be large
-        const body = JSON.parse(raw);
-  
-        if (!Array.isArray(body.projects) || body.projects.length === 0) {
-          jsonReply(res, 400, { error: 'projects must be a non-empty array' });
-          return true;
-        }
-  
-        // riskTypes defaults to ['security'] for backward compatibility when omitted.
-        const riskTypes = Array.isArray(body.riskTypes) && body.riskTypes.length > 0
-          ? body.riskTypes
-          : ['security'];
-        const invalidTypes = riskTypes.filter(t => !VALID_RISK_TYPES.has(t));
-        if (invalidTypes.length > 0) {
-          jsonReply(res, 400, {
-            error: `Invalid risk type(s): ${invalidTypes.join(', ')}. Valid values: security, license, operational`,
-          });
-          return true;
-        }
-  
-        const jobs = Array.from(reportJobs.values());
-        const completedCount = jobs.filter(j => j.status === 'completed').length;
-        const runningCount   = jobs.filter(j => j.status === 'running').length;
-        const maxReports     = getMaxReports();
-        if (completedCount + runningCount >= maxReports) {
-          jsonReply(res, 429, {
-            error: `Report limit reached (${completedCount} completed + ${runningCount} in-progress = ${completedCount + runningCount} / ${maxReports}). ` +
-                   'Delete existing reports or raise the limit in Settings.',
-            completedCount,
-            runningCount,
-            maxReports,
-          });
-          return true;
-        }
-  
-        const id  = crypto.randomUUID();
-        const job = {
-          id,
-          status:       'pending',
-          filename:     null,
-          filePath:     null,
-          error:        null,
-          riskTypes,
-          progress:     { done: 0, total: body.projects.length },
-          createdAt:    new Date().toISOString(),
-          updatedAt:    new Date().toISOString(),
-          cancelFlag:   { cancelled: false },
-          cancelReason: null,
-        };
-        reportJobs.set(id, job);
-        saveRegistry();
-  
-        // Fire and forget — status is polled via /report/list
-        runReportJob(id, body.projects, riskTypes).catch(err =>
-          log('error', `Unhandled report job error (${id}): ${err.message}`)
-        );
-  
-        log('info', `Report job created: ${id} (${body.projects.length} projects)`);
-        jsonReply(res, 201, { id, message: 'Report generation started' });
-      } catch (e) {
-        log('error', `Report generate error: ${e.message}`);
-        jsonReply(res, 400, { error: e.message });
+// Report ids are uuids. Anything else is rejected here rather than handed to
+// PostgreSQL, which would raise a type error for a malformed literal.
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/**
+ * Stream a report's chunks in order.
+ *
+ * One chunk is held in memory at a time and backpressure is respected, so a
+ * large workbook never balloons the process regardless of how slowly the
+ * browser reads (CLAUDE.md §13).
+ */
+async function streamChunks(res, reportId, chunks) {
+  for (let seq = 0; seq < chunks; seq++) {
+    const chunk = await reportsDb.getChunk(reportId, seq);
+    if (!chunk) throw new Error(`Chunk ${seq} is missing`);
+    if (!res.write(chunk)) {
+      await new Promise((resolve, reject) => {
+        res.once('drain', resolve);
+        res.once('close', () => reject(Object.assign(new Error('Client disconnected'), { aborted: true })));
+      });
+    }
+  }
+  res.end();
+}
+
+async function handle({ method, path: parsedPath, req, res, principal }) {
+
+  // ── POST /violation-cache/report/generate ───────────────────────────────
+  if (method === 'POST' && parsedPath === '/violation-cache/report/generate') {
+    const userId = requireUser(principal, res);
+    if (!userId) return true;
+
+    // 5 MB: the selected project list can be very large (CLAUDE.md §12).
+    const body = await readJson(req, res, 5 * 1024 * 1024);
+    if (body === null) return true;
+
+    try {
+      if (!Array.isArray(body.projects) || body.projects.length === 0) {
+        jsonReply(res, 400, { error: 'projects must be a non-empty array.', code: 'VALIDATION_FAILED' });
+        return true;
       }
-      return true;
-    }
-  
-    // GET /violation-cache/report/list
-    if (method === 'GET' && parsedPath === '/violation-cache/report/list') {
-      const list = Array.from(reportJobs.values())
-        .map(jobToApi)
-        .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
-      jsonReply(res, 200, list);
-      return true;
-    }
 
-  // Dynamic :id routes
+      const riskTypes = Array.isArray(body.riskTypes) && body.riskTypes.length > 0
+        ? body.riskTypes : ['security'];
+      const invalid = riskTypes.filter(t => !reports.VALID_RISK_TYPES.has(t));
+      if (invalid.length > 0) {
+        jsonReply(res, 400, {
+          error: `Invalid risk type(s): ${invalid.join(', ')}. Valid values: security, license, operational.`,
+          code: 'VALIDATION_FAILED',
+        });
+        return true;
+      }
+
+      let conn;
+      try {
+        conn = await dtConnections.getResolved(userId);
+      } catch (err) {
+        if (err.code === 'DT_KEY_UNREADABLE') {
+          jsonReply(res, 503, { error: err.message, code: 'DT_KEY_UNREADABLE' });
+          return true;
+        }
+        throw err;
+      }
+      if (!conn || !conn.isConfigured || !conn.apiKey) {
+        jsonReply(res, 503, {
+          error: 'Configure your DependencyTrack connection in Settings before generating a report.',
+          code: 'DT_NOT_CONFIGURED',
+        });
+        return true;
+      }
+
+      // The quota is this user's own, never a global counter.
+      const { completed, running } = await reportsDb.activeCount(userId);
+      const maxReports = await userSettings.getMaxReports(userId);
+      if (completed + running >= maxReports) {
+        jsonReply(res, 429, {
+          error: `Report limit reached (${completed} completed + ${running} in progress = `
+               + `${completed + running} / ${maxReports}). Delete existing reports or raise the limit in Settings.`,
+          code: 'QUOTA_REACHED',
+          completedCount: completed, runningCount: running, maxReports,
+        });
+        return true;
+      }
+
+      const report = await reportsDb.create(userId, {
+        riskTypes, projectCount: body.projects.length,
+      });
+
+      // Fire and forget — the browser polls /report/list (CLAUDE.md §6.6).
+      reports.runReportJob(userId, report.id, conn, body.projects, riskTypes)
+        .catch(err => log('error', `Unhandled report job error: ${err.message}`, {
+          userId, reportId: report.id,
+        }));
+
+      log('info', 'Report job created', { userId, reportId: report.id, projects: body.projects.length });
+      jsonReply(res, 201, { id: report.id, message: 'Report generation started' });
+    } catch (err) {
+      log('error', `Report generate failed: ${err.message}`, { userId });
+      jsonReply(res, 500, { error: 'Could not start the report.', code: 'INTERNAL' });
+    }
+    return true;
+  }
+
+  // ── GET /violation-cache/report/list ────────────────────────────────────
+  if (method === 'GET' && parsedPath === '/violation-cache/report/list') {
+    const userId = requireUser(principal, res);
+    if (!userId) return true;
+    try {
+      jsonReply(res, 200, await reportsDb.listForUser(userId));
+    } catch (err) {
+      log('error', `Report list failed: ${err.message}`, { userId });
+      jsonReply(res, 500, { error: 'Could not load your reports.', code: 'INTERNAL' });
+    }
+    return true;
+  }
+
   const dlMatch     = parsedPath.match(/^\/violation-cache\/report\/([^/]+)\/download$/);
   const cancelMatch = parsedPath.match(/^\/violation-cache\/report\/([^/]+)\/cancel$/);
   const idMatch     = parsedPath.match(/^\/violation-cache\/report\/([^/]+)$/);
+  if (!dlMatch && !cancelMatch && !idMatch) return false;
 
-    // GET /violation-cache/report/:id/download
-    if (method === 'GET' && dlMatch) {
-      const id  = dlMatch[1];
-      const job = reportJobs.get(id);
-      if (!job) { jsonReply(res, 404, { error: 'Report not found' }); return true; }
-      if (job.status !== 'completed') {
-        jsonReply(res, 409, { error: `Report is not ready (status: ${job.status})` });
+  const userId = requireUser(principal, res);
+  if (!userId) return true;
+
+  const reportId = (dlMatch || cancelMatch || idMatch)[1];
+  if (!UUID_RE.test(reportId)) {
+    jsonReply(res, 404, { error: 'Report not found.', code: 'NOT_FOUND' });
+    return true;
+  }
+
+  // ── GET /violation-cache/report/:id/download ──────────────────────────────
+  if (method === 'GET' && dlMatch) {
+    try {
+      const report = await reportsDb.getForUser(userId, reportId);
+      if (!report) { jsonReply(res, 404, { error: 'Report not found.', code: 'NOT_FOUND' }); return true; }
+      if (report.status !== 'completed') {
+        jsonReply(res, 409, { error: `Report is not ready (status: ${report.status}).`, code: 'NOT_READY' });
         return true;
       }
-      if (!fs.existsSync(job.filePath)) {
-        jsonReply(res, 410, { error: 'Report file no longer exists on disk' });
+      const chunks = await reportsDb.chunkCount(reportId);
+      if (chunks === 0) {
+        jsonReply(res, 410, { error: 'The report file is no longer stored.', code: 'FILE_GONE' });
         return true;
       }
-      try {
-        const stat = fs.statSync(job.filePath);
-        res.writeHead(200, {
-          'Content-Type':        'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
-          'Content-Disposition': `attachment; filename="${job.filename}"`,
-          'Content-Length':      stat.size,
-          'Cache-Control':       'no-store',
+
+      res.writeHead(200, {
+        'Content-Type':        'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet',
+        'Content-Disposition': `attachment; filename="${report.filename}"`,
+        'Content-Length':      report.fileSizeBytes,
+        'Cache-Control':       'no-store',
+      });
+      await streamChunks(res, reportId, chunks);
+    } catch (err) {
+      if (err.aborted) {
+        log('info', 'Report download aborted by the client', { userId, reportId });
+        return true;
+      }
+      log('error', `Report download failed: ${err.message}`, { userId, reportId });
+      // Headers are already out once streaming has begun; ending the response
+      // early is all that is left, and the short body fails the download.
+      if (!res.headersSent) jsonReply(res, 500, { error: 'Could not read the report.', code: 'INTERNAL' });
+      else res.end();
+    }
+    return true;
+  }
+
+  // ── POST /violation-cache/report/:id/cancel ───────────────────────────────
+  if (method === 'POST' && cancelMatch) {
+    try {
+      const report = await reportsDb.getForUser(userId, reportId);
+      if (!report) { jsonReply(res, 404, { error: 'Report not found.', code: 'NOT_FOUND' }); return true; }
+      if (report.status !== 'running' && report.status !== 'pending') {
+        jsonReply(res, 409, {
+          error: `Cannot cancel — the job is not running (status: ${report.status}).`,
+          code: 'NOT_RUNNING',
         });
-        fs.createReadStream(job.filePath).pipe(res);
-      } catch (e) {
-        log('error', `Report download failed (${id}): ${e.message}`);
-        jsonReply(res, 500, { error: 'Failed to stream report file' });
-      }
-      return true;
-    }
-  
-    // POST /violation-cache/report/:id/cancel
-    if (method === 'POST' && cancelMatch) {
-      const id  = cancelMatch[1];
-      const job = reportJobs.get(id);
-      if (!job) { jsonReply(res, 404, { error: 'Report not found' }); return true; }
-      if (job.status !== 'running') {
-        jsonReply(res, 409, { error: `Cannot cancel — job is not running (status: ${job.status})` });
         return true;
       }
-      job.cancelFlag.cancelled = true;
-      job.cancelReason = 'user';
-      log('info', `Report job ${id} cancel requested by user`);
+      if (!reports.requestCancel(reportId)) {
+        // The job is recorded as running but no process here owns it — a
+        // restart lost the worker. Fail it rather than leaving it stuck.
+        await reportsDb.setStatus(reportId, 'failed', {
+          error: 'The service restarted while this report was being generated.',
+        });
+        jsonReply(res, 200, { ok: true, message: 'Report marked as failed' });
+        return true;
+      }
+      log('info', 'Report cancellation requested', { userId, reportId });
       jsonReply(res, 200, { ok: true, message: 'Cancellation requested' });
-      return true;
+    } catch (err) {
+      log('error', `Report cancel failed: ${err.message}`, { userId, reportId });
+      jsonReply(res, 500, { error: 'Could not cancel the report.', code: 'INTERNAL' });
     }
-  
-    // DELETE /violation-cache/report/:id
-    if (method === 'DELETE' && idMatch) {
-      const id  = idMatch[1];
-      const job = reportJobs.get(id);
-      if (!job) { jsonReply(res, 404, { error: 'Report not found' }); return true; }
-      if (job.status === 'running') {
-        jsonReply(res, 409, { error: 'Cancel the job before deleting it' });
+    return true;
+  }
+
+  // ── DELETE /violation-cache/report/:id ────────────────────────────────────
+  if (method === 'DELETE' && idMatch) {
+    try {
+      const report = await reportsDb.getForUser(userId, reportId);
+      if (!report) { jsonReply(res, 404, { error: 'Report not found.', code: 'NOT_FOUND' }); return true; }
+      if (report.status === 'running') {
+        jsonReply(res, 409, { error: 'Cancel the job before deleting it.', code: 'STILL_RUNNING' });
         return true;
       }
-      // Delete the file only for completed jobs (failed jobs never produced a file)
-      if (job.status === 'completed' && job.filePath && fs.existsSync(job.filePath)) {
-        try { fs.unlinkSync(job.filePath); } catch (e) {
-          log('warn', `Could not delete report file ${job.filePath}: ${e.message}`);
-        }
-      }
-      reportJobs.delete(id);
-      saveRegistry();
-      log('info', `Report job ${id} deleted`);
+      await reportsDb.deleteForUser(userId, reportId);
+      log('info', 'Report deleted', { userId, reportId });
       jsonReply(res, 200, { ok: true });
-      return true;
+    } catch (err) {
+      log('error', `Report delete failed: ${err.message}`, { userId, reportId });
+      jsonReply(res, 500, { error: 'Could not delete the report.', code: 'INTERNAL' });
     }
+    return true;
+  }
 
   return false;
 }

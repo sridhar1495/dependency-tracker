@@ -59,11 +59,11 @@ write code that assumes a later phase has landed.
 | 0 | Postgres service, migration runner, connection pool, module split | **Merged** |
 | 1 | Schema, indexes, data-access modules | **Merged** |
 | 2 | Authentication backend | **Merged** |
-| 3 | Authentication frontend (`login.html`, `apiFetch`, profile) | **In review** |
-| 4 | Per-user DT connection | Not started |
-| 5 | Per-user settings, mail, multi-tenant scheduler | Not started |
-| 6 | Reports in the database | Not started |
-| 7 | Shared violation cache | Not started |
+| 3 | Authentication frontend (`login.html`, `apiFetch`, profile) | **Merged** |
+| 4 | Per-user DT connection | **In review** |
+| 5 | Per-user settings, mail, multi-tenant scheduler | **In review** |
+| 6 | Reports in the database | **In review** |
+| 7 | Shared violation cache | **In review** |
 | 8 | Installer, infrastructure, documentation | Not started |
 | 9 | Administration panel (read-only) | Not started |
 | 10 | Performance validation | Not started |
@@ -72,6 +72,13 @@ write code that assumes a later phase has landed.
 but still uses one shared DT connection. That interim state is a demo checkpoint and
 is **not** released to users, so no backwards-compatibility shims or feature flags
 are to be written for it.
+
+**Milestone M2 = phases 4–7**, delivered as one pull request rather than four. At the
+end of M2 every user has their own DependencyTrack connection, settings, mail
+configuration, schedule and reports, and the violation cache is shared by connection
+fingerprint. The single-tenant files (`app-config.json`, `violation-cache.json`, the
+report registry and the `/data/reports` directory) are gone; `/data` holds only
+`admin-credentials.json`.
 
 ---
 
@@ -93,9 +100,11 @@ dependency-tracker/
 │   │   ├── crypto.js           # scrypt, token mint/hash, AES-256-GCM
 │   │   ├── auth.js             # Sessions, token cache, rate limiting
 │   │   ├── validate.js         # Field validators (mirrored in the frontend)
-│   │   ├── users.js settings.js reports.js caches.js schedules.js
-│   │   └── dt-fetch.js excel.js mail.js
-│   ├── routes/                 # auth.js profile.js config.js reports.js …
+│   │   ├── users.js sessions.js login-audit.js admin.js
+│   │   ├── dt-connections.js user-settings.js mail-settings.js
+│   │   ├── reports-db.js caches.js schedules.js scheduler.js
+│   │   └── dt-fetch.js excel.js mail.js reports.js violation-cache.js
+│   ├── routes/                 # auth.js profile.js dt-proxy.js config.js reports.js schedule.js cache.js
 │   ├── server.test.js          # Unit tests for server helpers
 │   ├── dashboard.test.js       # Unit tests for dashboard helpers
 │   ├── db.test.js              # DB integration tier (opt-in)  [phase 1]
@@ -185,10 +194,9 @@ Inline comments use lettered prefixes to trace design decisions:
 - **O-numbers** — observability notes (`// O3: JSON log format for log aggregators`)
 - **S-numbers** — security rationale (`// S2: token hashed before storage`) — **new in revision 2**
 
-Highest numbers currently in use on `main`: **Q10, P5, O4**; no S-numbers yet, so
-start at **S1**. When adding logic with a non-obvious trade-off, add the next number
-in the appropriate series. Check the current maximum before assigning — parallel
-branches can claim the same number.
+Highest numbers currently in use: **Q13, P15, O5, S23**. When adding logic with a
+non-obvious trade-off, add the next number in the appropriate series. Check the
+current maximum before assigning — parallel branches can claim the same number.
 
 ### 4.6 Module Style (backend)
 
@@ -499,8 +507,10 @@ Every call to `/violation-cache/*` uses the `apiFetch(path, opts)` wrapper, whic
 2. redirects to `login.html` when no token is present,
 3. clears the token and redirects on any 401.
 
-**Never call `fetch()` directly against a backend route.** Direct calls to the DT
-API (`/api/*`) still use `X-Api-Key` and are the one exception.
+**Never call `fetch()` directly against a backend route.** There is no exception:
+DependencyTrack is reached through `DT_PROXY` (`/violation-cache/dt/…`) on the same
+backend, which attaches the signed-in user's API key server-side. The browser holds
+no DependencyTrack credentials at all.
 
 ### 8.4 Auth gate
 
@@ -524,6 +534,9 @@ Flat, module-scoped globals, no reactive framework.
 | `_configPanelDirty` | boolean | Unsaved changes in config panel |
 | `_appConfig` | object \| null | Last fetched app config |
 | `_currentUser` | object \| null | Authenticated principal |
+| `dtConfigured` | boolean | Server reports a usable DT connection for this user |
+| `dtApiUrl` / `dtFrontendUrl` | string | Shown in Settings; requests never use them directly |
+| `dtHasApiKey` | boolean | A key is stored — **never its value** |
 
 Never mutate `allProjects` after initial load. Derive everything else from it.
 
@@ -612,11 +625,11 @@ The frontend never performs uniqueness checks — those are backend-only, via
 
 `dashboard/nginx.conf.template` uses `envsubst` placeholders (`${VAR_NAME}`).
 
-- `/api/*` → DT API server (upstream resolved at request time, not startup).
-- `/violation-cache/*` → `dt-violation-cache:3001`.
+- `/auth/*`, `/profile` and `/violation-cache/*` → `dt-violation-cache:3001`.
 - SPA routing: `try_files $uri $uri/ /index.html`; `login.html` served directly.
-- The `/dt-config` block is **removed** in phase 4 — DT configuration is per-user
-  and no longer baked into nginx.
+- There is **no `/api/*` block and no `/dt-config` block**. DependencyTrack is
+  per-user, reached through `/violation-cache/dt/`; forwarding `/api/*` to one
+  shared instance would defeat both the per-user connection and §7.6.
 
 ### 9.2 docker-compose.yml conventions
 
@@ -810,8 +823,10 @@ aspirations, and each is verifiable.
 | `LOG_FORMAT` | server | `text` (default) or `json` |
 | `TEST_DATABASE_URL` | tests | Enables the database integration tier |
 
-Removed in phase 4: `DT_API_INTERNAL_URL`, `DT_API_KEY`, `DT_FRONTEND_URL` — these
-become per-user database values.
+`DT_API_INTERNAL_URL`, `DT_API_KEY` and `DT_FRONTEND_URL` are **no longer read at
+request time**. They survive in `.env` only so an installation upgrading from the
+single-tenant build can seed its existing accounts once at first boot, guarded by a
+`system_state` marker. A fresh install leaves them blank.
 
 ---
 

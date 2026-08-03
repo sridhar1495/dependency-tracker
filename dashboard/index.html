@@ -995,15 +995,16 @@
     <!-- Connection section -->
     <div class="cfg-section">
       <div class="cfg-section-title" style="margin-bottom:12px">Connection</div>
-      <label class="cfg-label">DT API URL <span style="font-size:10px;color:var(--text-muted)">(blank = nginx proxy)</span></label>
+      <label class="cfg-label">DT API URL <span style="font-size:10px;color:var(--text-muted)">(your DependencyTrack API server)</span></label>
       <input id="cfgApiUrl" class="cfg-input" placeholder="https://dtrack.company.com" oninput="markConfigDirty()" />
       <label class="cfg-label">DT Frontend URL <span style="font-size:10px;color:var(--text-muted)">(optional — enables project links)</span></label>
       <input id="cfgFrontendUrl" class="cfg-input" placeholder="http://localhost:8080" oninput="markConfigDirty()" />
-      <label class="cfg-label">API Key</label>
+      <label class="cfg-label">API Key <span style="font-size:10px;color:var(--text-muted)">(stored encrypted; never shown again)</span></label>
       <input id="cfgApiKey" class="cfg-input" type="password" placeholder="odt_xxxxxxxxxxxxxxxxxxxxxxxxxx" oninput="markConfigDirty()" />
       <div id="cfgAutoKeyNote" style="display:none;margin-top:8px;font-size:12px;padding:6px 10px;background:var(--surface);border:1px solid var(--border);border-radius:6px;color:var(--ok)"></div>
-      <div style="display:flex;gap:8px;margin-top:12px">
+      <div style="display:flex;gap:8px;margin-top:12px;flex-wrap:wrap">
         <button class="btn primary" onclick="connectFromPanel()">Connect</button>
+        <button id="cfgTestConnBtn" class="btn" onclick="testConnectionFromPanel()">Test Connection</button>
         <button class="btn" onclick="loadMockData(); closeConfigPanel(true)">Use Mock Data</button>
       </div>
     </div>
@@ -1180,11 +1181,13 @@ let parentUuids      = new Set(); // cached in afterLoad(); never recomputed dur
 let currentMatchSet  = null;      // last filter match set; reused by lighter expand/collapse render
 let filterLatestOnly = false; // when true: show only isLatest=true projects + ancestors
 let liveMode         = false;
-let apiKey           = localStorage.getItem('dt_api_key')      || '';  // persisted so reloads re-connect automatically
-let apiBaseUrl       = localStorage.getItem('dt_api_url')      || '';  // '' = use nginx proxy
-let dtFrontendUrl    = localStorage.getItem('dt_frontend_url') || '';  // DT UI base URL for project hyperlinks
-let dtProxyTarget    = '';  // raw DT_API_INTERNAL_URL from /dt-config (informational)
-let preconfiguredKey = false;  // true when apiKey came from DT_API_KEY env var (auto-connect)
+// The DependencyTrack connection belongs to the signed-in account and lives
+// encrypted in the database. The browser never holds the API key: DT calls go
+// through the backend proxy, which injects it server-side (CLAUDE.md §7.6).
+let dtConfigured     = false;  // server reports a usable connection for this user
+let dtApiUrl         = '';     // shown in Settings; requests never use it directly
+let dtFrontendUrl    = '';     // DT UI base URL for project hyperlinks
+let dtHasApiKey      = false;  // a key is stored — never its value
 let _cachePollTimer  = null;   // setInterval id for polling /violation-cache/status
 let flatView         = false;  // when true: leaf-only flat list, no hierarchy
 let _searchDebounce    = null;   // timer id for search input debounce (200 ms)
@@ -1200,6 +1203,11 @@ let _currentUser      = null;    // authenticated principal from /auth/me
 // The bearer token lives in localStorage, so it is shared across tabs of one
 // browser but not across browsers — the required behaviour (CLAUDE.md §7.2).
 const TOKEN_KEY = 'dt_session_token';
+
+// Every DependencyTrack path is prefixed with this and forwarded by the backend
+// with the signed-in user's API key attached (CLAUDE.md §7.6). The browser has
+// no DT credentials of any kind.
+const DT_PROXY = '/violation-cache/dt';
 
 function getToken()  { return localStorage.getItem(TOKEN_KEY); }
 function clearToken() { localStorage.removeItem(TOKEN_KEY); }
@@ -1218,8 +1226,8 @@ function goToLogin(reason) {
  * 2. redirects to the sign-in page when no token is present
  * 3. clears the token and redirects on any 401
  *
- * Direct calls to the DependencyTrack API (/api/*) still use fetch() with
- * X-Api-Key and are the one documented exception.
+ * There is no exception any more: DependencyTrack is reached through
+ * `DT_PROXY` on this same backend, so those calls go through here too.
  */
 async function apiFetch(path, opts) {
   const token = getToken();
@@ -1455,6 +1463,20 @@ function closeConfigPanel(force = false) {
 
 function markConfigDirty() { _configPanelDirty = true; }
 
+/**
+ * Record the connection the server reported.
+ *
+ * `hasApiKey` is the only thing said about the key itself — its value is never
+ * transmitted (CLAUDE.md §7.6).
+ */
+function applyConnection(conn) {
+  const c = conn || {};
+  dtApiUrl      = c.apiUrl || '';
+  dtFrontendUrl = c.frontendUrl || '';
+  dtConfigured  = !!c.isConfigured;
+  dtHasApiKey   = !!c.hasApiKey;
+}
+
 function resetMaxReports() {
   document.getElementById('cfgMaxReports').value = 10;
   markConfigDirty();
@@ -1467,15 +1489,17 @@ async function loadConfigFromServer() {
     const data = await r.json();
     const cfg = data.config || {};
     _appConfig = cfg;
+    applyConnection(data.connection);
 
-    // Connection
-    document.getElementById('cfgApiUrl').value      = apiBaseUrl || '';
+    // Connection. The key field is write-only — the server never sends it back,
+    // so a blank box means "leave the stored key alone".
+    document.getElementById('cfgApiUrl').value      = dtApiUrl || '';
     document.getElementById('cfgFrontendUrl').value = dtFrontendUrl || '';
     document.getElementById('cfgApiKey').value      = '';
     const autoNote = document.getElementById('cfgAutoKeyNote');
-    if (data.apiKey) {
+    if (dtHasApiKey) {
       autoNote.style.display = '';
-      autoNote.textContent   = '✓ API key configured' + (data.envFileMounted ? ' (from .env file)' : '') + '.';
+      autoNote.textContent   = '✓ API key configured. Leave blank to keep it, or enter a new one to replace it.';
     } else {
       autoNote.style.display = 'none';
     }
@@ -1710,35 +1734,20 @@ async function saveConfigPanel() {
       }
     } catch (_) { /* report list unavailable — proceed without check */ }
 
-    const apiKeyVal = document.getElementById('cfgApiKey').value.trim();
-    const urlVal    = (document.getElementById('cfgApiUrl').value || '').trim().replace(/\/$/, '');
-    const frontVal  = (document.getElementById('cfgFrontendUrl').value || '').trim().replace(/\/$/, '');
-
+    // The connection and every setting are saved in one request, so a partial
+    // failure cannot leave the account half-configured.
     const r = await apiFetch('/violation-cache/config', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ config }),
+      body: JSON.stringify({ connection: readConnectionForm(), config }),
     });
     if (!r.ok) {
       const bd = await r.json().catch(() => ({}));
       showToast(`Save failed: ${bd.error || r.statusText}`, 'error');
       return;
     }
-    if (apiKeyVal) {
-      await apiFetch('/violation-cache/config', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ apiKey: apiKeyVal }),
-      }).catch(() => {});
-      apiKey = apiKeyVal;
-      localStorage.setItem('dt_api_key', apiKey);
-    }
-    apiBaseUrl    = urlVal;
-    dtFrontendUrl = frontVal;
-    if (apiBaseUrl)    localStorage.setItem('dt_api_url', apiBaseUrl);
-    else               localStorage.removeItem('dt_api_url');
-    if (dtFrontendUrl) localStorage.setItem('dt_frontend_url', dtFrontendUrl);
-    else               localStorage.removeItem('dt_frontend_url');
+    const saved = await r.json().catch(() => ({}));
+    applyConnection(saved.connection);
 
     _configPanelDirty = false;
     showToast('Settings saved.', 'success');
@@ -1752,29 +1761,64 @@ async function saveConfigPanel() {
 
 function cancelConfigPanel() { closeConfigPanel(false); }
 
+/** The connection fields as the server expects them. A blank key is omitted. */
+function readConnectionForm() {
+  const conn = {
+    apiUrl:      (document.getElementById('cfgApiUrl').value || '').trim().replace(/\/$/, ''),
+    frontendUrl: (document.getElementById('cfgFrontendUrl').value || '').trim().replace(/\/$/, ''),
+  };
+  const key = document.getElementById('cfgApiKey').value.trim();
+  if (key) conn.apiKey = key;
+  return conn;
+}
+
+/** Save just the connection, then load live data with it. */
 async function connectFromPanel() {
-  const apiKeyVal = document.getElementById('cfgApiKey').value.trim();
-  if (apiKeyVal) {
-    apiKey = apiKeyVal;
-    preconfiguredKey = false;
-    localStorage.setItem('dt_api_key', apiKey);
+  try {
+    const r = await apiFetch('/violation-cache/config', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ connection: readConnectionForm() }),
+    });
+    if (!r.ok) {
+      const bd = await r.json().catch(() => ({}));
+      showToast(`Could not save the connection: ${bd.error || r.statusText}`, 'error');
+      return;
+    }
+    applyConnection((await r.json()).connection);
+  } catch (e) {
+    showToast(`Could not save the connection: ${e.message}`, 'error');
+    return;
   }
-  const urlVal   = (document.getElementById('cfgApiUrl').value || '').trim().replace(/\/$/, '');
-  const frontVal = (document.getElementById('cfgFrontendUrl').value || '').trim().replace(/\/$/, '');
-  apiBaseUrl    = urlVal;
-  dtFrontendUrl = frontVal;
-  if (apiBaseUrl)    localStorage.setItem('dt_api_url', apiBaseUrl);
-  else               localStorage.removeItem('dt_api_url');
-  if (dtFrontendUrl) localStorage.setItem('dt_frontend_url', dtFrontendUrl);
-  else               localStorage.removeItem('dt_frontend_url');
-  if (apiKeyVal) {
-    apiFetch('/violation-cache/config', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ apiKey }),
-    }).catch(() => {});
+  if (!dtConfigured) {
+    showToast('Enter both a DependencyTrack URL and an API key to connect.', 'warn');
+    return;
   }
   closeConfigPanel(true);
   await connectLiveApi();
+}
+
+/** Probe DependencyTrack with what is on screen, without saving it. */
+async function testConnectionFromPanel() {
+  const btn = document.getElementById('cfgTestConnBtn');
+  if (btn) { btn.disabled = true; btn.textContent = 'Testing…'; }
+  try {
+    const r = await apiFetch('/violation-cache/config/test-connection', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(readConnectionForm()),
+    });
+    const d = await r.json().catch(() => ({}));
+    if (r.ok && d.ok) {
+      showToast(`Connected to DependencyTrack${d.version ? ' ' + d.version : ''}.`, 'success');
+    } else {
+      showToast(d.error || `Connection test failed (HTTP ${r.status}).`, 'error');
+    }
+  } catch (e) {
+    showToast(`Connection test failed: ${e.message}`, 'error');
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = 'Test Connection'; }
+  }
 }
 
 async function testEmailFromPanel() {
@@ -1883,20 +1927,24 @@ async function scheduleReports() {
   );
   if (!ok) return;
   try {
-    const newCfg = JSON.parse(JSON.stringify(cfg));
-    if (!newCfg.schedule) newCfg.schedule = {};
-    newCfg.schedule.projectUuids = leafUuids;
+    // Names and versions travel with the UUIDs so the schedule list stays
+    // readable even if a project is later removed from DependencyTrack.
+    const byUuid = new Map(allProjects.map(p => [p.uuid, p]));
+    const projects = leafUuids.map(uuid => {
+      const p = byUuid.get(uuid);
+      return { uuid, name: p ? p.name : '', version: p ? p.version : '' };
+    });
+
     const r = await apiFetch('/violation-cache/config', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ config: newCfg }),
+      body: JSON.stringify({ config: { schedule: { ...(cfg.schedule || {}), projects } } }),
     });
     if (!r.ok) {
       const bd = await r.json().catch(() => ({}));
       showToast(`Failed to schedule: ${bd.error || r.statusText}`, 'error');
       return;
     }
-    _appConfig = newCfg;
 
     // Explicitly arm the scheduler now that project UUIDs are saved.
     // Config saves alone no longer start the timer.
@@ -2706,12 +2754,12 @@ function setStatus(text, color, pulsing) {
 }
 
 // localStorage keys:
-//   dt_api_key      — API key entered via the Connect modal (persists across reloads)
-//   dt_api_url      — DT API base URL override ('' = use nginx proxy)
-//   dt_frontend_url — DT UI base URL for project hyperlinks
-//   dt_theme        — 'light' | 'dark' colour scheme preference
-// Project and violation data are never persisted to localStorage — they are
-// always fetched fresh from the live API and cache service on each page load.
+//   dt_session_token — bearer token for this browser's session
+//   dt_theme         — 'light' | 'dark' colour scheme preference
+// That is the whole list. The DependencyTrack URL, frontend URL and API key
+// used to live here too; they are now per-user rows in the database, and the
+// key never leaves the server (CLAUDE.md §7.6). Project and violation data are
+// never persisted — they are fetched fresh on each page load.
 
 
 // ── Export CSV ─────────────────────────────────────────────────────────────
@@ -2834,7 +2882,7 @@ function loadMockData() {
 // This minimises API round-trips: leaf projects (≈ 80-90% of the tree) never
 // trigger a /children fetch; metrics are embedded in every response object so
 // the separate /metrics per-project loop in Phase 3 is no longer needed.
-async function fetchAllProjects(key) {
+async function fetchAllProjects() {
   const pageSize = CONFIG.PROJECT_PAGE_SIZE;
   const signal   = _fetchController ? _fetchController.signal : undefined;
 
@@ -2842,11 +2890,16 @@ async function fetchAllProjects(key) {
     let page = 1, all = [];
     while (true) {
       const sep = url.includes('?') ? '&' : '?';
-      const res = await fetch(
-        `${url}${sep}pageSize=${pageSize}&pageNumber=${page}&excludeInactive=true`,
-        { headers: { 'X-Api-Key': key }, signal }
+      // DT_PROXY prefixes every DependencyTrack path. The key is added by the
+      // backend from this user's stored connection — it is never in the browser.
+      const res = await apiFetch(
+        `${DT_PROXY}${url}${sep}pageSize=${pageSize}&pageNumber=${page}&excludeInactive=true`,
+        { signal }
       );
-      if (!res.ok) throw new Error(`HTTP ${res.status} — check your API key`);
+      if (!res.ok) {
+        const detail = await res.json().catch(() => ({}));
+        throw new Error(detail.error || `HTTP ${res.status} — check your DependencyTrack connection`);
+      }
       const data = await res.json();
       const batch = Array.isArray(data.values) ? data.values
                   : Array.isArray(data)        ? data
@@ -2860,7 +2913,7 @@ async function fetchAllProjects(key) {
   }
 
   // Level 0 — root projects only
-  const roots = await fetchAllPages(`${apiBaseUrl}/api/v1/project?onlyRoot=true`);
+  const roots = await fetchAllPages('/api/v1/project?onlyRoot=true');
   const all = [...roots];
 
   // BFS — fire ALL same-level /children calls in full parallel.
@@ -2877,7 +2930,7 @@ async function fetchAllProjects(key) {
     const results = await Promise.all(parents.map(async parentProj => {
       try {
         const children = await fetchAllPages(
-          `${apiBaseUrl}/api/v1/project/${parentProj.uuid}/children`
+          `/api/v1/project/${parentProj.uuid}/children`
         );
         // Stamp parent reference on each child so the pipeline can read
         // p.parent?.uuid correctly without any extra resolution step.
@@ -2965,7 +3018,7 @@ function extractMetrics(p, violationMap) {
 //   stale     — file exists but TTL has expired
 //   building  — job is currently running
 //   none      — no file yet (first boot or file deleted)
-//   no-key    — DT_API_KEY not configured on the service
+//   no-key    — this account has no DependencyTrack connection configured
 
 // Poll /violation-cache/status every 5 s until the job completes, then apply.
 // Cancelled automatically when _fetchController changes (i.e. on Refresh/reconnect).
@@ -2993,11 +3046,8 @@ function startCachePoll() {
       } else if (s.status === 'ready') {
         clearInterval(_cachePollTimer); _cachePollTimer = null;
         try {
-          const dr = await apiFetch('/violation-cache/data');
-          if (!dr.ok) throw new Error(`HTTP ${dr.status}`);
-          const cacheJson = await dr.json();
-          applyViolationData(new Map(Object.entries(cacheJson.map || {})));
-          banner.innerHTML = buildReadyBanner(cacheJson);
+          applyViolationData(await fetchCacheMap());
+          banner.innerHTML = buildReadyBanner(s);
           banner.className = 'data-banner live';
         } catch(e) {
           banner.innerHTML =
@@ -3019,13 +3069,26 @@ function startCachePoll() {
   }, CONFIG.CACHE_POLL_MS);
 }
 
-function buildReadyBanner(cacheJson) {
-  const ageMs  = Date.now() - new Date(cacheJson.generatedAt).getTime();
+/**
+ * Fetch the cached count map.
+ *
+ * The body is the map on its own — the build metadata the banner needs comes
+ * from /status, so the payload can be stored gzipped and streamed straight
+ * through without a decompress/recompress round trip on the server.
+ */
+async function fetchCacheMap() {
+  const dr = await apiFetch('/violation-cache/data');
+  if (!dr.ok) throw new Error(`HTTP ${dr.status}`);
+  return new Map(Object.entries(await dr.json()));
+}
+
+function buildReadyBanner(status) {
+  const ageMs  = Date.now() - new Date(status.generatedAt).getTime();
   const ageH   = Math.floor(ageMs / 3_600_000);
   const ageMin = Math.floor((ageMs % 3_600_000) / 60_000);
   const ageStr = ageH > 0 ? `${ageH}h ${ageMin}m ago` : `${ageMin}m ago`;
-  const failNote = (cacheJson.failedPipelines || 0) > 0
-    ? ` <span class="banner-warn">⚠ ${cacheJson.failedPipelines} pipeline(s) had errors — data may be partial.</span>`
+  const failNote = (status.failedPipelines || 0) > 0
+    ? ` <span class="banner-warn">⚠ ${status.failedPipelines} pipeline(s) had errors — data may be partial.</span>`
     : '';
   return (
     `✓ Live — ${allProjects.length} projects. ` +
@@ -3046,28 +3109,21 @@ async function loadViolationCache() {
 
     if (status.status === 'ready') {
       // ── Happy path: serve instantly from cache ───────────────────────────
-      const dr = await apiFetch('/violation-cache/data');
-      if (!dr.ok) throw new Error(`Data HTTP ${dr.status}`);
-      const cacheJson = await dr.json();
-      applyViolationData(new Map(Object.entries(cacheJson.map || {})));
-      banner.innerHTML = buildReadyBanner(cacheJson);
+      applyViolationData(await fetchCacheMap());
+      banner.innerHTML = buildReadyBanner(status);
       banner.className = 'data-banner live';
 
     } else if (status.status === 'stale') {
       // ── Stale: apply old data immediately, rebuild silently in background ─
       try {
-        const dr = await apiFetch('/violation-cache/data');
-        if (dr.ok) {
-          const cacheJson = await dr.json();
-          const ageH = Math.floor(
-            (Date.now() - new Date(cacheJson.generatedAt).getTime()) / 3_600_000
-          );
-          applyViolationData(new Map(Object.entries(cacheJson.map || {})));
-          banner.innerHTML =
-            `✓ Live — ${allProjects.length} projects. ` +
-            `⚠ Violation cache expired (${ageH}h old) — refreshing in background…`;
-          banner.className = 'data-banner';
-        }
+        const ageH = Math.floor(
+          (Date.now() - new Date(status.generatedAt).getTime()) / 3_600_000
+        );
+        applyViolationData(await fetchCacheMap());
+        banner.innerHTML =
+          `✓ Live — ${allProjects.length} projects. ` +
+          `⚠ Violation cache expired (${ageH}h old) — refreshing in background…`;
+        banner.className = 'data-banner';
       } catch(_) {}
       await apiFetch('/violation-cache/refresh', { method: 'POST' }).catch(() => {});
       startCachePoll();
@@ -3082,11 +3138,11 @@ async function loadViolationCache() {
       startCachePoll();
 
     } else if (status.status === 'no-key') {
-      // ── No API key on service: operational/license counts will stay zero ──
+      // ── No usable connection: operational/license counts stay zero ───────
       banner.innerHTML =
         `✓ Live — ${allProjects.length} projects. ` +
         `<span class="banner-warn">⚠ Violation cache unavailable — ` +
-        `DT_API_KEY not configured on the cache service.</span>`;
+        `${escHtml(status.reason || 'configure your DependencyTrack connection in Settings')}.</span>`;
       banner.className = 'data-banner';
 
     } else {
@@ -3176,14 +3232,17 @@ async function connectLiveApi() {
   if (_fetchController) _fetchController.abort();
   _fetchController = new AbortController();
 
-  // Connection state (apiKey, apiBaseUrl, dtFrontendUrl) is set before calling this function.
-
-  if (!apiKey) { alert('Please enter an API key.'); return; }
+  // The connection is server-side. applyConnection() has already recorded
+  // whether this account has a usable one.
+  if (!dtConfigured) {
+    showToast('Configure your DependencyTrack connection in ⚙ Settings first.', 'warn');
+    return false;
+  }
 
   try {
     // Phase 1 — project hierarchy
     setStatus('Fetching projects…', 'var(--medium)', true);
-    const projects = await fetchAllProjects(apiKey);
+    const projects = await fetchAllProjects();
 
     if (projects.length === 0) {
       liveMode = true;
@@ -3264,104 +3323,33 @@ function escHtml(s) {
     .replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 }
 
-// ── Returns true when a URL's hostname can be resolved by the browser ──────
-// Docker-internal service names (e.g. "dtrack-apiserver") have no dots and
-// are not localhost/IPs, so the browser can't reach them directly.
-function isBrowserReachable(url) {
-  try {
-    const { hostname } = new URL(url);
-    return hostname === 'localhost'
-        || /^\d+\.\d+\.\d+\.\d+$/.test(hostname)   // plain IPv4
-        || hostname.includes('.');                   // any domain name
-  } catch(_) { return false; }
-}
-
-// ── Fetch config from nginx /dt-config ─────────────────────────────────────
-// Reads:
-//   proxyTarget – DT_API_INTERNAL_URL (informational; used to pre-fill modal)
-//   apiKey      – DT_API_KEY baked at container start (fallback only)
-//   frontendUrl – DT_FRONTEND_URL (optional)
+// ── Load this user's DependencyTrack connection ────────────────────────────
+// The connection belongs to the signed-in account and lives encrypted in the
+// database. The browser is told only the URLs and whether a key is stored — the
+// key itself is never sent (CLAUDE.md §7.6).
 //
-// Returns true if an auto-connect was triggered (caller should skip loadMockData).
-//
-// Key priority (highest → lowest):
-//   1. Cache service effective key (GET /violation-cache/config) — reads from
-//      the .env file, so a token saved via the UI on a previous session is
-//      picked up even after a container restart.
-//   2. Startup env key from nginx /dt-config (DT_API_KEY baked at image build).
-//   3. Key previously saved in localStorage by the Connect modal.
-//
-// NOTE: dtFrontendUrl is intentionally NOT set from /dt-config. DT_API_INTERNAL_URL
-// is the nginx-to-API backend URL and is almost always different from the DT
-// Frontend URL that users open in their browser.
-async function loadDtConfig() {
-  // ── Step 1: ask the cache service for the persisted effective key ──────────
-  // This is the authoritative source: it reads the bind-mounted .env file which
-  // is updated whenever the user saves a new token through the Connect modal.
-  // On success it takes priority over the startup env var from /dt-config.
-  let persistedKey = '';
+// Returns true when live data was loaded, so the caller knows whether to fall
+// back to demo data.
+async function loadDtConnection() {
   try {
-    const cr = await apiFetch('/violation-cache/config', { signal: AbortSignal.timeout(CONFIG.PROBE_TIMEOUT_MS) });
-    if (cr.ok) {
-      const ccfg = await cr.json();
-      if (ccfg.apiKey && typeof ccfg.apiKey === 'string') {
-        persistedKey = ccfg.apiKey.trim();
-      }
-    }
-  } catch(_) { /* cache service unreachable — fall through to /dt-config */ }
-
-  // ── Step 2: fetch nginx /dt-config for proxy target + frontend URL ─────────
-  let nginxApiKey = '';
-  try {
-    const r = await fetch('/dt-config', { signal: AbortSignal.timeout(CONFIG.PROBE_TIMEOUT_MS) });
-    if (r.ok) {
-      const cfg = await r.json();
-      if (cfg.proxyTarget) {
-        const target = cfg.proxyTarget.replace(/\/$/, '');
-        dtProxyTarget = target;
-
-        // If the user hasn't manually saved an API URL and the proxy target is
-        // reachable from the browser, pre-fill it (surfaces DT_API_INTERNAL_URL).
-        if (!localStorage.getItem('dt_api_url') && isBrowserReachable(target)) {
-          apiBaseUrl = target;
-        }
-      }
-
-      // Apply pre-configured frontend URL (DT_FRONTEND_URL env var) only when
-      // the user has not already saved a value in localStorage.
-      if (cfg.frontendUrl && !localStorage.getItem('dt_frontend_url')) {
-        dtFrontendUrl = cfg.frontendUrl.replace(/\/$/, '');
-      }
-
-      if (cfg.apiKey && typeof cfg.apiKey === 'string') {
-        nginxApiKey = cfg.apiKey.trim();
-      }
-    }
-  } catch(_) { /* silently ignore */ }
-
-  // ── Step 3: resolve the best available key and auto-connect ───────────────
-  // Priority: persisted key (cache service .env) > startup nginx key > localStorage.
-  const resolvedKey = persistedKey || nginxApiKey;
-  if (resolvedKey) {
-    apiKey = resolvedKey;
-    localStorage.setItem('dt_api_key', apiKey);  // keep localStorage in sync
-    preconfiguredKey = !!(nginxApiKey && resolvedKey === nginxApiKey && !persistedKey);
-    const banner = document.getElementById('dataBanner');
-    banner.innerHTML = '⏳ Connecting to DependencyTrack…';
-    banner.className = 'data-banner';
-    return await connectLiveApi();
+    const r = await apiFetch('/violation-cache/config',
+      { signal: AbortSignal.timeout(CONFIG.PROBE_TIMEOUT_MS) });
+    if (!r.ok) return false;
+    const data = await r.json();
+    _appConfig = data.config || {};
+    applyConnection(data.connection);
+  } catch (_) {
+    // The backend is unreachable. Demo data with the usual banner is the right
+    // degradation here (CLAUDE.md §11.2).
+    return false;
   }
 
-  // No server-side key — try the key previously saved via the Connect modal.
-  if (apiKey) {
-    preconfiguredKey = false;
-    const banner = document.getElementById('dataBanner');
-    banner.innerHTML = '⏳ Connecting to DependencyTrack…';
-    banner.className = 'data-banner';
-    return await connectLiveApi();
-  }
+  if (!dtConfigured) return false;
 
-  return false;
+  const banner = document.getElementById('dataBanner');
+  banner.innerHTML = '⏳ Connecting to DependencyTrack…';
+  banner.className = 'data-banner';
+  return await connectLiveApi();
 }
 
 // ── Theme (dark / light) ──────────────────────────────────────────────────
@@ -3950,6 +3938,7 @@ window.onSchedFreqChange      = onSchedFreqChange;
 window.saveConfigPanel      = saveConfigPanel;
 window.cancelConfigPanel    = cancelConfigPanel;
 window.connectFromPanel     = connectFromPanel;
+window.testConnectionFromPanel = testConnectionFromPanel;
 window.testEmailFromPanel   = testEmailFromPanel;
 window.cancelSchedule       = cancelSchedule;
 window.scheduleReports      = scheduleReports;
@@ -3973,10 +3962,10 @@ window.scheduleReports      = scheduleReports;
     if (wrap && !wrap.contains(e.target)) closeUserMenu();
   });
 
-  // loadDtConfig() auto-connects when DT_API_KEY is configured in the environment.
-  // Fall back to mock data only when no auto-connect is available.
-  loadDtConfig().then(autoConnected => {
-    if (!autoConnected) loadMockData();
+  // loadDtConnection() connects when this account has a DependencyTrack
+  // connection saved. Fall back to demo data when it does not.
+  loadDtConnection().then(connected => {
+    if (!connected) loadMockData();
   });
 
   // Check for schedule failure notifications from the server

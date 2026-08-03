@@ -1083,7 +1083,7 @@ describe('apiFetch contract in index.html', () => {
 
   test('every backend call site uses apiFetch', () => {
     const wrapped = INDEX_HTML.match(/apiFetch\((['`])\/violation-cache/g) || [];
-    assert.ok(wrapped.length >= 31, `expected at least 31 apiFetch call sites, found ${wrapped.length}`);
+    assert.ok(wrapped.length >= 29, `expected at least 29 apiFetch call sites, found ${wrapped.length}`);
   });
 
   test('apiFetch attaches the bearer header and handles 401', () => {
@@ -1093,9 +1093,38 @@ describe('apiFetch contract in index.html', () => {
       'apiFetch must treat 401 as "go to the login page"');
   });
 
-  test('DependencyTrack calls still use X-Api-Key and are not wrapped', () => {
-    assert.match(INDEX_HTML, /'X-Api-Key'/,
-      'direct /api/* calls keep using X-Api-Key — the documented exception');
+  test('the browser holds no DependencyTrack credentials at all', () => {
+    // The dashboard used to send X-Api-Key from localStorage. Both the header
+    // and the stored key are gone: DT is reached through the backend proxy,
+    // which injects the signed-in user's key (CLAUDE.md §7.6).
+    assert.doesNotMatch(INDEX_HTML, /X-Api-Key/,
+      'the dashboard must never send a DependencyTrack API key');
+    for (const key of ['dt_api_key', 'dt_api_url', 'dt_frontend_url']) {
+      assert.doesNotMatch(INDEX_HTML, new RegExp(`localStorage[^\\n]*${key}`),
+        `${key} must no longer be read from or written to localStorage`);
+    }
+  });
+
+  test('DependencyTrack calls go through the backend proxy, via apiFetch', () => {
+    assert.match(INDEX_HTML, /const DT_PROXY = '\/violation-cache\/dt'/,
+      'the proxy prefix must be declared once');
+    assert.match(INDEX_HTML, /apiFetch\(\s*`\$\{DT_PROXY\}/,
+      'DT pages must be fetched through apiFetch with the proxy prefix');
+    // No path may address DependencyTrack directly any more.
+    const direct = INDEX_HTML.match(/fetch\((['`])\/api\/v1/g) || [];
+    assert.equal(direct.length, 0, 'no bare fetch() may target /api/v1 any more');
+  });
+
+  test('the connection panel never receives the stored API key', () => {
+    // The server sends `hasApiKey`, never the key. If the panel ever read a
+    // key field back, the value would be in the DOM.
+    const assignments = INDEX_HTML.match(/cfgApiKey'\)\.value\s*=\s*[^;]+/g) || [];
+    assert.ok(assignments.length > 0, 'the field must at least be cleared on load');
+    for (const a of assignments) {
+      assert.match(a, /=\s*''\s*$/, `the API key field may only be cleared, found: ${a.trim()}`);
+    }
+    assert.match(INDEX_HTML, /dtHasApiKey/,
+      'the panel must render from hasApiKey rather than from a key value');
   });
 
   test('the session token key matches the one login.html writes', () => {
