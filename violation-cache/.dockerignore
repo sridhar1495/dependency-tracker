@@ -1,8 +1,11 @@
 # Exclude everything that is not needed inside the container image.
 # server.js plus db/, lib/ and routes/ are COPYed, so this is a safety net.
+#
+# package-lock.json is NOT excluded: the Dockerfile runs `npm ci`, which reads
+# it, so ignoring it here would fail the build (CLAUDE.md §9.3). Anything the
+# Dockerfile COPYs must be reachable in the build context.
 node_modules
 npm-debug.log
-package-lock.json
 *.test.js
 *.md
 .env
