@@ -2097,3 +2097,153 @@ describe('schedule/arm endpoint guard', () => {
     assert.equal(r.ok, false);
   });
 });
+
+// ── lib/config.js — environment parsing ───────────────────────────────────────
+// lib/config.js performs no I/O at require time, so it is imported directly
+// rather than duplicated (CLAUDE.md §10.3). parseConfig() takes the environment
+// as a parameter, so nothing here mutates process.env.
+
+const { parseConfig, DEFAULTS } = require('./lib/config');
+
+/** Minimum environment for a valid configuration. */
+const baseEnv = () => ({ POSTGRES_PASSWORD: 'pw' });
+
+describe('parseConfig — defaults', () => {
+  test('applies documented defaults when only the password is supplied', () => {
+    const c = parseConfig(baseEnv());
+    assert.equal(c.port, 3001);
+    assert.equal(c.logFormat, 'text');
+    assert.equal(c.cacheDir, '/data');
+    assert.equal(c.db.host, 'dt-postgres');
+    assert.equal(c.db.port, 5432);
+    assert.equal(c.db.user, 'dtdash');
+    assert.equal(c.db.database, 'dtdash');
+    assert.equal(c.reportConcurrency, 5);
+    assert.equal(c.violationConcurrency, 3);
+    assert.equal(c.cacheTtlMs, 24 * 3_600_000);
+    assert.equal(c.session.absoluteHours, 8);
+    assert.equal(c.session.idleHours, 2);
+  });
+
+  test('pool sizing and timeouts are fixed by design, not by environment', () => {
+    const c = parseConfig({ ...baseEnv(), POSTGRES_MAX: '999', STATEMENT_TIMEOUT: '1' });
+    assert.equal(c.db.max, 15);
+    assert.equal(c.db.statementTimeoutMs, 30_000);
+    assert.equal(c.db.idleInTransactionTimeoutMs, 30_000);
+  });
+
+  test('derives all file paths from CACHE_DIR', () => {
+    const c = parseConfig({ ...baseEnv(), CACHE_DIR: '/srv/dt' });
+    assert.equal(c.paths.cacheFile,  '/srv/dt/violation-cache.json');
+    assert.equal(c.paths.cacheTmp,   '/srv/dt/violation-cache.tmp.json');
+    assert.equal(c.paths.configFile, '/srv/dt/app-config.json');
+    assert.equal(c.paths.reportDir,  '/srv/dt/reports');
+    assert.equal(c.paths.schedDir,   '/srv/dt/scheduled-reports');
+    assert.equal(c.paths.adminCreds, '/srv/dt/admin-credentials.json');
+  });
+
+  test('an empty string falls back to the default rather than being accepted', () => {
+    const c = parseConfig({ ...baseEnv(), PORT: '', LOG_FORMAT: '' });
+    assert.equal(c.port, Number(DEFAULTS.PORT));
+    assert.equal(c.logFormat, 'text');
+  });
+
+  test('returns a frozen object so no module can mutate shared config', () => {
+    const c = parseConfig(baseEnv());
+    assert.equal(Object.isFrozen(c), true);
+  });
+});
+
+describe('parseConfig — overrides', () => {
+  test('honours supplied values', () => {
+    const c = parseConfig({
+      POSTGRES_PASSWORD: 'pw', PORT: '4000', LOG_FORMAT: 'json',
+      POSTGRES_HOST: 'db.internal', POSTGRES_PORT: '6543',
+      POSTGRES_USER: 'app', POSTGRES_DB: 'appdb',
+      CACHE_TTL_HOURS: '6', REPORT_CONCURRENCY: '9', VIOLATION_CONCURRENCY: '2',
+      SESSION_ABSOLUTE_HOURS: '12', SESSION_IDLE_HOURS: '3',
+    });
+    assert.equal(c.port, 4000);
+    assert.equal(c.logFormat, 'json');
+    assert.equal(c.db.host, 'db.internal');
+    assert.equal(c.db.port, 6543);
+    assert.equal(c.db.user, 'app');
+    assert.equal(c.db.database, 'appdb');
+    assert.equal(c.cacheTtlMs, 6 * 3_600_000);
+    assert.equal(c.reportConcurrency, 9);
+    assert.equal(c.violationConcurrency, 2);
+    assert.equal(c.session.absoluteHours, 12);
+    assert.equal(c.session.idleHours, 3);
+  });
+
+  test('strips a trailing slash and control characters from DT startup values', () => {
+    const c = parseConfig({
+      ...baseEnv(),
+      DT_API_URL: 'https://dt.example.com/',
+      DT_API_KEY: '  odt_abc123\n  ',
+    });
+    assert.equal(c.dt.startupApiUrl, 'https://dt.example.com');
+    assert.equal(c.dt.startupApiKey, 'odt_abc123');
+  });
+});
+
+describe('parseConfig — fail-fast validation', () => {
+  test('POSTGRES_PASSWORD is required and the message says where it comes from', () => {
+    assert.throws(() => parseConfig({}), (e) => {
+      assert.equal(e.code, 'CONFIG_INVALID');
+      assert.match(e.message, /POSTGRES_PASSWORD is required/);
+      assert.match(e.message, /install\.sh/);
+      return true;
+    });
+  });
+
+  test('a whitespace-only password is rejected', () => {
+    assert.throws(() => parseConfig({ POSTGRES_PASSWORD: '   ' }), (e) => e.code === 'CONFIG_INVALID');
+  });
+
+  test('LOG_FORMAT must be text or json', () => {
+    assert.throws(
+      () => parseConfig({ ...baseEnv(), LOG_FORMAT: 'xml' }),
+      (e) => e.code === 'CONFIG_INVALID' && /LOG_FORMAT/.test(e.message)
+    );
+  });
+
+  test('a non-numeric port is rejected and the message names the variable', () => {
+    assert.throws(
+      () => parseConfig({ ...baseEnv(), PORT: 'abc' }),
+      (e) => e.code === 'CONFIG_INVALID' && /PORT must be an integer/.test(e.message)
+    );
+  });
+
+  test('a port outside 1-65535 is rejected', () => {
+    assert.throws(() => parseConfig({ ...baseEnv(), PORT: '0' }), (e) => e.code === 'CONFIG_INVALID');
+    assert.throws(() => parseConfig({ ...baseEnv(), PORT: '70000' }), (e) => e.code === 'CONFIG_INVALID');
+    assert.throws(() => parseConfig({ ...baseEnv(), POSTGRES_PORT: '99999' }), (e) => e.code === 'CONFIG_INVALID');
+  });
+
+  test('a fractional integer is rejected rather than silently truncated', () => {
+    assert.throws(
+      () => parseConfig({ ...baseEnv(), REPORT_CONCURRENCY: '2.5' }),
+      (e) => e.code === 'CONFIG_INVALID'
+    );
+  });
+
+  test('a negative concurrency is rejected', () => {
+    assert.throws(
+      () => parseConfig({ ...baseEnv(), VIOLATION_CONCURRENCY: '-1' }),
+      (e) => e.code === 'CONFIG_INVALID'
+    );
+  });
+
+  test('idle session lifetime may not exceed the absolute lifetime', () => {
+    assert.throws(
+      () => parseConfig({ ...baseEnv(), SESSION_ABSOLUTE_HOURS: '2', SESSION_IDLE_HOURS: '8' }),
+      (e) => e.code === 'CONFIG_INVALID' && /never be reached/.test(e.message)
+    );
+  });
+
+  test('equal idle and absolute lifetimes are allowed', () => {
+    const c = parseConfig({ ...baseEnv(), SESSION_ABSOLUTE_HOURS: '4', SESSION_IDLE_HOURS: '4' });
+    assert.equal(c.session.idleHours, 4);
+  });
+});

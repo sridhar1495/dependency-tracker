@@ -81,12 +81,77 @@ services:
       # How many hours the cached file is valid before auto-expiry (default 24 h).
       CACHE_TTL_HOURS: "${VIOLATION_CACHE_TTL_HOURS:-24}"
       PORT: "3001"
+      # ─── Database connection ──────────────────────────────────────────────
+      # The service refuses to start if it cannot reach PostgreSQL: migrations
+      # must complete before the HTTP listener opens.
+      POSTGRES_HOST: "dt-postgres"
+      POSTGRES_PORT: "5432"
+      POSTGRES_USER: "${POSTGRES_USER:-dtdash}"
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in .env — run ./install.sh to generate one}"
+      POSTGRES_DB: "${POSTGRES_DB:-dtdash}"
+      # Session lifetimes are read now and enforced from phase 2 onward.
+      SESSION_ABSOLUTE_HOURS: "${SESSION_ABSOLUTE_HOURS:-8}"
+      SESSION_IDLE_HOURS: "${SESSION_IDLE_HOURS:-2}"
+    depends_on:
+      dt-postgres:
+        condition: service_healthy
     volumes:
       # Persists violation-cache.json, reports, and app-config.json across restarts.
       - ./violation-cache/data:/data
       # Bind-mount .env so the service can read updated config and persist
       # API key changes written via POST /violation-cache/config.
       - ./.env:/app/.env
+    networks:
+      - dependency-track
+
+  # ─── PostgreSQL — system of record ────────────────────────────────────────────
+  # Holds users, sessions, per-user configuration and reports as the multi-user
+  # migration lands. Phase 0 creates the service, the migration ledger and the
+  # citext extension; application tables arrive in phase 1.
+  #
+  # The data directory is a BIND MOUNT, not a named volume, and this is
+  # deliberate: install.sh runs `docker compose down -v` unconditionally on
+  # uninstall, which would silently destroy a named volume (CLAUDE.md §9.2).
+  dt-postgres:
+    image: postgres:16-alpine
+    container_name: dt-postgres
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-dtdash} -d ${POSTGRES_DB:-dtdash}"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 20s
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "50m"
+        max-file: "5"
+    environment:
+      POSTGRES_USER: "${POSTGRES_USER:-dtdash}"
+      POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in .env — run ./install.sh to generate one}"
+      POSTGRES_DB: "${POSTGRES_DB:-dtdash}"
+      # Deterministic collation regardless of the host locale, so index ordering
+      # is stable across machines.
+      POSTGRES_INITDB_ARGS: "--encoding=UTF8 --locale=C"
+    # Tuning is passed as flags so the whole configuration is visible here and
+    # needs no mounted postgresql.conf. Sized for a ~1 GB container allocation.
+    command: >
+      postgres
+      -c shared_buffers=256MB
+      -c effective_cache_size=768MB
+      -c work_mem=8MB
+      -c maintenance_work_mem=64MB
+      -c max_connections=50
+      -c random_page_cost=1.1
+      -c checkpoint_completion_target=0.9
+      -c wal_compression=on
+      -c log_min_duration_statement=500ms
+    ports:
+      # Exposed so administrators can attach pgAdmin/DBeaver from outside Docker.
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - ./violation-cache/pgdata:/var/lib/postgresql/data
     networks:
       - dependency-track
 

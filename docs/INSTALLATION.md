@@ -99,6 +99,34 @@ docker compose --env-file .env up -d
 | `DT_API_KEY` | _(blank)_ | Pre-configured API key. Exposed to the browser via `/dt-config` — restrict to internal networks |
 | `DT_FRONTEND_URL` | _(blank)_ | DT web UI URL for project hyperlinks (e.g. `https://dtrack.company.com`) |
 | `VIOLATION_CACHE_TTL_HOURS` | `24` | Hours the violation cache file is valid before auto-rebuild |
+| `POSTGRES_USER` | `dtdash` | Database role |
+| `POSTGRES_PASSWORD` | _(generated)_ | Database password. `install.sh` generates one when absent. **Changing it after first start will break the connection** — PostgreSQL only reads it when initialising the cluster |
+| `POSTGRES_DB` | `dtdash` | Database name |
+| `POSTGRES_PORT` | `5432` | Host port the database is published on, for external DB tooling |
+| `SESSION_ABSOLUTE_HOURS` | `8` | Absolute session lifetime (enforced from phase 2) |
+| `SESSION_IDLE_HOURS` | `2` | Idle session lifetime (enforced from phase 2) |
+| `LOG_FORMAT` | `text` | `text` or `json` for structured output |
+
+### Database
+
+The stack includes a `dt-postgres` container as the system of record for users,
+per-user settings and reports. Two things follow from that:
+
+- **`dt-violation-cache` will not start until the database is healthy.** Schema
+  migrations run before the HTTP listener opens, so the service refuses to serve
+  requests against an un-migrated database. If it exits at boot, check
+  `docker logs dt-postgres` first.
+- **The data directory is a bind mount at `./violation-cache/pgdata`**, not a
+  named Docker volume. This is deliberate: `./install.sh --uninstall` runs
+  `docker compose down -v`, which would destroy a named volume without warning.
+  A bind mount survives, and the uninstaller tells you the path to remove if you
+  really do want the data gone.
+
+Connect external tooling with:
+
+```bash
+psql -h localhost -p ${POSTGRES_PORT:-5432} -U dtdash dtdash
+```
 
 ### Changing the violation cache TTL after installation
 
@@ -160,17 +188,29 @@ docker compose --env-file .env up -d
 ## 7. Uninstalling
 
 ```bash
-# Remove containers and network (keep images and violation-cache/data/)
+# Remove containers and network (keep images and all data on disk)
 ./install.sh --uninstall
 
 # Remove containers, network, AND Docker images
 ./install.sh --all
 ```
 
-The `violation-cache/data/` directory is **not** removed — delete manually if needed:
+Both commands remove the `dt-dashboard`, `dt-violation-cache` and `dt-postgres`
+containers and the `dependency-track` network.
+
+**Your data is kept.** These are bind mounts on the host and are never deleted by
+the uninstaller:
+
+| Path | Contents |
+|------|----------|
+| `./violation-cache/pgdata` | The database — all users, settings and reports |
+| `./violation-cache/data` | Violation cache, generated report files, app config |
+| `./.env` | Configuration, including the database password |
+
+To discard everything, remove them explicitly after uninstalling:
 
 ```bash
-rm -f violation-cache/data/violation-cache.json
+rm -rf violation-cache/pgdata violation-cache/data
 ```
 
 ---

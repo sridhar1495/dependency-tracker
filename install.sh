@@ -69,11 +69,18 @@ do_uninstall() {
 
   echo ""
   echo -e "  ${BOLD}The following will be permanently removed:${RESET}"
-  echo -e "    • Containers : dt-dashboard, dt-violation-cache"
+  echo -e "    • Containers : dt-dashboard, dt-violation-cache, dt-postgres"
   echo -e "    • Network    : dependency-track"
+  echo -e "    • Volumes    : any Docker-managed volumes for these services"
   if [[ "$remove_images" == "true" ]]; then
-    echo -e "    • Images     : nginx:alpine, dt-violation-cache (built image)"
+    echo -e "    • Images     : nginx:alpine, postgres:16-alpine, dt-violation-cache (built image)"
   fi
+  echo ""
+  echo -e "  ${BOLD}The following are bind mounts and are KEPT on disk:${RESET}"
+  echo -e "    • ./violation-cache/pgdata  ${BOLD}(database — all users, settings and reports)${RESET}"
+  echo -e "    • ./violation-cache/data    (violation cache, report files, app config)"
+  echo -e "    • ./.env                    (configuration, including the DB password)"
+  echo -e "  Delete them manually if you intend to discard all data."
   echo ""
 
   if [[ "$NON_INTERACTIVE" == "false" ]]; then
@@ -101,6 +108,10 @@ do_uninstall() {
     echo -e "  Docker images were kept. To also remove images, run:"
     echo -e "    ${BOLD}./install.sh --all${RESET}"
   fi
+  echo ""
+  echo -e "  ${YELLOW}Database files were NOT deleted.${RESET}"
+  echo -e "  To discard all users, settings and reports as well:"
+  echo -e "    ${BOLD}rm -rf ./violation-cache/pgdata ./violation-cache/data${RESET}"
   echo ""
 }
 
@@ -245,15 +256,36 @@ if [[ "$NON_INTERACTIVE" == "false" ]]; then
   success ".env saved"
 fi
 
+# ─── Database credentials ────────────────────────────────────────────────────
+# Generated once and never rotated automatically: changing POSTGRES_PASSWORD
+# after the data directory exists would leave the service unable to connect,
+# because PostgreSQL only reads POSTGRES_PASSWORD when it initialises the
+# cluster on first start.
+if [[ -z "${POSTGRES_PASSWORD:-}" ]]; then
+  info "Generating a PostgreSQL password…"
+  if command -v openssl &>/dev/null; then
+    _pg_pass="$(openssl rand -base64 32 | tr -d '/+=\n' | cut -c1-32)"
+  else
+    _pg_pass="$(head -c 32 /dev/urandom | od -An -tx1 | tr -d ' \n')"
+  fi
+  grep -v "^POSTGRES_PASSWORD=" "$ENV_FILE" > "${ENV_FILE}.tmp" && mv "${ENV_FILE}.tmp" "$ENV_FILE"
+  printf 'POSTGRES_PASSWORD=%s\n' "$_pg_pass" >> "$ENV_FILE"
+  unset _pg_pass
+  chmod 600 "$ENV_FILE" 2>/dev/null || true
+  success "POSTGRES_PASSWORD generated and saved to .env"
+else
+  info "POSTGRES_PASSWORD already set — leaving it unchanged"
+fi
+
 # Re-load finalized env
 set -a; source "$ENV_FILE"; set +a
 
-# ─── Step 3 — Pull dashboard image ───────────────────────────────────────────
-step "Step 3 — Pulling Dashboard Image"
+# ─── Step 3 — Pull base images ───────────────────────────────────────────────
+step "Step 3 — Pulling Base Images"
 retry 4 2 \
   $COMPOSE_CMD -f "$SCRIPT_DIR/docker-compose.yml" --env-file "$ENV_FILE" \
-    pull dt-dashboard
-success "nginx:alpine pulled"
+    pull dt-dashboard dt-postgres
+success "nginx:alpine and postgres:16-alpine pulled"
 
 # ─── Step 4 — Build violation cache service ───────────────────────────────────
 step "Step 4 — Building Violation Cache Service"
@@ -263,11 +295,28 @@ retry 3 5 \
 success "Violation cache image built"
 
 # ─── Step 5 — Start services ─────────────────────────────────────────────────
+# --no-deps is deliberately NOT used: dt-violation-cache declares a health-gated
+# dependency on dt-postgres, and it must not start before migrations can run.
 step "Step 5 — Starting Services"
 retry 3 5 \
   $COMPOSE_CMD -f "$SCRIPT_DIR/docker-compose.yml" --env-file "$ENV_FILE" \
-    up -d --no-deps dt-dashboard dt-violation-cache
+    up -d dt-postgres dt-dashboard dt-violation-cache
 success "Containers started"
+
+info "Waiting for the database to accept connections…"
+_db_ready=false
+for _i in $(seq 1 30); do
+  if $COMPOSE_CMD -f "$SCRIPT_DIR/docker-compose.yml" --env-file "$ENV_FILE" \
+       exec -T dt-postgres pg_isready -U "${POSTGRES_USER:-dtdash}" &>/dev/null; then
+    _db_ready=true; break
+  fi
+  sleep 2
+done
+if [[ "$_db_ready" == "true" ]]; then
+  success "Database ready — schema migrations run automatically at service start"
+else
+  warn "Database did not report ready within 60s. Check: docker logs dt-postgres"
+fi
 
 # ─── Step 6 — Summary ────────────────────────────────────────────────────────
 step "Installation Complete!"
