@@ -78,6 +78,33 @@ async function handle({ method, path: parsedPath, req, res, principal }) {
       return true;
     }
 
+    // Both identifiers are checked in one query, so a user whose login ID AND
+    // email are both taken is told about both at once rather than fixing one,
+    // resubmitting, and being told about the other. The unique indexes are still
+    // the final arbiter below — this check can be raced, it just cannot be the
+    // reason someone has to submit the form twice.
+    try {
+      const taken = await users.findTakenIdentifiers({ loginId: input.loginId, email: input.email });
+      if (taken.loginId || taken.email) {
+        const errors = {};
+        // Neither message says who owns the identifier (CLAUDE.md §12).
+        if (taken.loginId) errors.loginId = 'This login ID is already registered.';
+        if (taken.email)   errors.email   = 'This email address is already registered.';
+        jsonReply(res, 409, {
+          error: Object.keys(errors).length > 1
+            ? 'This login ID and email address are both already registered.'
+            : Object.values(errors)[0],
+          code: 'ALREADY_REGISTERED',
+          errors,
+        });
+        return true;
+      }
+    } catch (err) {
+      log('error', `Availability check failed during registration: ${err.message}`);
+      jsonReply(res, 500, { error: 'Could not create the account.', code: 'INTERNAL' });
+      return true;
+    }
+
     try {
       const passwordHash = await crypto.hashPassword(input.password);
       const user = await users.create({

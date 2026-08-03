@@ -3,8 +3,9 @@
 'use strict';
 
 // ── Administration — read only ────────────────────────────────────────────────
-//   GET /admin/users     accounts with session, report and storage counts
-//   GET /admin/overview  service-wide totals
+//   GET /admin/users            accounts with session, report and storage counts
+//   GET /admin/overview         service-wide totals
+//   GET /admin/users/:loginId   one account's detail
 //
 // Deliberately read-only. There is no route here that disconnects a session,
 // resets a password or deletes an account: an administrator who can do those
@@ -86,6 +87,77 @@ async function handle({ method, path: parsedPath, res, principal }) {
     } catch (err) {
       log('error', `Administration overview failed: ${err.message}`);
       jsonReply(res, 500, { error: 'Could not load the overview.', code: 'INTERNAL' });
+    }
+    return true;
+  }
+
+  // ── GET /admin/users/:loginId ───────────────────────────────────────────
+  const detail = parsedPath.match(/^\/admin\/users\/([^/]+)$/);
+  if (method === 'GET' && detail) {
+    if (!requireAdmin(principal, res)) return true;
+    try {
+      const loginId = decodeURIComponent(detail[1]);
+      const row = await users.detailForAdmin(loginId);
+      if (!row) {
+        jsonReply(res, 404, { error: 'No such account.', code: 'NOT_FOUND' });
+        return true;
+      }
+
+      // Explicitly named rather than spread, so a column added to the query
+      // later cannot reach a response without someone deciding it should.
+      jsonReply(res, 200, {
+        account: {
+          loginId: row.loginId, email: row.email,
+          firstName: row.firstName, lastName: row.lastName,
+          createdAt: row.createdAt, updatedAt: row.updatedAt,
+          lastLoginAt: row.lastLoginAt,
+        },
+        session: row.sessionIssuedAt ? {
+          issuedAt:  row.sessionIssuedAt,
+          lastSeenAt: row.sessionLastSeenAt,
+          expiresAt: row.sessionExpiresAt,
+          userAgent: row.sessionUserAgent,
+          ipAddress: row.sessionIpAddress,
+        } : null,
+        // Whether a key exists, never the key. Same rule as the user's own
+        // Settings panel (CLAUDE.md §7.6).
+        dependencyTrack: {
+          configured:  row.dtConfigured === true,
+          apiUrl:      row.dtApiUrl || '',
+          frontendUrl: row.dtFrontendUrl || '',
+          hasApiKey:   row.dtHasApiKey === true,
+          updatedAt:   row.dtUpdatedAt,
+        },
+        settings: { maxReports: row.maxReports },
+        mail: {
+          enabled:     row.mailEnabled === true,
+          host:        row.mailHost || '',
+          port:        row.mailPort,
+          from:        row.mailFrom || '',
+          recipients:  row.mailRecipients || 0,
+          hasPassword: row.mailHasPassword === true,
+        },
+        schedule: {
+          enabled:       row.scheduleEnabled === true,
+          frequency:     row.frequency,
+          hour:          row.hour,
+          projectCount:  row.scheduleProjects,
+          nextRunAt:     row.nextRunAt,
+          lastRunAt:     row.lastRunAt,
+          lastRunStatus: row.lastRunStatus,
+        },
+        reports: {
+          total:        row.reportCount,
+          completed:    row.reportsCompleted,
+          running:      row.reportsRunning,
+          failed:       row.reportsFailed,
+          storageBytes: Number(row.storageBytes),
+          newestAt:     row.newestReportAt,
+        },
+      });
+    } catch (err) {
+      log('error', `Administration detail failed: ${err.message}`);
+      jsonReply(res, 500, { error: 'Could not load the account.', code: 'INTERNAL' });
     }
     return true;
   }

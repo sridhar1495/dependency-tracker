@@ -163,6 +163,26 @@ async function isEmailAvailable(email) {
   return rowCount === 0;
 }
 
+/**
+ * Which of the supplied identifiers are already taken.
+ *
+ * One query for both, so registration can report every clashing field at once
+ * instead of making the user resubmit to discover the second one. Advisory: the
+ * unique indexes remain the final arbiter, since another registration can land
+ * between this check and the insert.
+ *
+ * @returns {Promise<{loginId: boolean, email: boolean}>} true = taken
+ */
+async function findTakenIdentifiers({ loginId, email }) {
+  const { rows } = await query(
+    `SELECT
+       EXISTS (SELECT 1 FROM users WHERE login_id = $1)                       AS "loginId",
+       ($2::citext IS NOT NULL AND EXISTS (SELECT 1 FROM users WHERE email = $2)) AS "email"`,
+    [loginId || '', email || null]
+  );
+  return rows[0];
+}
+
 /** Total account count. Used by the administration panel. */
 async function count() {
   const { rows } = await query('SELECT count(*)::int AS n FROM users');
@@ -224,8 +244,83 @@ async function listWithStats({ limit = 500 } = {}) {
   return rows;
 }
 
+/**
+ * One account's detail, for the administration panel's per-user view.
+ *
+ * Same rule as the listing: metadata and counts only. It reports the shape of
+ * someone's configuration — whether a DependencyTrack connection exists, how
+ * many recipients their mail settings name — never its contents. There is
+ * deliberately no path from here to an API key, an SMTP password or a report's
+ * bytes (S27).
+ *
+ * @returns {Promise<object|null>} null when the account does not exist
+ */
+async function detailForAdmin(loginId) {
+  const { rows } = await query(
+    `SELECT u.id, u.login_id AS "loginId", u.email,
+            u.first_name AS "firstName", u.last_name AS "lastName",
+            u.created_at AS "createdAt", u.updated_at AS "updatedAt",
+            u.last_login_at AS "lastLoginAt",
+
+            s.issued_at    AS "sessionIssuedAt",
+            s.last_seen_at AS "sessionLastSeenAt",
+            s.expires_at   AS "sessionExpiresAt",
+            s.user_agent   AS "sessionUserAgent",
+            s.ip_address   AS "sessionIpAddress",
+
+            c.api_url AS "dtApiUrl", c.frontend_url AS "dtFrontendUrl",
+            c.is_configured AS "dtConfigured",
+            (c.api_key_ciphertext IS NOT NULL) AS "dtHasApiKey",
+            c.updated_at AS "dtUpdatedAt",
+
+            st.max_reports AS "maxReports",
+
+            m.enabled AS "mailEnabled", m.smtp_host AS "mailHost",
+            m.smtp_port AS "mailPort", m.from_addr AS "mailFrom",
+            COALESCE(array_length(m.to_addrs, 1), 0) AS "mailRecipients",
+            (m.smtp_pass_ciphertext IS NOT NULL) AS "mailHasPassword",
+
+            sc.enabled AS "scheduleEnabled", sc.frequency, sc.hour,
+            sc.next_run_at AS "nextRunAt", sc.last_run_at AS "lastRunAt",
+            sc.last_run_status AS "lastRunStatus",
+            (SELECT count(*)::int FROM schedule_projects p WHERE p.user_id = u.id) AS "scheduleProjects",
+
+            r.total::int      AS "reportCount",
+            r.completed::int  AS "reportsCompleted",
+            r.running::int    AS "reportsRunning",
+            r.failed::int     AS "reportsFailed",
+            r.bytes::bigint   AS "storageBytes",
+            r.newest          AS "newestReportAt"
+       FROM users u
+       LEFT JOIN LATERAL (
+         SELECT issued_at, last_seen_at, expires_at, user_agent, ip_address
+           FROM user_sessions
+          WHERE user_id = u.id AND principal_type = 'user'
+            AND revoked_at IS NULL AND expires_at > now()
+          LIMIT 1
+       ) s ON true
+       LEFT JOIN LATERAL (
+         SELECT count(*) AS total,
+                count(*) FILTER (WHERE status = 'completed') AS completed,
+                count(*) FILTER (WHERE status = 'running')   AS running,
+                count(*) FILTER (WHERE status = 'failed')    AS failed,
+                COALESCE(sum(file_size_bytes), 0)            AS bytes,
+                max(created_at)                              AS newest
+           FROM reports WHERE user_id = u.id
+       ) r ON true
+       LEFT JOIN dt_connections c ON c.user_id = u.id
+       LEFT JOIN user_settings st ON st.user_id = u.id
+       LEFT JOIN mail_settings m  ON m.user_id  = u.id
+       LEFT JOIN schedules sc     ON sc.user_id = u.id
+      WHERE u.login_id = $1`,
+    [loginId]
+  );
+  return rows[0] || null;
+}
+
 module.exports = {
   create, findById, findByLoginId, verifyLookup, updateProfile,
-  touchLastLogin, deleteById, isLoginIdAvailable, isEmailAvailable, count,
-  listWithStats, PUBLIC_COLUMNS,
+  touchLastLogin, deleteById, isLoginIdAvailable, isEmailAvailable,
+  findTakenIdentifiers, count,
+  listWithStats, detailForAdmin, PUBLIC_COLUMNS,
 };

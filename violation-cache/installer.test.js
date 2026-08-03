@@ -30,35 +30,60 @@ let sandbox;
  * A throwaway repository containing just enough for the uninstall path:
  * install.sh, a compose file, and populated data directories.
  */
-function makeSandbox() {
+function makeSandbox({ fresh = false } = {}) {
   const dir = fs.mkdtempSync(path.join(os.tmpdir(), 'dt-installer-'));
 
   fs.copyFileSync(INSTALL_SH, path.join(dir, 'install.sh'));
   fs.chmodSync(path.join(dir, 'install.sh'), 0o755);
   fs.copyFileSync(path.join(REPO_ROOT, 'docker-compose.yml'), path.join(dir, 'docker-compose.yml'));
-  fs.writeFileSync(path.join(dir, '.env'), 'POSTGRES_PASSWORD=sandbox\nSECRET_ENCRYPTION_KEY=x\n');
+  fs.copyFileSync(path.join(REPO_ROOT, '.env.example'), path.join(dir, '.env.example'));
 
+  // The installer hashes the administrator password with the service's own
+  // crypto module, so a fresh-install run needs it present.
+  fs.mkdirSync(path.join(dir, 'violation-cache', 'lib'), { recursive: true });
+  fs.copyFileSync(path.join(REPO_ROOT, 'violation-cache', 'lib', 'crypto.js'),
+                  path.join(dir, 'violation-cache', 'lib', 'crypto.js'));
+
+  if (fresh) {
+    // No .env, no data directories: exactly what a first install sees.
+    fs.mkdirSync(path.join(dir, 'stubbin'));
+    writeDockerStub(dir);
+    return dir;
+  }
+
+  fs.writeFileSync(path.join(dir, '.env'), 'POSTGRES_PASSWORD=sandbox\nSECRET_ENCRYPTION_KEY=x\n');
   fs.mkdirSync(path.join(dir, 'violation-cache', 'pgdata'), { recursive: true });
   fs.mkdirSync(path.join(dir, 'violation-cache', 'data'), { recursive: true });
   fs.writeFileSync(path.join(dir, 'violation-cache', 'pgdata', 'PG_VERSION'), '16\n');
   fs.writeFileSync(path.join(dir, 'violation-cache', 'data', 'admin-credentials.json'), '{}');
 
-  // A stub `docker` that satisfies `docker compose version` and records the
-  // arguments every invocation received, so the test can assert on the flags.
-  const binDir = path.join(dir, 'stubbin');
-  fs.mkdirSync(binDir);
-  fs.writeFileSync(path.join(binDir, 'docker'), [
-    '#!/usr/bin/env bash',
-    `echo "$@" >> "${path.join(dir, 'docker-calls.log')}"`,
-    'if [[ "$1" == "compose" && "$2" == "version" ]]; then echo "v2.0.0"; exit 0; fi',
-    'exit 0',
-  ].join('\n'));
-  fs.chmodSync(path.join(binDir, 'docker'), 0o755);
-
+  fs.mkdirSync(path.join(dir, 'stubbin'));
+  writeDockerStub(dir);
   return dir;
 }
 
-/** Run install.sh in the sandbox. Returns { status, stdout }. */
+/**
+ * A stub `docker` that satisfies `docker compose version`, reports a recent
+ * server version, and records every invocation so the tests can assert on the
+ * flags actually passed.
+ */
+function writeDockerStub(dir) {
+  const bin = path.join(dir, 'stubbin', 'docker');
+  fs.writeFileSync(bin, [
+    '#!/usr/bin/env bash',
+    `echo "$@" >> "${path.join(dir, 'docker-calls.log')}"`,
+    'if [[ "$1" == "compose" && "$2" == "version" ]]; then echo "v2.0.0"; exit 0; fi',
+    'if [[ "$1" == "version" ]]; then echo "26.0.0"; exit 0; fi',
+    'exit 0',
+  ].join('\n'));
+  fs.chmodSync(bin, 0o755);
+}
+
+// The installer colours its output. Assertions are about the words, not the
+// escape codes, so strip them once here rather than in every test.
+const ANSI = /\u001b\[[0-9;]*m/g;
+
+/** Run install.sh in the sandbox. Returns { status, stdout } with ANSI removed. */
 function runInstaller(args, { input = '' } = {}) {
   const binDir = path.join(sandbox, 'stubbin');
   try {
@@ -69,9 +94,12 @@ function runInstaller(args, { input = '' } = {}) {
       env: { ...process.env, PATH: `${binDir}:${process.env.PATH}` },
       stdio: ['pipe', 'pipe', 'pipe'],
     });
-    return { status: 0, stdout };
+    return { status: 0, stdout: stdout.replace(ANSI, '') };
   } catch (err) {
-    return { status: err.status, stdout: (err.stdout || '') + (err.stderr || '') };
+    return {
+      status: err.status,
+      stdout: ((err.stdout || '') + (err.stderr || '')).replace(ANSI, ''),
+    };
   }
 }
 
@@ -167,6 +195,121 @@ describe('install.sh --all — deletes the data directories', () => {
     assert.match(r.stdout, /pgdata/);
     assert.match(r.stdout, /every user account, setting, schedule and report/);
     assert.match(r.stdout, /admin/i);
+  });
+});
+
+describe('install.sh — credential prompts on a first install', () => {
+  beforeEach(() => { sandbox = makeSandbox({ fresh: true }); });
+  afterEach(() => { fs.rmSync(sandbox, { recursive: true, force: true }); });
+
+  /** Read the sandbox .env as a key→value map. */
+  const env = () => Object.fromEntries(
+    fs.readFileSync(path.join(sandbox, '.env'), 'utf8')
+      .split('\n').filter(l => l.includes('='))
+      .map(l => [l.slice(0, l.indexOf('=')), l.slice(l.indexOf('=') + 1)]));
+
+  // Prompt order: dashboard port, PostgreSQL username, password, database,
+  // administrator login ID, administrator password.
+  const answers = (a) => a.join('\n') + '\n';
+
+  test('pressing Enter through every prompt takes the documented defaults', () => {
+    const r = runInstaller([], { input: answers(['', '', '', '', '', '']) });
+    assert.equal(r.status, 0, r.stdout);
+    const e = env();
+    assert.equal(e.DT_DASHBOARD_PORT, '3000');
+    assert.equal(e.POSTGRES_USER, 'dtdash');
+    assert.equal(e.POSTGRES_DB, 'dtdash');
+    assert.ok(e.POSTGRES_PASSWORD && e.POSTGRES_PASSWORD.length >= 16,
+      'a password must be generated when none is given');
+    assert.ok(/^[0-9a-f]{64}$/.test(e.SECRET_ENCRYPTION_KEY),
+      'the encryption key must be generated as 64 hex characters');
+  });
+
+  test('supplied PostgreSQL credentials are stored', () => {
+    const r = runInstaller([], { input: answers(['3100', 'riskdb', 'Sup3rSecret!', 'riskdata', '', '']) });
+    assert.equal(r.status, 0, r.stdout);
+    const e = env();
+    assert.equal(e.DT_DASHBOARD_PORT, '3100');
+    assert.equal(e.POSTGRES_USER, 'riskdb');
+    assert.equal(e.POSTGRES_PASSWORD, 'Sup3rSecret!');
+    assert.equal(e.POSTGRES_DB, 'riskdata');
+  });
+
+  test('the summary prints both credential sets so they can be recorded', () => {
+    const r = runInstaller([], { input: answers(['', 'riskdb', 'Sup3rSecret!', 'riskdata', 'ops', 'Adm1nPass!']) });
+    assert.equal(r.status, 0, r.stdout);
+    assert.match(r.stdout, /Credentials — record these now/);
+    // Administrator
+    assert.match(r.stdout, /Username : ops/);
+    assert.match(r.stdout, /Password : Adm1nPass!/);
+    // PostgreSQL
+    assert.match(r.stdout, /Database : riskdata/);
+    assert.match(r.stdout, /Username : riskdb/);
+    assert.match(r.stdout, /Password : Sup3rSecret!/);
+  });
+
+  test('the summary says where each value can be found later', () => {
+    const r = runInstaller([], { input: answers(['', '', '', '', '', '']) });
+    assert.match(r.stdout, /Where to find these later/);
+    assert.match(r.stdout, /grep \^POSTGRES_/);
+    assert.match(r.stdout, /grep loginId/);
+    // The administrator password genuinely cannot be recovered, and saying so
+    // is more useful than implying it can.
+    assert.match(r.stdout, /only its scrypt hash is stored/);
+    assert.match(r.stdout, /re-run this installer/);
+    assert.match(r.stdout, /Back up/);
+  });
+
+  test('the administrator password is hashed, never stored in the clear', () => {
+    const r = runInstaller([], { input: answers(['', '', '', '', 'ops', 'Adm1nPass!']) });
+    assert.equal(r.status, 0, r.stdout);
+    const creds = fs.readFileSync(
+      path.join(sandbox, 'violation-cache', 'data', 'admin-credentials.json'), 'utf8');
+    assert.match(creds, /"loginId": "ops"/);
+    assert.match(creds, /"passwordHash": "scrypt\$16384\$8\$1\$/);
+    assert.doesNotMatch(creds, /Adm1nPass!/, 'the plaintext must never reach the file');
+    assert.equal(
+      (fs.statSync(path.join(sandbox, 'violation-cache', 'data', 'admin-credentials.json')).mode & 0o777),
+      0o600, 'the credentials file must be owner-only');
+  });
+
+  test('the default administrator password is used and named when none is given', () => {
+    const r = runInstaller([], { input: answers(['', '', '', '', '', '']) });
+    assert.match(r.stdout, /Password : ScaAdmin@dt8624/);
+    assert.match(r.stdout, /the documented default/);
+  });
+
+  test('.env is not world-readable once it holds secrets', () => {
+    runInstaller([], { input: answers(['', '', '', '', '', '']) });
+    assert.equal(fs.statSync(path.join(sandbox, '.env')).mode & 0o777, 0o600);
+  });
+});
+
+describe('install.sh — an existing database is never re-credentialled', () => {
+  beforeEach(() => { sandbox = makeSandbox(); });   // pgdata already populated
+  afterEach(() => { fs.rmSync(sandbox, { recursive: true, force: true }); });
+
+  test('the PostgreSQL prompts are skipped and the stored password is kept', () => {
+    // PostgreSQL reads these only when initialising the cluster, so asking again
+    // would collect an answer that silently does nothing — and changing the
+    // value would break the connection to the existing data.
+    const r = runInstaller([], { input: '\n\n\n' });
+    assert.equal(r.status, 0, r.stdout);
+    assert.match(r.stdout, /keeping its credentials unchanged/);
+    const envText = fs.readFileSync(path.join(sandbox, '.env'), 'utf8');
+    assert.match(envText, /POSTGRES_PASSWORD=sandbox/, 'the existing password survives');
+  });
+
+  test('an existing administrator file is left alone and reported by name', () => {
+    fs.writeFileSync(
+      path.join(sandbox, 'violation-cache', 'data', 'admin-credentials.json'),
+      JSON.stringify({ loginId: 'existing-admin', passwordHash: 'scrypt$16384$8$1$a$b' }));
+    const r = runInstaller([], { input: '\n\n\n' });
+    assert.equal(r.status, 0, r.stdout);
+    assert.match(r.stdout, /already exist — leaving them unchanged/);
+    assert.match(r.stdout, /Username : existing-admin/,
+      'the summary must report the login ID from the file, not a guess');
+    assert.match(r.stdout, /unchanged — the credentials file already existed/);
   });
 });
 

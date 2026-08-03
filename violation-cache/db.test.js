@@ -1440,3 +1440,209 @@ describe('administration listing', { skip: !ENABLED && 'TEST_DATABASE_URL not se
     } finally { pg.query = realQuery; }
   });
 });
+
+// ── Administration detail (per-user view) ────────────────────────────────────
+describe('administration user detail', { skip: !ENABLED && 'TEST_DATABASE_URL not set' }, () => {
+  let pool, users, dtCrypto, dtConnections, mailSettings, schedulesDb, reportsDb;
+  let erin;
+
+  before(async () => {
+    pool = require('./db/pool');
+    if (!pool.isReady()) {
+      const url = new URL(DB_URL);
+      process.env.POSTGRES_HOST     = url.hostname;
+      process.env.POSTGRES_PORT     = url.port || '5432';
+      process.env.POSTGRES_USER     = decodeURIComponent(url.username);
+      process.env.POSTGRES_PASSWORD = decodeURIComponent(url.password) || 'x';
+      process.env.POSTGRES_DB       = url.pathname.replace(/^\//, '');
+      const { parseConfig } = require('./lib/config');
+      pool.init(parseConfig(process.env).db);
+      await migrate({ pool: pool.getPool(), dir: MIGRATIONS_DIR });
+    }
+    users         = require('./lib/users');
+    dtCrypto      = require('./lib/crypto');
+    dtConnections = require('./lib/dt-connections');
+    mailSettings  = require('./lib/mail-settings');
+    schedulesDb   = require('./lib/schedules');
+    reportsDb     = require('./lib/reports-db');
+    const key = dtCrypto.parseEncryptionKey(process.env.SECRET_ENCRYPTION_KEY);
+    dtConnections.configure(key);
+    mailSettings.configure(key);
+
+    await pool.query("DELETE FROM users WHERE login_id = 'zz_erin'");
+    erin = await users.create({
+      loginId: 'zz_erin', email: 'erin@example.com', firstName: 'Erin', lastName: 'Elk',
+      passwordHash: await dtCrypto.hashPassword('password123'),
+    });
+  });
+
+  after(async () => {
+    if (pool && pool.isReady()) {
+      await pool.query("DELETE FROM users WHERE login_id = 'zz_erin'");
+      await pool.close();
+    }
+  });
+
+  test('a brand-new account returns a complete row with empty sections', async () => {
+    const d = await users.detailForAdmin('zz_erin');
+    assert.ok(d, 'the account must be found');
+    assert.equal(d.loginId, 'zz_erin');
+    assert.equal(d.dtConfigured, false);
+    assert.equal(d.dtHasApiKey, false);
+    assert.equal(d.mailEnabled, false);
+    assert.equal(d.scheduleEnabled, false);
+    assert.equal(d.reportCount, 0);
+    assert.equal(Number(d.storageBytes), 0);
+    assert.equal(d.sessionIssuedAt, null);
+    assert.equal(d.maxReports, 10, 'the seeded default is visible');
+  });
+
+  test('configuration is reflected without disclosing any secret', async () => {
+    await dtConnections.save(erin.id, { apiUrl: 'https://dt.example.com', apiKey: 'erin_secret_key' });
+    await mailSettings.save(erin.id, {
+      enabled: true,
+      smtp: { host: 'smtp.example.com', port: 587, user: 'erin', pass: 'erin_smtp_pw' },
+      from: 'erin@example.com', to: 'a@x.com, b@x.com',
+    });
+    await schedulesDb.save(erin.id, { enabled: true, frequency: 'weekly', hour: 7 });
+
+    const d = await users.detailForAdmin('zz_erin');
+    assert.equal(d.dtConfigured, true);
+    assert.equal(d.dtApiUrl, 'https://dt.example.com');
+    assert.equal(d.dtHasApiKey, true, 'presence is reported');
+    assert.equal(d.mailEnabled, true);
+    assert.equal(d.mailRecipients, 2, 'the recipient count, not the addresses');
+    assert.equal(d.mailHasPassword, true);
+    assert.equal(d.scheduleEnabled, true);
+    assert.equal(d.frequency, 'weekly');
+
+    // Neither secret may appear anywhere in the projection.
+    const serialised = JSON.stringify(d);
+    assert.doesNotMatch(serialised, /erin_secret_key/);
+    assert.doesNotMatch(serialised, /erin_smtp_pw/);
+    assert.doesNotMatch(serialised, /scrypt\$/);
+  });
+
+  test('report counts are broken down by status and scoped to the account', async () => {
+    const ids = [];
+    for (let i = 0; i < 3; i++) {
+      const r = await reportsDb.create(erin.id, { riskTypes: ['security'], projectCount: 1 });
+      ids.push(r.id);
+    }
+    await reportsDb.storeFile(ids[0], Buffer.alloc(500, 1), 'a.xlsx');
+    await reportsDb.storeFile(ids[1], Buffer.alloc(1500, 2), 'b.xlsx');
+    await reportsDb.setStatus(ids[2], 'failed', { error: 'nope' });
+    try {
+      const d = await users.detailForAdmin('zz_erin');
+      assert.equal(d.reportCount, 3);
+      assert.equal(d.reportsCompleted, 2);
+      assert.equal(d.reportsFailed, 1);
+      assert.equal(Number(d.storageBytes), 2000);
+      assert.ok(d.newestReportAt instanceof Date);
+    } finally {
+      for (const id of ids) await reportsDb.deleteForUser(erin.id, id);
+    }
+  });
+
+  test('an unknown login ID returns null rather than throwing', async () => {
+    assert.equal(await users.detailForAdmin('zz_nobody_at_all'), null);
+  });
+
+  test('the login ID lookup is case-insensitive, matching sign-in', async () => {
+    const d = await users.detailForAdmin('ZZ_ERIN');
+    assert.ok(d, 'citext means the administrator need not match the stored case');
+    assert.equal(d.loginId, 'zz_erin');
+  });
+
+  test('it is one query', async () => {
+    const pg = pool.getPool();
+    const realQuery = pg.query.bind(pg);
+    let calls = 0;
+    pg.query = (...args) => { calls++; return realQuery(...args); };
+    try {
+      await users.detailForAdmin('zz_erin');
+      assert.equal(calls, 1, `expected a single query, made ${calls}`);
+    } finally { pg.query = realQuery; }
+  });
+});
+
+// ── Registration conflict detection ─────────────────────────────────────────
+describe('taken-identifier detection', { skip: !ENABLED && 'TEST_DATABASE_URL not set' }, () => {
+  let pool, users, dtCrypto;
+
+  before(async () => {
+    pool = require('./db/pool');
+    if (!pool.isReady()) {
+      const url = new URL(DB_URL);
+      process.env.POSTGRES_HOST     = url.hostname;
+      process.env.POSTGRES_PORT     = url.port || '5432';
+      process.env.POSTGRES_USER     = decodeURIComponent(url.username);
+      process.env.POSTGRES_PASSWORD = decodeURIComponent(url.password) || 'x';
+      process.env.POSTGRES_DB       = url.pathname.replace(/^\//, '');
+      const { parseConfig } = require('./lib/config');
+      pool.init(parseConfig(process.env).db);
+      await migrate({ pool: pool.getPool(), dir: MIGRATIONS_DIR });
+    }
+    users    = require('./lib/users');
+    dtCrypto = require('./lib/crypto');
+    await pool.query("DELETE FROM users WHERE login_id = 'zz_frank'");
+    await users.create({
+      loginId: 'zz_frank', email: 'frank@example.com', firstName: 'Frank', lastName: 'Fox',
+      passwordHash: await dtCrypto.hashPassword('password123'),
+    });
+  });
+
+  after(async () => {
+    if (pool && pool.isReady()) {
+      await pool.query("DELETE FROM users WHERE login_id = 'zz_frank'");
+      await pool.close();
+    }
+  });
+
+  test('both clashes are detected in one call', async () => {
+    const t = await users.findTakenIdentifiers({ loginId: 'zz_frank', email: 'frank@example.com' });
+    assert.deepEqual(t, { loginId: true, email: true });
+  });
+
+  test('each clash is detected independently', async () => {
+    assert.deepEqual(
+      await users.findTakenIdentifiers({ loginId: 'zz_frank', email: 'free@example.com' }),
+      { loginId: true, email: false });
+    assert.deepEqual(
+      await users.findTakenIdentifiers({ loginId: 'zz_free', email: 'frank@example.com' }),
+      { loginId: false, email: true });
+  });
+
+  test('free identifiers report free', async () => {
+    assert.deepEqual(
+      await users.findTakenIdentifiers({ loginId: 'zz_free', email: 'free@example.com' }),
+      { loginId: false, email: false });
+  });
+
+  test('an omitted email is never reported as taken', async () => {
+    // Email is optional, and a blank one must not collide with anything.
+    for (const email of [null, undefined, '']) {
+      assert.deepEqual(
+        await users.findTakenIdentifiers({ loginId: 'zz_free', email }),
+        { loginId: false, email: false }, `email=${JSON.stringify(email)}`);
+    }
+  });
+
+  test('detection is case-insensitive, like the unique indexes', async () => {
+    assert.deepEqual(
+      await users.findTakenIdentifiers({ loginId: 'ZZ_FRANK', email: 'FRANK@EXAMPLE.COM' }),
+      { loginId: true, email: true },
+      'citext means differing case is still the same identifier');
+  });
+
+  test('it is one query for both fields', async () => {
+    const pg = pool.getPool();
+    const realQuery = pg.query.bind(pg);
+    let calls = 0;
+    pg.query = (...args) => { calls++; return realQuery(...args); };
+    try {
+      await users.findTakenIdentifiers({ loginId: 'zz_frank', email: 'frank@example.com' });
+      assert.equal(calls, 1);
+    } finally { pg.query = realQuery; }
+  });
+});

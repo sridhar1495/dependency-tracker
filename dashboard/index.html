@@ -562,10 +562,11 @@
       opacity: 0; pointer-events: none; transition: opacity 0.2s; z-index: 390;
     }
     .pf-backdrop.open { opacity: 1; pointer-events: auto; }
+    /* Same right-hand placement and the same slide, for the same reason. */
     .pf-panel {
-      position: fixed; top: 0; left: 0; height: 100%; width: 400px; max-width: 92vw;
-      background: var(--surface); border-right: 1px solid var(--border);
-      transform: translateX(-100%); transition: transform 0.22s ease;
+      position: fixed; top: 0; right: 0; height: 100%; width: 400px; max-width: 92vw;
+      background: var(--surface); border-left: 1px solid var(--border);
+      transform: translateX(100%); transition: transform 0.22s ease;
       z-index: 400; display: flex; flex-direction: column;
     }
     .pf-panel.open { transform: translateX(0); }
@@ -610,6 +611,31 @@
     .adm-dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; margin-right: 5px; }
     .adm-dot.on  { background: var(--ok); }
     .adm-dot.off { background: var(--text-muted); opacity: .5; }
+    .adm-table tr.adm-row { cursor: pointer; }
+    .adm-table tr.adm-row.selected td { background: var(--surface2); }
+    .adm-chevron { color: var(--text-muted); font-size: 11px; }
+
+    .adm-detail { margin-top: 16px; }
+    .adm-detail-head {
+      display: flex; align-items: center; justify-content: space-between;
+      padding-bottom: 8px; margin-bottom: 12px; border-bottom: 1px solid var(--border);
+    }
+    .adm-detail-head h3 { font-size: 14px; font-weight: 600; }
+    .adm-detail-grid {
+      display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 12px;
+    }
+    .adm-card {
+      background: var(--surface2); border: 1px solid var(--border);
+      border-radius: var(--radius); padding: 11px 13px;
+    }
+    .adm-card h4 {
+      font-size: 10.5px; text-transform: uppercase; letter-spacing: .04em;
+      color: var(--text-muted); margin-bottom: 8px; font-weight: 600;
+    }
+    .adm-kv { display: flex; justify-content: space-between; gap: 12px; font-size: 12px; padding: 3px 0; }
+    .adm-kv dt { color: var(--text-muted); white-space: nowrap; }
+    .adm-kv dd { text-align: right; word-break: break-word; }
+
     .adm-note {
       font-size: 11.5px; color: var(--text-muted); line-height: 1.55;
       background: var(--surface2); border: 1px solid var(--border);
@@ -685,11 +711,14 @@
       transition: opacity 0.25s;
     }
     .cfg-backdrop.open { opacity: 1; pointer-events: all; }
+    /* Slides in from the RIGHT, under the toolbar button that opens it, so the
+       panel appears next to its trigger rather than across the page. The
+       animation is unchanged — only its direction and the border side. */
     .cfg-panel {
-      position: fixed; top: 0; left: 0; bottom: 0; width: 40%;
-      background: var(--surface); border-right: 1px solid var(--border);
+      position: fixed; top: 0; right: 0; bottom: 0; width: 40%;
+      background: var(--surface); border-left: 1px solid var(--border);
       z-index: 301; display: flex; flex-direction: column;
-      transform: translateX(-100%); transition: transform 0.25s ease;
+      transform: translateX(100%); transition: transform 0.25s ease;
       overflow: hidden;
     }
     .cfg-panel.open { transform: translateX(0); }
@@ -792,6 +821,10 @@
       <div class="status-dot"></div><span>Mock Data</span>
     </div>
     <button class="btn-theme" id="themeBtn" onclick="toggleTheme()" title="Toggle dark/light mode">🌙</button>
+    <!-- Order after the status indicator: Reports, Settings, user menu, Refresh. -->
+    <button class="btn" id="reportsBtn" onclick="openModal('reportsModal')" title="View and download generated vulnerability reports">
+      📥 Reports<span id="reportsBadge"></span>
+    </button>
     <button class="btn" id="settingsBtn" onclick="openConfigPanel()">⚙ Settings</button>
     <div class="user-menu-wrap">
       <button class="btn" id="userMenuBtn" onclick="toggleUserMenu()">👤</button>
@@ -801,9 +834,6 @@
         <button class="user-menu-item danger" onclick="doLogout()">⎋ Sign out</button>
       </div>
     </div>
-    <button class="btn" id="reportsBtn" onclick="openModal('reportsModal')" title="View and download generated vulnerability reports">
-      📥 Reports<span id="reportsBadge"></span>
-    </button>
     <button class="btn primary" onclick="refreshData()">↻ Refresh</button>
   </header>
 
@@ -1033,13 +1063,15 @@
         <thead>
           <tr>
             <th>Login ID</th><th>Name</th><th>Created</th><th>Last sign-in</th>
-            <th>Session</th><th>DT</th><th>Schedule</th><th>Reports</th><th>Storage</th>
+            <th>Session</th><th>DT</th><th>Schedule</th><th>Reports</th><th>Storage</th><th></th>
           </tr>
         </thead>
         <tbody id="adminUsers"></tbody>
       </table>
     </div>
     <div class="pf-meta" id="adminEmpty" style="display:none">No accounts yet.</div>
+    <div class="pf-meta" id="adminHint">Select an account to see its detail.</div>
+    <div class="adm-detail" id="adminDetail" style="display:none"></div>
   </div>
   <div class="pf-footer">
     <button class="btn" onclick="loadAdminData()">↻ Refresh</button>
@@ -1372,6 +1404,7 @@ function openAdminPanel() {
   closeUserMenu();
   document.getElementById('adminBackdrop').classList.add('open');
   document.getElementById('adminPanel').classList.add('open');
+  closeAdminUserDetail();
   loadAdminData();
 }
 
@@ -1431,7 +1464,7 @@ async function loadAdminData() {
 
     emptyEl.style.display = users.length ? 'none' : '';
     bodyEl.innerHTML = users.map(u => `
-      <tr>
+      <tr class="adm-row" data-login="${escHtml(u.loginId)}">
         <td><strong>${escHtml(u.loginId)}</strong></td>
         <td>${escHtml(u.name)}</td>
         <td>${escHtml(fmtDate(u.createdAt))}</td>
@@ -1441,10 +1474,122 @@ async function loadAdminData() {
         <td><span class="adm-dot ${u.scheduleEnabled ? 'on' : 'off'}"></span>${u.scheduleEnabled ? 'On' : 'Off'}</td>
         <td>${escHtml(String(u.reportCount))}</td>
         <td>${escHtml(formatBytes(u.storageBytes))}</td>
+        <td class="adm-chevron">›</td>
       </tr>`).join('');
+
+    // Delegated, so the handler survives every re-render and needs no
+    // window export for an inline onclick.
+    bodyEl.querySelectorAll('.adm-row').forEach(tr => {
+      tr.onclick = () => showAdminUserDetail(tr.dataset.login);
+    });
+
+    // Keep the open detail in step with a refresh.
+    if (_adminSelectedLogin) showAdminUserDetail(_adminSelectedLogin);
   } catch (e) {
     showToast('Could not load administration data: ' + e.message, 'error');
   }
+}
+
+// Which account's detail is open, so ↻ Refresh re-renders it rather than
+// collapsing back to the list.
+let _adminSelectedLogin = null;
+
+/** One account's detail. Read-only, like everything else in this panel. */
+async function showAdminUserDetail(loginId) {
+  const box  = document.getElementById('adminDetail');
+  const hint = document.getElementById('adminHint');
+  _adminSelectedLogin = loginId;
+
+  document.querySelectorAll('#adminUsers .adm-row').forEach(tr => {
+    tr.classList.toggle('selected', tr.dataset.login === loginId);
+  });
+
+  try {
+    const r = await apiFetch('/admin/users/' + encodeURIComponent(loginId));
+    if (!r.ok) {
+      const bd = await r.json().catch(() => ({}));
+      showToast(bd.error || `Could not load ${loginId}.`, 'error');
+      return;
+    }
+    const d = await r.json();
+    const yes = (b) => `<span class="adm-dot ${b ? 'on' : 'off'}"></span>${b ? 'Yes' : 'No'}`;
+    const kv  = (label, value) => `<div class="adm-kv"><dt>${escHtml(label)}</dt><dd>${value}</dd></div>`;
+    const txt = (v) => escHtml(v === null || v === undefined || v === '' ? '—' : String(v));
+
+    hint.style.display = 'none';
+    box.style.display  = '';
+    box.innerHTML = `
+      <div class="adm-detail-head">
+        <h3>${escHtml(d.account.firstName)} ${escHtml(d.account.lastName)}
+            <span style="color:var(--text-muted);font-weight:400">· ${escHtml(d.account.loginId)}</span></h3>
+        <button class="btn-xs" id="admCloseDetail">Close</button>
+      </div>
+      <div class="adm-detail-grid">
+        <div class="adm-card">
+          <h4>Account</h4>
+          ${kv('Email', txt(d.account.email))}
+          ${kv('Registered', txt(fmtDate(d.account.createdAt)))}
+          ${kv('Last sign-in', txt(fmtDate(d.account.lastLoginAt)))}
+          ${kv('Last updated', txt(fmtDate(d.account.updatedAt)))}
+        </div>
+        <div class="adm-card">
+          <h4>Session</h4>
+          ${d.session ? `
+            ${kv('Signed in', txt(fmtDate(d.session.issuedAt)))}
+            ${kv('Last seen', txt(fmtDate(d.session.lastSeenAt)))}
+            ${kv('Expires', txt(fmtDate(d.session.expiresAt)))}
+            ${kv('From', txt(d.session.ipAddress))}
+          ` : kv('Active session', yes(false))}
+        </div>
+        <div class="adm-card">
+          <h4>DependencyTrack</h4>
+          ${kv('Configured', yes(d.dependencyTrack.configured))}
+          ${kv('API URL', txt(d.dependencyTrack.apiUrl))}
+          ${kv('API key stored', yes(d.dependencyTrack.hasApiKey))}
+          ${kv('Updated', txt(fmtDate(d.dependencyTrack.updatedAt)))}
+        </div>
+        <div class="adm-card">
+          <h4>Reports</h4>
+          ${kv('Completed', txt(d.reports.completed))}
+          ${kv('In progress', txt(d.reports.running))}
+          ${kv('Failed', txt(d.reports.failed))}
+          ${kv('Storage used', escHtml(formatBytes(d.reports.storageBytes)))}
+          ${kv('Limit', txt(d.settings.maxReports))}
+        </div>
+        <div class="adm-card">
+          <h4>Email</h4>
+          ${kv('Enabled', yes(d.mail.enabled))}
+          ${kv('SMTP host', txt(d.mail.host))}
+          ${kv('From', txt(d.mail.from))}
+          ${kv('Recipients', txt(d.mail.recipients))}
+          ${kv('Password stored', yes(d.mail.hasPassword))}
+        </div>
+        <div class="adm-card">
+          <h4>Schedule</h4>
+          ${kv('Enabled', yes(d.schedule.enabled))}
+          ${kv('Frequency', txt(d.schedule.frequency))}
+          ${kv('Projects', txt(d.schedule.projectCount))}
+          ${kv('Next run', txt(fmtDate(d.schedule.nextRunAt)))}
+          ${kv('Last run', txt(d.schedule.lastRunStatus ? `${fmtDate(d.schedule.lastRunAt)} — ${d.schedule.lastRunStatus}` : null))}
+        </div>
+      </div>
+      <div class="pf-meta" style="margin-top:10px">
+        Values are shown as configured. Stored secrets — the DependencyTrack API
+        key and the SMTP password — are reported only as present or absent, and
+        are not readable from here.
+      </div>`;
+
+    document.getElementById('admCloseDetail').onclick = closeAdminUserDetail;
+  } catch (e) {
+    showToast('Could not load the account: ' + e.message, 'error');
+  }
+}
+
+function closeAdminUserDetail() {
+  _adminSelectedLogin = null;
+  document.getElementById('adminDetail').style.display = 'none';
+  document.getElementById('adminHint').style.display = '';
+  document.querySelectorAll('#adminUsers .adm-row').forEach(tr => tr.classList.remove('selected'));
 }
 
 function toggleUserMenu() {
@@ -4057,6 +4202,8 @@ window.openProfilePanel     = openProfilePanel;
 window.openAdminPanel       = openAdminPanel;
 window.closeAdminPanel      = closeAdminPanel;
 window.loadAdminData        = loadAdminData;
+window.showAdminUserDetail  = showAdminUserDetail;
+window.closeAdminUserDetail = closeAdminUserDetail;
 window.closeProfilePanel    = closeProfilePanel;
 window.saveProfile          = saveProfile;
 window.deleteAccount        = deleteAccount;

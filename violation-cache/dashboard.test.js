@@ -1173,3 +1173,109 @@ describe('apiFetch contract in index.html', () => {
     }
   });
 });
+
+// ── Login page: animated backgrounds and placeholders ───────────────────────
+describe('login.html presentation', () => {
+  test('both background layers exist and only the user one starts active', () => {
+    assert.match(LOGIN_HTML, /id="bgUser"[^>]*class=|class="bg active" id="bgUser"/);
+    assert.match(LOGIN_HTML, /id="bgAdmin"/);
+    assert.match(LOGIN_HTML, /class="bg active" id="bgUser"/,
+      'the user background is the default');
+    assert.doesNotMatch(LOGIN_HTML, /class="bg active" id="bgAdmin"/,
+      'the administrator background must start hidden');
+  });
+
+  test('the administrator toggle swaps the background', () => {
+    assert.match(LOGIN_HTML, /bgUser'\)\.classList\.toggle\('active', !isAdmin\)/);
+    assert.match(LOGIN_HTML, /bgAdmin'\)\.classList\.toggle\('active', isAdmin\)/);
+  });
+
+  test('the two backgrounds use visibly different colours', () => {
+    // Indigo family for a user, amber/rose for the administrator. If these ever
+    // converge the toggle stops communicating anything.
+    assert.match(LOGIN_HTML, /#bgUser\s+\.b1[^}]*#6366f1/);
+    assert.match(LOGIN_HTML, /#bgAdmin\s+\.b1[^}]*#f59e0b/);
+  });
+
+  test('the animation is disabled for prefers-reduced-motion', () => {
+    assert.match(LOGIN_HTML, /@media \(prefers-reduced-motion: reduce\)/,
+      'motion must be optional — the page must not be worse for asking');
+    const block = /@media \(prefers-reduced-motion: reduce\)\s*\{([\s\S]*?)\n    \}/.exec(LOGIN_HTML);
+    assert.ok(block && /animation:\s*none/.test(block[1]));
+  });
+
+  test('the background is decorative and hidden from assistive technology', () => {
+    const layers = LOGIN_HTML.match(/<div class="bg[^"]*" id="bg\w+"[^>]*>/g) || [];
+    assert.equal(layers.length, 2);
+    for (const l of layers) assert.match(l, /aria-hidden="true"/);
+  });
+
+  test('login ID and password have placeholders in both modes', () => {
+    assert.match(LOGIN_HTML, /id="liLoginId"[^>]*placeholder="your login ID"/);
+    assert.match(LOGIN_HTML, /id="liPassword"[^>]*placeholder="your password"/);
+    assert.match(LOGIN_HTML, /placeholder\s*=\s*isAdmin \? 'administrator login ID'/);
+    assert.match(LOGIN_HTML, /placeholder\s*=\s*isAdmin \? 'administrator password'/);
+  });
+
+  test('the background never covers the card', () => {
+    assert.match(LOGIN_HTML, /\.bg \{[^}]*z-index: -2/);
+    assert.match(LOGIN_HTML, /\.auth-card \{ position: relative; z-index: 1; \}/);
+  });
+});
+
+// ── Panel placement and toolbar order ───────────────────────────────────────
+describe('index.html layout', () => {
+  test('the settings and profile panels slide in from the right', () => {
+    const cfg = /\.cfg-panel \{([\s\S]*?)\}/.exec(INDEX_HTML)[1];
+    assert.match(cfg, /right: 0/);
+    assert.doesNotMatch(cfg, /left: 0/);
+    assert.match(cfg, /translateX\(100%\)/, 'off-screen to the right when closed');
+    assert.match(cfg, /border-left/, 'the border belongs on the side facing the page');
+
+    const pf = /\.pf-panel \{([\s\S]*?)\}/.exec(INDEX_HTML)[1];
+    assert.match(pf, /right: 0/);
+    assert.match(pf, /translateX\(100%\)/);
+    assert.match(pf, /border-left/);
+  });
+
+  test('the open state and its transition are unchanged', () => {
+    assert.match(INDEX_HTML, /\.cfg-panel\.open \{ transform: translateX\(0\); \}/);
+    assert.match(INDEX_HTML, /\.pf-panel\.open \{ transform: translateX\(0\); \}/);
+    assert.match(INDEX_HTML, /\.cfg-panel \{[\s\S]*?transition: transform 0\.25s ease/);
+    assert.match(INDEX_HTML, /\.pf-panel \{[\s\S]*?transition: transform 0\.22s ease/);
+  });
+
+  test('toolbar order after the status indicator is Reports, Settings, user, Refresh', () => {
+    const bar = /<div class="topbar-status"[\s\S]*?<\/header>/.exec(INDEX_HTML)[0];
+    const order = ['reportsBtn', 'settingsBtn', 'userMenuBtn', 'refreshData()']
+      .map(id => bar.indexOf(id));
+    assert.ok(order.every(i => i > -1), 'every toolbar control must still be present');
+    for (let i = 1; i < order.length; i++) {
+      assert.ok(order[i] > order[i - 1],
+        `toolbar order is wrong at position ${i}: ${JSON.stringify(order)}`);
+    }
+  });
+});
+
+// ── Administration detail view ──────────────────────────────────────────────
+describe('index.html administration detail', () => {
+  test('rows open a detail view', () => {
+    assert.match(INDEX_HTML, /class="adm-row" data-login=/);
+    assert.match(INDEX_HTML, /showAdminUserDetail\(tr\.dataset\.login\)/);
+    assert.match(INDEX_HTML, /apiFetch\('\/admin\/users\/' \+ encodeURIComponent\(loginId\)\)/);
+  });
+
+  test('every value rendered into the detail is escaped', () => {
+    // The panel interpolates account-controlled text — names, emails, URLs —
+    // into innerHTML (CLAUDE.md §12).
+    const fn = /async function showAdminUserDetail[\s\S]*?\n\}/.exec(INDEX_HTML)[0];
+    assert.match(fn, /const kv\s*=\s*\(label, value\) => `<div class="adm-kv"><dt>\$\{escHtml\(label\)\}/);
+    assert.match(fn, /const txt = \(v\) =>[\s\S]*?escHtml/);
+    assert.match(fn, /escHtml\(d\.account\.firstName\)/);
+    assert.match(fn, /escHtml\(d\.account\.loginId\)/);
+  });
+
+  test('the detail says secrets are not readable from it', () => {
+    assert.match(INDEX_HTML, /are not readable from here/);
+  });
+});

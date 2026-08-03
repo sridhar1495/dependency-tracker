@@ -204,7 +204,7 @@ Inline comments use lettered prefixes to trace design decisions:
 - **O-numbers** — observability notes (`// O3: JSON log format for log aggregators`)
 - **S-numbers** — security rationale (`// S2: token hashed before storage`) — **new in revision 2**
 
-Highest numbers currently in use: **Q13, P17, O5, S26**. When adding logic with a
+Highest numbers currently in use: **Q13, P17, O5, S27**. When adding logic with a
 non-obvious trade-off, add the next number in the appropriate series. Check the
 current maximum before assigning — parallel branches can claim the same number.
 
@@ -598,6 +598,13 @@ The frontend never performs uniqueness checks — those are backend-only, via
 
 - Theme driven by CSS custom properties on `:root`, overridden under
   `[data-theme="light"]`.
+- **Side panels slide in from the right** (`right: 0`, `translateX(100%)` when
+  closed), so a panel appears beside the toolbar button that opens it. Settings,
+  Profile and Administration all use this one pattern.
+- The login page's animated background is pure CSS — transforms and opacity
+  only, so the compositor runs it off the main thread. It must stay decorative:
+  `aria-hidden`, behind a `z-index`, and disabled under
+  `@media (prefers-reduced-motion: reduce)`.
 - Accent colour `--accent: #6366f1`. Severity colours are variables
   (`--critical`, `--high`, …).
 - Never hard-code a colour hex inside a component rule.

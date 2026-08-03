@@ -15,6 +15,7 @@
 //   PUT    /profile                             — update name / password
 //   GET    /admin/users                         — accounts and their counts (administrator)
 //   GET    /admin/overview                      — service-wide totals (administrator)
+//   GET    /admin/users/:loginId                — one account's detail (administrator)
 //   GET    /violation-cache/status              — build state for this user's connection
 //   GET    /violation-cache/data                — the cached map (gzipped)
 //   POST   /violation-cache/refresh             — trigger a background rebuild
