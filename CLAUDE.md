@@ -64,9 +64,9 @@ write code that assumes a later phase has landed.
 | 5 | Per-user settings, mail, multi-tenant scheduler | **In review** |
 | 6 | Reports in the database | **In review** |
 | 7 | Shared violation cache | **In review** |
-| 8 | Installer, infrastructure, documentation | Not started |
-| 9 | Administration panel (read-only) | Not started |
-| 10 | Performance validation | Not started |
+| 8 | Installer, infrastructure, documentation | **In review** |
+| 9 | Administration panel (read-only) | **In review** |
+| 10 | Performance validation | **In review** |
 
 **Milestone M1 = phases 0–3.** At the end of M1 the dashboard is gated behind login
 but still uses one shared DT connection. That interim state is a demo checkpoint and
@@ -79,6 +79,11 @@ configuration, schedule and reports, and the violation cache is shared by connec
 fingerprint. The single-tenant files (`app-config.json`, `violation-cache.json`, the
 report registry and the `/data/reports` directory) are gone; `/data` holds only
 `admin-credentials.json`.
+
+**Milestone M3 = phases 8–10**, also delivered as one pull request. It ships the
+installer's two-level uninstall, continuous integration, the read-only
+administration panel, and the performance evidence in `docs/PERFORMANCE.md`.
+After M3 the migration is complete and the phase table above is history.
 
 ---
 
@@ -104,13 +109,18 @@ dependency-tracker/
 │   │   ├── dt-connections.js user-settings.js mail-settings.js
 │   │   ├── reports-db.js caches.js schedules.js scheduler.js
 │   │   └── dt-fetch.js excel.js mail.js reports.js violation-cache.js
-│   ├── routes/                 # auth.js profile.js dt-proxy.js config.js reports.js schedule.js cache.js
-│   ├── server.test.js          # Unit tests for server helpers
+│   ├── routes/                 # auth.js profile.js admin.js dt-proxy.js config.js reports.js schedule.js cache.js
+│   ├── package.json            # Dependencies: exceljs, nodemailer, pg
+│   ├── Dockerfile
+│   ├── server.test.js          # Unit + route tests for server helpers
 │   ├── dashboard.test.js       # Unit tests for dashboard helpers
 │   ├── db.test.js              # DB integration tier (opt-in)  [phase 1]
-│   ├── package.json            # Dependencies: exceljs, nodemailer, pg
-│   └── Dockerfile
+│   └── installer.test.js       # install.sh uninstall contract  [phase 8]
 ├── docs/
+│   ├── PERFORMANCE.md          # Query plans and load evidence  [phase 10]
+│   ├── perf-check.js           # Reproduces that evidence
+│   └── auth-smoke-test.sh
+├── .github/workflows/ci.yml    # Offline, database and audit jobs  [phase 8]
 ├── install.sh
 ├── docker-compose.yml
 └── .env.example
@@ -194,7 +204,7 @@ Inline comments use lettered prefixes to trace design decisions:
 - **O-numbers** — observability notes (`// O3: JSON log format for log aggregators`)
 - **S-numbers** — security rationale (`// S2: token hashed before storage`) — **new in revision 2**
 
-Highest numbers currently in use: **Q13, P15, O5, S23**. When adding logic with a
+Highest numbers currently in use: **Q13, P17, O5, S26**. When adding logic with a
 non-obvious trade-off, add the next number in the appropriate series. Check the
 current maximum before assigning — parallel branches can claim the same number.
 
@@ -649,11 +659,14 @@ The frontend never performs uniqueness checks — those are backend-only, via
 Every new backend directory needs an explicit `COPY`. The image copies named paths
 only — a new directory that is not listed is silently missing at runtime.
 
+The image installs from the committed lock file with `npm ci`, not `npm install`,
+so it contains exactly the dependency tree that was tested and audited.
+
 ```dockerfile
 FROM node:22-alpine
 WORKDIR /app
-COPY package.json ./
-RUN npm install --omit=dev --no-audit --no-fund
+COPY package.json package-lock.json ./
+RUN npm ci --omit=dev --no-audit --no-fund
 COPY server.js ./
 COPY db/ ./db/
 COPY lib/ ./lib/
@@ -669,8 +682,25 @@ CMD ["node", "server.js"]
   `SCA_ADMIN_PASSWORD` (defaults `admin` / `ScaAdmin@dt8624`), hashed, mode `0600`.
 - It generates `POSTGRES_PASSWORD` and `SECRET_ENCRYPTION_KEY` when absent.
 - It no longer prompts for or writes any DT connection value.
-- The uninstall confirmation must name every container and data directory it
-  destroys. Update it whenever a service or bind mount is added.
+
+**Uninstall has two levels, and the difference is data:**
+
+| Flag | Containers and network | Images | `pgdata/`, `data/` | Confirmation |
+|---|---|---|---|---|
+| `--uninstall` / `-u` | removed | kept | **kept** | `y/N` |
+| `--all` / `-a` | removed | removed | **deleted** | type `DELETE` |
+
+- `docker compose down -v` is used only at the `--all` level. At the plain level
+  nothing on disk may be discarded, and the flag would say the opposite.
+- The banner must name every container and every directory, and must state
+  plainly whether the data survives. Update it whenever a service or bind mount
+  is added.
+- `.env` is kept at both levels: it holds `SECRET_ENCRYPTION_KEY`, and deleting
+  it silently is a much worse failure than leaving it.
+- Deletions use `${SCRIPT_DIR:?}` so an empty variable cannot turn a cleanup
+  into an `rm -rf` of the wrong path.
+- `installer.test.js` pins all of this. It runs offline against a throwaway
+  copy with a stub `docker` on `PATH`.
 
 ---
 
@@ -681,21 +711,29 @@ CMD ["node", "server.js"]
 ```bash
 node --test violation-cache/server.test.js
 node --test violation-cache/dashboard.test.js
+node --test violation-cache/installer.test.js
 
 # opt-in database tier
 TEST_DATABASE_URL=postgres://… node --test violation-cache/db.test.js
 ```
 
 No npm test script is defined. The default run must stay offline: it requires no
-database, no Docker and no network.
+database, no Docker and no network. CI runs the offline tiers on every push and
+the database tier against a `postgres:16-alpine` service container
+(`.github/workflows/ci.yml`).
 
-### 10.2 Three tiers
+### 10.2 Four tiers
 
 | Tier | File | Requirement |
 |---|---|---|
 | Pure unit | `server.test.js`, `dashboard.test.js` | Always runs. No I/O beyond temp files. |
-| Database integration | `db.test.js` | Skipped unless `TEST_DATABASE_URL` is set. |
 | Route / authorisation | `server.test.js` | Always runs, with a stubbed data layer. |
+| Installer | `installer.test.js` | Always runs. Executes `install.sh` in a temp copy with a stub `docker`. |
+| Database integration | `db.test.js` | Skipped unless `TEST_DATABASE_URL` is set. |
+
+`docs/perf-check.js` is **not** a test tier: it seeds tens of thousands of rows,
+which no test may do. It is run by hand before a release and its output lives in
+`docs/PERFORMANCE.md`.
 
 ### 10.3 Conventions
 

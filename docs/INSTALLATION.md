@@ -237,31 +237,66 @@ docker compose --env-file .env up -d
 
 ## 7. Uninstalling
 
-```bash
-# Remove containers and network (keep images and all data on disk)
-./install.sh --uninstall
+There are two levels, and the difference is whether your data survives.
 
-# Remove containers, network, AND Docker images
-./install.sh --all
+### Keep the data (default)
+
+```bash
+./install.sh --uninstall
 ```
 
-Both commands remove the `dt-dashboard`, `dt-violation-cache` and `dt-postgres`
-containers and the `dependency-track` network.
-
-**Your data is kept.** These are bind mounts on the host and are never deleted by
-the uninstaller:
+Removes the `dt-dashboard`, `dt-violation-cache` and `dt-postgres` containers and
+the `dependency-track` network. Docker images are kept, and **every byte of data
+stays on disk**:
 
 | Path | Contents |
 |------|----------|
-| `./violation-cache/pgdata` | The database — all users, settings and reports |
-| `./violation-cache/data` | `admin-credentials.json` only — caches, reports and all configuration live in PostgreSQL |
-| `./.env` | Configuration, including the database password |
+| `./violation-cache/pgdata` | The database — all accounts, settings, schedules and reports |
+| `./violation-cache/data` | `admin-credentials.json` |
+| `./.env` | Configuration, including the database password and `SECRET_ENCRYPTION_KEY` |
 
-To discard everything, remove them explicitly after uninstalling:
+Running `./install.sh` again brings the service back with all of it intact. This
+is the command to use for an upgrade, a host reboot or a temporary teardown.
+
+### Delete everything
 
 ```bash
-rm -rf violation-cache/pgdata violation-cache/data
+./install.sh --all
 ```
+
+Removes the containers, the network, the Docker images, **and deletes
+`violation-cache/pgdata` and `violation-cache/data`**. Every account, setting,
+schedule and report is destroyed and cannot be recovered.
+
+Interactively it will not accept `y` — you must type `DELETE`:
+
+```
+  FULL UNINSTALL — the following will be PERMANENTLY DELETED:
+    • .../violation-cache/pgdata
+      the database: every user account, setting, schedule and report
+    • .../violation-cache/data
+      the administrator credentials file
+    • Images: nginx:alpine, postgres:16-alpine, and the built backend image
+
+  This cannot be undone. Type DELETE to confirm, or anything else to abort.
+  >
+```
+
+`./install.sh --all --non-interactive` skips the prompt, which is what a script
+wants and what a typo does not. Use it deliberately.
+
+**`.env` is kept at both levels.** It holds `SECRET_ENCRYPTION_KEY`, and deleting
+it silently would be a worse surprise than leaving it behind. Remove it yourself
+if you want a clean slate:
+
+```bash
+rm -f .env
+```
+
+> **Backing up.** The two things worth backing up are `./violation-cache/pgdata`
+> and `SECRET_ENCRYPTION_KEY` from `./.env`. The database is useless without the
+> key: every stored DependencyTrack API key and SMTP password is encrypted with
+> it, and losing it means every user must re-enter their credentials.
 
 ---
 

@@ -169,8 +169,63 @@ async function count() {
   return rows[0].n;
 }
 
+/**
+ * Every account with the counts the administration panel renders.
+ *
+ * One query rather than a per-user round trip: with a few hundred accounts the
+ * N+1 shape would be several hundred queries for one page view (CLAUDE.md §13).
+ * The aggregates are computed in lateral subqueries so a user with no reports
+ * still appears, with zeroes.
+ *
+ * Read-only, and it returns no secret of any kind — no password hash, no API
+ * key, not even whether the DT key decrypts (S24).
+ */
+async function listWithStats({ limit = 500 } = {}) {
+  const { rows } = await query(
+    // P16: the page of users is selected BEFORE the laterals run. Ordering and
+    // limiting at the top level instead made PostgreSQL evaluate every lateral
+    // for all 5,000 accounts and throw away 4,500 of the results — 337 ms and
+    // 136,861 buffers, against 7 ms and 4,873 this way.
+    //
+    // S26/P17: `principal_type = 'user'` is not a filter, it is what makes
+    // ux_sessions_one_live_per_user usable. That index is partial on
+    // (revoked_at IS NULL AND principal_type = 'user'), and without the
+    // predicate the planner fell back to scanning the whole session table once
+    // per account. An administrator session has user_id NULL, so it could never
+    // have matched anyway and no row changes.
+    `SELECT u.id, u.login_id AS "loginId", u.email,
+            u.first_name AS "firstName", u.last_name AS "lastName",
+            u.created_at AS "createdAt", u.last_login_at AS "lastLoginAt",
+            (s.id IS NOT NULL)                     AS "sessionActive",
+            s.last_seen_at                         AS "lastSeenAt",
+            COALESCE(r.reports, 0)::int            AS "reportCount",
+            COALESCE(r.bytes, 0)::bigint           AS "storageBytes",
+            COALESCE(c.is_configured, false)       AS "dtConfigured",
+            COALESCE(sc.enabled, false)            AS "scheduleEnabled"
+       FROM (
+         SELECT id, login_id, email, first_name, last_name, created_at, last_login_at
+           FROM users ORDER BY created_at LIMIT $1
+       ) u
+       LEFT JOIN LATERAL (
+         SELECT id, last_seen_at FROM user_sessions
+          WHERE user_id = u.id AND principal_type = 'user'
+            AND revoked_at IS NULL AND expires_at > now()
+          LIMIT 1
+       ) s ON true
+       LEFT JOIN LATERAL (
+         SELECT count(*) AS reports, COALESCE(sum(file_size_bytes), 0) AS bytes
+           FROM reports WHERE user_id = u.id
+       ) r ON true
+       LEFT JOIN dt_connections c ON c.user_id = u.id
+       LEFT JOIN schedules sc      ON sc.user_id = u.id
+      ORDER BY u.created_at`,
+    [limit]
+  );
+  return rows;
+}
+
 module.exports = {
   create, findById, findByLoginId, verifyLookup, updateProfile,
   touchLastLogin, deleteById, isLoginIdAvailable, isEmailAvailable, count,
-  PUBLIC_COLUMNS,
+  listWithStats, PUBLIC_COLUMNS,
 };

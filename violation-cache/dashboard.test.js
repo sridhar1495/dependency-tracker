@@ -1086,6 +1086,28 @@ describe('apiFetch contract in index.html', () => {
     assert.ok(wrapped.length >= 29, `expected at least 29 apiFetch call sites, found ${wrapped.length}`);
   });
 
+  test('the administration panel also goes through apiFetch', () => {
+    // A bare fetch() here would miss the bearer header and, worse, would not
+    // redirect on 401 — the panel would look empty instead of signed out.
+    assert.doesNotMatch(INDEX_HTML, /fetch\((['`])\/admin\//,
+      'administration routes must be called through apiFetch()');
+    assert.match(INDEX_HTML, /apiFetch\('\/admin\/overview'\)/);
+    assert.match(INDEX_HTML, /apiFetch\('\/admin\/users'\)/);
+  });
+
+  test('the administration entry is hidden for a non-administrator', () => {
+    assert.match(INDEX_HTML, /userMenuAdmin/);
+    assert.match(INDEX_HTML, /adminItem\.style\.display\s*=\s*_currentUser\.isAdmin/,
+      'the menu entry must be driven by the principal, not always shown');
+  });
+
+  test('administration handlers are window-exported from the IIFE', () => {
+    for (const fn of ['openAdminPanel', 'closeAdminPanel', 'loadAdminData']) {
+      assert.match(INDEX_HTML, new RegExp('window\\.' + fn + '\\s*='),
+        `${fn} is used by an onclick attribute and must be window-exported`);
+    }
+  });
+
   test('apiFetch attaches the bearer header and handles 401', () => {
     assert.match(INDEX_HTML, /Authorization['"]?\s*:\s*['"`]Bearer/,
       'apiFetch must attach the Authorization header');

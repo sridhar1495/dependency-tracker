@@ -2346,3 +2346,132 @@ describe('user settings — maxReports bounds', () => {
     }
   });
 });
+
+// ── Administration routes — read-only, administrator-only ────────────────────
+// The panel exists so an operator can see usage without being handed the keys
+// to everyone's data. These tests pin both halves of that.
+
+const routeAdmin = require('./routes/admin');
+const usersMod   = require('./lib/users');
+const cachesMod2 = require('./lib/caches');
+
+describe('routes — administration is administrator-only', () => {
+  for (const path of ['/admin/users', '/admin/overview']) {
+    test(`an ordinary user gets 403 ADMIN_ONLY on ${path}`, async () => {
+      const restore = stub(usersMod, {
+        listWithStats: async () => { throw new Error('must not query on an unauthorised request'); },
+      });
+      try {
+        const res = makeRes();
+        const handled = await routeAdmin.handle({
+          method: 'GET', url: path, path, res, principal: asUser(USER_A),
+        });
+        assert.equal(handled, true);
+        assert.equal(res.statusCode, 403);
+        assert.equal(res.json.code, 'ADMIN_ONLY');
+      } finally { restore(); }
+    });
+  }
+
+  test('the administration area is 403, not 404 — its existence is not a secret', async () => {
+    // Another user's report is hidden with 404 because confirming it exists
+    // leaks something. An admin area leaks nothing by existing.
+    const restore = stub(usersMod, { listWithStats: async () => [] });
+    try {
+      const res = makeRes();
+      await routeAdmin.handle({
+        method: 'GET', url: '/admin/users', path: '/admin/users', res, principal: asUser(USER_A),
+      });
+      assert.equal(res.statusCode, 403);
+    } finally { restore(); }
+  });
+});
+
+describe('routes — the administration listing exposes no secrets', () => {
+  const sampleRows = () => ([
+    {
+      id: USER_A, loginId: 'alice', email: 'a@x.com', firstName: 'Alice', lastName: 'Ant',
+      createdAt: new Date('2026-01-01'), lastLoginAt: new Date('2026-02-01'),
+      sessionActive: true, lastSeenAt: new Date('2026-02-01'),
+      reportCount: 3, storageBytes: '4096', dtConfigured: true, scheduleEnabled: false,
+    },
+    {
+      id: USER_B, loginId: 'bob', email: null, firstName: 'Bob', lastName: 'Bee',
+      createdAt: new Date('2026-01-02'), lastLoginAt: null,
+      sessionActive: false, lastSeenAt: null,
+      reportCount: 0, storageBytes: '0', dtConfigured: false, scheduleEnabled: true,
+    },
+  ]);
+
+  test('users are returned with counts, and nothing that could authenticate as them', async () => {
+    const restore = stub(usersMod, { listWithStats: async () => sampleRows() });
+    try {
+      const res = makeRes();
+      await routeAdmin.handle({
+        method: 'GET', url: '/admin/users', path: '/admin/users', res, principal: asAdmin(),
+      });
+      assert.equal(res.statusCode, 200);
+      const { users } = res.json;
+      assert.equal(users.length, 2);
+      assert.equal(users[0].loginId, 'alice');
+      assert.equal(users[0].name, 'Alice Ant');
+      assert.equal(users[0].sessionActive, true);
+      assert.equal(users[0].reportCount, 3);
+      assert.equal(users[0].storageBytes, 4096, 'bigint counts are returned as numbers');
+
+      // Nothing that could be replayed, decrypted or used to sign in.
+      for (const forbidden of ['passwordHash', 'password_hash', 'apiKey', 'api_key',
+                               'tokenHash', 'smtpPass', 'fingerprint', 'id']) {
+        assert.equal(forbidden in users[0], false, `${forbidden} must not be in the response`);
+      }
+      assert.doesNotMatch(res.body, /scrypt\$/);
+    } finally { restore(); }
+  });
+
+  test('the overview totals are derived from the same rows', async () => {
+    const restore  = stub(usersMod, { listWithStats: async () => sampleRows() });
+    const restore2 = stub(cachesMod2, { count: async () => 1 });
+    try {
+      const res = makeRes();
+      await routeAdmin.handle({
+        method: 'GET', url: '/admin/overview', path: '/admin/overview', res, principal: asAdmin(),
+      });
+      assert.equal(res.statusCode, 200);
+      assert.deepEqual(res.json, {
+        userCount: 2, activeSessions: 1, reportCount: 3, storageBytes: 4096,
+        dtConfigured: 1, schedulesActive: 1, cacheCount: 1,
+      });
+    } finally { restore(); restore2(); }
+  });
+
+  test('one cache for two configured users is the shared build working', async () => {
+    // The number the operator should watch as accounts are added: caches grow
+    // with distinct DependencyTrack connections, not with users (CLAUDE.md §13).
+    const rows = sampleRows().map(u => ({ ...u, dtConfigured: true }));
+    const restore  = stub(usersMod, { listWithStats: async () => rows });
+    const restore2 = stub(cachesMod2, { count: async () => 1 });
+    try {
+      const res = makeRes();
+      await routeAdmin.handle({
+        method: 'GET', url: '/admin/overview', path: '/admin/overview', res, principal: asAdmin(),
+      });
+      assert.equal(res.json.dtConfigured, 2);
+      assert.equal(res.json.cacheCount, 1);
+    } finally { restore(); restore2(); }
+  });
+
+  test('there is no route that changes anything', async () => {
+    // A write route here would be a much larger blast radius than the panel is
+    // worth. If one is ever added, this test should be the thing that stops it.
+    for (const method of ['POST', 'PUT', 'DELETE', 'PATCH']) {
+      for (const path of ['/admin/users', '/admin/overview', '/admin/users/alice']) {
+        const res = makeRes();
+        const handled = await routeAdmin.handle({
+          method, url: path, path, res, principal: asAdmin(),
+        });
+        assert.equal(handled, false,
+          `${method} ${path} must not be handled — administration is read-only`);
+      }
+    }
+  });
+});

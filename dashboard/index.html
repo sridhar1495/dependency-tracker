@@ -586,6 +586,35 @@
     .pf-banner.error   { background: var(--critical-bg); color: var(--critical); padding: 9px 11px; }
     .pf-banner.success { background: var(--ok-bg);       color: var(--ok);       padding: 9px 11px; }
     .pf-readonly { opacity: 0.6; cursor: not-allowed; }
+
+    /* ── Administration panel ──────────────────────────────────────────────
+       Wider than the profile panel because it renders a table, but otherwise
+       the same sliding-panel pattern and the same custom properties. */
+    .adm-panel { width: 1040px; }
+    .adm-stats { display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 16px; }
+    .adm-stat {
+      flex: 1 1 130px; background: var(--surface2); border: 1px solid var(--border);
+      border-radius: var(--radius); padding: 10px 12px;
+    }
+    .adm-stat-label { font-size: 10.5px; color: var(--text-muted); text-transform: uppercase; letter-spacing: .04em; }
+    .adm-stat-value { font-size: 20px; font-weight: 700; margin-top: 2px; }
+    .adm-table-wrap { overflow-x: auto; }
+    .adm-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+    .adm-table th {
+      text-align: left; font-size: 10.5px; text-transform: uppercase; letter-spacing: .04em;
+      color: var(--text-muted); padding: 7px 9px; border-bottom: 1px solid var(--border);
+      white-space: nowrap;
+    }
+    .adm-table td { padding: 7px 9px; border-bottom: 1px solid var(--border); white-space: nowrap; }
+    .adm-table tr:hover td { background: var(--surface2); }
+    .adm-dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; margin-right: 5px; }
+    .adm-dot.on  { background: var(--ok); }
+    .adm-dot.off { background: var(--text-muted); opacity: .5; }
+    .adm-note {
+      font-size: 11.5px; color: var(--text-muted); line-height: 1.55;
+      background: var(--surface2); border: 1px solid var(--border);
+      border-radius: var(--radius); padding: 9px 11px; margin-bottom: 14px;
+    }
     .pf-danger-zone {
       margin-top: 22px; padding-top: 14px; border-top: 1px solid var(--critical);
     }
@@ -768,6 +797,7 @@
       <button class="btn" id="userMenuBtn" onclick="toggleUserMenu()">👤</button>
       <div class="user-menu" id="userMenu">
         <button class="user-menu-item" id="userMenuProfile" onclick="openProfilePanel()">👤 Profile</button>
+        <button class="user-menu-item" id="userMenuAdmin" style="display:none" onclick="openAdminPanel()">🛡 Administration</button>
         <button class="user-menu-item danger" onclick="doLogout()">⎋ Sign out</button>
       </div>
     </div>
@@ -981,6 +1011,39 @@
   <div class="pf-footer">
     <button class="btn" onclick="closeProfilePanel()">Close</button>
     <button class="btn primary" id="pfSaveBtn" onclick="saveProfile()">Save changes</button>
+  </div>
+</div>
+
+<!-- ── Administration panel (read-only) ───────────────────────────────────── -->
+<div class="pf-backdrop" id="adminBackdrop" onclick="closeAdminPanel()"></div>
+<div class="pf-panel adm-panel" id="adminPanel">
+  <div class="pf-header">
+    <h2>Administration</h2>
+    <button class="pf-close" onclick="closeAdminPanel()" title="Close">&times;</button>
+  </div>
+  <div class="pf-body">
+    <div class="adm-note">
+      Read-only. This panel shows account metadata and usage totals. It cannot read
+      anyone's DependencyTrack key, SMTP password or report contents, and it has no
+      action that changes another account.
+    </div>
+    <div class="adm-stats" id="adminStats"></div>
+    <div class="adm-table-wrap">
+      <table class="adm-table">
+        <thead>
+          <tr>
+            <th>Login ID</th><th>Name</th><th>Created</th><th>Last sign-in</th>
+            <th>Session</th><th>DT</th><th>Schedule</th><th>Reports</th><th>Storage</th>
+          </tr>
+        </thead>
+        <tbody id="adminUsers"></tbody>
+      </table>
+    </div>
+    <div class="pf-meta" id="adminEmpty" style="display:none">No accounts yet.</div>
+  </div>
+  <div class="pf-footer">
+    <button class="btn" onclick="loadAdminData()">↻ Refresh</button>
+    <button class="btn primary" onclick="closeAdminPanel()">Close</button>
   </div>
 </div>
 
@@ -1288,6 +1351,100 @@ function renderUserMenu() {
   // profile panel has nothing editable to offer.
   const profileItem = document.getElementById('userMenuProfile');
   if (profileItem) profileItem.style.display = _currentUser.isAdmin ? 'none' : '';
+  const adminItem = document.getElementById('userMenuAdmin');
+  if (adminItem) adminItem.style.display = _currentUser.isAdmin ? '' : 'none';
+
+  // The administrator owns no DependencyTrack connection, settings or reports —
+  // every one of those routes answers 403 for them (CLAUDE.md §7.5). Hiding the
+  // controls is honest about that rather than offering buttons that only fail.
+  if (_currentUser.isAdmin) {
+    for (const id of ['settingsBtn', 'reportsBtn']) {
+      const el = document.getElementById(id);
+      if (el) el.style.display = 'none';
+    }
+  }
+}
+
+// ── Administration panel (read-only) ──────────────────────────────────────
+// Only ever opened from an administrator session. The backend enforces that
+// independently — the hidden menu entry is convenience, not security.
+function openAdminPanel() {
+  closeUserMenu();
+  document.getElementById('adminBackdrop').classList.add('open');
+  document.getElementById('adminPanel').classList.add('open');
+  loadAdminData();
+}
+
+function closeAdminPanel() {
+  document.getElementById('adminBackdrop').classList.remove('open');
+  document.getElementById('adminPanel').classList.remove('open');
+}
+
+/** Human-readable byte count for the storage column. */
+function formatBytes(n) {
+  const b = Number(n) || 0;
+  if (b === 0) return '—';
+  const units = ['B', 'KB', 'MB', 'GB'];
+  let i = 0, v = b;
+  while (v >= 1024 && i < units.length - 1) { v /= 1024; i++; }
+  return `${v < 10 && i > 0 ? v.toFixed(1) : Math.round(v)} ${units[i]}`;
+}
+
+const fmtDate = (v) => (v ? new Date(v).toLocaleString() : '—');
+
+async function loadAdminData() {
+  const statsEl = document.getElementById('adminStats');
+  const bodyEl  = document.getElementById('adminUsers');
+  const emptyEl = document.getElementById('adminEmpty');
+  statsEl.innerHTML = '';
+  bodyEl.innerHTML  = '';
+
+  try {
+    const [oR, uR] = await Promise.all([
+      apiFetch('/admin/overview'),
+      apiFetch('/admin/users'),
+    ]);
+    if (!oR.ok || !uR.ok) {
+      const bd = await (oR.ok ? uR : oR).json().catch(() => ({}));
+      showToast(bd.error || 'Could not load administration data.', 'error');
+      return;
+    }
+    const overview = await oR.json();
+    const { users } = await uR.json();
+
+    const stats = [
+      ['Accounts',          overview.userCount],
+      ['Active sessions',   overview.activeSessions],
+      ['DT configured',     overview.dtConfigured],
+      ['Schedules on',      overview.schedulesActive],
+      ['Reports stored',    overview.reportCount],
+      ['Report storage',    formatBytes(overview.storageBytes)],
+      // Fewer caches than configured accounts means users are sharing a build,
+      // which is the whole point of the fingerprint key (CLAUDE.md §7.5).
+      ['Violation caches',  overview.cacheCount],
+    ];
+    statsEl.innerHTML = stats.map(([label, value]) => `
+      <div class="adm-stat">
+        <div class="adm-stat-label">${escHtml(label)}</div>
+        <div class="adm-stat-value">${escHtml(String(value))}</div>
+      </div>`).join('');
+
+    emptyEl.style.display = users.length ? 'none' : '';
+    bodyEl.innerHTML = users.map(u => `
+      <tr>
+        <td><strong>${escHtml(u.loginId)}</strong></td>
+        <td>${escHtml(u.name)}</td>
+        <td>${escHtml(fmtDate(u.createdAt))}</td>
+        <td>${escHtml(fmtDate(u.lastLoginAt))}</td>
+        <td><span class="adm-dot ${u.sessionActive ? 'on' : 'off'}"></span>${u.sessionActive ? 'Active' : 'None'}</td>
+        <td><span class="adm-dot ${u.dtConfigured ? 'on' : 'off'}"></span>${u.dtConfigured ? 'Set' : 'Not set'}</td>
+        <td><span class="adm-dot ${u.scheduleEnabled ? 'on' : 'off'}"></span>${u.scheduleEnabled ? 'On' : 'Off'}</td>
+        <td>${escHtml(String(u.reportCount))}</td>
+        <td>${escHtml(formatBytes(u.storageBytes))}</td>
+      </tr>`).join('');
+  } catch (e) {
+    showToast('Could not load administration data: ' + e.message, 'error');
+  }
 }
 
 function toggleUserMenu() {
@@ -3897,6 +4054,9 @@ async function cancelReport(id) {
 window.toggleUserMenu       = toggleUserMenu;
 window.doLogout             = doLogout;
 window.openProfilePanel     = openProfilePanel;
+window.openAdminPanel       = openAdminPanel;
+window.closeAdminPanel      = closeAdminPanel;
+window.loadAdminData        = loadAdminData;
 window.closeProfilePanel    = closeProfilePanel;
 window.saveProfile          = saveProfile;
 window.deleteAccount        = deleteAccount;
@@ -3961,6 +4121,18 @@ window.scheduleReports      = scheduleReports;
     const wrap = document.querySelector('.user-menu-wrap');
     if (wrap && !wrap.contains(e.target)) closeUserMenu();
   });
+
+  if (_currentUser.isAdmin) {
+    // An administrator session has no per-user data to load. Show demo data so
+    // the page is not empty, and say plainly where the useful view is.
+    loadMockData();
+    const banner = document.getElementById('dataBanner');
+    banner.innerHTML =
+      'Signed in as <strong>administrator</strong> — showing demo data. ' +
+      'Open <strong>👤 → 🛡 Administration</strong> for accounts and usage.';
+    banner.className = 'data-banner';
+    return;
+  }
 
   // loadDtConnection() connects when this account has a DependencyTrack
   // connection saved. Fall back to demo data when it does not.

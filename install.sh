@@ -10,8 +10,10 @@
 # Options:
 #   --non-interactive   Skip all prompts and use defaults / .env values
 #   --skip-docker-check Skip Docker version validation
-#   --uninstall | -u    Remove containers, volumes, and networks (keep images)
-#   --all       | -a    Remove containers, volumes, networks, AND images
+#   --uninstall | -u    Remove containers and the network. KEEPS all data on disk
+#                       (database, administrator credentials, .env) and keeps images
+#   --all       | -a    Remove containers, the network and images, AND DELETE the
+#                       data directories. Every user, setting and report is destroyed
 #   --help              Show this help
 # =============================================================================
 
@@ -47,8 +49,20 @@ retry() {
 }
 
 # ─── Uninstall helper ────────────────────────────────────────────────────────
+# Two distinct levels, because "I am done with this container" and "erase every
+# account, report and setting" are very different intentions:
+#
+#   --uninstall  containers + network. All data directories are KEPT, so
+#                re-running install.sh brings the same database back.
+#   --all        the above, plus images, plus the data directories themselves.
+#                This is irreversible.
+#
+# `docker compose down -v` is deliberately NOT used at the plain --uninstall
+# level: -v removes volumes, and the intent there is that nothing on disk is
+# lost. The data directories are bind mounts (CLAUDE.md §9.2), so they survive
+# either way, but the flag would still say the opposite of what we mean.
 do_uninstall() {
-  local remove_images="$1"
+  local remove_all="$1"
 
   step "Uninstalling Risk Dashboard"
 
@@ -67,51 +81,87 @@ do_uninstall() {
   local env_args=()
   [[ -f "$SCRIPT_DIR/.env" ]] && env_args=(--env-file "$SCRIPT_DIR/.env")
 
+  # Named explicitly so the banner can never drift from what is actually removed.
+  local pgdata_dir="$SCRIPT_DIR/violation-cache/pgdata"
+  local data_dir="$SCRIPT_DIR/violation-cache/data"
+
   echo ""
-  echo -e "  ${BOLD}The following will be permanently removed:${RESET}"
-  echo -e "    • Containers : dt-dashboard, dt-violation-cache, dt-postgres"
-  echo -e "    • Network    : dependency-track"
-  echo -e "    • Volumes    : any Docker-managed volumes for these services"
-  if [[ "$remove_images" == "true" ]]; then
-    echo -e "    • Images     : nginx:alpine, postgres:16-alpine, dt-violation-cache (built image)"
-  fi
-  echo ""
-  echo -e "  ${BOLD}The following are bind mounts and are KEPT on disk:${RESET}"
-  echo -e "    • ./violation-cache/pgdata  ${BOLD}(database — all users, settings and reports)${RESET}"
-  echo -e "    • ./violation-cache/data    (administrator credentials file)"
-  echo -e "    • ./.env                    (configuration, including the DB password)"
-  echo -e "  Delete them manually if you intend to discard all data."
+  echo -e "  ${BOLD}Containers${RESET} : dt-dashboard, dt-violation-cache, dt-postgres"
+  echo -e "  ${BOLD}Network${RESET}    : dependency-track"
   echo ""
 
-  if [[ "$NON_INTERACTIVE" == "false" ]]; then
-    read -rp "  Are you sure? This cannot be undone. [y/N]: " _confirm
-    if [[ "$_confirm" != "y" && "$_confirm" != "Y" ]]; then
-      info "Aborted."
-      exit 0
+  if [[ "$remove_all" == "true" ]]; then
+    echo -e "  ${RED}${BOLD}FULL UNINSTALL — the following will be PERMANENTLY DELETED:${RESET}"
+    echo -e "    ${RED}•${RESET} ${pgdata_dir}"
+    echo -e "      ${BOLD}the database: every user account, setting, schedule and report${RESET}"
+    echo -e "    ${RED}•${RESET} ${data_dir}"
+    echo -e "      the administrator credentials file"
+    echo -e "    ${RED}•${RESET} Images: nginx:alpine, postgres:16-alpine, and the built backend image"
+    echo ""
+    echo -e "  ${BOLD}Kept:${RESET} ./.env — it still holds POSTGRES_PASSWORD and SECRET_ENCRYPTION_KEY,"
+    echo -e "  which a fresh install will reuse. Delete it yourself if you want a clean slate."
+    echo ""
+    if [[ "$NON_INTERACTIVE" == "false" ]]; then
+      echo -e "  ${YELLOW}This cannot be undone.${RESET} Type ${BOLD}DELETE${RESET} to confirm, or anything else to abort."
+      read -rp "  > " _confirm
+      if [[ "$_confirm" != "DELETE" ]]; then
+        info "Aborted. Nothing was removed."
+        exit 0
+      fi
+    else
+      warn "--non-interactive --all: deleting all data without confirmation."
+    fi
+  else
+    echo -e "  ${GREEN}${BOLD}Your data is KEPT:${RESET}"
+    echo -e "    ${GREEN}•${RESET} ${pgdata_dir}"
+    echo -e "      the database: users, settings, schedules and reports"
+    echo -e "    ${GREEN}•${RESET} ${data_dir}"
+    echo -e "      the administrator credentials file"
+    echo -e "    ${GREEN}•${RESET} ./.env"
+    echo -e "  Re-running ./install.sh restores the service with all of it intact."
+    echo ""
+    echo -e "  Docker images are kept too. To remove everything including the data, run:"
+    echo -e "    ${BOLD}./install.sh --all${RESET}"
+    echo ""
+    if [[ "$NON_INTERACTIVE" == "false" ]]; then
+      read -rp "  Remove the containers and network? [y/N]: " _confirm
+      if [[ "$_confirm" != "y" && "$_confirm" != "Y" ]]; then
+        info "Aborted."
+        exit 0
+      fi
     fi
   fi
 
-  local down_flags=(-v)
-  [[ "$remove_images" == "true" ]] && down_flags+=(--rmi all)
+  local down_flags=()
+  if [[ "$remove_all" == "true" ]]; then
+    # -v only matters if a future service ever declares an anonymous volume;
+    # at the full level removing it is what the operator asked for.
+    down_flags+=(-v --rmi all)
+  fi
 
-  info "Stopping and removing containers, volumes, and networks…"
+  info "Stopping and removing containers and the network…"
   $COMPOSE_CMD -f "$SCRIPT_DIR/docker-compose.yml" "${env_args[@]}" down "${down_flags[@]}" \
     || warn "docker compose down reported errors — some resources may already be removed"
+
+  if [[ "$remove_all" == "true" ]]; then
+    # ${VAR:?} refuses to expand when the variable is empty, so a bug that blanked
+    # SCRIPT_DIR can never turn this into `rm -rf /violation-cache/pgdata`.
+    info "Deleting data directories…"
+    rm -rf "${SCRIPT_DIR:?}/violation-cache/pgdata"
+    rm -rf "${SCRIPT_DIR:?}/violation-cache/data"
+    success "Data directories deleted"
+  fi
 
   echo ""
   success "Uninstall complete."
   echo ""
-  if [[ "$remove_images" == "true" ]]; then
-    echo -e "  All containers, networks, and images have been removed."
+  if [[ "$remove_all" == "true" ]]; then
+    echo -e "  Containers, network, images and all data have been removed."
+    echo -e "  ./.env was kept; delete it manually to discard the generated secrets too."
   else
-    echo -e "  All containers and networks have been removed."
-    echo -e "  Docker images were kept. To also remove images, run:"
-    echo -e "    ${BOLD}./install.sh --all${RESET}"
+    echo -e "  Containers and the network have been removed. Images and data were kept."
+    echo -e "  Bring it back with: ${BOLD}./install.sh${RESET}"
   fi
-  echo ""
-  echo -e "  ${YELLOW}Database files were NOT deleted.${RESET}"
-  echo -e "  To discard all users, settings and reports as well:"
-  echo -e "    ${BOLD}rm -rf ./violation-cache/pgdata ./violation-cache/data${RESET}"
   echo ""
 }
 
@@ -119,16 +169,16 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 NON_INTERACTIVE=false
 SKIP_DOCKER_CHECK=false
 UNINSTALL=false
-REMOVE_IMAGES=false
+REMOVE_ALL=false
 
 for arg in "$@"; do
   case $arg in
     --non-interactive)   NON_INTERACTIVE=true ;;
     --skip-docker-check) SKIP_DOCKER_CHECK=true ;;
     --uninstall|-u)      UNINSTALL=true ;;
-    --all|-a)            UNINSTALL=true; REMOVE_IMAGES=true ;;
+    --all|-a)            UNINSTALL=true; REMOVE_ALL=true ;;
     --help)
-      sed -n '2,16p' "$0"; exit 0 ;;
+      sed -n '2,19p' "$0"; exit 0 ;;
     *)
       warn "Unknown option: $arg (ignored)" ;;
   esac
@@ -149,7 +199,7 @@ echo ""
 
 # ─── Uninstall dispatch ──────────────────────────────────────────────────────
 if [[ "$UNINSTALL" == "true" ]]; then
-  do_uninstall "$REMOVE_IMAGES"
+  do_uninstall "$REMOVE_ALL"
   exit 0
 fi
 

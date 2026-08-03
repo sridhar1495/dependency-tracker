@@ -13,6 +13,8 @@
 //   DELETE /auth/account
 //   GET    /profile                             — signed-in user's details
 //   PUT    /profile                             — update name / password
+//   GET    /admin/users                         — accounts and their counts (administrator)
+//   GET    /admin/overview                      — service-wide totals (administrator)
 //   GET    /violation-cache/status              — build state for this user's connection
 //   GET    /violation-cache/data                — the cached map (gzipped)
 //   POST   /violation-cache/refresh             — trigger a background rebuild
@@ -59,6 +61,7 @@ const mailSettings  = require('./lib/mail-settings');
 const routeModules = [
   require('./routes/auth'),
   require('./routes/profile'),
+  require('./routes/admin'),
   require('./routes/dt-proxy'),
   require('./routes/cache'),
   require('./routes/config'),
