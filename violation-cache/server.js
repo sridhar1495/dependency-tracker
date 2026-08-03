@@ -61,15 +61,10 @@ const PUBLIC_PATHS = new Set([
   '/auth/login',               // the entry point itself
 ]);
 
-// Phase 3 deletes this set and every /violation-cache/* route becomes
-// authenticated in the same pull request that teaches the dashboard to send a
-// bearer token. Enforcing it here instead would break the dashboard for
-// everyone between phase 2 and phase 3 merging, leaving main unusable.
-const PENDING_FRONTEND_AUTH_PREFIX = '/violation-cache/';
-
+// Everything else — including every /violation-cache/* route — now requires a
+// bearer token. The dashboard sends one via apiFetch() as of phase 3.
 function isPublic(path) {
-  if (PUBLIC_PATHS.has(path)) return true;
-  return path.startsWith(PENDING_FRONTEND_AUTH_PREFIX);
+  return PUBLIC_PATHS.has(path);
 }
 
 // ── Boot step 1: read and validate configuration ──────────────────────────────
@@ -222,11 +217,10 @@ async function boot() {
   const appCfg = appConfig.loadConfig();
   log('info', `Violation cache service listening on :${cfg.port}`);
   log('info', 'Authentication', {
-    adminLogin:    admin.isEnabled() ? 'enabled' : 'DISABLED',
-    sessionHours:  `${cfg.session.absoluteHours} absolute / ${cfg.session.idleHours} idle`,
-    // Honest about the interim state rather than implying full coverage.
-    enforcedOn:    '/auth/*, /profile',
-    pendingPhase3: '/violation-cache/* (enforced once the dashboard sends a token)',
+    adminLogin:   admin.isEnabled() ? 'enabled' : 'DISABLED',
+    sessionHours: `${cfg.session.absoluteHours} absolute / ${cfg.session.idleHours} idle`,
+    enforcedOn:   'all routes',
+    publicPaths:  [...PUBLIC_PATHS].join(', '),
   });
   log('info', 'Startup configuration', {
     apiUrl,

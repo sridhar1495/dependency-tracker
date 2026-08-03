@@ -536,6 +536,63 @@
     .btn-rpt.danger:hover { background: rgba(239,68,68,0.1); }
     /* Badge dot on Reports button */
     #reportsBtn { position: relative; }
+
+    /* ── User menu ─────────────────────────────────────────────────────────
+       Reuses the existing dropdown idiom rather than inventing a new one. */
+    .user-menu-wrap { position: relative; }
+    .user-menu {
+      position: absolute; right: 0; top: calc(100% + 6px); min-width: 190px;
+      background: var(--surface); border: 1px solid var(--border);
+      border-radius: var(--radius); box-shadow: 0 10px 30px rgba(0,0,0,0.35);
+      padding: 5px; display: none; z-index: 300;
+    }
+    .user-menu.open { display: block; }
+    .user-menu-item {
+      display: block; width: 100%; text-align: left; background: none; border: none;
+      color: var(--text); font-size: 13px; font-family: inherit; padding: 8px 10px;
+      border-radius: 6px; cursor: pointer;
+    }
+    .user-menu-item:hover { background: var(--surface2); }
+    .user-menu-item.danger { color: var(--critical); }
+
+    /* ── Profile panel ─────────────────────────────────────────────────────
+       Same sliding-panel pattern as the settings panel. */
+    .pf-backdrop {
+      position: fixed; inset: 0; background: rgba(0,0,0,0.5);
+      opacity: 0; pointer-events: none; transition: opacity 0.2s; z-index: 390;
+    }
+    .pf-backdrop.open { opacity: 1; pointer-events: auto; }
+    .pf-panel {
+      position: fixed; top: 0; left: 0; height: 100%; width: 400px; max-width: 92vw;
+      background: var(--surface); border-right: 1px solid var(--border);
+      transform: translateX(-100%); transition: transform 0.22s ease;
+      z-index: 400; display: flex; flex-direction: column;
+    }
+    .pf-panel.open { transform: translateX(0); }
+    .pf-header {
+      padding: 16px 18px; border-bottom: 1px solid var(--border);
+      display: flex; align-items: center; justify-content: space-between;
+    }
+    .pf-header h2 { font-size: 15px; font-weight: 600; }
+    .pf-close { background: none; border: none; color: var(--text-muted); cursor: pointer; font-size: 20px; }
+    .pf-close:hover { color: var(--text); }
+    .pf-body { padding: 16px 18px; overflow-y: auto; flex: 1; }
+    .pf-footer {
+      padding: 12px 18px; border-top: 1px solid var(--border);
+      display: flex; gap: 8px; justify-content: flex-end;
+    }
+    .pf-meta { font-size: 11.5px; color: var(--text-muted); margin-bottom: 12px; }
+    .pf-banner { font-size: 12.5px; margin-bottom: 12px; padding: 0; border-radius: var(--radius); }
+    .pf-banner.error   { background: var(--critical-bg); color: var(--critical); padding: 9px 11px; }
+    .pf-banner.success { background: var(--ok-bg);       color: var(--ok);       padding: 9px 11px; }
+    .pf-readonly { opacity: 0.6; cursor: not-allowed; }
+    .pf-danger-zone {
+      margin-top: 22px; padding-top: 14px; border-top: 1px solid var(--critical);
+    }
+    .pf-danger-zone h3 { font-size: 12px; color: var(--critical); margin-bottom: 6px; }
+    .pf-danger-zone p  { font-size: 11.5px; color: var(--text-muted); line-height: 1.5; margin-bottom: 8px; }
+    .btn.danger { background: var(--critical); border-color: var(--critical); color: #fff; }
+    .btn.danger:hover { filter: brightness(1.1); }
     #reportsBadge {
       position: absolute; top: -4px; right: -4px;
       background: var(--critical); color: #fff;
@@ -707,6 +764,13 @@
     </div>
     <button class="btn-theme" id="themeBtn" onclick="toggleTheme()" title="Toggle dark/light mode">🌙</button>
     <button class="btn" id="settingsBtn" onclick="openConfigPanel()">⚙ Settings</button>
+    <div class="user-menu-wrap">
+      <button class="btn" id="userMenuBtn" onclick="toggleUserMenu()">👤</button>
+      <div class="user-menu" id="userMenu">
+        <button class="user-menu-item" id="userMenuProfile" onclick="openProfilePanel()">👤 Profile</button>
+        <button class="user-menu-item danger" onclick="doLogout()">⎋ Sign out</button>
+      </div>
+    </div>
     <button class="btn" id="reportsBtn" onclick="openModal('reportsModal')" title="View and download generated vulnerability reports">
       📥 Reports<span id="reportsBadge"></span>
     </button>
@@ -876,6 +940,50 @@
 <div id="toastContainer"></div>
 
 <!-- ── Config Panel (left-side overlay) ──────────────────────────────────── -->
+<!-- ── Profile panel ──────────────────────────────────────────────────────── -->
+<div class="pf-backdrop" id="profileBackdrop" onclick="closeProfilePanel()"></div>
+<div class="pf-panel" id="profilePanel">
+  <div class="pf-header">
+    <h2>Your profile</h2>
+    <button class="pf-close" onclick="closeProfilePanel()" title="Close">&times;</button>
+  </div>
+  <div class="pf-body">
+    <div class="pf-banner" id="pfBanner"></div>
+    <div class="pf-meta" id="pfMeta"></div>
+
+    <label class="cfg-label" for="pfLoginId">Login ID</label>
+    <input class="cfg-input pf-readonly" id="pfLoginId" readonly disabled>
+    <label class="cfg-label" for="pfEmail">Email</label>
+    <input class="cfg-input pf-readonly" id="pfEmail" readonly disabled>
+    <div class="pf-meta" style="margin-top:5px">
+      Login ID and email cannot be changed.
+    </div>
+
+    <label class="cfg-label" for="pfFirstName">First name</label>
+    <input class="cfg-input" id="pfFirstName" autocomplete="given-name">
+    <label class="cfg-label" for="pfLastName">Last name</label>
+    <input class="cfg-input" id="pfLastName" autocomplete="family-name">
+
+    <label class="cfg-label" for="pfPassword">New password <span style="opacity:.65">(leave blank to keep)</span></label>
+    <input class="cfg-input" id="pfPassword" type="password" autocomplete="new-password">
+    <label class="cfg-label" for="pfConfirm">Confirm new password</label>
+    <input class="cfg-input" id="pfConfirm" type="password" autocomplete="new-password">
+
+    <div class="pf-danger-zone">
+      <h3>Delete account</h3>
+      <p>Permanently removes your account, settings, schedules and every report you
+         have generated. This cannot be undone.</p>
+      <label class="cfg-label" for="pfDeleteConfirm">Type your login ID to confirm</label>
+      <input class="cfg-input" id="pfDeleteConfirm" placeholder="your login ID">
+      <button class="btn danger" style="margin-top:8px" onclick="deleteAccount()">Delete my account</button>
+    </div>
+  </div>
+  <div class="pf-footer">
+    <button class="btn" onclick="closeProfilePanel()">Close</button>
+    <button class="btn primary" id="pfSaveBtn" onclick="saveProfile()">Save changes</button>
+  </div>
+</div>
+
 <div class="cfg-backdrop" id="cfgBackdrop" onclick="closeConfigPanel(false)"></div>
 <div class="cfg-panel" id="configPanel">
   <div class="cfg-panel-header">
@@ -1086,6 +1194,247 @@ let selectedProjectUuids = new Set(); // UUIDs of leaf projects manually checked
 // ── Config panel state ─────────────────────────────────────────────────────
 let _configPanelDirty = false;   // true when any config panel field has changed
 let _appConfig        = null;    // last fetched config from /violation-cache/config
+let _currentUser      = null;    // authenticated principal from /auth/me
+
+// ── Authentication ────────────────────────────────────────────────────────────
+// The bearer token lives in localStorage, so it is shared across tabs of one
+// browser but not across browsers — the required behaviour (CLAUDE.md §7.2).
+const TOKEN_KEY = 'dt_session_token';
+
+function getToken()  { return localStorage.getItem(TOKEN_KEY); }
+function clearToken() { localStorage.removeItem(TOKEN_KEY); }
+
+/** Send the visitor to the sign-in page, optionally with a reason to display. */
+function goToLogin(reason) {
+  clearToken();
+  const q = reason ? ('?reason=' + encodeURIComponent(reason)) : '';
+  window.location.replace('login.html' + q);
+}
+
+/**
+ * The ONLY way to call a backend route (CLAUDE.md §8.3).
+ *
+ * 1. attaches the Authorization: Bearer header
+ * 2. redirects to the sign-in page when no token is present
+ * 3. clears the token and redirects on any 401
+ *
+ * Direct calls to the DependencyTrack API (/api/*) still use fetch() with
+ * X-Api-Key and are the one documented exception.
+ */
+async function apiFetch(path, opts) {
+  const token = getToken();
+  if (!token) {
+    goToLogin('Please sign in to continue.');
+    // Never resolves: the page is navigating away, and returning a rejected
+    // promise here would surface a spurious error toast on the way out.
+    return new Promise(() => {});
+  }
+
+  const options = Object.assign({}, opts);
+  options.headers = Object.assign({}, options.headers, { Authorization: 'Bearer ' + token });
+
+  const response = await fetch(path, options);
+
+  if (response.status === 401) {
+    goToLogin('Your session has expired. Please sign in again.');
+    return new Promise(() => {});
+  }
+  return response;
+}
+
+/**
+ * Validate the session before anything renders.
+ * An unauthenticated visitor never sees dashboard chrome (CLAUDE.md §8.4).
+ */
+async function requireSession() {
+  const token = getToken();
+  if (!token) { goToLogin(); return null; }
+  try {
+    const r = await fetch('/auth/me', { headers: { Authorization: 'Bearer ' + token } });
+    if (!r.ok) { goToLogin('Your session has expired. Please sign in again.'); return null; }
+    const data = await r.json();
+    return data.user;
+  } catch (e) {
+    // The backend is unreachable. Signing the user out would be wrong — their
+    // session may be perfectly valid — so report it and stop.
+    document.body.innerHTML =
+      '<div style="padding:40px;font-family:sans-serif;color:#e2e8f0;background:#0f1117;min-height:100vh">' +
+      '<h2>Cannot reach the server</h2><p>' + escHtml(e.message) + '</p>' +
+      '<p>Check that the dt-violation-cache service is running, then reload.</p></div>';
+    return null;
+  }
+}
+
+// ── User menu ─────────────────────────────────────────────────────────────────
+function renderUserMenu() {
+  const btn = document.getElementById('userMenuBtn');
+  if (!btn || !_currentUser) return;
+  const name = _currentUser.isAdmin
+    ? 'Administrator'
+    : [_currentUser.firstName, _currentUser.lastName].filter(Boolean).join(' ') || _currentUser.loginId;
+  btn.textContent = '👤 ' + name;
+  btn.title = _currentUser.isAdmin
+    ? 'Signed in as administrator'
+    : 'Signed in as ' + _currentUser.loginId;
+  // Administrator details are held in the installation credentials file, so the
+  // profile panel has nothing editable to offer.
+  const profileItem = document.getElementById('userMenuProfile');
+  if (profileItem) profileItem.style.display = _currentUser.isAdmin ? 'none' : '';
+}
+
+function toggleUserMenu() {
+  const m = document.getElementById('userMenu');
+  if (m) m.classList.toggle('open');
+}
+function closeUserMenu() {
+  const m = document.getElementById('userMenu');
+  if (m) m.classList.remove('open');
+}
+
+async function doLogout() {
+  closeUserMenu();
+  try {
+    // Clear the local token only after the server confirms revocation, so a
+    // network failure cannot strand a live session with no way to reach it.
+    const r = await apiFetch('/auth/logout', { method: 'POST' });
+    if (r && !r.ok) {
+      showToast('Could not sign out cleanly — signing out locally.', 'warn');
+    }
+  } catch (e) {
+    showToast('Could not reach the server — signing out locally.', 'warn');
+  }
+  clearToken();
+  window.location.replace('login.html');
+}
+
+// ── Profile panel ─────────────────────────────────────────────────────────────
+// Reuses the sliding settings-panel pattern rather than the modal pattern,
+// matching the established convention for settings-style surfaces.
+function openProfilePanel() {
+  closeUserMenu();
+  document.getElementById('profileBackdrop').classList.add('open');
+  document.getElementById('profilePanel').classList.add('open');
+  loadProfile();
+}
+
+function closeProfilePanel() {
+  document.getElementById('profileBackdrop').classList.remove('open');
+  document.getElementById('profilePanel').classList.remove('open');
+}
+
+async function loadProfile() {
+  setProfileError('');
+  try {
+    const r = await apiFetch('/profile');
+    if (!r.ok) { setProfileError('Could not load your profile.'); return; }
+    const { user } = await r.json();
+    document.getElementById('pfLoginId').value   = user.loginId || '';
+    document.getElementById('pfEmail').value     = user.email || '(not set)';
+    document.getElementById('pfFirstName').value = user.firstName || '';
+    document.getElementById('pfLastName').value  = user.lastName || '';
+    document.getElementById('pfPassword').value  = '';
+    document.getElementById('pfConfirm').value   = '';
+    const meta = document.getElementById('pfMeta');
+    if (meta) {
+      const bits = [];
+      if (user.createdAt)   bits.push('Member since ' + new Date(user.createdAt).toLocaleDateString());
+      if (user.lastLoginAt) bits.push('Last sign-in ' + new Date(user.lastLoginAt).toLocaleString());
+      meta.textContent = bits.join(' · ');
+    }
+  } catch (e) {
+    setProfileError('Could not load your profile: ' + e.message);
+  }
+}
+
+function setProfileError(message, kind) {
+  const el = document.getElementById('pfBanner');
+  if (!el) return;
+  el.textContent = message || '';
+  el.className = message ? ('pf-banner ' + (kind || 'error')) : 'pf-banner';
+}
+
+async function saveProfile() {
+  setProfileError('');
+  const firstName = document.getElementById('pfFirstName').value;
+  const lastName  = document.getElementById('pfLastName').value;
+  const password  = document.getElementById('pfPassword').value;
+  const confirm   = document.getElementById('pfConfirm').value;
+
+  // Mirrors violation-cache/lib/validate.js — change both together (§8.8).
+  const NAME_RE = /^\p{L}+(?: \p{L}+)*$/u;
+  const nameError = (v, label) => {
+    if (!v) return label + ' is required.';
+    if (v !== v.trim()) return label + ' cannot start or end with a space.';
+    if (v.length < 3 || v.length > 128) return label + ' must be 3 to 128 characters.';
+    if (!NAME_RE.test(v)) return label + ' may contain only letters and single spaces between words.';
+    return null;
+  };
+  let err = nameError(firstName, 'First name') || nameError(lastName, 'Last name');
+  if (!err && password) {
+    if (/\s/.test(password)) err = 'Password cannot contain spaces.';
+    else if (password.length < 8 || password.length > 128) err = 'Password must be 8 to 128 characters.';
+    else if (password !== confirm) err = 'Passwords do not match.';
+  }
+  if (err) { setProfileError(err); return; }
+
+  const payload = { firstName, lastName };
+  if (password) { payload.password = password; payload.confirmPassword = confirm; }
+
+  const btn = document.getElementById('pfSaveBtn');
+  if (btn) { btn.disabled = true; btn.textContent = 'Saving…'; }
+  try {
+    const r = await apiFetch('/profile', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok) {
+      const first = data.errors ? Object.values(data.errors)[0] : null;
+      setProfileError(first || data.error || 'Could not save your profile.');
+      return;
+    }
+    _currentUser = Object.assign({}, _currentUser, data.user);
+    renderUserMenu();
+    document.getElementById('pfPassword').value = '';
+    document.getElementById('pfConfirm').value  = '';
+    setProfileError(
+      data.passwordChanged ? 'Profile and password updated.' : 'Profile updated.', 'success'
+    );
+    showToast('Profile updated.', 'success');
+  } catch (e) {
+    setProfileError('Could not save your profile: ' + e.message);
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = 'Save changes'; }
+  }
+}
+
+/** Delete the account. Requires the login ID to be typed, then confirmed. */
+async function deleteAccount() {
+  const typed = document.getElementById('pfDeleteConfirm').value.trim();
+  const expected = (_currentUser && _currentUser.loginId) || '';
+  if (!typed || typed.toLowerCase() !== expected.toLowerCase()) {
+    setProfileError('Type your login ID exactly to confirm deletion.');
+    return;
+  }
+  const ok = await showConfirm(
+    'Delete your account?',
+    'This permanently removes your account, settings, schedules and every report you have generated. ' +
+    'It cannot be undone.',
+    'Delete my account', 'Cancel'
+  );
+  if (!ok) return;
+
+  try {
+    const r = await apiFetch('/auth/account', { method: 'DELETE' });
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok) { setProfileError(data.error || 'Could not delete the account.'); return; }
+    clearToken();
+    window.location.replace('login.html');
+  } catch (e) {
+    setProfileError('Could not delete the account: ' + e.message);
+  }
+}
 
 // ── Config Panel ──────────────────────────────────────────────────────────────
 function openConfigPanel() {
@@ -1113,7 +1462,7 @@ function resetMaxReports() {
 
 async function loadConfigFromServer() {
   try {
-    const r = await fetch('/violation-cache/config');
+    const r = await apiFetch('/violation-cache/config');
     if (!r.ok) throw new Error(`HTTP ${r.status}`);
     const data = await r.json();
     const cfg = data.config || {};
@@ -1134,7 +1483,7 @@ async function loadConfigFromServer() {
     // Max reports
     document.getElementById('cfgMaxReports').value = cfg.maxReports || 10;
     // Show current usage count in the hint label
-    fetch('/violation-cache/report/list').then(async rr => {
+    apiFetch('/violation-cache/report/list').then(async rr => {
       if (!rr.ok) return;
       const jobs = await rr.json();
       const active = jobs.filter(j => j.status === 'completed' || j.status === 'running').length;
@@ -1344,7 +1693,7 @@ async function saveConfigPanel() {
 
     // Before saving a reduced maxReports, warn the user if it would delete existing reports.
     try {
-      const listR = await fetch('/violation-cache/report/list');
+      const listR = await apiFetch('/violation-cache/report/list');
       if (listR.ok) {
         const jobs           = await listR.json();
         const completedCount = jobs.filter(j => j.status === 'completed').length;
@@ -1365,7 +1714,7 @@ async function saveConfigPanel() {
     const urlVal    = (document.getElementById('cfgApiUrl').value || '').trim().replace(/\/$/, '');
     const frontVal  = (document.getElementById('cfgFrontendUrl').value || '').trim().replace(/\/$/, '');
 
-    const r = await fetch('/violation-cache/config', {
+    const r = await apiFetch('/violation-cache/config', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ config }),
@@ -1376,7 +1725,7 @@ async function saveConfigPanel() {
       return;
     }
     if (apiKeyVal) {
-      await fetch('/violation-cache/config', {
+      await apiFetch('/violation-cache/config', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ apiKey: apiKeyVal }),
@@ -1419,7 +1768,7 @@ async function connectFromPanel() {
   if (dtFrontendUrl) localStorage.setItem('dt_frontend_url', dtFrontendUrl);
   else               localStorage.removeItem('dt_frontend_url');
   if (apiKeyVal) {
-    fetch('/violation-cache/config', {
+    apiFetch('/violation-cache/config', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ apiKey }),
     }).catch(() => {});
@@ -1453,7 +1802,7 @@ async function testEmailFromPanel() {
       to:   toRaw ? toRaw.split(',').map(s => s.trim()).filter(Boolean) : [],
       cc:   ccRaw ? ccRaw.split(',').map(s => s.trim()).filter(Boolean) : [],
     };
-    const r  = await fetch('/violation-cache/config/test-email', {
+    const r  = await apiFetch('/violation-cache/config/test-email', {
       method:  'POST',
       headers: { 'Content-Type': 'application/json' },
       body:    JSON.stringify(body),
@@ -1471,7 +1820,7 @@ async function testEmailFromPanel() {
 async function cancelSchedule() {
   if (!confirm('Cancel the current schedule? Scheduled reports will stop sending.')) return;
   try {
-    const r = await fetch('/violation-cache/schedule', { method: 'DELETE' });
+    const r = await apiFetch('/violation-cache/schedule', { method: 'DELETE' });
     if (!r.ok) {
       const bd = await r.json().catch(() => ({}));
       showToast(`Failed to cancel schedule: ${bd.error || r.statusText}`, 'error');
@@ -1494,7 +1843,7 @@ async function scheduleReports() {
   }
   // Always refresh config so validation is against the current saved state.
   try {
-    const r = await fetch('/violation-cache/config');
+    const r = await apiFetch('/violation-cache/config');
     if (r.ok) { const d = await r.json(); _appConfig = d.config || {}; }
   } catch (_) {}
 
@@ -1537,7 +1886,7 @@ async function scheduleReports() {
     const newCfg = JSON.parse(JSON.stringify(cfg));
     if (!newCfg.schedule) newCfg.schedule = {};
     newCfg.schedule.projectUuids = leafUuids;
-    const r = await fetch('/violation-cache/config', {
+    const r = await apiFetch('/violation-cache/config', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ config: newCfg }),
@@ -1551,7 +1900,7 @@ async function scheduleReports() {
 
     // Explicitly arm the scheduler now that project UUIDs are saved.
     // Config saves alone no longer start the timer.
-    const armR = await fetch('/violation-cache/schedule/arm', { method: 'POST' });
+    const armR = await apiFetch('/violation-cache/schedule/arm', { method: 'POST' });
     const armBd = await armR.json().catch(() => ({}));
     if (!armR.ok) {
       showToast(`Projects saved but scheduler not started: ${armBd.error || armR.statusText}`, 'warn');
@@ -2630,7 +2979,7 @@ function startCachePoll() {
       clearInterval(_cachePollTimer); _cachePollTimer = null; return;
     }
     try {
-      const r = await fetch('/violation-cache/status');
+      const r = await apiFetch('/violation-cache/status');
       if (!r.ok) return; // transient — keep polling
       const s = await r.json();
 
@@ -2644,7 +2993,7 @@ function startCachePoll() {
       } else if (s.status === 'ready') {
         clearInterval(_cachePollTimer); _cachePollTimer = null;
         try {
-          const dr = await fetch('/violation-cache/data');
+          const dr = await apiFetch('/violation-cache/data');
           if (!dr.ok) throw new Error(`HTTP ${dr.status}`);
           const cacheJson = await dr.json();
           applyViolationData(new Map(Object.entries(cacheJson.map || {})));
@@ -2691,13 +3040,13 @@ function buildReadyBanner(cacheJson) {
 async function loadViolationCache() {
   const banner = document.getElementById('dataBanner');
   try {
-    const r = await fetch('/violation-cache/status');
+    const r = await apiFetch('/violation-cache/status');
     if (!r.ok) throw new Error(`Status HTTP ${r.status}`);
     const status = await r.json();
 
     if (status.status === 'ready') {
       // ── Happy path: serve instantly from cache ───────────────────────────
-      const dr = await fetch('/violation-cache/data');
+      const dr = await apiFetch('/violation-cache/data');
       if (!dr.ok) throw new Error(`Data HTTP ${dr.status}`);
       const cacheJson = await dr.json();
       applyViolationData(new Map(Object.entries(cacheJson.map || {})));
@@ -2707,7 +3056,7 @@ async function loadViolationCache() {
     } else if (status.status === 'stale') {
       // ── Stale: apply old data immediately, rebuild silently in background ─
       try {
-        const dr = await fetch('/violation-cache/data');
+        const dr = await apiFetch('/violation-cache/data');
         if (dr.ok) {
           const cacheJson = await dr.json();
           const ageH = Math.floor(
@@ -2720,7 +3069,7 @@ async function loadViolationCache() {
           banner.className = 'data-banner';
         }
       } catch(_) {}
-      await fetch('/violation-cache/refresh', { method: 'POST' }).catch(() => {});
+      await apiFetch('/violation-cache/refresh', { method: 'POST' }).catch(() => {});
       startCachePoll();
 
     } else if (status.status === 'building') {
@@ -2745,7 +3094,7 @@ async function loadViolationCache() {
       banner.innerHTML =
         `✓ Live — ${allProjects.length} projects. ⏳ Refetching violations…`;
       banner.className = 'data-banner';
-      await fetch('/violation-cache/refresh', { method: 'POST' }).catch(() => {});
+      await apiFetch('/violation-cache/refresh', { method: 'POST' }).catch(() => {});
       startCachePoll();
     }
 
@@ -2766,7 +3115,7 @@ async function triggerCacheRefresh() {
   const banner = document.getElementById('dataBanner');
   if (_cachePollTimer) { clearInterval(_cachePollTimer); _cachePollTimer = null; }
   try {
-    const r = await fetch('/violation-cache/refresh', { method: 'POST' });
+    const r = await apiFetch('/violation-cache/refresh', { method: 'POST' });
     if (r.status === 409) {
       // Already building — just resume polling
       banner.innerHTML =
@@ -2952,7 +3301,7 @@ async function loadDtConfig() {
   // On success it takes priority over the startup env var from /dt-config.
   let persistedKey = '';
   try {
-    const cr = await fetch('/violation-cache/config', { signal: AbortSignal.timeout(CONFIG.PROBE_TIMEOUT_MS) });
+    const cr = await apiFetch('/violation-cache/config', { signal: AbortSignal.timeout(CONFIG.PROBE_TIMEOUT_MS) });
     if (cr.ok) {
       const ccfg = await cr.json();
       if (ccfg.apiKey && typeof ccfg.apiKey === 'string') {
@@ -3093,7 +3442,7 @@ let _pendingReportProjects = null; // projects waiting for risk-type selection i
 /** Fetch /violation-cache/report/list and re-render the reports modal. */
 async function refreshReportsList() {
   try {
-    const r = await fetch('/violation-cache/report/list');
+    const r = await apiFetch('/violation-cache/report/list');
     if (!r.ok) return;
     const reports = await r.json();
     renderReportsList(reports);
@@ -3354,7 +3703,7 @@ async function confirmReportOptions() {
     // ── Pre-flight: fetch existing jobs ──────────────────────────────────
     let reports = [];
     try {
-      const r = await fetch('/violation-cache/report/list');
+      const r = await apiFetch('/violation-cache/report/list');
       if (r.ok) reports = await r.json();
     } catch (_) { /* service unreachable */ }
 
@@ -3431,7 +3780,7 @@ async function doTriggerReport(projectsToReport, riskTypes = ['security']) {
       version: p.version || '',
     }));
 
-    const r = await fetch('/violation-cache/report/generate', {
+    const r = await apiFetch('/violation-cache/report/generate', {
       method:  'POST',
       headers: { 'Content-Type': 'application/json' },
       body:    JSON.stringify({ projects, riskTypes }),
@@ -3460,7 +3809,7 @@ async function doTriggerReport(projectsToReport, riskTypes = ['security']) {
 /** Download a completed report file, then auto-clear it from the server. */
 async function downloadReport(id) {
   try {
-    const r = await fetch(`/violation-cache/report/${id}/download`);
+    const r = await apiFetch(`/violation-cache/report/${id}/download`);
     if (!r.ok) {
       const body = await r.json().catch(() => ({}));
       showToast(`Download failed: ${body.error || r.statusText}`, 'error');
@@ -3481,7 +3830,7 @@ async function downloadReport(id) {
     URL.revokeObjectURL(url);
 
     // Auto-clear from server after download (spec requirement)
-    await fetch(`/violation-cache/report/${id}`, { method: 'DELETE' }).catch(() => {});
+    await apiFetch(`/violation-cache/report/${id}`, { method: 'DELETE' }).catch(() => {});
 
     showToast('Report downloaded and cleared from server.', 'success');
     refreshReportsList();
@@ -3493,7 +3842,7 @@ async function downloadReport(id) {
 /** Delete a report entry (and its file for completed reports) from the server. */
 async function clearReport(id) {
   try {
-    const r = await fetch(`/violation-cache/report/${id}`, { method: 'DELETE' });
+    const r = await apiFetch(`/violation-cache/report/${id}`, { method: 'DELETE' });
     if (!r.ok) {
       const body = await r.json().catch(() => ({}));
       showToast(`Could not clear report: ${body.error || r.statusText}`, 'error');
@@ -3510,7 +3859,7 @@ async function clearReport(id) {
 async function clearAllReports() {
   let reports = [];
   try {
-    const r = await fetch('/violation-cache/report/list');
+    const r = await apiFetch('/violation-cache/report/list');
     if (r.ok) reports = await r.json();
   } catch (_) { /* proceed with empty list */ }
 
@@ -3528,7 +3877,7 @@ async function clearAllReports() {
   if (btn) { btn.disabled = true; btn.textContent = 'Clearing…'; }
   try {
     await Promise.all(visible.map(job =>
-      fetch(`/violation-cache/report/${job.id}`, { method: 'DELETE' }).catch(() => {})
+      apiFetch(`/violation-cache/report/${job.id}`, { method: 'DELETE' }).catch(() => {})
     ));
     showToast('All reports cleared.', 'success');
   } catch (e) {
@@ -3542,7 +3891,7 @@ async function clearAllReports() {
 /** Request cancellation of a running report job. */
 async function cancelReport(id) {
   try {
-    const r = await fetch(`/violation-cache/report/${id}/cancel`, { method: 'POST' });
+    const r = await apiFetch(`/violation-cache/report/${id}/cancel`, { method: 'POST' });
     if (!r.ok) {
       const body = await r.json().catch(() => ({}));
       showToast(`Could not cancel: ${body.error || r.statusText}`, 'error');
@@ -3557,6 +3906,12 @@ async function cancelReport(id) {
 
 // ── Expose functions required by inline HTML event handlers ───────────────
 // The IIFE scope is not window-global; onclick="fn()" attributes need explicit exposure.
+window.toggleUserMenu       = toggleUserMenu;
+window.doLogout             = doLogout;
+window.openProfilePanel     = openProfilePanel;
+window.closeProfilePanel    = closeProfilePanel;
+window.saveProfile          = saveProfile;
+window.deleteAccount        = deleteAccount;
 window.openModal            = openModal;
 window.closeModal           = closeModal;
 window.refreshData          = refreshData;
@@ -3600,23 +3955,40 @@ window.cancelSchedule       = cancelSchedule;
 window.scheduleReports      = scheduleReports;
 
 // ── Init ───────────────────────────────────────────────────────────────────
-initTheme();
-buildColHeaders();
-// loadDtConfig() auto-connects when DT_API_KEY is configured in the environment.
-// Fall back to mock data only when no auto-connect is available.
-loadDtConfig().then(autoConnected => {
-  if (!autoConnected) loadMockData();
-});
+// The session is validated BEFORE any data loading, theme initialisation or
+// rendering, so an unauthenticated visitor never sees dashboard chrome
+// (CLAUDE.md §8.4).
+(async function init() {
+  const user = await requireSession();
+  if (!user) return;               // requireSession() has already redirected
+  _currentUser = user;
 
-// Check for schedule failure notifications from the server
-fetch('/violation-cache/schedule/status').then(async r => {
-  if (!r.ok) return;
-  const s = await r.json();
-  if (s.failureNotification) {
-    showToast(`Scheduled report failed: ${s.failureNotification}`, 'error');
-    fetch('/violation-cache/schedule/ack-notification', { method: 'POST' }).catch(() => {});
-  }
-}).catch(() => {});
+  initTheme();
+  renderUserMenu();
+  buildColHeaders();
+
+  // Close the user menu when clicking anywhere outside it.
+  document.addEventListener('click', (e) => {
+    const wrap = document.querySelector('.user-menu-wrap');
+    if (wrap && !wrap.contains(e.target)) closeUserMenu();
+  });
+
+  // loadDtConfig() auto-connects when DT_API_KEY is configured in the environment.
+  // Fall back to mock data only when no auto-connect is available.
+  loadDtConfig().then(autoConnected => {
+    if (!autoConnected) loadMockData();
+  });
+
+  // Check for schedule failure notifications from the server
+  apiFetch('/violation-cache/schedule/status').then(async r => {
+    if (!r.ok) return;
+    const s = await r.json();
+    if (s.failureNotification) {
+      showToast(`Scheduled report failed: ${s.failureNotification}`, 'error');
+      apiFetch('/violation-cache/schedule/ack-notification', { method: 'POST' }).catch(() => {});
+    }
+  }).catch(() => {});
+})();
 
 })(); // end module IIFE
 </script>

@@ -23,6 +23,7 @@ The installer prompts for your DependencyTrack API URL and (optionally) an API k
 
 | Component | Description |
 |-----------|-------------|
+| `dashboard/login.html` | Sign-in and registration page (zero npm dependencies) |
 | `dashboard/index.html` | Single-file SPA dashboard (zero npm dependencies) |
 | `dashboard/nginx.conf.template` | nginx config with API proxy and violation-cache proxy |
 | `violation-cache/server.js` | Node.js service that pre-fetches policy violations server-side |

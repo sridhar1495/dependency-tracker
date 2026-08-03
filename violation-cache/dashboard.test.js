@@ -946,3 +946,179 @@ describe('schedule field validation', () => {
     assert.equal(validateSchedFields({ ...base, freq: 'monthly', weekDays: [], monthDayVal: 15 }), null);
   });
 });
+
+// ── Frontend / backend validation mirror (phase 3) ───────────────────────────
+// Field rules exist in two places: violation-cache/lib/validate.js (authority)
+// and dashboard/login.html (immediate feedback). CLAUDE.md §8.8 requires them to
+// change together. These tests fail loudly if they drift apart.
+
+const fs   = require('node:fs');
+const path = require('node:path');
+
+const LOGIN_HTML  = fs.readFileSync(path.join(__dirname, '..', 'dashboard', 'login.html'), 'utf8');
+const INDEX_HTML  = fs.readFileSync(path.join(__dirname, '..', 'dashboard', 'index.html'), 'utf8');
+const backendValidate = require('./lib/validate');
+
+describe('validation mirror — login.html vs lib/validate.js', () => {
+  test('the three field regexes are byte-identical in both files', () => {
+    const pairs = [
+      ['NAME_RE',  backendValidate.NAME_RE],
+      ['LOGIN_RE', backendValidate.LOGIN_RE],
+      ['EMAIL_RE', backendValidate.EMAIL_RE],
+    ];
+    for (const [name, backendRe] of pairs) {
+      const m = new RegExp('const\\s+' + name + '\\s*=\\s*(/.*?/[a-z]*)\\s*;').exec(LOGIN_HTML);
+      assert.ok(m, `${name} not found in login.html`);
+      assert.equal(m[1], backendRe.toString(),
+        `${name} differs: login.html has ${m[1]}, lib/validate.js has ${backendRe}`);
+    }
+  });
+
+  test('the length bounds are identical in both files', () => {
+    const bounds = {
+      NAME_MIN: backendValidate.NAME_MIN, NAME_MAX: backendValidate.NAME_MAX,
+      LOGIN_MIN: backendValidate.LOGIN_MIN, LOGIN_MAX: backendValidate.LOGIN_MAX,
+      PASSWORD_MIN: backendValidate.PASSWORD_MIN, PASSWORD_MAX: backendValidate.PASSWORD_MAX,
+      EMAIL_MAX: backendValidate.EMAIL_MAX,
+    };
+    for (const [name, expected] of Object.entries(bounds)) {
+      const m = new RegExp(name + '\\s*=\\s*(\\d+)').exec(LOGIN_HTML);
+      assert.ok(m, `${name} not found in login.html`);
+      assert.equal(Number(m[1]), expected, `${name} differs`);
+    }
+  });
+
+  // Behavioural equivalence over a corpus, so a rewrite that keeps the regexes
+  // but changes the surrounding logic is still caught.
+  const NAME_RE  = /^\p{L}+(?: \p{L}+)*$/u;
+  const LOGIN_RE = /^[A-Za-z0-9._-]+$/;
+  const EMAIL_RE = /^[^@\s]+@[^@\s]+\.[^@\s]+$/;
+
+  function feName(value, label) {
+    if (typeof value !== 'string' || value.length === 0) return label + ' is required.';
+    if (value !== value.trim()) return label + ' cannot start or end with a space.';
+    if (value.length < 3) return label + ' must be at least 3 characters.';
+    if (value.length > 128) return label + ' must be at most 128 characters.';
+    if (!NAME_RE.test(value)) return label + ' may contain only letters and single spaces between words.';
+    return null;
+  }
+  function feLoginId(value) {
+    if (typeof value !== 'string' || value.length === 0) return 'Login ID is required.';
+    if (/\s/.test(value)) return 'Login ID cannot contain spaces.';
+    if (value.length < 3) return 'too short';
+    if (value.length > 64) return 'too long';
+    if (!LOGIN_RE.test(value)) return 'bad charset';
+    return null;
+  }
+  function feEmail(value) {
+    if (value === undefined || value === null || value === '') return null;
+    if (/\s/.test(value)) return 'space';
+    if (value.length > 254) return 'too long';
+    if (!EMAIL_RE.test(value)) return 'invalid';
+    return null;
+  }
+  function fePassword(value) {
+    if (typeof value !== 'string' || value.length === 0) return 'required';
+    if (/\s/.test(value)) return 'space';
+    if (value.length < 8) return 'too short';
+    if (value.length > 128) return 'too long';
+    return null;
+  }
+
+  test('names: frontend and backend agree on accept/reject for every case', () => {
+    const corpus = ['Alice', 'Mary Jane', 'José', 'Müller', '山田太郎', 'Al', ' Alice', 'Alice ',
+                    'Mary  Jane', 'Al1ce', "O'Brien", 'Smith-Jones', '', 'A'.repeat(128), 'A'.repeat(129)];
+    for (const value of corpus) {
+      assert.equal(
+        feName(value, 'First name') === null,
+        backendValidate.validateFirstName(value) === null,
+        `disagreement on name ${JSON.stringify(value)}`
+      );
+    }
+  });
+
+  test('login IDs: frontend and backend agree', () => {
+    const corpus = ['alice', 'alice.smith', 'alice_smith', 'alice-smith', 'a1', 'al ice',
+                    'alice@host', 'alice!', '', 'a'.repeat(64), 'a'.repeat(65)];
+    for (const value of corpus) {
+      assert.equal(
+        feLoginId(value) === null,
+        backendValidate.validateLoginId(value) === null,
+        `disagreement on login ID ${JSON.stringify(value)}`
+      );
+    }
+  });
+
+  test('emails: frontend and backend agree', () => {
+    const corpus = ['', 'a@b.co', 'first.last@example.com', 'user+tag@example.co.uk',
+                    "o'brien@example.com", 'nope', 'a@b', '@example.com', 'a b@c.co', 'a@b c.co'];
+    for (const value of corpus) {
+      assert.equal(
+        feEmail(value) === null,
+        backendValidate.validateEmail(value) === null,
+        `disagreement on email ${JSON.stringify(value)}`
+      );
+    }
+  });
+
+  test('passwords: frontend and backend agree', () => {
+    const corpus = ['password', 'p@$$w0rd!', '日本語パスワード', 'passwor', 'pass word',
+                    'pass\tword', '', 'a'.repeat(128), 'a'.repeat(129)];
+    for (const value of corpus) {
+      assert.equal(
+        fePassword(value) === null,
+        backendValidate.validatePassword(value) === null,
+        `disagreement on password ${JSON.stringify(value)}`
+      );
+    }
+  });
+});
+
+describe('apiFetch contract in index.html', () => {
+  test('no backend route is called with a bare fetch()', () => {
+    const bare = INDEX_HTML.match(/(?<!api)\bfetch\((['`])\/violation-cache/g) || [];
+    assert.equal(bare.length, 0,
+      'every /violation-cache/* call must go through apiFetch() — CLAUDE.md §8.3');
+  });
+
+  test('every backend call site uses apiFetch', () => {
+    const wrapped = INDEX_HTML.match(/apiFetch\((['`])\/violation-cache/g) || [];
+    assert.ok(wrapped.length >= 31, `expected at least 31 apiFetch call sites, found ${wrapped.length}`);
+  });
+
+  test('apiFetch attaches the bearer header and handles 401', () => {
+    assert.match(INDEX_HTML, /Authorization['"]?\s*:\s*['"`]Bearer/,
+      'apiFetch must attach the Authorization header');
+    assert.match(INDEX_HTML, /response\.status === 401/,
+      'apiFetch must treat 401 as "go to the login page"');
+  });
+
+  test('DependencyTrack calls still use X-Api-Key and are not wrapped', () => {
+    assert.match(INDEX_HTML, /'X-Api-Key'/,
+      'direct /api/* calls keep using X-Api-Key — the documented exception');
+  });
+
+  test('the session token key matches the one login.html writes', () => {
+    const indexKey = /const TOKEN_KEY = '([^']+)'/.exec(INDEX_HTML);
+    const loginKey = /const TOKEN_KEY = '([^']+)'/.exec(LOGIN_HTML);
+    assert.ok(indexKey && loginKey);
+    assert.equal(indexKey[1], loginKey[1], 'both pages must use the same localStorage key');
+    assert.equal(indexKey[1], 'dt_session_token');
+  });
+
+  test('new handlers are window-exported from the IIFE', () => {
+    for (const fn of ['toggleUserMenu', 'doLogout', 'openProfilePanel',
+                      'closeProfilePanel', 'saveProfile', 'deleteAccount']) {
+      assert.match(INDEX_HTML, new RegExp('window\\.' + fn + '\\s*='),
+        `${fn} is used by an onclick attribute and must be window-exported`);
+    }
+  });
+
+  test('login.html window-exports its onclick handlers too', () => {
+    for (const fn of ['showView', 'doLogin', 'doRegister', 'forceLogin',
+                      'closeSessionModal', 'onAdminToggle', 'toggleTheme']) {
+      assert.match(LOGIN_HTML, new RegExp('window\\.' + fn + '\\s*='),
+        `${fn} is used by an onclick attribute and must be window-exported`);
+    }
+  });
+});

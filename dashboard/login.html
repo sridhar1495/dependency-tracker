@@ -1,0 +1,661 @@
+<!DOCTYPE html>
+<!-- SPDX-License-Identifier: MIT
+     Copyright (c) 2024 Dependency-Track Risk Dashboard contributors
+
+     Sign-in / registration page.
+
+     A SECOND standalone page, not a split of index.html: the no-build-step rule
+     forbids sharing an asset, so the design tokens below are duplicated from
+     index.html on purpose (CLAUDE.md §8.1). Keep them in sync by hand.
+
+     Field validation here MIRRORS violation-cache/lib/validate.js and must be
+     changed in the same commit as that file (CLAUDE.md §8.8). Uniqueness is
+     never decided here — it is asked of the backend. -->
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Sign in — Dependency-Track Risk Dashboard</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg:           #0f1117;
+      --surface:      #1a1d27;
+      --surface2:     #21253a;
+      --border:       #2e3352;
+      --text:         #e2e8f0;
+      --text-muted:   #8892a4;
+      --accent:       #6366f1;
+      --critical:     #ef4444;
+      --critical-bg:  rgba(239,68,68,0.12);
+      --ok:           #22c55e;
+      --ok-bg:        rgba(34,197,94,0.08);
+      --medium:       #eab308;
+      --medium-bg:    rgba(234,179,8,0.12);
+      --radius:       8px;
+    }
+    [data-theme="light"] {
+      --bg:           #f0f2f8;
+      --surface:      #ffffff;
+      --surface2:     #f7f8fc;
+      --border:       #d8dcea;
+      --text:         #1e2333;
+      --text-muted:   #6b7285;
+      --critical-bg:  rgba(239,68,68,0.10);
+      --ok-bg:        rgba(34,197,94,0.10);
+      --medium-bg:    rgba(234,179,8,0.12);
+    }
+
+    body {
+      background: var(--bg); color: var(--text); min-height: 100vh;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      display: flex; align-items: center; justify-content: center; padding: 24px;
+    }
+
+    .auth-card {
+      background: var(--surface); border: 1px solid var(--border);
+      border-radius: 14px; width: 100%; max-width: 430px;
+      padding: 32px; box-shadow: 0 18px 48px rgba(0,0,0,0.28);
+    }
+    .auth-brand { text-align: center; margin-bottom: 22px; }
+    .auth-brand h1 { font-size: 20px; font-weight: 700; letter-spacing: -0.2px; }
+    .auth-brand .sub { font-size: 12.5px; color: var(--text-muted); margin-top: 4px; }
+    .auth-logo {
+      width: 44px; height: 44px; border-radius: 11px; margin: 0 auto 12px;
+      background: linear-gradient(135deg, var(--accent), #8b5cf6);
+      display: flex; align-items: center; justify-content: center;
+      font-size: 21px; font-weight: 700; color: #fff;
+    }
+    .auth-title { font-size: 16px; font-weight: 600; margin-bottom: 16px; }
+
+    .cfg-label {
+      font-size: 12px; color: var(--text-muted); display: block;
+      margin-bottom: 4px; margin-top: 12px;
+    }
+    .cfg-label:first-child { margin-top: 0; }
+    .cfg-input {
+      background: var(--bg); border: 1px solid var(--border);
+      border-radius: var(--radius); color: var(--text); font-size: 13.5px;
+      padding: 9px 11px; outline: none; transition: border-color 0.15s; width: 100%;
+    }
+    .cfg-input:focus { border-color: var(--accent); }
+    .cfg-input::placeholder { color: var(--text-muted); }
+    .cfg-input.invalid { border-color: var(--critical); }
+    .cfg-input.valid { border-color: var(--ok); }
+    .cfg-input:disabled { opacity: 0.55; cursor: not-allowed; }
+
+    .field-error {
+      color: var(--critical); font-size: 11.5px; margin-top: 4px;
+      min-height: 15px; line-height: 1.3;
+    }
+    .field-ok { color: var(--ok); font-size: 11.5px; margin-top: 4px; min-height: 15px; }
+
+    .row-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; }
+
+    .btn {
+      background: var(--surface2); border: 1px solid var(--border);
+      border-radius: var(--radius); color: var(--text); cursor: pointer;
+      font-size: 13.5px; padding: 10px 16px; transition: background 0.15s, border-color 0.15s;
+    }
+    .btn:hover:not(:disabled) { border-color: var(--accent); }
+    .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+    .btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }
+    .btn.primary:hover:not(:disabled) { filter: brightness(1.1); }
+    .btn.block { width: 100%; margin-top: 20px; }
+
+    .admin-toggle {
+      display: flex; align-items: center; gap: 9px; margin-top: 16px;
+      padding: 10px 12px; background: var(--bg);
+      border: 1px solid var(--border); border-radius: var(--radius); cursor: pointer;
+    }
+    .admin-toggle:hover { border-color: var(--accent); }
+    .admin-toggle input { cursor: pointer; width: 15px; height: 15px; accent-color: var(--accent); }
+    .admin-toggle-text { font-size: 12.5px; }
+    .admin-toggle-text .hint { color: var(--text-muted); font-size: 11px; display: block; margin-top: 1px; }
+
+    .auth-alt { text-align: center; margin-top: 18px; font-size: 12.5px; color: var(--text-muted); }
+    .link {
+      color: var(--accent); cursor: pointer; text-decoration: none;
+      background: none; border: none; font-size: inherit; font-family: inherit; padding: 0;
+    }
+    .link:hover { text-decoration: underline; }
+
+    .banner {
+      border-radius: var(--radius); padding: 10px 12px; font-size: 12.5px;
+      margin-bottom: 14px; line-height: 1.45; display: none;
+    }
+    .banner.error   { background: var(--critical-bg); color: var(--critical); border: 1px solid var(--critical); display: block; }
+    .banner.success { background: var(--ok-bg);       color: var(--ok);       border: 1px solid var(--ok);       display: block; }
+    .banner.info    { background: var(--medium-bg);   color: var(--medium);   border: 1px solid var(--medium);   display: block; }
+
+    .view { display: none; }
+    .view.active { display: block; }
+
+    .modal-overlay {
+      position: fixed; inset: 0; background: rgba(0,0,0,0.6);
+      display: none; align-items: center; justify-content: center; z-index: 500; padding: 20px;
+    }
+    .modal-overlay.open { display: flex; }
+    .modal {
+      background: var(--surface); border: 1px solid var(--border);
+      border-radius: 12px; padding: 22px; max-width: 430px; width: 100%;
+    }
+    .modal h3 { font-size: 15px; margin-bottom: 10px; }
+    .modal p  { font-size: 13px; color: var(--text-muted); line-height: 1.55; margin-bottom: 16px; }
+    .modal-actions { display: flex; gap: 8px; justify-content: flex-end; }
+    .session-detail {
+      background: var(--bg); border: 1px solid var(--border); border-radius: var(--radius);
+      padding: 10px 12px; font-size: 12px; color: var(--text-muted); margin-bottom: 14px;
+    }
+    .session-detail div { margin: 3px 0; }
+    .session-detail b { color: var(--text); font-weight: 600; }
+
+    .theme-btn {
+      position: fixed; top: 16px; right: 16px; background: var(--surface);
+      border: 1px solid var(--border); border-radius: var(--radius);
+      color: var(--text); cursor: pointer; font-size: 15px; padding: 7px 11px;
+    }
+    .theme-btn:hover { border-color: var(--accent); }
+
+    .pw-hint { font-size: 11px; color: var(--text-muted); margin-top: 5px; }
+
+    @media (max-width: 480px) {
+      .auth-card { padding: 24px 20px; }
+      .row-2 { grid-template-columns: 1fr; }
+    }
+  </style>
+</head>
+<body>
+
+<button class="theme-btn" id="themeBtn" onclick="toggleTheme()" title="Toggle light / dark theme">🌓</button>
+
+<div class="auth-card">
+  <div class="auth-brand">
+    <div class="auth-logo">DT</div>
+    <h1>Risk Dashboard</h1>
+    <div class="sub">DependencyTrack portfolio risk</div>
+  </div>
+
+  <div class="banner" id="banner"></div>
+
+  <!-- ── Sign in ────────────────────────────────────────────────────────── -->
+  <div class="view active" id="viewLogin">
+    <div class="auth-title">Sign in</div>
+    <form id="loginForm" onsubmit="return false;">
+      <label class="cfg-label" for="liLoginId">Login ID</label>
+      <input class="cfg-input" id="liLoginId" autocomplete="username" autofocus>
+
+      <label class="cfg-label" for="liPassword">Password</label>
+      <input class="cfg-input" id="liPassword" type="password" autocomplete="current-password">
+
+      <label class="admin-toggle" for="liIsAdmin">
+        <input type="checkbox" id="liIsAdmin" onchange="onAdminToggle()">
+        <span class="admin-toggle-text">
+          Administrator login
+          <span class="hint">Validated against the installation credentials file, not user accounts.</span>
+        </span>
+      </label>
+
+      <button class="btn primary block" id="liSubmit" onclick="doLogin(false)">Sign in</button>
+    </form>
+    <div class="auth-alt">
+      <button class="link" onclick="showView('forgot')">Forgot password?</button>
+      &nbsp;·&nbsp;
+      <button class="link" onclick="showView('register')">Create an account</button>
+    </div>
+  </div>
+
+  <!-- ── Register ───────────────────────────────────────────────────────── -->
+  <div class="view" id="viewRegister">
+    <div class="auth-title">Create an account</div>
+    <form id="registerForm" onsubmit="return false;">
+      <div class="row-2">
+        <div>
+          <label class="cfg-label" for="rgFirstName">First name *</label>
+          <input class="cfg-input" id="rgFirstName" autocomplete="given-name">
+          <div class="field-error" id="errFirstName"></div>
+        </div>
+        <div>
+          <label class="cfg-label" for="rgLastName">Last name *</label>
+          <input class="cfg-input" id="rgLastName" autocomplete="family-name">
+          <div class="field-error" id="errLastName"></div>
+        </div>
+      </div>
+
+      <label class="cfg-label" for="rgLoginId">Login ID *</label>
+      <input class="cfg-input" id="rgLoginId" autocomplete="username">
+      <div class="field-error" id="errLoginId"></div>
+
+      <label class="cfg-label" for="rgEmail">Email <span style="opacity:.65">(optional)</span></label>
+      <input class="cfg-input" id="rgEmail" type="email" autocomplete="email">
+      <div class="field-error" id="errEmail"></div>
+
+      <label class="cfg-label" for="rgPassword">Password *</label>
+      <input class="cfg-input" id="rgPassword" type="password" autocomplete="new-password">
+      <div class="pw-hint">At least 8 characters. Any character except a space.</div>
+      <div class="field-error" id="errPassword"></div>
+
+      <label class="cfg-label" for="rgConfirm">Confirm password *</label>
+      <input class="cfg-input" id="rgConfirm" type="password" autocomplete="new-password">
+      <div class="field-error" id="errConfirm"></div>
+
+      <button class="btn primary block" id="rgSubmit" onclick="doRegister()">Create account</button>
+    </form>
+    <div class="auth-alt">
+      Already have an account? <button class="link" onclick="showView('login')">Sign in</button>
+    </div>
+  </div>
+
+  <!-- ── Forgot password (deferred — decision D5) ────────────────────────── -->
+  <div class="view" id="viewForgot">
+    <div class="auth-title">Forgot password</div>
+    <div class="banner info" style="display:block">
+      Self-service password reset is not available yet.
+      <br><br>
+      Sending a reset link needs a mail server that works before you are signed in,
+      and that is configured per user after sign-in. Until a system-wide mail
+      server is added, please ask your administrator to reset the password for you.
+    </div>
+    <div class="auth-alt">
+      <button class="link" onclick="showView('login')">Back to sign in</button>
+    </div>
+  </div>
+</div>
+
+<!-- ── Existing-session dialog ───────────────────────────────────────────── -->
+<div class="modal-overlay" id="sessionModal">
+  <div class="modal">
+    <h3>You are already signed in</h3>
+    <p>This account has an active session on another device or browser. Only one
+       session can be open at a time.</p>
+    <div class="session-detail" id="sessionDetail"></div>
+    <p>Disconnect that session and continue here?</p>
+    <div class="modal-actions">
+      <button class="btn" onclick="closeSessionModal()">No, cancel</button>
+      <button class="btn primary" onclick="forceLogin()">Yes, sign me in here</button>
+    </div>
+  </div>
+</div>
+
+<script>
+// ── Module wrapper ────────────────────────────────────────────────────────
+// Same IIFE + window-export pattern as index.html: onclick="" attributes need
+// the handlers exposed explicitly (CLAUDE.md §8.2).
+(function () {
+'use strict';
+
+const TOKEN_KEY = 'dt_session_token';
+const THEME_KEY = 'dt_theme';
+
+// ── Validation — MIRRORS violation-cache/lib/validate.js ──────────────────
+// Any change here must be made in that file in the same commit, and vice versa.
+// Uniqueness is never decided here; it is asked of the backend on blur.
+const NAME_MIN = 3, NAME_MAX = 128;
+const LOGIN_MIN = 3, LOGIN_MAX = 64;
+const PASSWORD_MIN = 8, PASSWORD_MAX = 128;
+const EMAIL_MAX = 254;
+
+const NAME_RE  = /^\p{L}+(?: \p{L}+)*$/u;
+const LOGIN_RE = /^[A-Za-z0-9._-]+$/;
+const EMAIL_RE = /^[^@\s]+@[^@\s]+\.[^@\s]+$/;
+
+function validateName(value, label) {
+  if (typeof value !== 'string' || value.length === 0) return label + ' is required.';
+  if (value !== value.trim()) return label + ' cannot start or end with a space.';
+  if (value.length < NAME_MIN) return label + ' must be at least ' + NAME_MIN + ' characters.';
+  if (value.length > NAME_MAX) return label + ' must be at most ' + NAME_MAX + ' characters.';
+  if (!NAME_RE.test(value)) return label + ' may contain only letters and single spaces between words.';
+  return null;
+}
+function validateFirstName(v) { return validateName(v, 'First name'); }
+function validateLastName(v)  { return validateName(v, 'Last name'); }
+
+function validateLoginId(value) {
+  if (typeof value !== 'string' || value.length === 0) return 'Login ID is required.';
+  if (/\s/.test(value)) return 'Login ID cannot contain spaces.';
+  if (value.length < LOGIN_MIN) return 'Login ID must be at least ' + LOGIN_MIN + ' characters.';
+  if (value.length > LOGIN_MAX) return 'Login ID must be at most ' + LOGIN_MAX + ' characters.';
+  if (!LOGIN_RE.test(value)) return 'Login ID may contain only letters, digits, dot, underscore and hyphen.';
+  return null;
+}
+
+function validateEmail(value) {
+  if (value === undefined || value === null || value === '') return null;
+  if (/\s/.test(value)) return 'Email address cannot contain spaces.';
+  if (value.length > EMAIL_MAX) return 'Email address must be at most ' + EMAIL_MAX + ' characters.';
+  if (!EMAIL_RE.test(value)) return 'Enter a valid email address.';
+  return null;
+}
+
+function validatePassword(value) {
+  if (typeof value !== 'string' || value.length === 0) return 'Password is required.';
+  if (/\s/.test(value)) return 'Password cannot contain spaces.';
+  if (value.length < PASSWORD_MIN) return 'Password must be at least ' + PASSWORD_MIN + ' characters.';
+  if (value.length > PASSWORD_MAX) return 'Password must be at most ' + PASSWORD_MAX + ' characters.';
+  return null;
+}
+
+function validateConfirm(password, confirm) {
+  if (typeof confirm !== 'string' || confirm.length === 0) return 'Please confirm the password.';
+  if (password !== confirm) return 'Passwords do not match.';
+  return null;
+}
+
+// ── Small helpers ─────────────────────────────────────────────────────────
+const $ = (id) => document.getElementById(id);
+
+function escHtml(s) {
+  return String(s == null ? '' : s)
+    .replace(/&/g, '&amp;').replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+}
+
+function showBanner(message, kind) {
+  const b = $('banner');
+  b.textContent = message;
+  b.className = 'banner ' + (kind || 'error');
+}
+function clearBanner() { $('banner').className = 'banner'; $('banner').textContent = ''; }
+
+/** Paint a field's error text and border state. */
+function setFieldError(inputId, errorId, message) {
+  const input = $(inputId), err = $(errorId);
+  if (err) err.textContent = message || '';
+  if (!input) return;
+  input.classList.toggle('invalid', Boolean(message));
+  if (message) input.classList.remove('valid');
+}
+function setFieldOk(inputId, errorId) {
+  setFieldError(inputId, errorId, '');
+  const input = $(inputId);
+  if (input && input.value) input.classList.add('valid');
+}
+
+function busy(buttonId, isBusy, labelWhenBusy, labelWhenIdle) {
+  const b = $(buttonId);
+  if (!b) return;
+  b.disabled = isBusy;
+  b.textContent = isBusy ? labelWhenBusy : labelWhenIdle;
+}
+
+// ── View switching ────────────────────────────────────────────────────────
+function showView(name) {
+  clearBanner();
+  ['login', 'register', 'forgot'].forEach(v => {
+    $('view' + v.charAt(0).toUpperCase() + v.slice(1)).classList.toggle('active', v === name);
+  });
+  const focus = { login: 'liLoginId', register: 'rgFirstName', forgot: null }[name];
+  if (focus) { const el = $(focus); if (el) el.focus(); }
+}
+
+function onAdminToggle() {
+  // An administrator cannot register, so steer the wording rather than leaving
+  // a "create an account" invitation that would fail.
+  const isAdmin = $('liIsAdmin').checked;
+  $('liLoginId').placeholder = isAdmin ? 'Administrator login ID' : '';
+}
+
+// ── Sign in ───────────────────────────────────────────────────────────────
+let _pendingLogin = null; // credentials held while the session dialog is open
+
+async function doLogin(force) {
+  clearBanner();
+  const loginId  = $('liLoginId').value.trim();
+  const password = $('liPassword').value;
+  const isAdmin  = $('liIsAdmin').checked;
+
+  if (!loginId || !password) {
+    showBanner('Enter your login ID and password.', 'error');
+    return;
+  }
+
+  busy('liSubmit', true, 'Signing in…', 'Sign in');
+  try {
+    const r = await fetch('/auth/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ loginId, password, isAdmin, force: force === true }),
+    });
+    const data = await r.json().catch(() => ({}));
+
+    if (r.status === 409 && data.code === 'SESSION_EXISTS') {
+      _pendingLogin = { loginId, password, isAdmin };
+      openSessionModal(data.session);
+      return;
+    }
+    if (!r.ok) {
+      showBanner(data.error || 'Could not sign in.', 'error');
+      return;
+    }
+
+    localStorage.setItem(TOKEN_KEY, data.token);
+    window.location.replace('index.html');
+  } catch (e) {
+    showBanner('Could not reach the server: ' + e.message, 'error');
+  } finally {
+    // Do NOT close the session dialog here: the SESSION_EXISTS branch above
+    // opens it and then returns through this same finally, so closing it here
+    // would hide it the instant it appeared. Every other path either navigates
+    // away or has already closed it (forceLogin closes before retrying).
+    busy('liSubmit', false, 'Signing in…', 'Sign in');
+  }
+}
+
+function openSessionModal(session) {
+  const fmt = (iso) => {
+    if (!iso) return 'unknown';
+    try { return new Date(iso).toLocaleString(); } catch (_) { return String(iso); }
+  };
+  const parts = [];
+  if (session) {
+    parts.push('<div>Signed in: <b>' + escHtml(fmt(session.issuedAt)) + '</b></div>');
+    parts.push('<div>Last active: <b>' + escHtml(fmt(session.lastSeenAt)) + '</b></div>');
+    if (session.userAgent) {
+      parts.push('<div>Device: <b>' + escHtml(session.userAgent.slice(0, 90)) + '</b></div>');
+    }
+  }
+  $('sessionDetail').innerHTML = parts.join('') || '<div>No details available.</div>';
+  $('sessionModal').classList.add('open');
+}
+
+function closeSessionModal() {
+  $('sessionModal').classList.remove('open');
+}
+
+/** "No" — stay on the login page and revoke nothing. */
+function cancelSessionTakeover() {
+  _pendingLogin = null;
+  closeSessionModal();
+  showBanner('Sign-in cancelled. The other session is still active.', 'info');
+}
+
+/** "Yes" — repeat the login with force, which revokes the other session. */
+async function forceLogin() {
+  if (!_pendingLogin) { closeSessionModal(); return; }
+  closeSessionModal();
+  await doLogin(true);
+}
+
+// ── Registration ──────────────────────────────────────────────────────────
+
+/** Ask the backend whether a login ID or email is free. Never decided locally. */
+async function checkAvailability(field, value) {
+  try {
+    const r = await fetch('/auth/check-availability', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ field, value }),
+    });
+    if (!r.ok) return null;
+    return await r.json();
+  } catch (_) {
+    return null; // offline: submit will surface the real answer
+  }
+}
+
+async function onLoginIdBlur() {
+  const value = $('rgLoginId').value.trim();
+  if (!value) { setFieldError('rgLoginId', 'errLoginId', ''); return; }
+  const formatError = validateLoginId(value);
+  if (formatError) { setFieldError('rgLoginId', 'errLoginId', formatError); return; }
+
+  const result = await checkAvailability('loginId', value);
+  if (!result) { setFieldError('rgLoginId', 'errLoginId', ''); return; }
+  if (result.available) setFieldOk('rgLoginId', 'errLoginId');
+  else setFieldError('rgLoginId', 'errLoginId', result.error || 'This login ID is already registered.');
+}
+
+async function onEmailBlur() {
+  const value = $('rgEmail').value.trim();
+  if (!value) { setFieldError('rgEmail', 'errEmail', ''); return; }
+  const formatError = validateEmail(value);
+  if (formatError) { setFieldError('rgEmail', 'errEmail', formatError); return; }
+
+  const result = await checkAvailability('email', value);
+  if (!result) { setFieldError('rgEmail', 'errEmail', ''); return; }
+  if (result.available) setFieldOk('rgEmail', 'errEmail');
+  else setFieldError('rgEmail', 'errEmail', result.error || 'This email address is already registered.');
+}
+
+function onFieldBlur(which) {
+  if (which === 'firstName') {
+    setFieldError('rgFirstName', 'errFirstName', validateFirstName($('rgFirstName').value) || '');
+    if (!validateFirstName($('rgFirstName').value)) setFieldOk('rgFirstName', 'errFirstName');
+  } else if (which === 'lastName') {
+    setFieldError('rgLastName', 'errLastName', validateLastName($('rgLastName').value) || '');
+    if (!validateLastName($('rgLastName').value)) setFieldOk('rgLastName', 'errLastName');
+  } else if (which === 'password') {
+    setFieldError('rgPassword', 'errPassword', validatePassword($('rgPassword').value) || '');
+    if (!validatePassword($('rgPassword').value)) setFieldOk('rgPassword', 'errPassword');
+  } else if (which === 'confirm') {
+    setFieldError('rgConfirm', 'errConfirm',
+      validateConfirm($('rgPassword').value, $('rgConfirm').value) || '');
+    if (!validateConfirm($('rgPassword').value, $('rgConfirm').value)) setFieldOk('rgConfirm', 'errConfirm');
+  }
+}
+
+async function doRegister() {
+  clearBanner();
+  const payload = {
+    firstName: $('rgFirstName').value,
+    lastName:  $('rgLastName').value,
+    loginId:   $('rgLoginId').value.trim(),
+    email:     $('rgEmail').value.trim(),
+    password:  $('rgPassword').value,
+    confirmPassword: $('rgConfirm').value,
+  };
+
+  // Local pass first, so obvious mistakes never reach the network.
+  const local = {
+    firstName: validateFirstName(payload.firstName),
+    lastName:  validateLastName(payload.lastName),
+    loginId:   validateLoginId(payload.loginId),
+    email:     validateEmail(payload.email),
+    password:  validatePassword(payload.password),
+    confirmPassword: validatePassword(payload.password)
+      ? null : validateConfirm(payload.password, payload.confirmPassword),
+  };
+  const map = {
+    firstName: ['rgFirstName', 'errFirstName'], lastName: ['rgLastName', 'errLastName'],
+    loginId: ['rgLoginId', 'errLoginId'], email: ['rgEmail', 'errEmail'],
+    password: ['rgPassword', 'errPassword'], confirmPassword: ['rgConfirm', 'errConfirm'],
+  };
+  let hasLocalError = false;
+  Object.keys(map).forEach(k => {
+    setFieldError(map[k][0], map[k][1], local[k] || '');
+    if (local[k]) hasLocalError = true;
+  });
+  if (hasLocalError) {
+    showBanner('Please correct the highlighted fields.', 'error');
+    return;
+  }
+
+  // Uniqueness is re-checked on submit as well as on blur — a competing
+  // registration can land in between.
+  busy('rgSubmit', true, 'Creating…', 'Create account');
+  try {
+    const r = await fetch('/auth/register', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+    });
+    const data = await r.json().catch(() => ({}));
+
+    if (!r.ok) {
+      if (data.errors) {
+        Object.keys(data.errors).forEach(field => {
+          if (map[field]) setFieldError(map[field][0], map[field][1], data.errors[field]);
+        });
+      }
+      showBanner(data.error || 'Could not create the account.', 'error');
+      return;
+    }
+
+    // Success: hand the user straight to sign-in with their login ID filled in.
+    $('registerForm').reset();
+    Object.keys(map).forEach(k => setFieldError(map[k][0], map[k][1], ''));
+    showView('login');
+    $('liLoginId').value = payload.loginId;
+    $('liPassword').focus();
+    showBanner('Account created. Please sign in.', 'success');
+  } catch (e) {
+    showBanner('Could not reach the server: ' + e.message, 'error');
+  } finally {
+    busy('rgSubmit', false, 'Creating…', 'Create account');
+  }
+}
+
+// ── Theme ─────────────────────────────────────────────────────────────────
+function initTheme() {
+  const saved = localStorage.getItem(THEME_KEY);
+  if (saved === 'light') document.documentElement.setAttribute('data-theme', 'light');
+}
+function toggleTheme() {
+  const isLight = document.documentElement.getAttribute('data-theme') === 'light';
+  if (isLight) { document.documentElement.removeAttribute('data-theme'); localStorage.setItem(THEME_KEY, 'dark'); }
+  else { document.documentElement.setAttribute('data-theme', 'light'); localStorage.setItem(THEME_KEY, 'light'); }
+}
+
+// ── Init ──────────────────────────────────────────────────────────────────
+initTheme();
+
+// Enter submits the visible form.
+document.addEventListener('keydown', (e) => {
+  if (e.key !== 'Enter') return;
+  if ($('sessionModal').classList.contains('open')) { forceLogin(); return; }
+  if ($('viewLogin').classList.contains('active')) doLogin(false);
+  else if ($('viewRegister').classList.contains('active')) doRegister();
+});
+
+// On-blur wiring, kept out of the markup so the handler names stay greppable.
+$('rgFirstName').addEventListener('blur', () => onFieldBlur('firstName'));
+$('rgLastName').addEventListener('blur',  () => onFieldBlur('lastName'));
+$('rgPassword').addEventListener('blur',  () => onFieldBlur('password'));
+$('rgConfirm').addEventListener('blur',   () => onFieldBlur('confirm'));
+$('rgLoginId').addEventListener('blur',   onLoginIdBlur);
+$('rgEmail').addEventListener('blur',     onEmailBlur);
+
+// Already signed in? Skip the form. An invalid token simply falls through.
+(async function checkExistingSession() {
+  const token = localStorage.getItem(TOKEN_KEY);
+  if (!token) return;
+  try {
+    const r = await fetch('/auth/me', { headers: { Authorization: 'Bearer ' + token } });
+    if (r.ok) window.location.replace('index.html');
+    else localStorage.removeItem(TOKEN_KEY);
+  } catch (_) { /* offline — let the user sign in normally */ }
+})();
+
+// ── Exports required by inline onclick handlers ───────────────────────────
+window.showView              = showView;
+window.doLogin               = doLogin;
+window.doRegister            = doRegister;
+window.forceLogin            = forceLogin;
+window.closeSessionModal     = cancelSessionTakeover;
+window.onAdminToggle         = onAdminToggle;
+window.toggleTheme           = toggleTheme;
+})();
+</script>
+</body>
+</html>
