@@ -2,73 +2,107 @@
 // Copyright (c) 2024 Dependency-Track Risk Dashboard contributors
 'use strict';
 
-// Scheduled-report endpoints: arm, status, disable and failure acknowledgement.
+// ── Scheduled-report endpoints ────────────────────────────────────────────────
+//   POST   /violation-cache/schedule/arm               arm this user's schedule
+//   GET    /violation-cache/schedule/status            state for the config panel
+//   DELETE /violation-cache/schedule                   disable without discarding
+//   POST   /violation-cache/schedule/ack-notification  clear a displayed failure
+//
+// Arming writes next_run_at; the poller does the rest. There is no per-user
+// timer anywhere in the process (CLAUDE.md §6.8).
 
 const { log } = require('../lib/log');
-const { jsonReply } = require('../lib/http-util');
-const { loadConfig, saveConfig } = require('../lib/app-config');
-const scheduler = require('../lib/scheduler');
+const { jsonReply, requireUser } = require('../lib/http-util');
+const schedulesDb = require('../lib/schedules');
+const scheduler   = require('../lib/scheduler');
 
-async function handle({ method, path: parsedPath, res }) {
-    // ── POST /violation-cache/schedule/arm ───────────────────────────────────
-    // Explicitly arms the scheduler. Called by the "Schedule Reports" button
-    // after project UUIDs are saved, so saving config alone never starts the timer.
-    if (method === 'POST' && parsedPath === '/violation-cache/schedule/arm') {
-      const cfg = loadConfig();
-      if (!cfg.schedule.enabled) {
-        jsonReply(res, 400, { error: 'Schedule is not enabled — enable it in settings first' });
+async function handle({ method, path: parsedPath, res, principal }) {
+
+  // ── POST /violation-cache/schedule/arm ──────────────────────────────────
+  if (method === 'POST' && parsedPath === '/violation-cache/schedule/arm') {
+    const userId = requireUser(principal, res);
+    if (!userId) return true;
+    try {
+      const sched = await schedulesDb.get(userId);
+      if (!sched || !sched.enabled) {
+        jsonReply(res, 400, {
+          error: 'The schedule is not enabled — enable it in Settings first.',
+          code: 'SCHEDULE_DISABLED',
+        });
         return true;
       }
-      if (!cfg.schedule.projectUuids.length) {
-        jsonReply(res, 400, { error: 'No project UUIDs saved — click Schedule Reports to select projects first' });
+      if (!sched.projectCount) {
+        jsonReply(res, 400, {
+          error: 'No projects are selected — click Schedule Reports to choose them first.',
+          code: 'NO_PROJECTS',
+        });
         return true;
       }
-      scheduler.armScheduler();
-      const updated = loadConfig();
-      log('info', 'Scheduler armed via API', { nextRun: updated.schedule.nextRun });
-      jsonReply(res, 200, { ok: true, nextRun: updated.schedule.nextRun });
-      return true;
+      const updated = await schedulesDb.arm(userId, scheduler.calcNextRun(sched));
+      log('info', 'Schedule armed', { userId, nextRun: updated.nextRunAt });
+      jsonReply(res, 200, { ok: true, nextRun: updated.nextRunAt });
+    } catch (err) {
+      log('error', `Arming the schedule failed: ${err.message}`, { userId });
+      jsonReply(res, 500, { error: 'Could not arm the schedule.', code: 'INTERNAL' });
     }
-  
-    // ── GET /violation-cache/schedule/status ─────────────────────────────────
-    if (method === 'GET' && parsedPath === '/violation-cache/schedule/status') {
-      const cfg = loadConfig();
+    return true;
+  }
+
+  // ── GET /violation-cache/schedule/status ────────────────────────────────
+  if (method === 'GET' && parsedPath === '/violation-cache/schedule/status') {
+    const userId = requireUser(principal, res);
+    if (!userId) return true;
+    try {
+      const sched = await schedulesDb.get(userId);
+      if (!sched) { jsonReply(res, 200, { enabled: false, projectCount: 0, isRunning: false }); return true; }
       jsonReply(res, 200, {
-        enabled:             cfg.schedule.enabled,
-        frequency:           cfg.schedule.frequency,
-        nextRun:             cfg.schedule.nextRun,
-        lastRun:             cfg.schedule.lastRun,
-        lastRunStatus:       cfg.schedule.lastRunStatus,
-        lastRunError:        cfg.schedule.lastRunError,
-        failureNotification: cfg.schedule.failureNotification,
-        isRunning:           scheduler.isRunning(),
-        projectCount:        cfg.schedule.projectUuids.length,
+        enabled:             sched.enabled,
+        frequency:           sched.frequency,
+        nextRun:             sched.nextRunAt,
+        lastRun:             sched.lastRunAt,
+        lastRunStatus:       sched.lastRunStatus,
+        lastRunError:        sched.lastRunError,
+        failureNotification: sched.failureNotification,
+        // Per-user, from running_since — not a process variable, so it stays
+        // correct across a restart and for every user independently.
+        isRunning:           Boolean(sched.runningSince),
+        projectCount:        sched.projectCount,
       });
-      return true;
+    } catch (err) {
+      log('error', `Schedule status failed: ${err.message}`, { userId });
+      jsonReply(res, 500, { error: 'Could not load the schedule.', code: 'INTERNAL' });
     }
-  
-    // ── DELETE /violation-cache/schedule ─────────────────────────────────────
-    // Disables the scheduled job without removing configuration.
-    if (method === 'DELETE' && parsedPath === '/violation-cache/schedule') {
-      const cfg = loadConfig();
-      cfg.schedule.enabled = false;
-      cfg.schedule.nextRun = null;
-      saveConfig(cfg);
-      scheduler.armScheduler(); // will immediately clear the timer because enabled=false
-      log('info', 'Schedule cancelled via API');
+    return true;
+  }
+
+  // ── DELETE /violation-cache/schedule ────────────────────────────────────
+  if (method === 'DELETE' && parsedPath === '/violation-cache/schedule') {
+    const userId = requireUser(principal, res);
+    if (!userId) return true;
+    try {
+      await schedulesDb.disable(userId);
+      log('info', 'Schedule disabled', { userId });
       jsonReply(res, 200, { ok: true, message: 'Schedule disabled' });
-      return true;
+    } catch (err) {
+      log('error', `Disabling the schedule failed: ${err.message}`, { userId });
+      jsonReply(res, 500, { error: 'Could not disable the schedule.', code: 'INTERNAL' });
     }
-  
-    // ── POST /violation-cache/schedule/ack-notification ──────────────────────
-    // Clears the failureNotification field once the browser has displayed it.
-    if (method === 'POST' && parsedPath === '/violation-cache/schedule/ack-notification') {
-      const cfg = loadConfig();
-      cfg.schedule.failureNotification = null;
-      saveConfig(cfg);
+    return true;
+  }
+
+  // ── POST /violation-cache/schedule/ack-notification ─────────────────────
+  if (method === 'POST' && parsedPath === '/violation-cache/schedule/ack-notification') {
+    const userId = requireUser(principal, res);
+    if (!userId) return true;
+    try {
+      await schedulesDb.ackNotification(userId);
       jsonReply(res, 200, { ok: true });
-      return true;
+    } catch (err) {
+      log('error', `Acknowledging the schedule notice failed: ${err.message}`, { userId });
+      jsonReply(res, 500, { error: 'Could not clear the notice.', code: 'INTERNAL' });
     }
+    return true;
+  }
 
   return false;
 }

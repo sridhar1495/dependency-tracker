@@ -2,184 +2,313 @@
 // Copyright (c) 2024 Dependency-Track Risk Dashboard contributors
 'use strict';
 
-// Configuration endpoints: effective DT key + app config, and the SMTP test send.
+// ── Per-user configuration ────────────────────────────────────────────────────
+//   GET    /violation-cache/config                  connection + settings + mail + schedule
+//   POST   /violation-cache/config                  save any subset of the above
+//   DELETE /violation-cache/config/dt-key           forget the stored DT API key
+//   POST   /violation-cache/config/test-connection  probe DT before saving
+//   POST   /violation-cache/config/test-email       send a test message
+//
+// Everything here is scoped to `principal.userId`. Nothing is read from or
+// written to .env or app-config.json any more — the single-tenant files are
+// gone (CLAUDE.md §5.6).
+//
+// S22: neither the DT API key nor the SMTP password is ever present in a
+// response. The client is told only whether each is configured.
 
-const fs   = require('fs');
 const { log } = require('../lib/log');
-const { jsonReply, readBody } = require('../lib/http-util');
-const { patchEnvFile } = require('../lib/env-file');
-const {
-  loadConfig, saveConfig, deepMerge, sanitiseConfigForClient, DEFAULT_MAX_REPORTS,
-} = require('../lib/app-config');
-const { sendEmail } = require('../lib/mail');
-const { reportJobs, saveRegistry } = require('../lib/reports');
-const scheduler = require('../lib/scheduler');
+const { jsonReply, readJson, requireUser } = require('../lib/http-util');
+// Module references, not destructured bindings, so the offline route tests
+// can substitute them (CLAUDE.md §10.1).
+const dtFetch = require('../lib/dt-fetch');
+const mail    = require('../lib/mail');
+const dtConnections = require('../lib/dt-connections');
+const userSettings  = require('../lib/user-settings');
+const mailSettings  = require('../lib/mail-settings');
+const schedulesDb   = require('../lib/schedules');
+const reportsDb     = require('../lib/reports-db');
+const scheduler     = require('../lib/scheduler');
 
-async function handle({ method, url, path: parsedPath, req, res, deps }) {
-    // ── GET /violation-cache/config ───────────────────────────────────────────
-    // Returns the full app config (sanitised — SMTP password is masked) plus
-    // the current effective API key and .env mount status.
-    // The dashboard reads this on page load and after the config panel is opened.
-    if (method === 'GET' && url === '/violation-cache/config') {
-      const { apiKey: effectiveKey } = deps.getEffectiveConfig();
-      const clientCfg = sanitiseConfigForClient(loadConfig());
+/** Shape the schedule row the way the dashboard's config panel expects it. */
+function scheduleForClient(row, projects) {
+  if (!row) return { enabled: false };
+  return {
+    enabled:             row.enabled,
+    frequency:           row.frequency,
+    hour:                row.hour,
+    weekDays:            row.weekDays || [],
+    monthDay:            row.monthDay,
+    riskTypes:           row.riskTypes || [],
+    nextRun:             row.nextRunAt,
+    lastRun:             row.lastRunAt,
+    lastRunStatus:       row.lastRunStatus,
+    lastRunError:        row.lastRunError,
+    failureNotification: row.failureNotification,
+    projectUuids:        projects.map(p => p.uuid),
+    projectCount:        projects.length,
+  };
+}
+
+async function handle({ method, path: parsedPath, req, res, principal }) {
+
+  // ── GET /violation-cache/config ─────────────────────────────────────────
+  if (method === 'GET' && parsedPath === '/violation-cache/config') {
+    const userId = requireUser(principal, res);
+    if (!userId) return true;
+
+    try {
+      const [conn, settings, mailCfg, sched, projects] = await Promise.all([
+        dtConnections.getForClient(userId),
+        userSettings.get(userId),
+        mailSettings.getForClient(userId),
+        schedulesDb.get(userId),
+        schedulesDb.getProjects(userId),
+      ]);
+
       jsonReply(res, 200, {
-        apiKey:         effectiveKey,
-        envFileMounted: fs.existsSync(deps.envFile),
-        config:         clientCfg,
+        connection: {
+          apiUrl:       conn ? conn.apiUrl : '',
+          frontendUrl:  conn ? conn.frontendUrl : '',
+          isConfigured: conn ? conn.isConfigured : false,
+          hasApiKey:    conn ? conn.hasApiKey : false,
+        },
+        config: {
+          maxReports: settings.maxReports,
+          mail:       mailCfg || { enabled: false },
+          schedule:   scheduleForClient(sched, projects),
+        },
       });
-      return true;
+    } catch (err) {
+      log('error', `Config read failed: ${err.message}`, { userId });
+      jsonReply(res, 500, { error: 'Could not load your settings.', code: 'INTERNAL' });
     }
+    return true;
+  }
 
-    // ── POST /violation-cache/config ──────────────────────────────────────────
-    // Accepts:
-    //   { apiKey }          — update DT_API_KEY in .env (backward compat)
-    //   { config: {...} }   — save full app config (maxReports, mail, schedule)
-    //   Both fields may appear together.
-    if (method === 'POST' && url === '/violation-cache/config') {
-      try {
-        const raw  = await readBody(req, 256 * 1024); // 256 KB — project UUID lists can be large
-        const body = JSON.parse(raw);
-  
-        // ── API key update (existing behaviour) ──────────────────────────
-        if (body.apiKey !== undefined) {
-          if (typeof body.apiKey !== 'string' || !body.apiKey.trim()) {
-            jsonReply(res, 400, { error: 'apiKey must be a non-empty string' });
-            return true;
-          }
-          const cleanKey = body.apiKey.replace(/[\x00-\x1F\x7F]/g, '').trim();
-          if (!fs.existsSync(deps.envFile)) {
-            jsonReply(res, 503, { error: `Config file not found at ${deps.envFile}. Ensure .env is bind-mounted.` });
-            return true;
-          }
-          patchEnvFile(deps.envFile, { DT_API_KEY: cleanKey });
-          log('info', `DT_API_KEY updated in ${deps.envFile}`, { key: `***${cleanKey.slice(-4)}` });
-        }
-  
-        // ── Full app config update ────────────────────────────────────────
-        if (body.config !== undefined) {
-          if (typeof body.config !== 'object' || body.config === null) {
-            jsonReply(res, 400, { error: 'config must be an object' });
-            return true;
-          }
-          const prevCfg    = loadConfig();
-          const prevMax    = prevCfg.maxReports || DEFAULT_MAX_REPORTS;
-          const newMax     = typeof body.config.maxReports === 'number' && body.config.maxReports > 0
-            ? body.config.maxReports : prevMax;
-  
-          // Restore real SMTP password when client sent the masked placeholder
-          if (body.config.mail?.smtp?.pass === '••••••••') {
-            if (body.config.mail) body.config.mail.smtp.pass = prevCfg.mail.smtp.pass;
-          }
-  
-          const merged = deepMerge(prevCfg, body.config);
-  
-          const schedChanged = JSON.stringify(prevCfg.schedule) !== JSON.stringify(merged.schedule);
-  
-          saveConfig(merged);
-          log('info', 'App config updated', {
-            maxReports:  merged.maxReports,
-            mailEnabled: merged.mail.enabled,
-            schedEnabled: merged.schedule.enabled,
-          });
-  
-          // Re-arm only if the scheduler timer was already active so that
-          // config changes take effect on the next run. First-time arming
-          // is done exclusively via POST /violation-cache/schedule/arm,
-          // which is called by the "Schedule Reports" toolbar button.
-          if (schedChanged && scheduler.isArmed()) scheduler.armScheduler();
-  
-          // Trim oldest completed reports when maxReports decreased
-          if (newMax < prevMax) {
-            const completed = Array.from(reportJobs.values())
-              .filter(j => j.status === 'completed')
-              .sort((a, b) => new Date(a.createdAt) - new Date(b.createdAt)); // oldest first
-            const toDelete = completed.slice(0, Math.max(0, completed.length - newMax));
-            for (const j of toDelete) {
-              if (j.filePath && fs.existsSync(j.filePath)) {
-                try { fs.unlinkSync(j.filePath); } catch (_) {}
-              }
-              reportJobs.delete(j.id);
-              log('info', `Trimmed old report ${j.id} (maxReports reduced to ${newMax})`);
-            }
-            if (toDelete.length) saveRegistry();
-          }
-  
-          // Re-arm scheduler based on updated config
-          if (schedChanged) scheduler.armScheduler();
-        }
-  
-        jsonReply(res, 200, { ok: true });
-  
-      } catch (e) {
-        if (e.code === 'PATCH_READ_FAILED') {
-          log('error', `Config update failed — could not read .env: ${e.message}`);
-          jsonReply(res, 500, { error: 'Could not read configuration file — check file permissions' });
-        } else if (e.code === 'PATCH_WRITE_FAILED') {
-          log('error', `Config update failed — could not write .env: ${e.message}`);
-          jsonReply(res, 500, { error: 'Could not write configuration file — check file permissions' });
-        } else {
-          log('error', `Config update error: ${e.message}`);
-          jsonReply(res, 500, { error: e.message });
-        }
-      }
-      return true;
-    }
+  // ── POST /violation-cache/config ────────────────────────────────────────
+  if (method === 'POST' && parsedPath === '/violation-cache/config') {
+    const userId = requireUser(principal, res);
+    if (!userId) return true;
 
-    // ── POST /violation-cache/config/test-email ──────────────────────────────
-    // Sends a plain-text test email.
-    // Accepts an optional JSON body with form-level SMTP credentials so the
-    // user can test connectivity before saving.  If useStoredPass:true is set
-    // the real stored password is substituted (the browser never has it).
-    // Falls back to saved config when no body is supplied.
-    if (method === 'POST' && parsedPath === '/violation-cache/config/test-email') {
-      try {
-        const cfg = loadConfig();
-        let mailCfg;
-  
-        const raw = await readBody(req).catch(() => '');
-        const body = raw ? JSON.parse(raw) : null;
-  
-        if (body && body.smtp) {
-          // Q10: use form credentials for the test; substitute stored password
-          // when the browser sends useStoredPass:true (placeholder was shown).
-          const storedPass = cfg.mail && cfg.mail.smtp ? cfg.mail.smtp.pass : '';
-          mailCfg = {
-            enabled: true,
-            smtp: {
-              host:   body.smtp.host   || '',
-              port:   body.smtp.port   || 587,
-              secure: !!body.smtp.secure,
-              user:   body.smtp.user   || '',
-              pass:   body.useStoredPass ? storedPass : (body.smtp.pass || ''),
-            },
-            from: body.from || '',
-            to:   body.to   || [],
-            cc:   body.cc   || [],
-          };
-        } else {
-          if (!cfg.mail.enabled) {
-            jsonReply(res, 400, { error: 'Email is not enabled in configuration' });
-            return true;
-          }
-          mailCfg = cfg.mail;
-        }
-  
-        if (!mailCfg.smtp.host || !mailCfg.from || !mailCfg.to.length) {
-          jsonReply(res, 400, { error: 'SMTP host, From address, and at least one To address are required' });
+    // 256 KB: a schedule's project selection can be several hundred UUIDs
+    // (CLAUDE.md §12).
+    const body = await readJson(req, res, 256 * 1024);
+    if (body === null) return true;
+
+    try {
+      let trimmedReports = 0;
+
+      // ── DependencyTrack connection ────────────────────────────────
+      if (body.connection !== undefined) {
+        if (typeof body.connection !== 'object' || body.connection === null) {
+          jsonReply(res, 400, { error: 'connection must be an object.', code: 'VALIDATION_FAILED' });
           return true;
         }
-        await sendEmail(mailCfg, null, null, {
-          subject: 'Dependency-Track — Test Email',
-          body:    `This is a test email from the Dependency-Track Risk Dashboard sent on ${new Date().toLocaleString()}. Your SMTP configuration is working correctly.`,
-        });
-        jsonReply(res, 200, { ok: true, message: 'Test email sent successfully' });
-      } catch (e) {
-        log('error', `Test email failed: ${e.message}`);
-        jsonReply(res, 500, { error: `Email failed: ${e.message}` });
+        await dtConnections.save(userId, body.connection);
       }
-      return true;
+
+      const cfg = body.config;
+      if (cfg !== undefined) {
+        if (typeof cfg !== 'object' || cfg === null) {
+          jsonReply(res, 400, { error: 'config must be an object.', code: 'VALIDATION_FAILED' });
+          return true;
+        }
+
+        // ── Report ceiling ──────────────────────────────────────────
+        if (cfg.maxReports !== undefined) {
+          await userSettings.setMaxReports(userId, cfg.maxReports);
+          // Lowering the limit deletes the user's own oldest completed
+          // reports, never anybody else's (CLAUDE.md §7.5).
+          trimmedReports = await reportsDb.trimToLimit(userId, Number(cfg.maxReports));
+        }
+
+        // ── SMTP ────────────────────────────────────────────────────
+        if (cfg.mail !== undefined) {
+          if (typeof cfg.mail !== 'object' || cfg.mail === null) {
+            jsonReply(res, 400, { error: 'mail must be an object.', code: 'VALIDATION_FAILED' });
+            return true;
+          }
+          await mailSettings.save(userId, cfg.mail);
+        }
+
+        // ── Schedule ────────────────────────────────────────────────
+        if (cfg.schedule !== undefined) {
+          if (typeof cfg.schedule !== 'object' || cfg.schedule === null) {
+            jsonReply(res, 400, { error: 'schedule must be an object.', code: 'VALIDATION_FAILED' });
+            return true;
+          }
+          await schedulesDb.save(userId, cfg.schedule);
+          if (Array.isArray(cfg.schedule.projects)) {
+            await schedulesDb.setProjects(userId, cfg.schedule.projects);
+          }
+
+          // Keep next_run_at consistent with the definition that was just
+          // saved. calcNextRun is the single source of truth for timing, so
+          // the value is never computed anywhere else (CLAUDE.md §6.8).
+          const saved = await schedulesDb.get(userId);
+          if (saved && saved.enabled && saved.projectCount > 0) {
+            await schedulesDb.arm(userId, scheduler.calcNextRun(saved));
+          } else if (saved && !saved.enabled) {
+            await schedulesDb.disable(userId);
+          }
+        }
+      }
+
+      const connection = await dtConnections.getForClient(userId);
+      jsonReply(res, 200, {
+        ok: true,
+        trimmedReports,
+        connection: {
+          apiUrl:       connection ? connection.apiUrl : '',
+          frontendUrl:  connection ? connection.frontendUrl : '',
+          isConfigured: connection ? connection.isConfigured : false,
+          hasApiKey:    connection ? connection.hasApiKey : false,
+        },
+      });
+    } catch (err) {
+      if (err.code === 'VALIDATION_FAILED') {
+        jsonReply(res, 400, { error: err.message, code: 'VALIDATION_FAILED', field: err.field });
+        return true;
+      }
+      log('error', `Config update failed: ${err.message}`, { userId });
+      jsonReply(res, 500, { error: 'Could not save your settings.', code: 'INTERNAL' });
     }
+    return true;
+  }
+
+  // ── DELETE /violation-cache/config/dt-key ───────────────────────────────
+  // Used when a stored key can no longer be decrypted, and by "Disconnect".
+  if (method === 'DELETE' && parsedPath === '/violation-cache/config/dt-key') {
+    const userId = requireUser(principal, res);
+    if (!userId) return true;
+    try {
+      await dtConnections.clearKey(userId);
+      jsonReply(res, 200, { ok: true });
+    } catch (err) {
+      log('error', `Clearing the DT key failed: ${err.message}`, { userId });
+      jsonReply(res, 500, { error: 'Could not clear the API key.', code: 'INTERNAL' });
+    }
+    return true;
+  }
+
+  // ── POST /violation-cache/config/test-connection ────────────────────────
+  // Probes DT with the supplied credentials so the user finds out before
+  // saving. An omitted key means "test the one already stored" — the browser
+  // never has it to send back.
+  if (method === 'POST' && parsedPath === '/violation-cache/config/test-connection') {
+    const userId = requireUser(principal, res);
+    if (!userId) return true;
+
+    const body = await readJson(req, res);
+    if (body === null) return true;
+
+    try {
+      let apiUrl = typeof body.apiUrl === 'string' ? body.apiUrl.trim().replace(/\/$/, '') : '';
+      let apiKey = typeof body.apiKey === 'string' ? body.apiKey.replace(/[\x00-\x1F\x7F]/g, '').trim() : '';
+
+      if (!apiUrl || !apiKey) {
+        const stored = await dtConnections.getResolved(userId);
+        if (!apiUrl) apiUrl = stored ? stored.apiUrl : '';
+        if (!apiKey) apiKey = stored ? stored.apiKey : '';
+      }
+      if (!apiUrl || !apiKey) {
+        jsonReply(res, 400, {
+          error: 'Enter both a DependencyTrack URL and an API key.',
+          code: 'VALIDATION_FAILED',
+        });
+        return true;
+      }
+
+      // One cheap authenticated call: /version needs a valid key and returns
+      // a tiny body.
+      const { json } = await dtFetch.dtGetWithRetry('/api/v1/version', apiUrl, apiKey);
+      jsonReply(res, 200, {
+        ok: true,
+        version: json && json.version ? json.version : null,
+        application: json && json.application ? json.application : null,
+      });
+    } catch (err) {
+      if (err.code === 'DT_KEY_UNREADABLE') {
+        jsonReply(res, 503, { error: err.message, code: 'DT_KEY_UNREADABLE' });
+        return true;
+      }
+      const dtStatus = err.statusCode || null;
+      jsonReply(res, 200, {
+        ok: false,
+        dtStatus,
+        error: dtStatus
+          ? `DependencyTrack returned HTTP ${dtStatus}. Check the URL and API key.`
+          : `DependencyTrack could not be reached: ${err.message}`,
+      });
+    }
+    return true;
+  }
+
+  // ── POST /violation-cache/config/test-email ─────────────────────────────
+  // Uses the values currently on screen so connectivity can be checked before
+  // saving. useStoredPass:true substitutes the stored password, which the
+  // browser only ever sees as a placeholder.
+  if (method === 'POST' && parsedPath === '/violation-cache/config/test-email') {
+    const userId = requireUser(principal, res);
+    if (!userId) return true;
+
+    const body = await readJson(req, res);
+    if (body === null) return true;
+
+    try {
+      let mailCfg;
+      if (body && body.smtp) {
+        let storedPass = '';
+        if (body.useStoredPass) {
+          const stored = await mailSettings.getResolved(userId);
+          storedPass = stored ? stored.smtp.pass : '';
+        }
+        mailCfg = {
+          enabled: true,
+          smtp: {
+            host:   body.smtp.host || '',
+            port:   body.smtp.port || 587,
+            secure: Boolean(body.smtp.secure),
+            user:   body.smtp.user || '',
+            pass:   body.useStoredPass ? storedPass : (body.smtp.pass || ''),
+          },
+          from: body.from || '',
+          to:   mailSettings.toAddressArray(body.to),
+          cc:   mailSettings.toAddressArray(body.cc),
+        };
+      } else {
+        const stored = await mailSettings.getResolved(userId);
+        if (!stored || !stored.enabled) {
+          jsonReply(res, 400, { error: 'Email is not enabled in your settings.', code: 'MAIL_DISABLED' });
+          return true;
+        }
+        mailCfg = stored;
+      }
+
+      if (!mailCfg.smtp.host || !mailCfg.from || !mailCfg.to.length) {
+        jsonReply(res, 400, {
+          error: 'SMTP host, From address and at least one To address are required.',
+          code: 'VALIDATION_FAILED',
+        });
+        return true;
+      }
+
+      await mail.sendEmail(mailCfg, null, {
+        subject: 'Dependency-Track — Test Email',
+        body: `This is a test email from the Dependency-Track Risk Dashboard sent on ${new Date().toLocaleString()}. `
+            + 'Your SMTP configuration is working correctly.',
+      });
+      jsonReply(res, 200, { ok: true, message: 'Test email sent successfully' });
+    } catch (err) {
+      if (err.code === 'SMTP_PASS_UNREADABLE') {
+        jsonReply(res, 503, { error: err.message, code: 'SMTP_PASS_UNREADABLE' });
+        return true;
+      }
+      log('error', `Test email failed: ${err.message}`, { userId });
+      jsonReply(res, 500, { error: `Email failed: ${err.message}`, code: 'MAIL_SEND_FAILED' });
+    }
+    return true;
+  }
 
   return false;
 }

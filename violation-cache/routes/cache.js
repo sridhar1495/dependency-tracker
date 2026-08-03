@@ -2,61 +2,135 @@
 // Copyright (c) 2024 Dependency-Track Risk Dashboard contributors
 'use strict';
 
-// Violation cache endpoints: build status, cached payload, manual rebuild.
+// ── Violation cache endpoints ─────────────────────────────────────────────────
+//   GET  /violation-cache/status   build state for the signed-in user's connection
+//   GET  /violation-cache/data     the cached count map
+//   POST /violation-cache/refresh  ask for a rebuild
+//
+// The cache is shared, keyed by a fingerprint of the DependencyTrack connection
+// rather than by user, so twenty accounts pointing at one DT instance with the
+// same key cause one crawl and not twenty (CLAUDE.md §7.5, §13). Callers that
+// lose the builder election are told "building" and poll for the winner's
+// result — exactly what a second tab already did.
 
-const fs = require('fs');
 const { log } = require('../lib/log');
-const { jsonReply } = require('../lib/http-util');
-const cache = require('../lib/violation-cache');
+const { jsonReply, requireUser } = require('../lib/http-util');
+const cache  = require('../lib/violation-cache');
+const caches = require('../lib/caches');
+const dtConnections = require('../lib/dt-connections');
 
 /**
- * @param {{ method: string, url: string, path: string, req: object, res: object,
- *           deps: object }} ctx
- * @returns {Promise<boolean>} true when this module handled the request
+ * Resolve the caller's connection, replying itself on the failure paths.
+ *
+ * @returns {Promise<object|null>} the resolved connection, or null once answered
  */
-async function handle({ method, url, res, deps }) {
-    // ── GET /violation-cache/status ───────────────────────────────────────────
-    if (method === 'GET' && url === '/violation-cache/status') {
-      jsonReply(res, 200, cache.getStatus());
-      return true;
+async function connectionFor(userId, res, { quiet = false } = {}) {
+  let conn;
+  try {
+    conn = await dtConnections.getResolved(userId);
+  } catch (err) {
+    if (err.code === 'DT_KEY_UNREADABLE') {
+      if (quiet) { jsonReply(res, 200, { status: 'no-key', reason: err.message }); return null; }
+      jsonReply(res, 503, { error: err.message, code: 'DT_KEY_UNREADABLE' });
+      return null;
     }
-  
-    // ── GET /violation-cache/data ─────────────────────────────────────────────
-    if (method === 'GET' && url === '/violation-cache/data') {
-      if (!fs.existsSync(deps.paths.cacheFile)) {
-        jsonReply(res, 404, { error: 'No cache available' });
-        return true;
-      }
-      try {
-        const raw = fs.readFileSync(deps.paths.cacheFile);
-        res.writeHead(200, {
-          'Content-Type':   'application/json',
-          'Content-Length': raw.length,
-          'Cache-Control':  'no-store',
-        });
-        res.end(raw);
-      } catch (e) {
-        log('error', `Failed to serve cache file: ${e.message}`);
-        jsonReply(res, 500, { error: 'Failed to read cache file' });
-      }
-      return true;
-    }
+    throw err;
+  }
+  if (!conn || !conn.isConfigured || !conn.apiKey) {
+    // 'no-key' is the status the dashboard already understands as "fall back to
+    // demo data", so an unconfigured account is not an error.
+    if (quiet) { jsonReply(res, 200, { status: 'no-key' }); return null; }
+    jsonReply(res, 503, {
+      error: 'No DependencyTrack connection is configured for this account.',
+      code: 'DT_NOT_CONFIGURED',
+    });
+    return null;
+  }
+  return conn;
+}
 
-    // ── POST /violation-cache/refresh ─────────────────────────────────────────
-    if (method === 'POST' && url === '/violation-cache/refresh') {
-      const { apiKey } = deps.getEffectiveConfig();
-      if (!apiKey) {
-        jsonReply(res, 503, { error: 'DT_API_KEY not configured on the cache service' });
-        return true;
+async function handle({ method, path: parsedPath, res, principal }) {
+
+  // ── GET /violation-cache/status ─────────────────────────────────────────
+  if (method === 'GET' && parsedPath === '/violation-cache/status') {
+    const userId = requireUser(principal, res);
+    if (!userId) return true;
+    try {
+      const conn = await connectionFor(userId, res, { quiet: true });
+      if (!conn) return true;
+
+      const status = await cache.getStatus(conn);
+
+      // Missing or expired: try to become the builder. A caller that loses the
+      // election gets `started:false` back straight away and simply polls.
+      if (status.status === 'none' || status.status === 'stale') {
+        cache.runJob(conn).catch(err =>
+          log('error', `Cache build error: ${err.message}`, { userId }));
+        if (status.status === 'none') {
+          jsonReply(res, 200, { status: 'building', progress: { pagesDone: 0, pagesTotal: 0 } });
+          return true;
+        }
       }
-      if (cache.isJobRunning()) {
-        jsonReply(res, 409, { status: 'building', message: 'Job already running' });
-        return true;
-      }
-      cache.runJob().catch(err => log('error', `Unhandled job error: ${err.message}`));
-      jsonReply(res, 202, { status: 'building', message: 'Job started' });
-      return true;
+      jsonReply(res, 200, status);
+    } catch (err) {
+      log('error', `Cache status failed: ${err.message}`, { userId });
+      jsonReply(res, 500, { error: 'Could not read the cache status.', code: 'INTERNAL' });
     }
+    return true;
+  }
+
+  // ── GET /violation-cache/data ───────────────────────────────────────────
+  if (method === 'GET' && parsedPath === '/violation-cache/data') {
+    const userId = requireUser(principal, res);
+    if (!userId) return true;
+    try {
+      const conn = await connectionFor(userId, res);
+      if (!conn) return true;
+
+      const payload = await caches.getPayloadGzip(conn.fingerprint);
+      if (!payload) {
+        jsonReply(res, 404, { error: 'No cache available yet.', code: 'NO_CACHE' });
+        return true;
+      }
+      // P15: stored gzipped and served gzipped — no decompress/recompress round
+      // trip, and the count map compresses to a fraction of its JSON size.
+      res.writeHead(200, {
+        'Content-Type':     'application/json',
+        'Content-Encoding': 'gzip',
+        'Content-Length':   payload.length,
+        'Cache-Control':    'no-store',
+      });
+      res.end(payload);
+    } catch (err) {
+      log('error', `Serving the cache failed: ${err.message}`, { userId });
+      if (!res.headersSent) jsonReply(res, 500, { error: 'Could not read the cache.', code: 'INTERNAL' });
+      else res.end();
+    }
+    return true;
+  }
+
+  // ── POST /violation-cache/refresh ───────────────────────────────────────
+  if (method === 'POST' && parsedPath === '/violation-cache/refresh') {
+    const userId = requireUser(principal, res);
+    if (!userId) return true;
+    try {
+      const conn = await connectionFor(userId, res);
+      if (!conn) return true;
+
+      const meta = await caches.getMeta(conn.fingerprint);
+      if (caches.deriveStatus(meta) === 'building') {
+        jsonReply(res, 409, { status: 'building', message: 'A build is already in progress.' });
+        return true;
+      }
+      cache.runJob(conn).catch(err =>
+        log('error', `Cache build error: ${err.message}`, { userId }));
+      jsonReply(res, 202, { status: 'building', message: 'Job started' });
+    } catch (err) {
+      log('error', `Cache refresh failed: ${err.message}`, { userId });
+      jsonReply(res, 500, { error: 'Could not start a rebuild.', code: 'INTERNAL' });
+    }
+    return true;
+  }
 
   return false;
 }

@@ -1,8 +1,10 @@
 #
 # Dependency-Track Risk Dashboard — Docker Compose
-# Serves the custom risk dashboard and violation cache service.
-# Both containers proxy to an existing DependencyTrack API instance
-# (set DT_API_INTERNAL_URL to point at your DT API server).
+# Serves the dashboard, the multi-user backend and its PostgreSQL database.
+#
+# There is no service-wide DependencyTrack connection: each account stores its
+# own URL and API key, encrypted, in the database, and the backend proxies
+# DependencyTrack calls on that user's behalf (CLAUDE.md §7.6).
 #
 
 networks:
@@ -27,17 +29,9 @@ services:
       options:
         max-size: "50m"
         max-file: "5"
-    environment:
-      # Where nginx should proxy /api/* requests.
-      # Point this at your DependencyTrack API server (on the same Docker network
-      # or an external URL if DT is hosted elsewhere).
-      # Example external: DT_API_INTERNAL_URL=https://dtrack.company.com
-      DT_API_INTERNAL_URL: "${DT_API_INTERNAL_URL:-http://dtrack-apiserver:8080}"
-      # Optional: pre-configure the DT API key so the dashboard loads live data
-      # automatically on page open (no manual "Connect API" step needed).
-      DT_API_KEY: "${DT_API_KEY:-}"
-      # Optional: DependencyTrack UI URL used by the dashboard for clickable project links.
-      DT_FRONTEND_URL: "${DT_FRONTEND_URL:-}"
+    # nginx serves the two static pages and proxies /auth, /profile and
+    # /violation-cache to the backend. It no longer proxies DependencyTrack —
+    # that is per-user and goes through /violation-cache/dt/.
     volumes:
       - ./dashboard:/usr/share/nginx/html:ro
       # nginx:alpine's entrypoint runs envsubst on *.template files in this dir
@@ -49,14 +43,12 @@ services:
       - dependency-track
 
   # ─── Violation Cache Service ──────────────────────────────────────────────────
-  # Fetches all policy violations from DependencyTrack on demand and caches the
-  # per-project count map in a JSON file.  The dashboard reads this file instead
-  # of streaming large violation payloads through the browser on every page load.
+  # Authentication, per-user configuration, reports, the scheduler and the shared
+  # violation cache.
   #
-  # Endpoints (proxied through nginx at /violation-cache/*):
-  #   GET  /violation-cache/status   — cache state + build progress
-  #   GET  /violation-cache/data     — the cached per-project violation map
-  #   POST /violation-cache/refresh  — trigger a background rebuild
+  # The violation cache is keyed by a fingerprint of the DependencyTrack
+  # connection rather than by user, so accounts sharing one DT instance share a
+  # single crawl (CLAUDE.md §7.5).
   dt-violation-cache:
     build:
       context: ./violation-cache
@@ -74,13 +66,18 @@ services:
         max-size: "100m"
         max-file: "5"
     environment:
-      # Must point to the DT API server reachable from within this container.
-      DT_API_URL: "${DT_API_INTERNAL_URL:-http://dtrack-apiserver:8080}"
-      # DT API key used by the cache service to fetch violations server-side.
-      DT_API_KEY: "${DT_API_KEY:-}"
-      # How many hours the cached file is valid before auto-expiry (default 24 h).
+      # How many hours a cached violation map is valid before auto-expiry.
       CACHE_TTL_HOURS: "${VIOLATION_CACHE_TTL_HOURS:-24}"
       PORT: "3001"
+      # AES-256-GCM key for stored DT API keys and SMTP passwords. The service
+      # refuses to start without it — a key saved under a missing encryption key
+      # could never be read back.
+      SECRET_ENCRYPTION_KEY: "${SECRET_ENCRYPTION_KEY:?SECRET_ENCRYPTION_KEY must be set in .env — run ./install.sh to generate one}"
+      # Legacy single-tenant connection, read ONCE at first boot to seed existing
+      # accounts. Safe to remove after upgrading; ignored on a fresh install.
+      DT_API_URL: "${DT_API_INTERNAL_URL:-}"
+      DT_API_KEY: "${DT_API_KEY:-}"
+      DT_FRONTEND_URL: "${DT_FRONTEND_URL:-}"
       # ─── Database connection ──────────────────────────────────────────────
       # The service refuses to start if it cannot reach PostgreSQL: migrations
       # must complete before the HTTP listener opens.
@@ -89,18 +86,18 @@ services:
       POSTGRES_USER: "${POSTGRES_USER:-dtdash}"
       POSTGRES_PASSWORD: "${POSTGRES_PASSWORD:?POSTGRES_PASSWORD must be set in .env — run ./install.sh to generate one}"
       POSTGRES_DB: "${POSTGRES_DB:-dtdash}"
-      # Session lifetimes are read now and enforced from phase 2 onward.
       SESSION_ABSOLUTE_HOURS: "${SESSION_ABSOLUTE_HOURS:-8}"
       SESSION_IDLE_HOURS: "${SESSION_IDLE_HOURS:-2}"
     depends_on:
       dt-postgres:
         condition: service_healthy
     volumes:
-      # Persists violation-cache.json, reports, and app-config.json across restarts.
+      # Holds admin-credentials.json and nothing else — caches, reports and all
+      # configuration live in PostgreSQL now (CLAUDE.md §5.6).
       - ./violation-cache/data:/data
-      # Bind-mount .env so the service can read updated config and persist
-      # API key changes written via POST /violation-cache/config.
-      - ./.env:/app/.env
+      # Read-only: the service reads .env once at boot to migrate a legacy
+      # single-tenant connection. It never writes to it.
+      - ./.env:/app/.env:ro
     networks:
       - dependency-track
 

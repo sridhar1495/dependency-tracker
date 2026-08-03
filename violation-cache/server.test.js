@@ -32,49 +32,14 @@ function parseEnvFile(filePath) {
   return result;
 }
 
-function patchEnvFile(filePath, updates) {
-  let content;
-  try {
-    content = fs.existsSync(filePath)
-      ? fs.readFileSync(filePath, 'utf8').replace(/\r\n/g, '\n')
-      : '';
-  } catch (e) {
-    throw Object.assign(
-      new Error(`Failed to read ${filePath}: ${e.message}`),
-      { code: 'PATCH_READ_FAILED', cause: e }
-    );
-  }
-
-  const remaining = new Set(Object.keys(updates));
-  let lines = content.split('\n').map(line => {
-    const eqIdx = line.indexOf('=');
-    if (eqIdx < 1) return line;
-    const key = line.slice(0, eqIdx).trim();
-    if (key in updates) {
-      remaining.delete(key);
-      return `${key}=${updates[key]}`;
-    }
-    return line;
-  });
-
-  for (const key of remaining) lines.push(`${key}=${updates[key]}`);
-
-  try {
-    fs.writeFileSync(filePath, lines.join('\n'), 'utf8');
-  } catch (e) {
-    throw Object.assign(
-      new Error(`Failed to write ${filePath}: ${e.message}`),
-      { code: 'PATCH_WRITE_FAILED', cause: e }
-    );
-  }
-}
-
-/** Inline getEffectiveConfig with injectable params for testability. */
-function getEffectiveConfig(envFile, startupUrl, startupKey) {
+/** Inline readLegacyConnection with injectable params for testability. */
+function readLegacyConnection(envFile, fallback = {}) {
   const envVars = parseEnvFile(envFile);
-  const apiUrl  = (envVars['DT_API_INTERNAL_URL'] || startupUrl || '').replace(/\/$/, '');
-  const apiKey  = (envVars['DT_API_KEY'] || startupKey || '').replace(/[\x00-\x1F\x7F]/g, '').trim();
-  return { apiUrl, apiKey };
+  return {
+    apiUrl: (envVars['DT_API_INTERNAL_URL'] || fallback.apiUrl || '').replace(/\/$/, ''),
+    apiKey: (envVars['DT_API_KEY'] || fallback.apiKey || '').replace(/[\x00-\x1F\x7F]/g, '').trim(),
+    frontendUrl: (envVars['DT_FRONTEND_URL'] || fallback.frontendUrl || '').replace(/\/$/, ''),
+  };
 }
 
 /** Inline log() helper. */
@@ -184,166 +149,44 @@ describe('parseEnvFile', () => {
   });
 });
 
-// ── patchEnvFile ──────────────────────────────────────────────────────────────
-describe('patchEnvFile', () => {
-  test('updates an existing key in place', () => {
-    const file = tmpFile('DT_API_KEY=old\nOTHER=keep\n');
-    try {
-      patchEnvFile(file, { DT_API_KEY: 'newkey' });
-      const result = parseEnvFile(file);
-      assert.equal(result.DT_API_KEY, 'newkey');
-      assert.equal(result.OTHER, 'keep');
-    } finally { cleanup(file); }
+// ── readLegacyConnection ──────────────────────────────────────────────────────
+// The only remaining reader of .env. It runs once at boot to seed accounts on
+// an upgraded installation; nothing writes to .env any more.
+describe('readLegacyConnection', () => {
+  test('returns the fallback values when the .env file does not exist', () => {
+    const c = readLegacyConnection('/nonexistent.env', { apiUrl: 'http://dt:8080', apiKey: 'startupkey' });
+    assert.equal(c.apiUrl, 'http://dt:8080');
+    assert.equal(c.apiKey, 'startupkey');
   });
 
-  test('appends a new key when it does not already exist', () => {
-    const file = tmpFile('EXISTING=yes\n');
-    try {
-      patchEnvFile(file, { NEW_KEY: 'hello' });
-      const result = parseEnvFile(file);
-      assert.equal(result.EXISTING, 'yes');
-      assert.equal(result.NEW_KEY, 'hello');
-    } finally { cleanup(file); }
-  });
-
-  test('creates the file when it does not exist', () => {
-    const file = path.join(os.tmpdir(), `dt-cache-test-new-${Date.now()}.env`);
-    try {
-      patchEnvFile(file, { KEY: 'value' });
-      assert.equal(parseEnvFile(file).KEY, 'value');
-    } finally { cleanup(file); }
-  });
-
-  test('preserves comment lines', () => {
-    const file = tmpFile('# a comment\nKEY=val\n');
-    try {
-      patchEnvFile(file, { KEY: 'new' });
-      const raw = fs.readFileSync(file, 'utf8');
-      assert.ok(raw.includes('# a comment'), 'comment should be preserved');
-    } finally { cleanup(file); }
-  });
-
-  test('normalises Windows CRLF before patching', () => {
-    const file = tmpFile('DT_API_KEY=old\r\nOTHER=keep\r\n');
-    try {
-      patchEnvFile(file, { DT_API_KEY: 'updated' });
-      const result = parseEnvFile(file);
-      assert.equal(result.DT_API_KEY, 'updated');
-      assert.equal(result.OTHER, 'keep');
-    } finally { cleanup(file); }
-  });
-
-  test('throws PATCH_READ_FAILED when file is unreadable', () => {
-    assert.throws(
-      () => patchEnvFile('/tmp', { KEY: 'val' }),
-      (err) => err.code === 'PATCH_READ_FAILED' || err.code === 'PATCH_WRITE_FAILED'
-    );
-  });
-
-  test('updates multiple keys in one call', () => {
-    const file = tmpFile('A=1\nB=2\nC=3\n');
-    try {
-      patchEnvFile(file, { A: '10', C: '30' });
-      const result = parseEnvFile(file);
-      assert.equal(result.A, '10');
-      assert.equal(result.B, '2');
-      assert.equal(result.C, '30');
-    } finally { cleanup(file); }
-  });
-
-  test('does not duplicate a key that already exists', () => {
-    const file = tmpFile('KEY=old\n');
-    try {
-      patchEnvFile(file, { KEY: 'new' });
-      const raw   = fs.readFileSync(file, 'utf8');
-      const count = (raw.match(/^KEY=/gm) || []).length;
-      assert.equal(count, 1, 'key should appear exactly once');
-    } finally { cleanup(file); }
-  });
-});
-
-// ── getEffectiveConfig ────────────────────────────────────────────────────────
-describe('getEffectiveConfig', () => {
-  test('returns startup values when .env file does not exist', () => {
-    const cfg = getEffectiveConfig('/nonexistent.env', 'http://dt:8080', 'startupkey');
-    assert.equal(cfg.apiUrl, 'http://dt:8080');
-    assert.equal(cfg.apiKey, 'startupkey');
-  });
-
-  test('.env values take priority over startup values', () => {
+  test('.env values take priority over the process environment', () => {
     const file = tmpFile('DT_API_INTERNAL_URL=http://from-env:9090\nDT_API_KEY=envkey\n');
     try {
-      const cfg = getEffectiveConfig(file, 'http://startup:8080', 'startupkey');
-      assert.equal(cfg.apiUrl, 'http://from-env:9090');
-      assert.equal(cfg.apiKey, 'envkey');
+      const c = readLegacyConnection(file, { apiUrl: 'http://startup:8080', apiKey: 'startupkey' });
+      assert.equal(c.apiUrl, 'http://from-env:9090');
+      assert.equal(c.apiKey, 'envkey');
     } finally { cleanup(file); }
   });
 
-  test('strips trailing slash from apiUrl', () => {
-    const file = tmpFile('DT_API_INTERNAL_URL=http://dt:8080/\n');
+  test('strips a trailing slash from both URLs', () => {
+    const file = tmpFile('DT_API_INTERNAL_URL=http://dt:8080/\nDT_FRONTEND_URL=http://ui:8081/\n');
     try {
-      const cfg = getEffectiveConfig(file, '', '');
-      assert.equal(cfg.apiUrl, 'http://dt:8080');
+      const c = readLegacyConnection(file);
+      assert.equal(c.apiUrl, 'http://dt:8080');
+      assert.equal(c.frontendUrl, 'http://ui:8081');
     } finally { cleanup(file); }
   });
 
-  test('strips control characters from apiKey read from .env', () => {
-    const file = tmpFile(`DT_API_KEY=mykey\r\n`);
+  test('strips control characters from a key read out of .env', () => {
+    const file = tmpFile('DT_API_KEY=mykey\r\n');
     try {
-      const cfg = getEffectiveConfig(file, '', '');
-      assert.equal(cfg.apiKey, 'mykey');
+      assert.equal(readLegacyConnection(file).apiKey, 'mykey');
     } finally { cleanup(file); }
   });
 
-  test('falls back to startup key when .env has no DT_API_KEY', () => {
-    const file = tmpFile('DT_API_INTERNAL_URL=http://dt:8080\n');
-    try {
-      const cfg = getEffectiveConfig(file, 'http://dt:8080', 'fallback-key');
-      assert.equal(cfg.apiKey, 'fallback-key');
-    } finally { cleanup(file); }
-  });
-
-  test('returns empty strings when no config anywhere', () => {
-    const cfg = getEffectiveConfig('/nonexistent.env', '', '');
-    assert.equal(cfg.apiUrl, '');
-    assert.equal(cfg.apiKey, '');
-  });
-});
-
-// ── GET /violation-cache/config response shape ─────────────────────────────────
-// Tests for the logic that drives the GET endpoint: getEffectiveConfig() is the
-// source of truth — the endpoint just wraps it.  We verify the three scenarios
-// that matter for the dashboard's key-priority logic.
-describe('GET /violation-cache/config — effective key scenarios', () => {
-  test('returns the .env key when one has been persisted (user-set takes priority over startup)', () => {
-    const file = tmpFile('DT_API_KEY=user-saved-key\n');
-    try {
-      const cfg = getEffectiveConfig(file, 'http://dt:8080', 'startup-env-key');
-      // .env key must win — this is what the GET endpoint returns
-      assert.equal(cfg.apiKey, 'user-saved-key');
-    } finally { cleanup(file); }
-  });
-
-  test('returns the startup key when .env exists but has no DT_API_KEY (install-time only)', () => {
-    const file = tmpFile('DT_API_INTERNAL_URL=http://dt:8080\n');
-    try {
-      const cfg = getEffectiveConfig(file, 'http://dt:8080', 'startup-key');
-      assert.equal(cfg.apiKey, 'startup-key');
-    } finally { cleanup(file); }
-  });
-
-  test('returns empty string when neither .env key nor startup key is present (mock mode)', () => {
-    const cfg = getEffectiveConfig('/nonexistent.env', '', '');
-    assert.equal(cfg.apiKey, '');
-  });
-
-  test('persisted key survives a subsequent patchEnvFile update (round-trip)', () => {
-    const file = tmpFile('DT_API_KEY=original-key\n');
-    try {
-      patchEnvFile(file, { DT_API_KEY: 'updated-key' });
-      const cfg = getEffectiveConfig(file, 'http://dt:8080', 'startup-key');
-      assert.equal(cfg.apiKey, 'updated-key');
-    } finally { cleanup(file); }
+  test('returns empty strings when there is nothing to migrate', () => {
+    const c = readLegacyConnection('/nonexistent.env');
+    assert.deepEqual(c, { apiUrl: '', apiKey: '', frontendUrl: '' });
   });
 });
 
@@ -529,242 +372,6 @@ describe('makeSemaphore()', () => {
     });
     await Promise.all([inc(), inc(), inc()]);
     assert.equal(count, 3);
-  });
-});
-
-// ── loadRegistry / saveRegistry logic ────────────────────────────────────────
-// Inline a test-scoped version of the registry helpers so we don't start a
-// real HTTP server.
-
-function makeRegistry() {
-  const jobs = new Map();
-
-  function saveRegistry(dir) {
-    fs.mkdirSync(dir, { recursive: true });
-    const tmp = path.join(dir, 'registry.tmp.json');
-    const dst = path.join(dir, 'registry.json');
-    const entries = [];
-    for (const job of jobs.values()) {
-      const { cancelFlag, watchdogId, ...persisted } = job; // eslint-disable-line no-unused-vars
-      entries.push(persisted);
-    }
-    fs.writeFileSync(tmp, JSON.stringify(entries, null, 2), 'utf8');
-    fs.renameSync(tmp, dst);
-    return dst;
-  }
-
-  function loadRegistry(regPath) {
-    if (!fs.existsSync(regPath)) return;
-    const entries = JSON.parse(fs.readFileSync(regPath, 'utf8'));
-    for (const entry of entries) {
-      if (entry.status === 'running') {
-        entry.status    = 'failed';
-        entry.error     = 'Service restarted while this report was being generated.';
-        entry.updatedAt = new Date().toISOString();
-      }
-      jobs.set(entry.id, { ...entry, cancelFlag: { cancelled: false } });
-    }
-  }
-
-  return { jobs, saveRegistry, loadRegistry };
-}
-
-describe('saveRegistry / loadRegistry', () => {
-  function tmpDir() {
-    const d = path.join(os.tmpdir(), `dt-reg-test-${Date.now()}-${Math.random().toString(36).slice(2)}`);
-    fs.mkdirSync(d, { recursive: true });
-    return d;
-  }
-
-  test('saveRegistry persists jobs to registry.json atomically', () => {
-    const dir = tmpDir();
-    try {
-      const { jobs, saveRegistry } = makeRegistry();
-      jobs.set('abc', { id: 'abc', status: 'completed', filename: 'f.xlsx',
-        filePath: '/data/f.xlsx', error: null, progress: { done: 1, total: 1 },
-        createdAt: '2024-01-01T00:00:00Z', updatedAt: '2024-01-01T00:01:00Z',
-        cancelFlag: { cancelled: false } });
-      const dst = saveRegistry(dir);
-      assert.ok(fs.existsSync(dst), 'registry.json should exist');
-      const data = JSON.parse(fs.readFileSync(dst, 'utf8'));
-      assert.equal(data.length, 1);
-      assert.equal(data[0].id, 'abc');
-    } finally { fs.rmSync(dir, { recursive: true, force: true }); }
-  });
-
-  test('saveRegistry omits cancelFlag and watchdogId from persisted output', () => {
-    const dir = tmpDir();
-    try {
-      const { jobs, saveRegistry } = makeRegistry();
-      jobs.set('xyz', { id: 'xyz', status: 'running', cancelFlag: { cancelled: false },
-        watchdogId: 42, createdAt: '2024-01-01T00:00:00Z', updatedAt: '2024-01-01T00:00:00Z',
-        filename: null, filePath: null, error: null, progress: { done: 0, total: 2 } });
-      const dst = saveRegistry(dir);
-      const data = JSON.parse(fs.readFileSync(dst, 'utf8'));
-      assert.ok(!('cancelFlag'  in data[0]), 'cancelFlag should not be persisted');
-      assert.ok(!('watchdogId'  in data[0]), 'watchdogId should not be persisted');
-    } finally { fs.rmSync(dir, { recursive: true, force: true }); }
-  });
-
-  test('loadRegistry marks running jobs as failed with "Service restarted" message', () => {
-    const dir = tmpDir();
-    try {
-      const { jobs, saveRegistry, loadRegistry } = makeRegistry();
-      jobs.set('run1', { id: 'run1', status: 'running', cancelFlag: { cancelled: false },
-        filename: null, filePath: null, error: null, progress: { done: 0, total: 5 },
-        createdAt: '2024-01-01T00:00:00Z', updatedAt: '2024-01-01T00:00:00Z' });
-      const dst = saveRegistry(dir);
-
-      // Simulate service restart by loading into a fresh registry
-      const { jobs: jobs2, loadRegistry: load2 } = makeRegistry();
-      load2(dst);
-
-      const reloaded = jobs2.get('run1');
-      assert.equal(reloaded.status, 'failed');
-      assert.ok(reloaded.error.includes('Service restarted'));
-    } finally { fs.rmSync(dir, { recursive: true, force: true }); }
-  });
-
-  test('loadRegistry preserves completed and failed job statuses unchanged', () => {
-    const dir = tmpDir();
-    try {
-      const { jobs, saveRegistry, loadRegistry } = makeRegistry();
-      jobs.set('c1', { id: 'c1', status: 'completed', filename: 'r.xlsx',
-        filePath: '/data/r.xlsx', error: null, progress: { done: 3, total: 3 },
-        createdAt: '2024-01-01T00:00:00Z', updatedAt: '2024-01-01T00:01:00Z',
-        cancelFlag: { cancelled: false } });
-      jobs.set('f1', { id: 'f1', status: 'failed', filename: null,
-        filePath: null, error: 'API error', progress: { done: 1, total: 3 },
-        createdAt: '2024-01-01T00:00:00Z', updatedAt: '2024-01-01T00:01:00Z',
-        cancelFlag: { cancelled: false } });
-      const dst = saveRegistry(dir);
-
-      const { jobs: j2, loadRegistry: l2 } = makeRegistry();
-      l2(dst);
-
-      assert.equal(j2.get('c1').status, 'completed');
-      assert.equal(j2.get('f1').status, 'failed');
-      assert.equal(j2.get('f1').error,  'API error');
-    } finally { fs.rmSync(dir, { recursive: true, force: true }); }
-  });
-
-  test('loadRegistry is a no-op when registry file does not exist', () => {
-    const { jobs, loadRegistry } = makeRegistry();
-    loadRegistry('/tmp/definitely-no-registry-here-dt.json');
-    assert.equal(jobs.size, 0);
-  });
-
-  test('loadRegistry adds cancelFlag object to every loaded job', () => {
-    const dir = tmpDir();
-    try {
-      const { jobs, saveRegistry, loadRegistry } = makeRegistry();
-      jobs.set('j1', { id: 'j1', status: 'completed', filename: 'x.xlsx',
-        filePath: '/x.xlsx', error: null, progress: { done: 1, total: 1 },
-        createdAt: '2024-01-01T00:00:00Z', updatedAt: '2024-01-01T00:00:00Z',
-        cancelFlag: { cancelled: false } });
-      const dst = saveRegistry(dir);
-
-      const { jobs: j2, loadRegistry: l2 } = makeRegistry();
-      l2(dst);
-      assert.ok(typeof j2.get('j1').cancelFlag === 'object', 'cancelFlag should be restored');
-    } finally { fs.rmSync(dir, { recursive: true, force: true }); }
-  });
-});
-
-// ── jobToApi ──────────────────────────────────────────────────────────────────
-// Inline jobToApi (same logic as server.js).
-function jobToApi(job) {
-  const { cancelFlag, watchdogId, filePath, ...pub } = job; // eslint-disable-line no-unused-vars
-  return pub;
-}
-
-describe('jobToApi()', () => {
-  const BASE = {
-    id: 'test-id', status: 'completed', filename: 'r.xlsx',
-    filePath: '/data/r.xlsx', error: null,
-    progress: { done: 2, total: 2 },
-    createdAt: '2024-01-01T00:00:00Z',
-    updatedAt: '2024-01-01T00:01:00Z',
-    cancelFlag: { cancelled: false },
-    watchdogId: 99,
-  };
-
-  test('strips cancelFlag from output', () => {
-    assert.ok(!('cancelFlag' in jobToApi({ ...BASE })));
-  });
-
-  test('strips watchdogId from output', () => {
-    assert.ok(!('watchdogId' in jobToApi({ ...BASE })));
-  });
-
-  test('strips filePath from output', () => {
-    assert.ok(!('filePath' in jobToApi({ ...BASE })));
-  });
-
-  test('preserves id, status, filename, progress, createdAt, updatedAt', () => {
-    const out = jobToApi({ ...BASE });
-    assert.equal(out.id,        'test-id');
-    assert.equal(out.status,    'completed');
-    assert.equal(out.filename,  'r.xlsx');
-    assert.equal(out.createdAt, '2024-01-01T00:00:00Z');
-    assert.equal(out.updatedAt, '2024-01-01T00:01:00Z');
-    assert.deepEqual(out.progress, { done: 2, total: 2 });
-  });
-});
-
-// ── Report generation pre-flight logic ───────────────────────────────────────
-// Inline the limit-check logic from the generate endpoint and generateReport().
-
-function checkReportLimit(jobs, MAX_REPORTS) {
-  const completedCount = jobs.filter(j => j.status === 'completed').length;
-  const runningCount   = jobs.filter(j => j.status === 'running'  ).length;
-  const total          = completedCount + runningCount;
-  if (total >= MAX_REPORTS) return { limitReached: true, completedCount, runningCount };
-  return { limitReached: false, completedCount, runningCount };
-}
-
-describe('Report limit check', () => {
-  const MAX = 10;
-
-  test('returns limitReached:false when no jobs exist', () => {
-    assert.equal(checkReportLimit([], MAX).limitReached, false);
-  });
-
-  test('returns limitReached:false when total is exactly MAX-1', () => {
-    const jobs = Array.from({ length: MAX - 1 }, (_, i) => ({ status: 'completed', id: `${i}` }));
-    assert.equal(checkReportLimit(jobs, MAX).limitReached, false);
-  });
-
-  test('returns limitReached:true when completed alone equals MAX', () => {
-    const jobs = Array.from({ length: MAX }, () => ({ status: 'completed' }));
-    assert.equal(checkReportLimit(jobs, MAX).limitReached, true);
-  });
-
-  test('returns limitReached:true when running + completed equals MAX', () => {
-    const jobs = [
-      ...Array.from({ length: 7 }, () => ({ status: 'completed' })),
-      ...Array.from({ length: 3 }, () => ({ status: 'running' })),
-    ];
-    assert.equal(checkReportLimit(jobs, MAX).limitReached, true);
-  });
-
-  test('failed jobs do not count toward the limit', () => {
-    const jobs = [
-      ...Array.from({ length: MAX - 1 }, () => ({ status: 'completed' })),
-      ...Array.from({ length: 5 },       () => ({ status: 'failed' })),
-    ];
-    assert.equal(checkReportLimit(jobs, MAX).limitReached, false);
-  });
-
-  test('reports correct completedCount and runningCount', () => {
-    const jobs = [
-      { status: 'completed' }, { status: 'completed' },
-      { status: 'running' },
-      { status: 'failed' },
-    ];
-    const result = checkReportLimit(jobs, MAX);
-    assert.equal(result.completedCount, 2);
-    assert.equal(result.runningCount,   1);
   });
 });
 
@@ -1134,53 +741,6 @@ describe('violation state accumulation (license / operational)', () => {
     ]);
     assert.equal(counts.fail, 1);
     assert.equal(counts.warn, 1);
-  });
-});
-
-// ── jobToApi includes riskTypes ───────────────────────────────────────────────
-// Verify jobToApi (already tested above) correctly passes through riskTypes.
-
-describe('jobToApi() with riskTypes field', () => {
-  test('riskTypes is included in API output', () => {
-    const job = {
-      id: 'j1', status: 'completed', filename: 'r.xlsx',
-      filePath: '/data/r.xlsx', error: null,
-      riskTypes: ['security', 'license'],
-      progress: { done: 2, total: 2 },
-      createdAt: '2024-01-01T00:00:00Z',
-      updatedAt: '2024-01-01T00:01:00Z',
-      cancelFlag: { cancelled: false },
-      watchdogId: 1,
-    };
-    const out = jobToApi(job);
-    assert.deepEqual(out.riskTypes, ['security', 'license']);
-  });
-
-  test('riskTypes for security-only job is preserved', () => {
-    const job = {
-      id: 'j2', status: 'running', filename: null,
-      filePath: null, error: null,
-      riskTypes: ['security'],
-      progress: { done: 0, total: 3 },
-      createdAt: '2024-01-01T00:00:00Z',
-      updatedAt: '2024-01-01T00:00:00Z',
-      cancelFlag: { cancelled: false },
-    };
-    assert.deepEqual(jobToApi(job).riskTypes, ['security']);
-  });
-
-  test('job without riskTypes (legacy) returns undefined riskTypes gracefully', () => {
-    const job = {
-      id: 'j3', status: 'completed', filename: 'old.xlsx',
-      filePath: '/data/old.xlsx', error: null,
-      progress: { done: 1, total: 1 },
-      createdAt: '2024-01-01T00:00:00Z',
-      updatedAt: '2024-01-01T00:01:00Z',
-      cancelFlag: { cancelled: false },
-    };
-    const out = jobToApi(job);
-    assert.equal(out.riskTypes, undefined);
-    assert.equal(out.id, 'j3');  // other fields still present
   });
 });
 
@@ -1621,255 +1181,11 @@ describe('performance constants and parallel phase execution', () => {
   });
 });
 
-// ── deepMerge ─────────────────────────────────────────────────────────────────
-function deepMerge(target, source) {
-  const out = JSON.parse(JSON.stringify(target));
-  for (const key of Object.keys(source)) {
-    const sv = source[key];
-    const tv = out[key];
-    if (sv !== null && typeof sv === 'object' && !Array.isArray(sv)
-        && tv !== null && typeof tv === 'object' && !Array.isArray(tv)) {
-      out[key] = deepMerge(tv, sv);
-    } else {
-      out[key] = sv;
-    }
-  }
-  return out;
-}
-
-describe('deepMerge()', () => {
-  test('shallow key override', () => {
-    const result = deepMerge({ a: 1, b: 2 }, { b: 99 });
-    assert.equal(result.a, 1);
-    assert.equal(result.b, 99);
-  });
-
-  test('nested object merge does not replace sibling keys', () => {
-    const target = { mail: { host: 'old', port: 25, user: 'u' } };
-    const source = { mail: { host: 'new' } };
-    const result = deepMerge(target, source);
-    assert.equal(result.mail.host, 'new');
-    assert.equal(result.mail.port, 25);
-    assert.equal(result.mail.user, 'u');
-  });
-
-  test('array in source replaces array in target (no element-level merge)', () => {
-    const result = deepMerge({ tags: ['a', 'b'] }, { tags: ['x'] });
-    assert.deepEqual(result.tags, ['x']);
-  });
-
-  test('does not mutate target', () => {
-    const target = { a: { b: 1 } };
-    deepMerge(target, { a: { b: 2 } });
-    assert.equal(target.a.b, 1);
-  });
-
-  test('null source value replaces object target value', () => {
-    const result = deepMerge({ a: { x: 1 } }, { a: null });
-    assert.equal(result.a, null);
-  });
-
-  test('adds keys present only in source', () => {
-    const result = deepMerge({ a: 1 }, { b: 2 });
-    assert.equal(result.a, 1);
-    assert.equal(result.b, 2);
-  });
-
-  test('deeply nested three levels', () => {
-    const target = { a: { b: { c: 1, d: 2 } } };
-    const source = { a: { b: { c: 99 } } };
-    const result = deepMerge(target, source);
-    assert.equal(result.a.b.c, 99);
-    assert.equal(result.a.b.d, 2);
-  });
-});
-
-// ── sanitiseConfigForClient ───────────────────────────────────────────────────
-function sanitiseConfigForClient(cfg) {
-  const out = JSON.parse(JSON.stringify(cfg));
-  if (out.mail && out.mail.smtp) {
-    out.mail.smtp.pass = out.mail.smtp.pass ? '••••••••' : '';
-  }
-  return out;
-}
-
-describe('sanitiseConfigForClient()', () => {
-  test('masks a non-empty smtp.pass with bullet placeholder', () => {
-    const cfg = { mail: { smtp: { host: 'smtp.example.com', pass: 's3cr3t' } } };
-    const out = sanitiseConfigForClient(cfg);
-    assert.equal(out.mail.smtp.pass, '••••••••');
-  });
-
-  test('leaves smtp.pass empty string when not set', () => {
-    const cfg = { mail: { smtp: { pass: '' } } };
-    const out = sanitiseConfigForClient(cfg);
-    assert.equal(out.mail.smtp.pass, '');
-  });
-
-  test('does not mutate the original config', () => {
-    const cfg = { mail: { smtp: { pass: 'secret' } } };
-    sanitiseConfigForClient(cfg);
-    assert.equal(cfg.mail.smtp.pass, 'secret');
-  });
-
-  test('preserves all other fields unchanged', () => {
-    const cfg = {
-      maxReports: 5,
-      mail: { enabled: true, smtp: { host: 'smtp.test', port: 587, pass: 'x' }, from: 'a@b.com' },
-    };
-    const out = sanitiseConfigForClient(cfg);
-    assert.equal(out.maxReports, 5);
-    assert.equal(out.mail.enabled, true);
-    assert.equal(out.mail.smtp.host, 'smtp.test');
-    assert.equal(out.mail.smtp.port, 587);
-    assert.equal(out.mail.from, 'a@b.com');
-  });
-
-  test('handles config with no mail section', () => {
-    const cfg = { maxReports: 10, schedule: { enabled: false } };
-    const out = sanitiseConfigForClient(cfg);
-    assert.equal(out.maxReports, 10);
-    assert.equal(out.schedule.enabled, false);
-  });
-});
-
-// ── loadConfig / saveConfig ───────────────────────────────────────────────────
-const DEFAULT_CONFIG_TEST = {
-  maxReports: 10,
-  mail: {
-    enabled: false,
-    smtp:    { host: '', port: 587, secure: false, user: '', pass: '' },
-    from:    '',
-    to:      [],
-    cc:      [],
-    subject: '',
-    body:    '',
-  },
-  schedule: {
-    enabled:             false,
-    frequency:           'daily',
-    hour:                9,
-    weekDays:            [1],
-    monthDay:            1,
-    projectUuids:        [],
-    riskTypes:           ['security', 'license', 'operational'],
-    lastRun:             null,
-    lastRunStatus:       null,
-    lastRunError:        null,
-    nextRun:             null,
-    failureNotification: null,
-  },
-};
-
-function loadConfigTest(configFile) {
-  try {
-    if (fs.existsSync(configFile)) {
-      const raw = JSON.parse(fs.readFileSync(configFile, 'utf8'));
-      return deepMerge(DEFAULT_CONFIG_TEST, raw);
-    }
-  } catch (_) {}
-  return JSON.parse(JSON.stringify(DEFAULT_CONFIG_TEST));
-}
-
-function saveConfigTest(cfg, configFile, tmpFile2) {
-  fs.writeFileSync(tmpFile2, JSON.stringify(cfg, null, 2), 'utf8');
-  fs.renameSync(tmpFile2, configFile);
-}
-
-describe('loadConfig / saveConfig', () => {
-  let cfgFile, cfgTmp;
-  beforeEach(() => {
-    const base = path.join(os.tmpdir(), `dt-appcfg-${Date.now()}-${Math.random().toString(36).slice(2)}`);
-    cfgFile = `${base}.json`;
-    cfgTmp  = `${base}.tmp.json`;
-  });
-  afterEach(() => {
-    try { fs.unlinkSync(cfgFile); } catch (_) {}
-    try { fs.unlinkSync(cfgTmp);  } catch (_) {}
-  });
-
-  test('returns defaults when file does not exist', () => {
-    const cfg = loadConfigTest(cfgFile);
-    assert.equal(cfg.maxReports, 10);
-    assert.equal(cfg.mail.enabled, false);
-    assert.equal(cfg.schedule.enabled, false);
-    assert.equal(cfg.schedule.frequency, 'daily');
-  });
-
-  test('saves and reloads config round-trip', () => {
-    const cfg = loadConfigTest(cfgFile);
-    cfg.maxReports = 25;
-    cfg.mail.enabled = true;
-    cfg.mail.from = 'test@example.com';
-    saveConfigTest(cfg, cfgFile, cfgTmp);
-    const loaded = loadConfigTest(cfgFile);
-    assert.equal(loaded.maxReports, 25);
-    assert.equal(loaded.mail.enabled, true);
-    assert.equal(loaded.mail.from, 'test@example.com');
-  });
-
-  test('merges partial user config with defaults (missing keys filled from defaults)', () => {
-    fs.writeFileSync(cfgFile, JSON.stringify({ maxReports: 7 }), 'utf8');
-    const cfg = loadConfigTest(cfgFile);
-    assert.equal(cfg.maxReports, 7);
-    assert.equal(cfg.mail.smtp.port, 587);   // default filled in
-    assert.deepEqual(cfg.schedule.weekDays, [1]);  // default weekDays
-  });
-
-  test('persists nested schedule config correctly', () => {
-    const cfg = loadConfigTest(cfgFile);
-    cfg.schedule.enabled = true;
-    cfg.schedule.frequency = 'weekly';
-    cfg.schedule.weekDays = [1, 3, 5];
-    cfg.schedule.hour = 8;
-    saveConfigTest(cfg, cfgFile, cfgTmp);
-    const loaded = loadConfigTest(cfgFile);
-    assert.equal(loaded.schedule.enabled, true);
-    assert.equal(loaded.schedule.frequency, 'weekly');
-    assert.deepEqual(loaded.schedule.weekDays, [1, 3, 5]);
-    assert.equal(loaded.schedule.hour, 8);
-  });
-
-  test('handles corrupted JSON by returning defaults', () => {
-    fs.writeFileSync(cfgFile, '{ invalid json !!!', 'utf8');
-    const cfg = loadConfigTest(cfgFile);
-    assert.equal(cfg.maxReports, 10);
-  });
-
-  test('write is atomic (tmp file used then renamed)', () => {
-    const cfg = loadConfigTest(cfgFile);
-    saveConfigTest(cfg, cfgFile, cfgTmp);
-    assert.ok(fs.existsSync(cfgFile), 'config file should exist after save');
-    assert.ok(!fs.existsSync(cfgTmp), 'tmp file should be gone after rename');
-  });
-});
-
 // ── calcNextRun ───────────────────────────────────────────────────────────────
-function calcNextRun(schedule) {
-  const now = new Date();
-  if (schedule.frequency === 'daily') {
-    const next = new Date(now.getFullYear(), now.getMonth(), now.getDate(), schedule.hour, 0, 0, 0);
-    if (next <= now) next.setDate(next.getDate() + 1);
-    return next;
-  }
-  if (schedule.frequency === 'weekly') {
-    const targetDays = (schedule.weekDays || [1]).sort((a, b) => a - b);
-    for (let d = 1; d <= 8; d++) {
-      const candidate = new Date(
-        now.getFullYear(), now.getMonth(), now.getDate() + d, schedule.hour, 0, 0, 0
-      );
-      if (targetDays.includes(candidate.getDay())) return candidate;
-    }
-    return new Date(now.getFullYear(), now.getMonth(), now.getDate() + 7, schedule.hour, 0, 0, 0);
-  }
-  if (schedule.frequency === 'monthly') {
-    const day  = Math.min(schedule.monthDay || 1, 28);
-    let next   = new Date(now.getFullYear(), now.getMonth(), day, schedule.hour, 0, 0, 0);
-    if (next <= now) next = new Date(now.getFullYear(), now.getMonth() + 1, day, schedule.hour, 0, 0, 0);
-    return next;
-  }
-  return new Date(now.getTime() + 24 * 3_600_000);
-}
+// lib/scheduler.js performs no I/O at require time, so calcNextRun is imported
+// rather than duplicated (CLAUDE.md §10.3). It is the single source of truth for
+// scheduling times and must never be reimplemented at a call site.
+const { calcNextRun } = require('./lib/scheduler');
 
 describe('calcNextRun()', () => {
   test('daily: result is always in the future', () => {
@@ -1932,172 +1248,6 @@ describe('calcNextRun()', () => {
   });
 });
 
-// ── test-email body resolution logic ─────────────────────────────────────────
-// Mirrors the credential-resolution logic in the POST /config/test-email handler.
-// Extracted as a pure helper so it can be unit-tested without HTTP.
-function resolveTestMailConfig(body, savedCfg) {
-  if (body && body.smtp) {
-    const storedPass = savedCfg && savedCfg.mail && savedCfg.mail.smtp
-      ? savedCfg.mail.smtp.pass
-      : '';
-    return {
-      enabled: true,
-      smtp: {
-        host:   body.smtp.host   || '',
-        port:   body.smtp.port   || 587,
-        secure: !!body.smtp.secure,
-        user:   body.smtp.user   || '',
-        pass:   body.useStoredPass ? storedPass : (body.smtp.pass || ''),
-      },
-      from: body.from || '',
-      to:   body.to   || [],
-      cc:   body.cc   || [],
-    };
-  }
-  return savedCfg.mail;
-}
-
-describe('test-email body resolution', () => {
-  const savedCfg = {
-    mail: {
-      enabled: true,
-      smtp: { host: 'saved.smtp.com', port: 465, secure: true, user: 'u', pass: 'real-secret' },
-      from: 'saved@example.com',
-      to:   ['saved-to@example.com'],
-      cc:   [],
-    },
-  };
-
-  test('uses form body smtp credentials when body.smtp is present', () => {
-    const body = {
-      smtp: { host: 'form.smtp.com', port: 587, secure: false, user: 'form-user', pass: 'form-pass' },
-      from: 'form@example.com',
-      to:   ['to@example.com'],
-      cc:   [],
-    };
-    const result = resolveTestMailConfig(body, savedCfg);
-    assert.equal(result.smtp.host, 'form.smtp.com');
-    assert.equal(result.smtp.pass, 'form-pass');
-    assert.equal(result.from, 'form@example.com');
-  });
-
-  test('useStoredPass:true substitutes real stored password', () => {
-    const body = {
-      useStoredPass: true,
-      smtp: { host: 'form.smtp.com', port: 587, secure: false, user: 'u', pass: '' },
-      from: 'form@example.com',
-      to:   ['to@example.com'],
-    };
-    const result = resolveTestMailConfig(body, savedCfg);
-    assert.equal(result.smtp.pass, 'real-secret');
-  });
-
-  test('useStoredPass:false uses the pass value from the body', () => {
-    const body = {
-      useStoredPass: false,
-      smtp: { host: 'h', port: 587, secure: false, user: 'u', pass: 'new-pass' },
-      from: 'f@example.com',
-      to:   ['t@example.com'],
-    };
-    const result = resolveTestMailConfig(body, savedCfg);
-    assert.equal(result.smtp.pass, 'new-pass');
-  });
-
-  test('useStoredPass:true with no stored password yields empty string', () => {
-    const cfgNoPass = { mail: { smtp: { pass: '' } } };
-    const body = {
-      useStoredPass: true,
-      smtp: { host: 'h', port: 587, secure: false, user: 'u', pass: '' },
-      from: 'f@example.com',
-      to:   ['t@example.com'],
-    };
-    const result = resolveTestMailConfig(body, cfgNoPass);
-    assert.equal(result.smtp.pass, '');
-  });
-
-  test('falls back to saved config when no body.smtp supplied', () => {
-    const result = resolveTestMailConfig(null, savedCfg);
-    assert.deepEqual(result, savedCfg.mail);
-  });
-
-  test('defaults port to 587 when body.smtp.port is missing', () => {
-    const body = {
-      smtp: { host: 'h', secure: false, user: 'u', pass: 'p' },
-      from: 'f@example.com',
-      to:   ['t@example.com'],
-    };
-    const result = resolveTestMailConfig(body, savedCfg);
-    assert.equal(result.smtp.port, 587);
-  });
-
-  test('form to/cc are parsed as arrays', () => {
-    const body = {
-      smtp: { host: 'h', port: 25, secure: false, user: '', pass: '' },
-      from: 'f@example.com',
-      to:   ['a@x.com', 'b@x.com'],
-      cc:   ['c@x.com'],
-    };
-    const result = resolveTestMailConfig(body, savedCfg);
-    assert.deepEqual(result.to, ['a@x.com', 'b@x.com']);
-    assert.deepEqual(result.cc, ['c@x.com']);
-  });
-});
-
-// ── schedule/arm trigger logic ────────────────────────────────────────────────
-// Mirrors the condition in POST /violation-cache/config that decides whether
-// to re-arm after a config save, and the guard in POST /violation-cache/schedule/arm.
-function shouldRearmOnConfigSave(schedChanged, timerActive) {
-  return schedChanged && timerActive;
-}
-
-function armEndpointGuard(schedEnabled, projectUuidsLength) {
-  if (!schedEnabled)           return { ok: false, error: 'Schedule is not enabled — enable it in settings first' };
-  if (!projectUuidsLength)     return { ok: false, error: 'No project UUIDs saved — click Schedule Reports to select projects first' };
-  return { ok: true };
-}
-
-describe('schedule arm trigger logic', () => {
-  test('config save re-arms when timer is active and schedule changed', () => {
-    assert.equal(shouldRearmOnConfigSave(true, true), true);
-  });
-
-  test('config save does not arm when timer is inactive (first-time setup)', () => {
-    assert.equal(shouldRearmOnConfigSave(true, false), false);
-  });
-
-  test('config save does not re-arm when schedule did not change', () => {
-    assert.equal(shouldRearmOnConfigSave(false, true), false);
-  });
-
-  test('config save does not arm when both conditions are false', () => {
-    assert.equal(shouldRearmOnConfigSave(false, false), false);
-  });
-});
-
-describe('schedule/arm endpoint guard', () => {
-  test('rejects when schedule is not enabled', () => {
-    const r = armEndpointGuard(false, 5);
-    assert.equal(r.ok, false);
-    assert.ok(r.error.includes('not enabled'));
-  });
-
-  test('rejects when no project UUIDs are stored', () => {
-    const r = armEndpointGuard(true, 0);
-    assert.equal(r.ok, false);
-    assert.ok(r.error.includes('No project UUIDs'));
-  });
-
-  test('allows arm when schedule enabled and projects present', () => {
-    const r = armEndpointGuard(true, 3);
-    assert.equal(r.ok, true);
-  });
-
-  test('rejects when both conditions fail (schedule disabled, no UUIDs)', () => {
-    const r = armEndpointGuard(false, 0);
-    assert.equal(r.ok, false);
-  });
-});
-
 // ── lib/config.js — environment parsing ───────────────────────────────────────
 // lib/config.js performs no I/O at require time, so it is imported directly
 // rather than duplicated (CLAUDE.md §10.3). parseConfig() takes the environment
@@ -2106,7 +1256,8 @@ describe('schedule/arm endpoint guard', () => {
 const { parseConfig, DEFAULTS } = require('./lib/config');
 
 /** Minimum environment for a valid configuration. */
-const baseEnv = () => ({ POSTGRES_PASSWORD: 'pw' });
+const ENC_KEY = 'a'.repeat(64);   // 64 hex characters = 32 bytes
+const baseEnv = () => ({ POSTGRES_PASSWORD: 'pw', SECRET_ENCRYPTION_KEY: ENC_KEY });
 
 describe('parseConfig — defaults', () => {
   test('applies documented defaults when only the password is supplied', () => {
@@ -2132,14 +1283,12 @@ describe('parseConfig — defaults', () => {
     assert.equal(c.db.idleInTransactionTimeoutMs, 30_000);
   });
 
-  test('derives all file paths from CACHE_DIR', () => {
+  test('the admin credentials file is the only path left on disk', () => {
     const c = parseConfig({ ...baseEnv(), CACHE_DIR: '/srv/dt' });
-    assert.equal(c.paths.cacheFile,  '/srv/dt/violation-cache.json');
-    assert.equal(c.paths.cacheTmp,   '/srv/dt/violation-cache.tmp.json');
-    assert.equal(c.paths.configFile, '/srv/dt/app-config.json');
-    assert.equal(c.paths.reportDir,  '/srv/dt/reports');
-    assert.equal(c.paths.schedDir,   '/srv/dt/scheduled-reports');
     assert.equal(c.paths.adminCreds, '/srv/dt/admin-credentials.json');
+    // Everything else moved into PostgreSQL, so no other path may reappear
+    // here without a deliberate decision (CLAUDE.md §5.6).
+    assert.deepEqual(Object.keys(c.paths), ['adminCreds']);
   });
 
   test('an empty string falls back to the default rather than being accepted', () => {
@@ -2157,7 +1306,8 @@ describe('parseConfig — defaults', () => {
 describe('parseConfig — overrides', () => {
   test('honours supplied values', () => {
     const c = parseConfig({
-      POSTGRES_PASSWORD: 'pw', PORT: '4000', LOG_FORMAT: 'json',
+      POSTGRES_PASSWORD: 'pw', SECRET_ENCRYPTION_KEY: ENC_KEY,
+      PORT: '4000', LOG_FORMAT: 'json',
       POSTGRES_HOST: 'db.internal', POSTGRES_PORT: '6543',
       POSTGRES_USER: 'app', POSTGRES_DB: 'appdb',
       CACHE_TTL_HOURS: '6', REPORT_CONCURRENCY: '9', VIOLATION_CONCURRENCY: '2',
@@ -2176,20 +1326,30 @@ describe('parseConfig — overrides', () => {
     assert.equal(c.session.idleHours, 3);
   });
 
-  test('strips a trailing slash and control characters from DT startup values', () => {
+  test('strips a trailing slash and control characters from the legacy DT values', () => {
     const c = parseConfig({
       ...baseEnv(),
       DT_API_URL: 'https://dt.example.com/',
       DT_API_KEY: '  odt_abc123\n  ',
+      DT_FRONTEND_URL: 'https://dt.example.com/ui/',
     });
-    assert.equal(c.dt.startupApiUrl, 'https://dt.example.com');
-    assert.equal(c.dt.startupApiKey, 'odt_abc123');
+    assert.equal(c.legacyDt.apiUrl, 'https://dt.example.com');
+    assert.equal(c.legacyDt.apiKey, 'odt_abc123');
+    assert.equal(c.legacyDt.frontendUrl, 'https://dt.example.com/ui');
+  });
+
+  test('the legacy DT values default to empty rather than to a guessed host', () => {
+    // A fresh install has no DependencyTrack connection at all: guessing one
+    // would seed every account with a URL nobody chose.
+    const c = parseConfig(baseEnv());
+    assert.equal(c.legacyDt.apiUrl, '');
+    assert.equal(c.legacyDt.apiKey, '');
   });
 });
 
 describe('parseConfig — fail-fast validation', () => {
   test('POSTGRES_PASSWORD is required and the message says where it comes from', () => {
-    assert.throws(() => parseConfig({}), (e) => {
+    assert.throws(() => parseConfig({ SECRET_ENCRYPTION_KEY: ENC_KEY }), (e) => {
       assert.equal(e.code, 'CONFIG_INVALID');
       assert.match(e.message, /POSTGRES_PASSWORD is required/);
       assert.match(e.message, /install\.sh/);
@@ -2198,7 +1358,36 @@ describe('parseConfig — fail-fast validation', () => {
   });
 
   test('a whitespace-only password is rejected', () => {
-    assert.throws(() => parseConfig({ POSTGRES_PASSWORD: '   ' }), (e) => e.code === 'CONFIG_INVALID');
+    assert.throws(
+      () => parseConfig({ POSTGRES_PASSWORD: '   ', SECRET_ENCRYPTION_KEY: ENC_KEY }),
+      (e) => e.code === 'CONFIG_INVALID'
+    );
+  });
+
+  test('SECRET_ENCRYPTION_KEY is required — a stored key would be unreadable without it', () => {
+    assert.throws(() => parseConfig({ POSTGRES_PASSWORD: 'pw' }), (e) => {
+      assert.equal(e.code, 'CONFIG_INVALID');
+      assert.match(e.message, /SECRET_ENCRYPTION_KEY is required/);
+      return true;
+    });
+  });
+
+  test('a SECRET_ENCRYPTION_KEY that does not decode to 32 bytes is rejected', () => {
+    for (const bad of ['abc', 'a'.repeat(63), Buffer.alloc(16).toString('base64')]) {
+      assert.throws(
+        () => parseConfig({ POSTGRES_PASSWORD: 'pw', SECRET_ENCRYPTION_KEY: bad }),
+        (e) => e.code === 'CONFIG_INVALID' && /32 bytes/.test(e.message),
+        `expected ${bad} to be rejected`
+      );
+    }
+  });
+
+  test('a base64 SECRET_ENCRYPTION_KEY of exactly 32 bytes is accepted', () => {
+    const c = parseConfig({
+      POSTGRES_PASSWORD: 'pw',
+      SECRET_ENCRYPTION_KEY: Buffer.alloc(32, 7).toString('base64'),
+    });
+    assert.ok(c.secretEncryptionKey);
   });
 
   test('LOG_FORMAT must be text or json', () => {
@@ -2670,5 +1859,490 @@ describe('validate — whole payloads', () => {
   test('profile update ignores login ID and email entirely', () => {
     const r = v.validateProfileUpdate({ loginId: 'anything at all!', email: 'not-an-email' });
     assert.equal(r.valid, true, 'identity fields are not validated because they are not accepted');
+  });
+});
+
+// ── Route layer — per-user scoping and authorisation ─────────────────────────
+// The route modules perform no I/O at require time, so they are imported and
+// driven directly with a stubbed data layer (CLAUDE.md §10.2, §10.3). These are
+// the tests that keep one user's data out of another user's responses.
+
+const routeReports  = require('./routes/reports');
+const routeCache    = require('./routes/cache');
+const routeConfig   = require('./routes/config');
+const routeSchedule = require('./routes/schedule');
+const routeDtProxy  = require('./routes/dt-proxy');
+
+const reportsDbMod     = require('./lib/reports-db');
+const reportsMod       = require('./lib/reports');
+const userSettingsMod  = require('./lib/user-settings');
+const dtConnectionsMod = require('./lib/dt-connections');
+const cachesMod        = require('./lib/caches');
+const violationCacheMod = require('./lib/violation-cache');
+const schedulesMod     = require('./lib/schedules');
+const dtFetchMod       = require('./lib/dt-fetch');
+
+/** Minimal response double: records the status and parsed JSON body. */
+function makeRes() {
+  const res = {
+    statusCode: null, headers: null, chunks: [], headersSent: false,
+    writeHead(status, headers) { res.statusCode = status; res.headers = headers || {}; res.headersSent = true; },
+    write(chunk) { res.chunks.push(Buffer.from(chunk)); return true; },
+    end(chunk) { if (chunk) res.chunks.push(Buffer.from(chunk)); res.ended = true; },
+    once() {},
+    get body() { return Buffer.concat(res.chunks).toString('utf8'); },
+    get json() { try { return JSON.parse(res.body); } catch (_) { return null; } },
+  };
+  return res;
+}
+
+const USER_A = '11111111-1111-4111-8111-111111111111';
+const USER_B = '22222222-2222-4222-8222-222222222222';
+const REPORT_A = '33333333-3333-4333-8333-333333333333';
+
+const asUser  = (userId) => ({ userId, principalType: 'user', isAdmin: false, loginId: 'someone' });
+const asAdmin = () => ({ userId: null, principalType: 'admin', isAdmin: true, loginId: 'admin' });
+
+/** Swap a module's exported functions for the duration of one test. */
+function stub(mod, patch) {
+  const saved = {};
+  for (const [k, v] of Object.entries(patch)) { saved[k] = mod[k]; mod[k] = v; }
+  return () => { for (const [k, v] of Object.entries(saved)) mod[k] = v; };
+}
+
+describe('routes — the administrator has no per-user data', () => {
+  const cases = [
+    ['reports list',    routeReports,  { method: 'GET',  path: '/violation-cache/report/list' }],
+    ['cache status',    routeCache,    { method: 'GET',  path: '/violation-cache/status' }],
+    ['config read',     routeConfig,   { method: 'GET',  path: '/violation-cache/config' }],
+    ['schedule status', routeSchedule, { method: 'GET',  path: '/violation-cache/schedule/status' }],
+  ];
+
+  for (const [name, mod, req] of cases) {
+    test(`${name} answers 403 USER_ONLY for an administrator session`, async () => {
+      const res = makeRes();
+      const handled = await mod.handle({ ...req, url: req.path, req: {}, res, principal: asAdmin() });
+      assert.equal(handled, true, 'the route must own the request, not fall through');
+      assert.equal(res.statusCode, 403);
+      assert.equal(res.json.code, 'USER_ONLY');
+    });
+  }
+
+  test('the DT proxy also refuses an administrator session', async () => {
+    const res = makeRes();
+    await routeDtProxy.handle({
+      method: 'GET', url: '/violation-cache/dt/api/v1/project',
+      path: '/violation-cache/dt/api/v1/project', res, principal: asAdmin(),
+    });
+    assert.equal(res.statusCode, 403);
+    assert.equal(res.json.code, 'USER_ONLY');
+  });
+});
+
+describe('routes — cross-user access returns 404, never 403', () => {
+  test("another user's report is reported as not found", async () => {
+    // getForUser is scoped by user_id, so B's report simply is not there for A.
+    const restore = stub(reportsDbMod, { getForUser: async () => null });
+    try {
+      for (const req of [
+        { method: 'GET',    path: `/violation-cache/report/${REPORT_A}/download` },
+        { method: 'POST',   path: `/violation-cache/report/${REPORT_A}/cancel` },
+        { method: 'DELETE', path: `/violation-cache/report/${REPORT_A}` },
+      ]) {
+        const res = makeRes();
+        const handled = await routeReports.handle({ ...req, url: req.path, req: {}, res, principal: asUser(USER_A) });
+        assert.equal(handled, true);
+        assert.equal(res.statusCode, 404, `${req.method} ${req.path}`);
+        assert.equal(res.json.code, 'NOT_FOUND');
+        // The reply must not hint that the report exists for somebody else.
+        assert.doesNotMatch(res.body, /forbidden|permission|another/i);
+      }
+    } finally { restore(); }
+  });
+
+  test('every report lookup is scoped by the signed-in user', async () => {
+    const seen = [];
+    const restore = stub(reportsDbMod, {
+      getForUser: async (userId, reportId) => { seen.push([userId, reportId]); return null; },
+    });
+    try {
+      const res = makeRes();
+      await routeReports.handle({
+        method: 'DELETE', url: `/violation-cache/report/${REPORT_A}`,
+        path: `/violation-cache/report/${REPORT_A}`, req: {}, res, principal: asUser(USER_B),
+      });
+      assert.deepEqual(seen, [[USER_B, REPORT_A]]);
+    } finally { restore(); }
+  });
+
+  test('a malformed report id is rejected before it reaches the database', async () => {
+    let called = false;
+    const restore = stub(reportsDbMod, { getForUser: async () => { called = true; return null; } });
+    try {
+      const res = makeRes();
+      await routeReports.handle({
+        method: 'DELETE', url: "/violation-cache/report/'; DROP TABLE reports; --",
+        path: "/violation-cache/report/'; DROP TABLE reports; --",
+        req: {}, res, principal: asUser(USER_A),
+      });
+      assert.equal(res.statusCode, 404);
+      assert.equal(called, false, 'a non-uuid must never be handed to PostgreSQL');
+    } finally { restore(); }
+  });
+});
+
+describe('routes — the report quota is per user', () => {
+  const body = JSON.stringify({ projects: [{ uuid: 'p1', name: 'a' }], riskTypes: ['security'] });
+  const reqWith = (raw) => Readable.from([raw]);
+
+  test('a full quota answers 429 and reports this user\'s own counts', async () => {
+    const restore = stub(reportsDbMod, {
+      activeCount: async (userId) => {
+        assert.equal(userId, USER_A, 'the count must be scoped to the caller');
+        return { completed: 8, running: 2 };
+      },
+      create: async () => { throw new Error('must not create a report over quota'); },
+    });
+    const restoreSettings = stub(userSettingsMod, { getMaxReports: async () => 10 });
+    const restoreConn = stub(dtConnectionsMod, {
+      getResolved: async () => ({ apiUrl: 'http://dt', apiKey: 'k', isConfigured: true, fingerprint: 'f' }),
+    });
+    try {
+      const res = makeRes();
+      await routeReports.handle({
+        method: 'POST', url: '/violation-cache/report/generate',
+        path: '/violation-cache/report/generate', req: reqWith(body), res, principal: asUser(USER_A),
+      });
+      assert.equal(res.statusCode, 429);
+      assert.equal(res.json.code, 'QUOTA_REACHED');
+      assert.equal(res.json.maxReports, 10);
+      assert.equal(res.json.completedCount, 8);
+      assert.equal(res.json.runningCount, 2);
+    } finally { restore(); restoreSettings(); restoreConn(); }
+  });
+
+  test('one user being at quota does not block another', async () => {
+    const created = [];
+    const restore = stub(reportsDbMod, {
+      activeCount: async (userId) => (userId === USER_A ? { completed: 10, running: 0 } : { completed: 0, running: 0 }),
+      create: async (userId) => { created.push(userId); return { id: REPORT_A }; },
+    });
+    const restoreSettings = stub(userSettingsMod, { getMaxReports: async () => 10 });
+    const restoreConn = stub(dtConnectionsMod, {
+      getResolved: async () => ({ apiUrl: 'http://dt', apiKey: 'k', isConfigured: true, fingerprint: 'f' }),
+    });
+    const restoreRun = stub(reportsMod, { runReportJob: async () => ({ completed: true }) });
+    try {
+      const res = makeRes();
+      await routeReports.handle({
+        method: 'POST', url: '/violation-cache/report/generate',
+        path: '/violation-cache/report/generate', req: reqWith(body), res, principal: asUser(USER_B),
+      });
+      assert.equal(res.statusCode, 201);
+      assert.deepEqual(created, [USER_B]);
+    } finally { restore(); restoreSettings(); restoreConn(); restoreRun(); }
+  });
+
+  test('generation is refused when the account has no DependencyTrack connection', async () => {
+    const restoreConn = stub(dtConnectionsMod, {
+      getResolved: async () => ({ apiUrl: '', apiKey: '', isConfigured: false, fingerprint: null }),
+    });
+    const restore = stub(reportsDbMod, {
+      activeCount: async () => { throw new Error('quota must not be consulted without a connection'); },
+    });
+    try {
+      const res = makeRes();
+      await routeReports.handle({
+        method: 'POST', url: '/violation-cache/report/generate',
+        path: '/violation-cache/report/generate', req: reqWith(body), res, principal: asUser(USER_A),
+      });
+      assert.equal(res.statusCode, 503);
+      assert.equal(res.json.code, 'DT_NOT_CONFIGURED');
+    } finally { restore(); restoreConn(); }
+  });
+});
+
+describe('routes — the DT proxy never leaks the API key or a DT 401', () => {
+  const okConn = { apiUrl: 'http://dt:8080', apiKey: 'odt_secret_1234', isConfigured: true, fingerprint: 'f' };
+
+  test('the upstream path and the user\'s key are taken from the connection row', async () => {
+    let seen = null;
+    const restoreConn = stub(dtConnectionsMod, { getResolved: async () => okConn });
+    const restoreFetch = stub(dtFetchMod, {
+      dtGetWithRetry: async (urlPath, apiUrl, apiKey) => {
+        seen = { urlPath, apiUrl, apiKey };
+        return { json: [{ uuid: 'p1' }], headers: { 'x-total-count': '1' } };
+      },
+    });
+    try {
+      const res = makeRes();
+      const url = '/violation-cache/dt/api/v1/project?onlyRoot=true&pageSize=100';
+      await routeDtProxy.handle({
+        method: 'GET', url, path: url.split('?')[0], res, principal: asUser(USER_A),
+      });
+      assert.equal(res.statusCode, 200);
+      assert.equal(seen.urlPath, '/api/v1/project?onlyRoot=true&pageSize=100');
+      assert.equal(seen.apiUrl, okConn.apiUrl);
+      assert.equal(seen.apiKey, okConn.apiKey);
+      // The key must not appear anywhere in what the browser receives.
+      assert.doesNotMatch(res.body, /odt_secret_1234/);
+      assert.equal(res.headers['X-Total-Count'], '1');
+    } finally { restoreConn(); restoreFetch(); }
+  });
+
+  test('a DependencyTrack 401 becomes 502, not 401', async () => {
+    // A 401 from us means "your session died" and signs the user out. Passing an
+    // upstream 401 through would log people out over a bad DT key.
+    const restoreConn = stub(dtConnectionsMod, { getResolved: async () => okConn });
+    const restoreFetch = stub(dtFetchMod, {
+      dtGetWithRetry: async () => { throw Object.assign(new Error('HTTP 401'), { statusCode: 401 }); },
+    });
+    try {
+      const res = makeRes();
+      await routeDtProxy.handle({
+        method: 'GET', url: '/violation-cache/dt/api/v1/project',
+        path: '/violation-cache/dt/api/v1/project', res, principal: asUser(USER_A),
+      });
+      assert.equal(res.statusCode, 502);
+      assert.equal(res.json.code, 'DT_UPSTREAM_ERROR');
+      assert.equal(res.json.dtStatus, 401);
+    } finally { restoreConn(); restoreFetch(); }
+  });
+
+  test('only GET is forwarded, and only under /api/v1/', async () => {
+    const restoreConn = stub(dtConnectionsMod, {
+      getResolved: async () => { throw new Error('must not resolve a connection for a rejected request'); },
+    });
+    try {
+      const res1 = makeRes();
+      await routeDtProxy.handle({
+        method: 'POST', url: '/violation-cache/dt/api/v1/project',
+        path: '/violation-cache/dt/api/v1/project', res: res1, principal: asUser(USER_A),
+      });
+      assert.equal(res1.statusCode, 405);
+
+      const res2 = makeRes();
+      await routeDtProxy.handle({
+        method: 'GET', url: '/violation-cache/dt/etc/passwd',
+        path: '/violation-cache/dt/etc/passwd', res: res2, principal: asUser(USER_A),
+      });
+      assert.equal(res2.statusCode, 404);
+    } finally { restoreConn(); }
+  });
+
+  test('an unreadable stored key asks the user to re-enter it', async () => {
+    const restoreConn = stub(dtConnectionsMod, {
+      getResolved: async () => { throw Object.assign(new Error('unreadable'), { code: 'DT_KEY_UNREADABLE' }); },
+    });
+    try {
+      const res = makeRes();
+      await routeDtProxy.handle({
+        method: 'GET', url: '/violation-cache/dt/api/v1/project',
+        path: '/violation-cache/dt/api/v1/project', res, principal: asUser(USER_A),
+      });
+      assert.equal(res.statusCode, 503);
+      assert.equal(res.json.code, 'DT_KEY_UNREADABLE');
+    } finally { restoreConn(); }
+  });
+});
+
+describe('routes — the shared violation cache is keyed by connection', () => {
+  const connFor = (fingerprint) => ({
+    apiUrl: 'http://dt:8080', apiKey: 'k', isConfigured: true, fingerprint,
+  });
+
+  test('two users on the same connection read the same cache row', async () => {
+    const asked = [];
+    const restoreConn = stub(dtConnectionsMod, { getResolved: async () => connFor('deadbeef1234') });
+    const restoreCaches = stub(cachesMod, {
+      getPayloadGzip: async (fp) => { asked.push(fp); return Buffer.from('gz'); },
+    });
+    try {
+      for (const user of [USER_A, USER_B]) {
+        const res = makeRes();
+        await routeCache.handle({
+          method: 'GET', url: '/violation-cache/data', path: '/violation-cache/data',
+          res, principal: asUser(user),
+        });
+        assert.equal(res.statusCode, 200);
+        assert.equal(res.headers['Content-Encoding'], 'gzip');
+      }
+      assert.deepEqual(asked, ['deadbeef1234', 'deadbeef1234'],
+        'the fingerprint, not the user id, selects the cache row');
+    } finally { restoreConn(); restoreCaches(); }
+  });
+
+  test('an unconfigured account is told "no-key" rather than shown an error', async () => {
+    const restoreConn = stub(dtConnectionsMod, {
+      getResolved: async () => ({ apiUrl: '', apiKey: '', isConfigured: false, fingerprint: null }),
+    });
+    try {
+      const res = makeRes();
+      await routeCache.handle({
+        method: 'GET', url: '/violation-cache/status', path: '/violation-cache/status',
+        res, principal: asUser(USER_A),
+      });
+      assert.equal(res.statusCode, 200);
+      assert.equal(res.json.status, 'no-key');
+    } finally { restoreConn(); }
+  });
+
+  test('a refresh while a build is running answers 409 instead of starting a second one', async () => {
+    let started = false;
+    const restoreConn = stub(dtConnectionsMod, { getResolved: async () => connFor('abc123abc123') });
+    const restoreCaches = stub(cachesMod, { getMeta: async () => ({ status: 'building' }) });
+    const restoreCache = stub(violationCacheMod, { runJob: async () => { started = true; return {}; } });
+    try {
+      const res = makeRes();
+      await routeCache.handle({
+        method: 'POST', url: '/violation-cache/refresh', path: '/violation-cache/refresh',
+        res, principal: asUser(USER_A),
+      });
+      assert.equal(res.statusCode, 409);
+      assert.equal(started, false);
+    } finally { restoreConn(); restoreCaches(); restoreCache(); }
+  });
+});
+
+describe('routes — arming a schedule', () => {
+  test('a disabled schedule cannot be armed', async () => {
+    const restore = stub(schedulesMod, { get: async () => ({ enabled: false, projectCount: 5 }) });
+    try {
+      const res = makeRes();
+      await routeSchedule.handle({
+        method: 'POST', url: '/violation-cache/schedule/arm', path: '/violation-cache/schedule/arm',
+        res, principal: asUser(USER_A),
+      });
+      assert.equal(res.statusCode, 400);
+      assert.equal(res.json.code, 'SCHEDULE_DISABLED');
+    } finally { restore(); }
+  });
+
+  test('an enabled schedule with no projects cannot be armed', async () => {
+    const restore = stub(schedulesMod, { get: async () => ({ enabled: true, projectCount: 0 }) });
+    try {
+      const res = makeRes();
+      await routeSchedule.handle({
+        method: 'POST', url: '/violation-cache/schedule/arm', path: '/violation-cache/schedule/arm',
+        res, principal: asUser(USER_A),
+      });
+      assert.equal(res.statusCode, 400);
+      assert.equal(res.json.code, 'NO_PROJECTS');
+    } finally { restore(); }
+  });
+
+  test('arming writes a future next_run_at for the caller only', async () => {
+    const armed = [];
+    const restore = stub(schedulesMod, {
+      get: async () => ({ enabled: true, projectCount: 3, frequency: 'daily', hour: 9 }),
+      arm: async (userId, nextRunAt) => { armed.push([userId, nextRunAt]); return { nextRunAt }; },
+    });
+    try {
+      const res = makeRes();
+      await routeSchedule.handle({
+        method: 'POST', url: '/violation-cache/schedule/arm', path: '/violation-cache/schedule/arm',
+        res, principal: asUser(USER_B),
+      });
+      assert.equal(res.statusCode, 200);
+      assert.equal(armed.length, 1);
+      assert.equal(armed[0][0], USER_B);
+      assert.ok(armed[0][1] > new Date(), 'the armed time must be in the future');
+    } finally { restore(); }
+  });
+
+  test('isRunning comes from running_since, not from a process variable', async () => {
+    const since = new Date();
+    const restore = stub(schedulesMod, {
+      get: async () => ({ enabled: true, projectCount: 1, runningSince: since }),
+    });
+    try {
+      const res = makeRes();
+      await routeSchedule.handle({
+        method: 'GET', url: '/violation-cache/schedule/status', path: '/violation-cache/schedule/status',
+        res, principal: asUser(USER_A),
+      });
+      assert.equal(res.json.isRunning, true);
+    } finally { restore(); }
+  });
+});
+
+// ── lib/caches.js — pure helpers ─────────────────────────────────────────────
+describe('caches — status derivation and lock keys', () => {
+  test('a missing row is "none"', () => {
+    assert.equal(cachesMod.deriveStatus(null), 'none');
+  });
+
+  test('an unexpired payload is "ready" and an expired one is "stale"', () => {
+    const base = { status: 'ready', generatedAt: new Date(Date.now() - 1000) };
+    assert.equal(cachesMod.deriveStatus({ ...base, expiresAt: new Date(Date.now() + 60_000) }), 'ready');
+    assert.equal(cachesMod.deriveStatus({ ...base, expiresAt: new Date(Date.now() - 60_000) }), 'stale');
+  });
+
+  test('building and failed states are reported verbatim', () => {
+    assert.equal(cachesMod.deriveStatus({ status: 'building' }), 'building');
+    assert.equal(cachesMod.deriveStatus({ status: 'failed' }), 'failed');
+  });
+
+  test('the advisory lock key is deterministic and fits in two 32-bit halves', () => {
+    const fp = 'a3f1b2c4d5e6f708' + '9'.repeat(48);
+    const k1 = cachesMod.lockKeyFor(fp);
+    const k2 = cachesMod.lockKeyFor(fp);
+    assert.deepEqual(k1, k2, 'every process must derive the same key');
+    for (const half of [k1.hi, k1.lo]) {
+      assert.ok(Number.isInteger(half));
+      assert.ok(half >= -2147483648 && half <= 2147483647);
+    }
+    assert.notDeepEqual(cachesMod.lockKeyFor('b'.repeat(64)), k1,
+      'different connections must not share a builder lock');
+  });
+});
+
+// ── lib/mail-settings.js — address parsing and the password placeholder ──────
+const mailSettingsMod = require('./lib/mail-settings');
+
+describe('mail settings — recipient parsing', () => {
+  test('a comma-separated string becomes a trimmed array', () => {
+    assert.deepEqual(
+      mailSettingsMod.toAddressArray(' a@x.com , b@y.com ,, '),
+      ['a@x.com', 'b@y.com']
+    );
+  });
+
+  test('an array is normalised the same way', () => {
+    assert.deepEqual(mailSettingsMod.toAddressArray([' a@x.com ', '']), ['a@x.com']);
+  });
+
+  test('anything else becomes an empty list rather than throwing', () => {
+    for (const input of [undefined, null, 42, {}]) {
+      assert.deepEqual(mailSettingsMod.toAddressArray(input), []);
+    }
+  });
+
+  test('the placeholder is the exact literal the dashboard sends back', () => {
+    // If these ever diverge, saving settings would overwrite the stored password
+    // with eight bullet characters (CLAUDE.md §6.9).
+    assert.equal(mailSettingsMod.PASSWORD_PLACEHOLDER, '•'.repeat(8));
+    const html = fs.readFileSync(path.join(__dirname, '..', 'dashboard', 'index.html'), 'utf8');
+    assert.ok(
+      html.includes(`'${mailSettingsMod.PASSWORD_PLACEHOLDER}'`),
+      'the dashboard must send the same placeholder the backend recognises'
+    );
+  });
+});
+
+// ── lib/user-settings.js — quota bounds ──────────────────────────────────────
+describe('user settings — maxReports bounds', () => {
+  test('the documented default is 10', () => {
+    assert.equal(userSettingsMod.DEFAULT_MAX_REPORTS, 10);
+  });
+
+  test('out-of-range values are rejected with a field-tagged error', async () => {
+    for (const bad of [0, -1, 1001, 2.5, 'ten', null]) {
+      await assert.rejects(
+        () => userSettingsMod.setMaxReports(USER_A, bad),
+        (e) => e.code === 'VALIDATION_FAILED' && e.field === 'maxReports',
+        `expected ${bad} to be rejected`
+      );
+    }
   });
 });

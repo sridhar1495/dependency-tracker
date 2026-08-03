@@ -5,22 +5,25 @@
 // SMTP delivery. The only consumer of nodemailer.
 // S5: the SMTP password is read from stored config and never logged or returned.
 
-const fs   = require('fs');
-const path = require('path');
+
+
 const nodemailer = require('nodemailer'); // Q9: MIT-licensed SMTP email library (approved exception to no-new-packages rule)
 const { log } = require('./log');
 
 // ── Email helper ──────────────────────────────────────────────────────────────
 /**
- * Send an email using the SMTP credentials from the app config.
- * The SMTP password is read from the stored config — never from a GET response.
+ * Send an email using one user's decrypted SMTP settings.
  *
- * @param {object}      mailCfg       — config.mail object
- * @param {string|null} attachPath    — absolute path to attachment (or null)
- * @param {string|null} attachName    — filename displayed in email (or null)
- * @param {object}      [overrides]   — override to/subject/body (used for failure alerts)
+ * S20: mailCfg comes from mail-settings.getResolved(). The password is used here
+ * and nowhere else — it is never logged and never returned in a response.
+ *
+ * @param {object} mailCfg  resolved settings: { smtp:{host,port,secure,user,pass}, from, to, cc, subject, body }
+ * @param {{filename: string, content: Buffer}|null} attachment
+ *        Scheduled reports are built in memory and attached directly, so
+ *        nothing is written to disk (CLAUDE.md §6.8).
+ * @param {object} [overrides]  override to/cc/subject/body, used for failure alerts
  */
-async function sendEmail(mailCfg, attachPath, attachName, overrides = {}) {
+async function sendEmail(mailCfg, attachment, overrides = {}) {
   const now            = new Date();
   const defaultSubject = `Dependency-Track Risk Report — ${now.toLocaleDateString()}`;
   const defaultBody    = `Please find attached the latest Dependency-Track risk report generated on ${now.toLocaleString()}.`;
@@ -43,15 +46,15 @@ async function sendEmail(mailCfg, attachPath, attachName, overrides = {}) {
   const cc = (overrides.cc || mailCfg.cc || []);
   if (cc.length) msg.cc = cc.join(', ');
 
-  if (attachPath && fs.existsSync(attachPath)) {
-    msg.attachments = [{ filename: attachName || path.basename(attachPath), path: attachPath }];
+  if (attachment && attachment.content) {
+    msg.attachments = [{ filename: attachment.filename || 'report.xlsx', content: attachment.content }];
   }
 
   log('info', 'Sending email', {
     to:   msg.to,
     subj: msg.subject,
     smtp: `${mailCfg.smtp.host}:${mailCfg.smtp.port}`,
-    attach: attachName || 'none',
+    attach: attachment ? `${attachment.filename} (${attachment.content.length} bytes)` : 'none',
   });
   await transporter.sendMail(msg);
   log('info', 'Email sent successfully');

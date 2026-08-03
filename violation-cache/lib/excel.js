@@ -344,7 +344,14 @@ async function buildExcelReport(filePath, reportData) {
     alternateShading(wsO3);
   }
 
-  await wb.xlsx.writeFile(filePath);
+  // Reports are stored in the database, so the workbook is normally returned as
+  // a Buffer and never touches the filesystem. A path is still accepted for any
+  // caller that genuinely wants a file.
+  if (filePath) {
+    await wb.xlsx.writeFile(filePath);
+    return null;
+  }
+  return Buffer.from(await wb.xlsx.writeBuffer());
 }
 
 module.exports = { buildExcelReport };
