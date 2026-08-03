@@ -107,6 +107,38 @@ docker compose --env-file .env up -d
 | `SESSION_IDLE_HOURS` | `2` | Idle session lifetime (enforced from phase 2) |
 | `LOG_FORMAT` | `text` | `text` or `json` for structured output |
 
+### Signing in
+
+The dashboard requires an account. Opening it while signed out redirects to
+`login.html`.
+
+**First run:**
+
+1. Open `http://localhost:3000` — you are sent to the sign-in page.
+2. Click **Create an account** and register. Email is optional; everything else
+   is required.
+3. Sign in with the login ID you chose.
+
+**Administrator sign-in** — tick **Administrator login** on the sign-in page and
+use the credentials `install.sh` created. These are validated against
+`violation-cache/data/admin-credentials.json`, never against the user table, so
+a registered user can never impersonate the administrator. To reset them, delete
+that file and re-run the installer.
+
+**One session per account.** Signing in somewhere else asks whether to disconnect
+the existing session. Choosing *no* leaves the original session untouched;
+choosing *yes* signs the other device out immediately.
+
+Sessions end after `SESSION_ABSOLUTE_HOURS` from sign-in or `SESSION_IDLE_HOURS`
+of inactivity, whichever comes first. The session token is held in the browser's
+`localStorage`, so it is shared between tabs of the same browser but not between
+different browsers.
+
+> **Forgot password is not available yet.** Sending a reset link needs a mail
+> server that works before sign-in, which does not exist until per-user mail
+> configuration is generalised. Until then an administrator must reset a
+> password out of band.
+
 ### Database
 
 The stack includes a `dt-postgres` container as the system of record for users,

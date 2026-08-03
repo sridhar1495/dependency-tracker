@@ -17,8 +17,31 @@ server {
     set $upstream "${DT_API_INTERNAL_URL}";
 
     # Serve the dashboard SPA
+    # login.html is a real file, so try_files serves it directly before the
+    # /index.html fallback is ever considered.
     location / {
         try_files $uri $uri/ /index.html;
+    }
+
+    # Authentication endpoints live on the cache service, not the DT API.
+    # Without this block they would fall through to the SPA fallback above and
+    # the browser would receive index.html instead of a JSON response.
+    location /auth/ {
+        set $vcauth "http://dt-violation-cache:3001";
+        proxy_pass $vcauth;
+        proxy_set_header Host $http_host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        add_header Cache-Control "no-store" always;
+    }
+
+    location /profile {
+        set $vcprofile "http://dt-violation-cache:3001";
+        proxy_pass $vcprofile;
+        proxy_set_header Host $http_host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        add_header Cache-Control "no-store" always;
     }
 
     # Expose server-side config to the browser.
