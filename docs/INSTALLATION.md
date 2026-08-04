@@ -204,6 +204,18 @@ live in the credentials file rather than the database — and they cannot read a
 other account's DependencyTrack key, SMTP password or report contents. The
 🛡 Administration panel shows metadata and usage totals only.
 
+**Report limits are set by the administrator**, not by users. Each account sees
+its own limit in ⚙ Settings but cannot change it. In 🛡 Administration the
+administrator sets a default that every account follows, and can pin a different
+number for one account — the list marks which is which, so it is clear what
+changing the default would affect. Lowering a limit never deletes anything: an
+account over its limit simply cannot create new reports until it is back under.
+
+**If an administrator resets your password**, you are signed out immediately and
+asked to choose your own the next time you sign in. The password the
+administrator gave you works for that one purpose and nothing else — until you
+choose your own, the dashboard, reports and DependencyTrack are all closed.
+
 **One session per account.** Signing in somewhere else asks whether to disconnect
 the existing session. Choosing *no* leaves the original session untouched;
 choosing *yes* signs the other device out immediately.

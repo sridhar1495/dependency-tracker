@@ -5,7 +5,7 @@
 // ── DependencyTrack read proxy ────────────────────────────────────────────────
 //   GET /violation-cache/dt/api/v1/…   forward to the signed-in user's DT
 //
-// S21: the DT API key never reaches the browser (CLAUDE.md §7.6). Before this
+// S21: the DT API key never reaches the browser (CLAUDE.md §7.7). Before this
 // module the dashboard held the key in localStorage and sent it as X-Api-Key on
 // every request, which meant anyone with access to the browser — or to a
 // cross-site script on the page — had the key itself. Now the browser sends only

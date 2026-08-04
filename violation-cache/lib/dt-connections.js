@@ -7,7 +7,7 @@
 // is_configured = false so the dashboard shows mock data until they set it up.
 //
 // S17: the API key is stored AES-256-GCM encrypted and is NEVER returned to a
-// browser. Callers are told only whether a key is configured (CLAUDE.md §7.6).
+// browser. Callers are told only whether a key is configured (CLAUDE.md §7.7).
 // The plaintext exists only inside this process, for the duration of a request.
 //
 // The fingerprint is a SHA-256 of the normalised URL plus the key. Users whose
@@ -72,7 +72,7 @@ async function getResolved(userId) {
       apiKey = decryptSecret({ ciphertext: row.ct, nonce: row.nonce, tag: row.tag }, key());
     } catch (err) {
       // S18: never log the ciphertext, and never crash the request. The user is
-      // asked to re-enter the key (CLAUDE.md §7.6).
+      // asked to re-enter the key (CLAUDE.md §7.7).
       log('error', 'Stored DT API key could not be decrypted', { userId });
       throw Object.assign(
         new Error('Your stored DependencyTrack API key could not be read. Please re-enter it in Settings.'),

@@ -588,59 +588,16 @@
     .pf-banner.success { background: var(--ok-bg);       color: var(--ok);       padding: 9px 11px; }
     .pf-readonly { opacity: 0.6; cursor: not-allowed; }
 
-    /* ── Administration panel ──────────────────────────────────────────────
-       Wider than the profile panel because it renders a table, but otherwise
-       the same sliding-panel pattern and the same custom properties. */
-    .adm-panel { width: 1040px; }
-    .adm-stats { display: flex; flex-wrap: wrap; gap: 10px; margin-bottom: 16px; }
-    .adm-stat {
-      flex: 1 1 130px; background: var(--surface2); border: 1px solid var(--border);
-      border-radius: var(--radius); padding: 10px 12px;
-    }
-    .adm-stat-label { font-size: 10.5px; color: var(--text-muted); text-transform: uppercase; letter-spacing: .04em; }
-    .adm-stat-value { font-size: 20px; font-weight: 700; margin-top: 2px; }
-    .adm-table-wrap { overflow-x: auto; }
-    .adm-table { width: 100%; border-collapse: collapse; font-size: 12px; }
-    .adm-table th {
-      text-align: left; font-size: 10.5px; text-transform: uppercase; letter-spacing: .04em;
-      color: var(--text-muted); padding: 7px 9px; border-bottom: 1px solid var(--border);
-      white-space: nowrap;
-    }
-    .adm-table td { padding: 7px 9px; border-bottom: 1px solid var(--border); white-space: nowrap; }
-    .adm-table tr:hover td { background: var(--surface2); }
-    .adm-dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; margin-right: 5px; }
-    .adm-dot.on  { background: var(--ok); }
-    .adm-dot.off { background: var(--text-muted); opacity: .5; }
-    .adm-table tr.adm-row { cursor: pointer; }
-    .adm-table tr.adm-row.selected td { background: var(--surface2); }
-    .adm-chevron { color: var(--text-muted); font-size: 11px; }
-
-    .adm-detail { margin-top: 16px; }
-    .adm-detail-head {
-      display: flex; align-items: center; justify-content: space-between;
-      padding-bottom: 8px; margin-bottom: 12px; border-bottom: 1px solid var(--border);
-    }
-    .adm-detail-head h3 { font-size: 14px; font-weight: 600; }
-    .adm-detail-grid {
-      display: grid; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); gap: 12px;
-    }
-    .adm-card {
+    /* A value the user may see but not change. Styled like the input it
+       replaced so the panel does not look broken, but it is plain text —
+       there is nothing to type into. */
+    .cfg-readonly-value {
+      display: inline-block; min-width: 52px; text-align: center;
       background: var(--surface2); border: 1px solid var(--border);
-      border-radius: var(--radius); padding: 11px 13px;
+      border-radius: var(--radius); padding: 6px 10px;
+      font-size: 13px; font-weight: 600;
     }
-    .adm-card h4 {
-      font-size: 10.5px; text-transform: uppercase; letter-spacing: .04em;
-      color: var(--text-muted); margin-bottom: 8px; font-weight: 600;
-    }
-    .adm-kv { display: flex; justify-content: space-between; gap: 12px; font-size: 12px; padding: 3px 0; }
-    .adm-kv dt { color: var(--text-muted); white-space: nowrap; }
-    .adm-kv dd { text-align: right; word-break: break-word; }
 
-    .adm-note {
-      font-size: 11.5px; color: var(--text-muted); line-height: 1.55;
-      background: var(--surface2); border: 1px solid var(--border);
-      border-radius: var(--radius); padding: 9px 11px; margin-bottom: 14px;
-    }
     .pf-danger-zone {
       margin-top: 22px; padding-top: 14px; border-top: 1px solid var(--critical);
     }
@@ -1049,39 +1006,6 @@
 </div>
 
 <!-- ── Administration panel (read-only) ───────────────────────────────────── -->
-<div class="pf-backdrop" id="adminBackdrop" onclick="closeAdminPanel()"></div>
-<div class="pf-panel adm-panel" id="adminPanel">
-  <div class="pf-header">
-    <h2>Administration</h2>
-    <button class="pf-close" onclick="closeAdminPanel()" title="Close">&times;</button>
-  </div>
-  <div class="pf-body">
-    <div class="adm-note">
-      Read-only. This panel shows account metadata and usage totals. It cannot read
-      anyone's DependencyTrack key, SMTP password or report contents, and it has no
-      action that changes another account.
-    </div>
-    <div class="adm-stats" id="adminStats"></div>
-    <div class="adm-table-wrap">
-      <table class="adm-table">
-        <thead>
-          <tr>
-            <th>Login ID</th><th>Name</th><th>Created</th><th>Last sign-in</th>
-            <th>Session</th><th>DT</th><th>Schedule</th><th>Reports</th><th>Storage</th><th></th>
-          </tr>
-        </thead>
-        <tbody id="adminUsers"></tbody>
-      </table>
-    </div>
-    <div class="pf-meta" id="adminEmpty" style="display:none">No accounts yet.</div>
-    <div class="pf-meta" id="adminHint">Select an account to see its detail.</div>
-    <div class="adm-detail" id="adminDetail" style="display:none"></div>
-  </div>
-  <div class="pf-footer">
-    <button class="btn" onclick="loadAdminData()">↻ Refresh</button>
-    <button class="btn primary" onclick="closeAdminPanel()">Close</button>
-  </div>
-</div>
 
 <div class="cfg-backdrop" id="cfgBackdrop" onclick="closeConfigPanel(false)"></div>
 <div class="cfg-panel" id="configPanel">
@@ -1108,14 +1032,20 @@
       </div>
     </div>
 
-    <!-- Max Reports section -->
+    <!-- Max Reports — read-only.
+         The limit is a capacity decision about the server's disk, so it is the
+         administrator's to set, globally or for one account. It is shown here
+         because a user must be able to see what they are allowed; there is no
+         input and no reset, because neither would do anything. -->
     <div class="cfg-section">
       <div class="cfg-section-title" style="margin-bottom:12px">Max Report Downloads</div>
       <label class="cfg-label">Maximum reports kept on server <span style="font-size:10px;color:var(--text-muted)">(completed + in-progress)</span></label>
       <div style="display:flex;align-items:center;gap:8px;margin-top:4px">
-        <input id="cfgMaxReports" type="number" min="1" max="100" class="cfg-input" style="width:80px" value="10" oninput="markConfigDirty()" />
-        <button class="btn" style="font-size:12px;height:30px;padding:0 10px" onclick="resetMaxReports()" title="Reset to default (10)">Reset to default</button>
+        <span id="cfgMaxReports" class="cfg-readonly-value">10</span>
         <span id="cfgMaxReportsHint" style="font-size:11px;color:var(--text-muted)"></span>
+      </div>
+      <div style="font-size:11px;color:var(--text-muted);margin-top:6px;line-height:1.5">
+        Set by your administrator. Ask them if you need it raised.
       </div>
     </div>
 
@@ -1288,7 +1218,7 @@ let filterLatestOnly = false; // when true: show only isLatest=true projects + a
 let liveMode         = false;
 // The DependencyTrack connection belongs to the signed-in account and lives
 // encrypted in the database. The browser never holds the API key: DT calls go
-// through the backend proxy, which injects it server-side (CLAUDE.md §7.6).
+// through the backend proxy, which injects it server-side (CLAUDE.md §7.7).
 let dtConfigured     = false;  // server reports a usable connection for this user
 let dtApiUrl         = '';     // shown in Settings; requests never use it directly
 let dtFrontendUrl    = '';     // DT UI base URL for project hyperlinks
@@ -1318,7 +1248,7 @@ let _currentUser      = null;    // authenticated principal from /auth/me
 const TOKEN_KEY = 'dt_session_token';
 
 // Every DependencyTrack path is prefixed with this and forwarded by the backend
-// with the signed-in user's API key attached (CLAUDE.md §7.6). The browser has
+// with the signed-in user's API key attached (CLAUDE.md §7.7). The browser has
 // no DT credentials of any kind.
 const DT_PROXY = '/violation-cache/dt';
 
@@ -1359,6 +1289,21 @@ async function apiFetch(path, opts) {
   if (response.status === 401) {
     goToLogin('Your session has expired. Please sign in again.');
     return new Promise(() => {});
+  }
+
+  // An administrator reset this password. The session is valid but may reach
+  // nothing here until a new password is chosen, so every other call would
+  // 403 in turn and the page would fill with identical error toasts. Send them
+  // where the choice is made instead. The token is deliberately kept — the
+  // set-password view needs it (CLAUDE.md §7.4).
+  if (response.status === 403) {
+    const peek = response.clone();
+    const body = await peek.json().catch(() => ({}));
+    if (body && body.code === 'PASSWORD_CHANGE_REQUIRED') {
+      window.location.href = 'login.html?msg=' +
+        encodeURIComponent('Your password was reset. Please choose a new one.');
+      return new Promise(() => {});
+    }
   }
   return response;
 }
@@ -1415,196 +1360,26 @@ function renderUserMenu() {
 // ── Administration panel (read-only) ──────────────────────────────────────
 // Only ever opened from an administrator session. The backend enforces that
 // independently — the hidden menu entry is convenience, not security.
-function openAdminPanel() {
-  closeUserMenu();
-  document.getElementById('adminBackdrop').classList.add('open');
-  document.getElementById('adminPanel').classList.add('open');
-  closeAdminUserDetail();
-  loadAdminData();
-}
-
-function closeAdminPanel() {
-  document.getElementById('adminBackdrop').classList.remove('open');
-  document.getElementById('adminPanel').classList.remove('open');
-}
-
-/** Human-readable byte count for the storage column. */
+/** Human-readable byte count. Used by the reports list. */
 function formatBytes(n) {
   const b = Number(n) || 0;
-  if (b === 0) return '—';
+  if (b === 0) return '\u2014';
   const units = ['B', 'KB', 'MB', 'GB'];
   let i = 0, v = b;
   while (v >= 1024 && i < units.length - 1) { v /= 1024; i++; }
   return `${v < 10 && i > 0 ? v.toFixed(1) : Math.round(v)} ${units[i]}`;
 }
 
-const fmtDate = (v) => (v ? new Date(v).toLocaleString() : '—');
+const fmtDate = (v) => (v ? new Date(v).toLocaleString() : '\u2014');
 
-async function loadAdminData() {
-  const statsEl = document.getElementById('adminStats');
-  const bodyEl  = document.getElementById('adminUsers');
-  const emptyEl = document.getElementById('adminEmpty');
-  statsEl.innerHTML = '';
-  bodyEl.innerHTML  = '';
-
-  try {
-    const [oR, uR] = await Promise.all([
-      apiFetch('/admin/overview'),
-      apiFetch('/admin/users'),
-    ]);
-    if (!oR.ok || !uR.ok) {
-      const bd = await (oR.ok ? uR : oR).json().catch(() => ({}));
-      showToast(bd.error || 'Could not load administration data.', 'error');
-      return;
-    }
-    const overview = await oR.json();
-    const { users } = await uR.json();
-
-    const stats = [
-      ['Accounts',          overview.userCount],
-      ['Active sessions',   overview.activeSessions],
-      ['DT configured',     overview.dtConfigured],
-      ['Schedules on',      overview.schedulesActive],
-      ['Reports stored',    overview.reportCount],
-      ['Report storage',    formatBytes(overview.storageBytes)],
-      // Fewer caches than configured accounts means users are sharing a build,
-      // which is the whole point of the fingerprint key (CLAUDE.md §7.5).
-      ['Violation caches',  overview.cacheCount],
-    ];
-    statsEl.innerHTML = stats.map(([label, value]) => `
-      <div class="adm-stat">
-        <div class="adm-stat-label">${escHtml(label)}</div>
-        <div class="adm-stat-value">${escHtml(String(value))}</div>
-      </div>`).join('');
-
-    emptyEl.style.display = users.length ? 'none' : '';
-    bodyEl.innerHTML = users.map(u => `
-      <tr class="adm-row" data-login="${escHtml(u.loginId)}">
-        <td><strong>${escHtml(u.loginId)}</strong></td>
-        <td>${escHtml(u.name)}</td>
-        <td>${escHtml(fmtDate(u.createdAt))}</td>
-        <td>${escHtml(fmtDate(u.lastLoginAt))}</td>
-        <td><span class="adm-dot ${u.sessionActive ? 'on' : 'off'}"></span>${u.sessionActive ? 'Active' : 'None'}</td>
-        <td><span class="adm-dot ${u.dtConfigured ? 'on' : 'off'}"></span>${u.dtConfigured ? 'Set' : 'Not set'}</td>
-        <td><span class="adm-dot ${u.scheduleEnabled ? 'on' : 'off'}"></span>${u.scheduleEnabled ? 'On' : 'Off'}</td>
-        <td>${escHtml(String(u.reportCount))}</td>
-        <td>${escHtml(formatBytes(u.storageBytes))}</td>
-        <td class="adm-chevron">›</td>
-      </tr>`).join('');
-
-    // Delegated, so the handler survives every re-render and needs no
-    // window export for an inline onclick.
-    bodyEl.querySelectorAll('.adm-row').forEach(tr => {
-      tr.onclick = () => showAdminUserDetail(tr.dataset.login);
-    });
-
-    // Keep the open detail in step with a refresh.
-    if (_adminSelectedLogin) showAdminUserDetail(_adminSelectedLogin);
-  } catch (e) {
-    showToast('Could not load administration data: ' + e.message, 'error');
-  }
-}
-
-// Which account's detail is open, so ↻ Refresh re-renders it rather than
-// collapsing back to the list.
-let _adminSelectedLogin = null;
-
-/** One account's detail. Read-only, like everything else in this panel. */
-async function showAdminUserDetail(loginId) {
-  const box  = document.getElementById('adminDetail');
-  const hint = document.getElementById('adminHint');
-  _adminSelectedLogin = loginId;
-
-  document.querySelectorAll('#adminUsers .adm-row').forEach(tr => {
-    tr.classList.toggle('selected', tr.dataset.login === loginId);
-  });
-
-  try {
-    const r = await apiFetch('/admin/users/' + encodeURIComponent(loginId));
-    if (!r.ok) {
-      const bd = await r.json().catch(() => ({}));
-      showToast(bd.error || `Could not load ${loginId}.`, 'error');
-      return;
-    }
-    const d = await r.json();
-    const yes = (b) => `<span class="adm-dot ${b ? 'on' : 'off'}"></span>${b ? 'Yes' : 'No'}`;
-    const kv  = (label, value) => `<div class="adm-kv"><dt>${escHtml(label)}</dt><dd>${value}</dd></div>`;
-    const txt = (v) => escHtml(v === null || v === undefined || v === '' ? '—' : String(v));
-
-    hint.style.display = 'none';
-    box.style.display  = '';
-    box.innerHTML = `
-      <div class="adm-detail-head">
-        <h3>${escHtml(d.account.firstName)} ${escHtml(d.account.lastName)}
-            <span style="color:var(--text-muted);font-weight:400">· ${escHtml(d.account.loginId)}</span></h3>
-        <button class="btn-xs" id="admCloseDetail">Close</button>
-      </div>
-      <div class="adm-detail-grid">
-        <div class="adm-card">
-          <h4>Account</h4>
-          ${kv('Email', txt(d.account.email))}
-          ${kv('Registered', txt(fmtDate(d.account.createdAt)))}
-          ${kv('Last sign-in', txt(fmtDate(d.account.lastLoginAt)))}
-          ${kv('Last updated', txt(fmtDate(d.account.updatedAt)))}
-        </div>
-        <div class="adm-card">
-          <h4>Session</h4>
-          ${d.session ? `
-            ${kv('Signed in', txt(fmtDate(d.session.issuedAt)))}
-            ${kv('Last seen', txt(fmtDate(d.session.lastSeenAt)))}
-            ${kv('Expires', txt(fmtDate(d.session.expiresAt)))}
-            ${kv('From', txt(d.session.ipAddress))}
-          ` : kv('Active session', yes(false))}
-        </div>
-        <div class="adm-card">
-          <h4>DependencyTrack</h4>
-          ${kv('Configured', yes(d.dependencyTrack.configured))}
-          ${kv('API URL', txt(d.dependencyTrack.apiUrl))}
-          ${kv('API key stored', yes(d.dependencyTrack.hasApiKey))}
-          ${kv('Updated', txt(fmtDate(d.dependencyTrack.updatedAt)))}
-        </div>
-        <div class="adm-card">
-          <h4>Reports</h4>
-          ${kv('Completed', txt(d.reports.completed))}
-          ${kv('In progress', txt(d.reports.running))}
-          ${kv('Failed', txt(d.reports.failed))}
-          ${kv('Storage used', escHtml(formatBytes(d.reports.storageBytes)))}
-          ${kv('Limit', txt(d.settings.maxReports))}
-        </div>
-        <div class="adm-card">
-          <h4>Email</h4>
-          ${kv('Enabled', yes(d.mail.enabled))}
-          ${kv('SMTP host', txt(d.mail.host))}
-          ${kv('From', txt(d.mail.from))}
-          ${kv('Recipients', txt(d.mail.recipients))}
-          ${kv('Password stored', yes(d.mail.hasPassword))}
-        </div>
-        <div class="adm-card">
-          <h4>Schedule</h4>
-          ${kv('Enabled', yes(d.schedule.enabled))}
-          ${kv('Frequency', txt(d.schedule.frequency))}
-          ${kv('Projects', txt(d.schedule.projectCount))}
-          ${kv('Next run', txt(fmtDate(d.schedule.nextRunAt)))}
-          ${kv('Last run', txt(d.schedule.lastRunStatus ? `${fmtDate(d.schedule.lastRunAt)} — ${d.schedule.lastRunStatus}` : null))}
-        </div>
-      </div>
-      <div class="pf-meta" style="margin-top:10px">
-        Values are shown as configured. Stored secrets — the DependencyTrack API
-        key and the SMTP password — are reported only as present or absent, and
-        are not readable from here.
-      </div>`;
-
-    document.getElementById('admCloseDetail').onclick = closeAdminUserDetail;
-  } catch (e) {
-    showToast('Could not load the account: ' + e.message, 'error');
-  }
-}
-
-function closeAdminUserDetail() {
-  _adminSelectedLogin = null;
-  document.getElementById('adminDetail').style.display = 'none';
-  document.getElementById('adminHint').style.display = '';
-  document.querySelectorAll('#adminUsers .adm-row').forEach(tr => tr.classList.remove('selected'));
+/**
+ * Administration is a page of its own now (dashboard/admin.html), not a panel
+ * here. It grew a master/detail split and service configuration, which a
+ * slide-in panel hosts badly, and index.html was already ~4,400 lines.
+ */
+function openAdminPanel() {
+  closeUserMenu();
+  window.location.href = 'admin.html';
 }
 
 function toggleUserMenu() {
@@ -1784,7 +1559,7 @@ function markConfigDirty() { _configPanelDirty = true; }
  * Record the connection the server reported.
  *
  * `hasApiKey` is the only thing said about the key itself — its value is never
- * transmitted (CLAUDE.md §7.6).
+ * transmitted (CLAUDE.md §7.7).
  */
 function applyConnection(conn) {
   const c = conn || {};
@@ -1792,11 +1567,6 @@ function applyConnection(conn) {
   dtFrontendUrl = c.frontendUrl || '';
   dtConfigured  = !!c.isConfigured;
   dtHasApiKey   = !!c.hasApiKey;
-}
-
-function resetMaxReports() {
-  document.getElementById('cfgMaxReports').value = 10;
-  markConfigDirty();
 }
 
 async function loadConfigFromServer() {
@@ -1821,8 +1591,8 @@ async function loadConfigFromServer() {
       autoNote.style.display = 'none';
     }
 
-    // Max reports
-    document.getElementById('cfgMaxReports').value = cfg.maxReports || 10;
+    // Max reports — displayed, never edited.
+    document.getElementById('cfgMaxReports').textContent = String(cfg.maxReports || 10);
     // Show current usage count in the hint label
     apiFetch('/violation-cache/report/list').then(async rr => {
       if (!rr.ok) return;
@@ -1949,7 +1719,6 @@ async function saveConfigPanel() {
   const saveBtn = document.getElementById('cfgSaveBtn');
   if (saveBtn) { saveBtn.disabled = true; saveBtn.textContent = 'Saving…'; }
   try {
-    const maxReports   = parseInt(document.getElementById('cfgMaxReports').value, 10) || 10;
     const mailEnabled  = document.getElementById('cfgMailEnabled').checked;
     const schedEnabled = document.getElementById('cfgSchedEnabled').checked;
 
@@ -2030,26 +1799,11 @@ async function saveConfigPanel() {
       schedConfig = { ...existingSched, enabled: false };
     }
 
-    const config = { maxReports, mail: mailConfig, schedule: schedConfig };
-
-    // Before saving a reduced maxReports, warn the user if it would delete existing reports.
-    try {
-      const listR = await apiFetch('/violation-cache/report/list');
-      if (listR.ok) {
-        const jobs           = await listR.json();
-        const completedCount = jobs.filter(j => j.status === 'completed').length;
-        const deleteCount    = Math.max(0, completedCount - maxReports);
-        if (deleteCount > 0) {
-          const proceed = await showConfirm(
-            'Delete Existing Reports?',
-            `Reducing the limit to ${maxReports} will permanently delete the ${deleteCount} oldest completed report${deleteCount !== 1 ? 's' : ''}.\n\nThis cannot be undone. Proceed?`,
-            'Delete & Save',
-            'Cancel'
-          );
-          if (!proceed) return;
-        }
-      }
-    } catch (_) { /* report list unavailable — proceed without check */ }
+    // maxReports is deliberately absent: it is the administrator's to set, and
+    // the backend ignores it in this body anyway. The delete-confirmation that
+    // used to live here went with it — nothing deletes reports on a limit
+    // change any more, so there is nothing to warn about.
+    const config = { mail: mailConfig, schedule: schedConfig };
 
     // The connection and every setting are saved in one request, so a partial
     // failure cannot leave the account half-configured.
@@ -3075,7 +2829,7 @@ function setStatus(text, color, pulsing) {
 //   dt_theme         — 'light' | 'dark' colour scheme preference
 // That is the whole list. The DependencyTrack URL, frontend URL and API key
 // used to live here too; they are now per-user rows in the database, and the
-// key never leaves the server (CLAUDE.md §7.6). Project and violation data are
+// key never leaves the server (CLAUDE.md §7.7). Project and violation data are
 // never persisted — they are fetched fresh on each page load.
 
 
@@ -3745,7 +3499,7 @@ function escHtml(s) {
 // ── Load this user's DependencyTrack connection ────────────────────────────
 // The connection belongs to the signed-in account and lives encrypted in the
 // database. The browser is told only the URLs and whether a key is stored — the
-// key itself is never sent (CLAUDE.md §7.6).
+// key itself is never sent (CLAUDE.md §7.7).
 //
 // Returns true when live data was loaded, so the caller knows whether to fall
 // back to demo data.
@@ -4317,10 +4071,6 @@ window.toggleUserMenu       = toggleUserMenu;
 window.doLogout             = doLogout;
 window.openProfilePanel     = openProfilePanel;
 window.openAdminPanel       = openAdminPanel;
-window.closeAdminPanel      = closeAdminPanel;
-window.loadAdminData        = loadAdminData;
-window.showAdminUserDetail  = showAdminUserDetail;
-window.closeAdminUserDetail = closeAdminUserDetail;
 window.closeProfilePanel    = closeProfilePanel;
 window.saveProfile          = saveProfile;
 window.deleteAccount        = deleteAccount;
@@ -4362,7 +4112,6 @@ window.cancelReport         = cancelReport;
 window.openConfigPanel      = openConfigPanel;
 window.closeConfigPanel     = closeConfigPanel;
 window.markConfigDirty      = markConfigDirty;
-window.resetMaxReports      = resetMaxReports;
 window.onMailToggle           = onMailToggle;
 window.updateSchedToggleState = updateSchedToggleState;
 window.onSchedToggle          = onSchedToggle;

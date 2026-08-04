@@ -175,22 +175,12 @@ async function deleteForUser(userId, reportId) {
   return rowCount > 0;
 }
 
-/**
- * Trim the oldest completed reports down to `keep`, for when a user lowers
- * their own limit. Returns how many were removed.
- */
-async function trimToLimit(userId, keep) {
-  const { rowCount } = await query(
-    `DELETE FROM reports WHERE id IN (
-       SELECT id FROM reports
-        WHERE user_id = $1 AND status = 'completed'
-        ORDER BY created_at DESC OFFSET $2
-     )`,
-    [userId, keep]
-  );
-  if (rowCount) log('info', 'Trimmed reports beyond the user limit', { userId, removed: rowCount, keep });
-  return rowCount;
-}
+// trimToLimit() was removed with migration 005. It deleted a user's oldest
+// completed reports when their limit was lowered, which was defensible while
+// each user chose their own number. The limit is now an administrator's, and
+// the same call from a global change would have destroyed reports across many
+// accounts at once. Being over the limit blocks new reports; it never deletes
+// existing ones. Do not reintroduce a trim without deciding that question again.
 
 /**
  * Fail reports left running by a restart. The previous implementation did the
@@ -219,6 +209,6 @@ async function storageByUser() {
 module.exports = {
   create, listForUser, getForUser, activeCount, setStatus,
   writeProgress, forgetProgress, storeFile, chunkCount, getChunk,
-  deleteForUser, trimToLimit, failOrphaned, storageByUser,
+  deleteForUser, failOrphaned, storageByUser,
   CHUNK_BYTES, MAX_REPORT_BYTES, PROGRESS_INTERVAL_MS,
 };

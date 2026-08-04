@@ -164,7 +164,7 @@ function encryptSecret(plaintext, key) {
  * Decrypt a stored secret.
  * S12: a failure here means the key changed or the row was tampered with. The
  * caller surfaces it to the user as "re-enter your API key" and must never log
- * the ciphertext or crash the request (CLAUDE.md §7.6).
+ * the ciphertext or crash the request (CLAUDE.md §7.7).
  *
  * @throws {Error} code DECRYPT_FAILED
  */

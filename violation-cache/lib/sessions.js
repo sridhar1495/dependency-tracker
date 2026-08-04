@@ -77,7 +77,7 @@ async function findLiveByTokenHash(tokenHash, idleHours) {
     `SELECT s.id, s.user_id AS "userId", s.principal_type AS "principalType",
             s.expires_at AS "expiresAt", s.last_seen_at AS "lastSeenAt",
             u.login_id AS "loginId", u.first_name AS "firstName", u.last_name AS "lastName",
-            u.email
+            u.email, u.must_change_password AS "mustChangePassword"
        FROM user_sessions s
        LEFT JOIN users u ON u.id = s.user_id
       WHERE s.token_hash = $1

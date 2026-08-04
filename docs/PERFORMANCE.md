@@ -33,11 +33,20 @@ the correct plan and is not a finding.
 | `lib/schedules.js` — claim due schedules | **0.032 ms** | 13 | Index Scan `ix_sched_due` + `LockRows` |
 | `lib/caches.js` — cache metadata by fingerprint | **0.012 ms** | 1 | see §1.1 |
 | `lib/dt-connections.js` — resolve one connection | **0.019 ms** | 3 | Index Scan `dt_connections_pkey` |
-| `lib/users.js` — administration listing (500 rows) | **10.0 ms** | 4,873 | see §1.2 |
+| `lib/users.js` — administration listing (500 rows) | **9.3 ms** | 4,916 | see §1.2 |
+| `lib/disk.js` — storage by account (top 5) | **21.4 ms** | 768 | aggregate over 20,000 reports |
 
-Every per-request query is an index scan reading fewer than 15 pages. The one
-double-digit figure is the administration listing, which is a single page view
-by a single operator, not a per-request path.
+Every per-request query is an index scan reading fewer than 15 pages. The two
+double-digit figures both belong to the administration screen — a single page
+view by a single operator, not a per-request path — and the storage aggregate is
+additionally cached for 10 seconds so polling that screen cannot turn into load.
+
+**The listing absorbed a new join for free.** Migration 005 added
+`CROSS JOIN app_settings` and `LEFT JOIN user_settings` so the screen can show
+each account's effective report limit and whether it was inherited or set.
+`app_settings` is a singleton, so the planner materialises it once rather than
+multiplying rows: 10.0 ms / 4,873 buffers before, 9.3 ms / 4,916 after — inside
+run-to-run noise.
 
 ### 1.1 The cache lookup shows a sequential scan, and that is correct
 
@@ -164,6 +173,7 @@ after every project × risk type — roughly 1,500 writes for a 500-project repo
 | Table | Grows with | Bounded by |
 |---|---|---|
 | `users`, `dt_connections`, `user_settings`, `mail_settings`, `schedules` | accounts | one row per account |
+| `app_settings` | nothing | exactly one row, enforced by a singleton primary key |
 | `user_sessions` | live sessions | one per account (partial unique index) + a 10-minute sweeper |
 | `reports`, `report_file_chunks` | reports | per-user `max_reports`, enforced on creation and on lowering the limit |
 | `violation_caches` | **distinct DependencyTrack connections** | swept when no connection references the fingerprint |

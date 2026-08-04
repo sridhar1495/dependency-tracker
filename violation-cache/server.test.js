@@ -1896,6 +1896,7 @@ const routeDtProxy  = require('./routes/dt-proxy');
 const reportsDbMod     = require('./lib/reports-db');
 const reportsMod       = require('./lib/reports');
 const userSettingsMod  = require('./lib/user-settings');
+const appSettingsMod   = require('./lib/app-settings');
 const dtConnectionsMod = require('./lib/dt-connections');
 const cachesMod        = require('./lib/caches');
 const violationCacheMod = require('./lib/violation-cache');
@@ -2486,19 +2487,45 @@ describe('mail settings — recipient parsing', () => {
 });
 
 // ── lib/user-settings.js — quota bounds ──────────────────────────────────────
+// The report ceiling moved from a preference each user set for themselves to a
+// capacity decision the administrator makes, globally or per account (migration
+// 005). The bounds are unchanged; who may set them is not.
 describe('user settings — maxReports bounds', () => {
-  test('the documented default is 10', () => {
-    assert.equal(userSettingsMod.DEFAULT_MAX_REPORTS, 10);
+  test('the per-account bounds match the global ones exactly', () => {
+    // A global default an override could not express would be a value the
+    // administrator could set once and never change back.
+    assert.equal(userSettingsMod.MIN_MAX_REPORTS, appSettingsMod.MIN_MAX_REPORTS);
+    assert.equal(userSettingsMod.MAX_MAX_REPORTS, appSettingsMod.MAX_MAX_REPORTS);
+    assert.equal(userSettingsMod.MIN_MAX_REPORTS, 1);
+    assert.equal(userSettingsMod.MAX_MAX_REPORTS, 1000);
   });
 
-  test('out-of-range values are rejected with a field-tagged error', async () => {
+  test('an out-of-range override is rejected with a field-tagged error', async () => {
     for (const bad of [0, -1, 1001, 2.5, 'ten', null]) {
       await assert.rejects(
-        () => userSettingsMod.setMaxReports(USER_A, bad),
+        () => userSettingsMod.setMaxReportsOverride(USER_A, bad),
         (e) => e.code === 'VALIDATION_FAILED' && e.field === 'maxReports',
         `expected ${bad} to be rejected`
       );
     }
+  });
+
+  test('an out-of-range global default is rejected the same way', async () => {
+    for (const bad of [0, -1, 1001, 2.5, 'ten', null, undefined]) {
+      await assert.rejects(
+        () => appSettingsMod.setDefaultMaxReports(bad),
+        (e) => e.code === 'VALIDATION_FAILED' && e.field === 'defaultMaxReports',
+        `expected ${bad} to be rejected`
+      );
+    }
+  });
+
+  test('the user-facing setter is gone, not merely unused', () => {
+    // Leaving it exported would invite a route to call it and quietly hand the
+    // limit back to users.
+    assert.equal(userSettingsMod.setMaxReports, undefined);
+    assert.equal(typeof userSettingsMod.setMaxReportsOverride, 'function');
+    assert.equal(typeof userSettingsMod.clearMaxReportsOverride, 'function');
   });
 });
 
@@ -2723,18 +2750,68 @@ describe('routes — the administration listing exposes no secrets', () => {
     } finally { restore(); restore2(); }
   });
 
-  test('there is no route that changes anything', async () => {
-    // A write route here would be a much larger blast radius than the panel is
-    // worth. If one is ever added, this test should be the thing that stops it.
-    for (const method of ['POST', 'PUT', 'DELETE', 'PATCH']) {
-      for (const path of ['/admin/users', '/admin/overview', '/admin/users/alice']) {
-        const res = makeRes();
-        const handled = await routeAdmin.handle({
-          method, url: path, path, res, principal: asAdmin(),
-        });
-        assert.equal(handled, false,
-          `${method} ${path} must not be handled — administration is read-only`);
+  // Administration was read-only, and this test used to forbid every write.
+  // It now allows exactly three and forbids everything else, because a blanket
+  // ban that had to be deleted would have stopped protecting anything. The
+  // list is the contract: adding a fourth write means changing this line, in a
+  // diff somebody has to read.
+  const ALLOWED_WRITES = new Set([
+    'PUT /admin/settings',
+    'PUT /admin/users/:loginId/settings',
+    'POST /admin/users/:loginId/password',
+  ]);
+
+  test('only the three intended writes are handled', async () => {
+    const paths = [
+      '/admin/users', '/admin/overview', '/admin/storage', '/admin/settings',
+      '/admin/users/alice', '/admin/users/alice/settings', '/admin/users/alice/password',
+    ];
+    const restore = stub(usersMod, {
+      detailForAdmin: async () => { throw new Error('must not reach the data layer'); },
+    });
+    try {
+      for (const method of ['POST', 'PUT', 'DELETE', 'PATCH']) {
+        for (const path of paths) {
+          const key = `${method} ${path.replace(/alice/, ':loginId')}`;
+          const res = makeRes();
+          let handled;
+          try {
+            handled = await routeAdmin.handle({
+              method, url: path, path, res, principal: asAdmin(),
+              req: mockReq('{}'),
+            });
+          } catch (_) {
+            // Reaching the data layer means the route WAS handled.
+            handled = true;
+          }
+          if (ALLOWED_WRITES.has(key)) {
+            assert.equal(handled, true, `${key} is on the allow-list and must be handled`);
+          } else {
+            assert.equal(handled, false,
+              `${key} is not on the allow-list — administration writes are a closed set`);
+          }
+        }
       }
+    } finally { restore(); }
+  });
+
+  test('a normal user is refused every write, not only the reads', async () => {
+    for (const [method, path] of [
+      ['PUT',  '/admin/settings'],
+      ['PUT',  '/admin/users/alice/settings'],
+      ['POST', '/admin/users/alice/password'],
+    ]) {
+      const res = makeRes();
+      const restore = stub(usersMod, {
+        detailForAdmin: async () => { throw new Error('must not query on an unauthorised request'); },
+      });
+      try {
+        await routeAdmin.handle({
+          method, url: path, path, res, principal: asUser(USER_A), req: mockReq('{}'),
+        });
+        assert.equal(res.statusCode, 403, `${method} ${path}`);
+        assert.equal(res.json.code, 'ADMIN_ONLY');
+      } finally { restore(); }
     }
   });
 });
@@ -2947,7 +3024,10 @@ describe('routes — administration user detail', () => {
     } finally { restore(); }
   });
 
-  test('the detail route is read-only too', async () => {
+  test('the detail route itself stays read-only', async () => {
+    // The writes live on their own sub-paths — /settings and /password — so
+    // /admin/users/:loginId remains a GET and nothing else. A PUT here would
+    // be a general-purpose account editor, which is not what was asked for.
     for (const method of ['POST', 'PUT', 'DELETE', 'PATCH']) {
       const ctx = { method, url: '/admin/users/alice', path: '/admin/users/alice',
                     res: makeRes(), principal: asAdmin() };

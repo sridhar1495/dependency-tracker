@@ -956,6 +956,7 @@ const fs   = require('node:fs');
 const path = require('node:path');
 
 const LOGIN_HTML  = fs.readFileSync(path.join(__dirname, '..', 'dashboard', 'login.html'), 'utf8');
+const ADMIN_HTML  = fs.readFileSync(path.join(__dirname, '..', 'dashboard', 'admin.html'), 'utf8');
 const INDEX_HTML  = fs.readFileSync(path.join(__dirname, '..', 'dashboard', 'index.html'), 'utf8');
 const backendValidate = require('./lib/validate');
 
@@ -1086,13 +1087,12 @@ describe('apiFetch contract in index.html', () => {
     assert.ok(wrapped.length >= 29, `expected at least 29 apiFetch call sites, found ${wrapped.length}`);
   });
 
-  test('the administration panel also goes through apiFetch', () => {
-    // A bare fetch() here would miss the bearer header and, worse, would not
-    // redirect on 401 — the panel would look empty instead of signed out.
-    assert.doesNotMatch(INDEX_HTML, /fetch\((['`])\/admin\//,
-      'administration routes must be called through apiFetch()');
-    assert.match(INDEX_HTML, /apiFetch\('\/admin\/overview'\)/);
-    assert.match(INDEX_HTML, /apiFetch\('\/admin\/users'\)/);
+  test('index.html no longer talks to /admin at all', () => {
+    // Administration moved to its own page. Leaving the calls here would mean
+    // two implementations of the same screen drifting apart.
+    assert.doesNotMatch(INDEX_HTML, /\/admin\/users/,
+      'the administration listing belongs to admin.html now');
+    assert.doesNotMatch(INDEX_HTML, /\/admin\/overview/);
   });
 
   test('the administration entry is hidden for a non-administrator', () => {
@@ -1101,10 +1101,21 @@ describe('apiFetch contract in index.html', () => {
       'the menu entry must be driven by the principal, not always shown');
   });
 
-  test('administration handlers are window-exported from the IIFE', () => {
-    for (const fn of ['openAdminPanel', 'closeAdminPanel', 'loadAdminData']) {
-      assert.match(INDEX_HTML, new RegExp('window\\.' + fn + '\\s*='),
-        `${fn} is used by an onclick attribute and must be window-exported`);
+  test('the administration menu item navigates to the page', () => {
+    assert.match(INDEX_HTML, /window\.openAdminPanel\s*=/,
+      'the onclick handler must still be window-exported');
+    const fn = /function openAdminPanel\(\)[\s\S]*?\n\}/.exec(INDEX_HTML)[0];
+    assert.match(fn, /location\.href\s*=\s*'admin\.html'/,
+      'it navigates rather than opening a panel');
+  });
+
+  test('the old panel is gone, not merely hidden', () => {
+    // A dead panel left in place is a second implementation waiting to be
+    // rendered by accident.
+    for (const gone of ['adminPanel', 'adminBackdrop', 'loadAdminData',
+                        'showAdminUserDetail', 'closeAdminUserDetail', 'adm-panel']) {
+      assert.doesNotMatch(INDEX_HTML, new RegExp(gone),
+        `${gone} belongs to the removed administration panel`);
     }
   });
 
@@ -1118,7 +1129,7 @@ describe('apiFetch contract in index.html', () => {
   test('the browser holds no DependencyTrack credentials at all', () => {
     // The dashboard used to send X-Api-Key from localStorage. Both the header
     // and the stored key are gone: DT is reached through the backend proxy,
-    // which injects the signed-in user's key (CLAUDE.md §7.6).
+    // which injects the signed-in user's key (CLAUDE.md §7.7).
     assert.doesNotMatch(INDEX_HTML, /X-Api-Key/,
       'the dashboard must never send a DependencyTrack API key');
     for (const key of ['dt_api_key', 'dt_api_url', 'dt_frontend_url']) {
@@ -1258,25 +1269,212 @@ describe('index.html layout', () => {
 });
 
 // ── Administration detail view ──────────────────────────────────────────────
-describe('index.html administration detail', () => {
+// ── admin.html — the administration screen ──────────────────────────────────
+// It was a slide-in panel while it did one read-only thing. It now hosts a
+// master/detail split and service configuration, which is a page. Adding a page
+// is allowed; splitting one is not (CLAUDE.md §8.1).
+describe('admin.html is a self-contained page', () => {
+  test('it is one file with inline style and a single script', () => {
+    assert.equal((ADMIN_HTML.match(/<style>/g) || []).length, 1);
+    assert.equal((ADMIN_HTML.match(/<script>/g) || []).length, 1);
+    assert.doesNotMatch(ADMIN_HTML, /<script[^>]+src=/, 'no external script — there is no build step');
+    assert.doesNotMatch(ADMIN_HTML, /<link[^>]+stylesheet/, 'no external stylesheet either');
+  });
+
+  test('all logic is wrapped in an IIFE', () => {
+    assert.match(ADMIN_HTML, /\(function \(\) \{[\s\S]*'use strict';/);
+  });
+
+  test('it reuses the same custom properties as the other two pages', () => {
+    for (const prop of ['--bg', '--surface', '--surface2', '--border', '--text',
+                        '--text-muted', '--accent', '--critical', '--ok', '--radius']) {
+      assert.match(ADMIN_HTML, new RegExp(prop.replace(/-/g, '\\-') + ':'),
+        `${prop} must be defined so the three pages cannot drift apart`);
+    }
+    assert.match(ADMIN_HTML, /\[data-theme="light"\]/, 'the light theme must be carried over too');
+  });
+
+  test('no colour is hard-coded inside a component rule', () => {
+    // Component rules must use the variables. The :root and [data-theme] blocks
+    // are where literals belong (CLAUDE.md §8.10).
+    const withoutThemeBlocks = ADMIN_HTML
+      .replace(/:root \{[\s\S]*?\n    \}/, '')
+      .replace(/\[data-theme="light"\] \{[\s\S]*?\n    \}/, '');
+    const styleOnly = /<style>([\s\S]*?)<\/style>/.exec(withoutThemeBlocks)[1];
+    const hexes = styleOnly.match(/#[0-9a-fA-F]{3,8}\b/g) || [];
+    assert.deepEqual(hexes.filter(h => h.toLowerCase() !== '#fff' && h.toLowerCase() !== '#ffffff'), [],
+      'component rules must use custom properties');
+  });
+
+  test('body never sets overflow hidden', () => {
+    // A pane taller than a short viewport has to stay reachable (CLAUDE.md §8.10).
+    // Comments are stripped first: the rule explains itself in prose that would
+    // otherwise match the very pattern being forbidden.
+    const body = /\n    body \{[\s\S]*?\n    \}/.exec(ADMIN_HTML)[0]
+      .replace(/\/\*[\s\S]*?\*\//g, '');
+    assert.doesNotMatch(body, /overflow:\s*hidden/);
+  });
+});
+
+describe('admin.html gate and backend calls', () => {
+  test('every backend call goes through apiFetch', () => {
+    const bare = ADMIN_HTML.match(/(?<!api)\bfetch\((['`])\/admin/g) || [];
+    assert.equal(bare.length, 0, 'administration routes must go through apiFetch()');
+    for (const p of ['/admin/overview', '/admin/users', '/admin/settings', '/admin/storage']) {
+      assert.match(ADMIN_HTML, new RegExp("apiFetch\\('" + p.replace(/\//g, '\\/') + "'"),
+        `${p} must be fetched through apiFetch`);
+    }
+  });
+
+  test('apiFetch attaches the bearer token and treats 401 as sign-in', () => {
+    assert.match(ADMIN_HTML, /Authorization['"]?\s*:\s*['"`]Bearer/);
+    assert.match(ADMIN_HTML, /response\.status === 401/);
+    assert.match(ADMIN_HTML, /goToLogin/);
+  });
+
+  test('being signed in is not enough — the gate checks isAdmin', () => {
+    // An ordinary user reaching this URL must be sent away, not shown a page
+    // whose every request would 403 (CLAUDE.md §8.4).
+    const fn = /async function requireAdminSession[\s\S]*?\n  \}/.exec(ADMIN_HTML)[0];
+    assert.match(fn, /user\.isAdmin/);
+    assert.match(fn, /index\.html/, 'a non-administrator goes back to the dashboard');
+  });
+
+  test('the gate runs before anything renders', () => {
+    const boot = /async function boot\(\)[\s\S]*?\n  \}/.exec(ADMIN_HTML)[0];
+    const gateAt   = boot.indexOf('requireAdminSession');
+    const loadAt   = boot.indexOf('reloadAll');
+    assert.ok(gateAt > -1 && gateAt < loadAt, 'the session is checked before data is loaded');
+  });
+
+  test('it stores no DependencyTrack credential', () => {
+    assert.doesNotMatch(ADMIN_HTML, /dt_api_key|X-Api-Key/);
+  });
+});
+
+describe('admin.html layout', () => {
+  test('the panes start at 60/40', () => {
+    assert.match(ADMIN_HTML, /\.pane-left\s*\{[^}]*width:\s*60%/);
+    assert.match(ADMIN_HTML, /\.pane-right\s*\{[^}]*width:\s*40%/);
+  });
+
+  test('a splitter sits between them and is draggable', () => {
+    assert.match(ADMIN_HTML, /id="splitter"/);
+    assert.match(ADMIN_HTML, /cursor:\s*col-resize/);
+    assert.match(ADMIN_HTML, /function initSplitter\(\)/);
+    assert.match(ADMIN_HTML, /MIN_PANE_PCT/, 'a pane must not be draggable into uselessness');
+  });
+
+  test('accordions are closed until asked for', () => {
+    // Every section carries no "open" class in the markup. The screen opens as
+    // a menu of what is here, not a wall of data.
+    const sections = ADMIN_HTML.match(/<section class="acc"[^>]*>/g) || [];
+    assert.ok(sections.length >= 2, `expected at least two accordions, found ${sections.length}`);
+    for (const s of sections) {
+      assert.doesNotMatch(s, /\bopen\b/, 'no accordion may start open');
+    }
+    assert.match(ADMIN_HTML, /aria-expanded="false"/);
+  });
+
+  test('the two named sections exist', () => {
+    assert.match(ADMIN_HTML, /id="accUsers"/);
+    assert.match(ADMIN_HTML, /id="accReports"/);
+    assert.match(ADMIN_HTML, /<h2>Users<\/h2>/);
+    assert.match(ADMIN_HTML, /<h2>Report Configuration<\/h2>/);
+  });
+});
+
+describe('admin.html account list and detail', () => {
+  test('the list carries the report limit and where it came from', () => {
+    assert.match(ADMIN_HTML, /<th>Report limit<\/th>/);
+    const fn = /function limitCellHtml[\s\S]*?\n  \}/.exec(ADMIN_HTML)[0];
+    assert.match(fn, /maxReportsOverridden/);
+    assert.match(fn, /pill-set/,  'an overridden limit is marked');
+    assert.match(fn, /pill-inherit/, 'an inherited one says so');
+  });
+
   test('rows open a detail view', () => {
-    assert.match(INDEX_HTML, /class="adm-row" data-login=/);
-    assert.match(INDEX_HTML, /showAdminUserDetail\(tr\.dataset\.login\)/);
-    assert.match(INDEX_HTML, /apiFetch\('\/admin\/users\/' \+ encodeURIComponent\(loginId\)\)/);
+    assert.match(ADMIN_HTML, /data-login="\$\{escHtml\(u\.loginId\)\}"/);
+    assert.match(ADMIN_HTML, /selectUser\(tr\.dataset\.login\)/);
+    assert.match(ADMIN_HTML, /apiFetch\('\/admin\/users\/' \+ encodeURIComponent\(loginId\)\)/);
   });
 
   test('every value rendered into the detail is escaped', () => {
-    // The panel interpolates account-controlled text — names, emails, URLs —
+    // The screen interpolates account-controlled text — names, emails, URLs —
     // into innerHTML (CLAUDE.md §12).
-    const fn = /async function showAdminUserDetail[\s\S]*?\n\}/.exec(INDEX_HTML)[0];
-    assert.match(fn, /const kv\s*=\s*\(label, value\) => `<div class="adm-kv"><dt>\$\{escHtml\(label\)\}/);
+    const fn = /function renderDetail[\s\S]*?\n  \}/.exec(ADMIN_HTML)[0];
+    assert.match(fn, /const kv\s*=\s*\(label, value\) => `<div class="kv"><dt>\$\{escHtml\(label\)\}/);
     assert.match(fn, /const txt = \(v\) =>[\s\S]*?escHtml/);
-    assert.match(fn, /escHtml\(d\.account\.firstName\)/);
-    assert.match(fn, /escHtml\(d\.account\.loginId\)/);
+
+    // Stronger than naming one field: no account value may be interpolated
+    // BARE into the innerHTML template. Anything reaching the DOM as markup has
+    // to pass through txt/yes/escHtml first, so a field added later without one
+    // fails this. Scoped to the innerHTML assignment — the heading beside it is
+    // set through textContent, which needs no escaping.
+    const markup = /\$\('detailBody'\)\.innerHTML = `[\s\S]*?`;/.exec(fn)[0];
+    const bare = markup.match(/\$\{\s*d\.[A-Za-z0-9_.]+\s*\}/g) || [];
+    assert.deepEqual(bare, [],
+      'account-controlled text must be escaped before innerHTML (CLAUDE.md §12)');
   });
 
   test('the detail says secrets are not readable from it', () => {
-    assert.match(INDEX_HTML, /are not readable from here/);
+    assert.match(ADMIN_HTML, /are not readable from here/);
+  });
+
+  test('nothing is shown before a row is chosen', () => {
+    assert.match(ADMIN_HTML, /id="detailEmpty"/);
+    assert.match(ADMIN_HTML, /Select an account on the left/);
+  });
+});
+
+describe('admin.html write actions', () => {
+  test('the limit editor confirms before it applies', () => {
+    assert.match(ADMIN_HTML, /id="limitModal"/);
+    assert.match(ADMIN_HTML, /id="btnEditLimit"/);
+    const fn = /async function confirmLimit[\s\S]*?\n  \}/.exec(ADMIN_HTML)[0];
+    assert.match(fn, /method:\s*'PUT'/);
+    assert.match(fn, /\/settings/);
+    assert.match(fn, /maxReports: value/);
+    // Blank means "return to the default" — a distinct outcome from any number.
+    assert.match(fn, /let value = null/);
+  });
+
+  test('cancelling is a real path, not just a hidden dialog', () => {
+    assert.match(ADMIN_HTML, /function closeLimitModal/);
+    assert.match(ADMIN_HTML, /onclick="closeLimitModal\(\)"/);
+    assert.match(ADMIN_HTML, /function closePwModal/);
+  });
+
+  test('the password reset validates before the round trip', () => {
+    // Mirrors lib/validate.js. The backend remains the authority (CLAUDE.md §8.8).
+    const fn = /async function confirmPasswordReset[\s\S]*?\n  \}/.exec(ADMIN_HTML)[0];
+    assert.match(fn, /length < 8/);
+    assert.match(fn, /length > 128/);
+    assert.match(fn, /\\s/, 'a password with spaces must be caught');
+    assert.match(fn, /method:\s*'POST'/);
+    assert.match(fn, /\/password/);
+  });
+
+  test('the reset dialog says what it will do before it is used', () => {
+    assert.match(ADMIN_HTML, /signed out/i);
+    // The sentence wraps in the source, so match across whitespace.
+    assert.match(ADMIN_HTML, /choose\s+its\s+own\s+password/i);
+  });
+
+  test('the global default warns about accounts it puts over the line', () => {
+    const fn = /async function saveDefaultLimit[\s\S]*?\n  \}/.exec(ADMIN_HTML)[0];
+    assert.match(fn, /affectedAccounts/);
+    assert.match(fn, /cannot create new reports/,
+      'the administrator must be told what it does to people, not just that it saved');
+  });
+
+  test('every onclick handler is window-exported', () => {
+    const handlers = [...ADMIN_HTML.matchAll(/onclick="(\w+)\(/g)].map(m => m[1]);
+    assert.ok(handlers.length > 0);
+    for (const h of new Set(handlers)) {
+      assert.match(ADMIN_HTML, new RegExp('window\\.' + h + '\\s*='),
+        `${h} is used by an onclick and must be window-exported (CLAUDE.md §8.2)`);
+    }
   });
 });
 

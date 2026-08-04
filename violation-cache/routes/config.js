@@ -26,7 +26,6 @@ const dtConnections = require('../lib/dt-connections');
 const userSettings  = require('../lib/user-settings');
 const mailSettings  = require('../lib/mail-settings');
 const schedulesDb   = require('../lib/schedules');
-const reportsDb     = require('../lib/reports-db');
 const scheduler     = require('../lib/scheduler');
 
 /** Shape the schedule row the way the dashboard's config panel expects it. */
@@ -96,8 +95,6 @@ async function handle({ method, path: parsedPath, req, res, principal }) {
     if (body === null) return true;
 
     try {
-      let trimmedReports = 0;
-
       // ── DependencyTrack connection ────────────────────────────────
       if (body.connection !== undefined) {
         if (typeof body.connection !== 'object' || body.connection === null) {
@@ -115,12 +112,12 @@ async function handle({ method, path: parsedPath, req, res, principal }) {
         }
 
         // ── Report ceiling ──────────────────────────────────────────
-        if (cfg.maxReports !== undefined) {
-          await userSettings.setMaxReports(userId, cfg.maxReports);
-          // Lowering the limit deletes the user's own oldest completed
-          // reports, never anybody else's (CLAUDE.md §7.5).
-          trimmedReports = await reportsDb.trimToLimit(userId, Number(cfg.maxReports));
-        }
+        // Deliberately NOT read from the body. The limit is an administrator's
+        // capacity decision about the server's disk, set globally or per
+        // account from the administration screen, so a user submitting one is
+        // ignored rather than refused — the same defensive shape the profile
+        // route uses for loginId and email. The value is still returned by GET
+        // so the dashboard can show what the account is allowed.
 
         // ── SMTP ────────────────────────────────────────────────────
         if (cfg.mail !== undefined) {
@@ -157,7 +154,6 @@ async function handle({ method, path: parsedPath, req, res, principal }) {
       const connection = await dtConnections.getForClient(userId);
       jsonReply(res, 200, {
         ok: true,
-        trimmedReports,
         connection: {
           apiUrl:       connection ? connection.apiUrl : '',
           frontendUrl:  connection ? connection.frontendUrl : '',
