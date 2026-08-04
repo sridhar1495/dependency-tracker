@@ -834,7 +834,11 @@
         <button class="user-menu-item danger" onclick="doLogout()">⎋ Sign out</button>
       </div>
     </div>
-    <button class="btn primary" onclick="refreshData()">↻ Refresh</button>
+    <!-- Disabled while a violation-cache build runs — see setCacheBuilding().
+         Not the same control as the banner's ↻ Refetch Violations: this one
+         reloads the project hierarchy too. -->
+    <button class="btn primary" id="refreshBtn" onclick="refreshData()"
+            title="Reload projects from DependencyTrack and refresh violation counts">↻ Refresh</button>
   </header>
 
   <!-- ── Main ────────────────────────────────────────────────────────────── -->
@@ -1294,6 +1298,8 @@ let _cachePollTimer  = null;   // setInterval id for polling /violation-cache/st
 // The cache is shared by connection fingerprint, so a build another user started
 // reports as 'building' here too and disables this dashboard's refetch as well —
 // which is the point: one crawl is enough for everybody on that connection.
+// Never assigned directly — go through setCacheBuilding() so the toolbar and the
+// banner cannot disagree about whether a build is running.
 let _cacheBuilding   = false;
 let _cacheWatchTimer = null;   // slow poll that notices builds started elsewhere
 let flatView         = false;  // when true: leaf-only flat list, no hierarchy
@@ -3352,7 +3358,7 @@ function startCacheWatch() {
       if (!r.ok) return;
       const s = await r.json();
       if (s.status === 'building') {
-        _cacheBuilding = true;
+        setCacheBuilding(true);
         stopCacheWatch();
         startCachePoll();
       }
@@ -3380,7 +3386,7 @@ function startCachePoll() {
       const s = await r.json();
 
       if (s.status === 'building') {
-        _cacheBuilding = true;
+        setCacheBuilding(true);
         const prog = (s.progress?.pagesTotal || 0) > 0
           ? `(${s.progress.pagesDone}/${s.progress.pagesTotal} pages)` : '';
         banner.innerHTML =
@@ -3389,7 +3395,7 @@ function startCachePoll() {
         banner.className = 'data-banner';
 
       } else if (s.status === 'ready') {
-        _cacheBuilding = false;
+        setCacheBuilding(false);
         clearInterval(_cachePollTimer); _cachePollTimer = null;
         startCacheWatch();
         try {
@@ -3405,7 +3411,7 @@ function startCachePoll() {
 
       } else {
         // error or unexpected terminal state
-        _cacheBuilding = false;
+        setCacheBuilding(false);
         clearInterval(_cachePollTimer); _cachePollTimer = null;
         startCacheWatch();
         banner.innerHTML =
@@ -3422,6 +3428,30 @@ function startCachePoll() {
   // leaves the control looking clickable for five seconds after a build starts —
   // including a build somebody else started, which is exactly when it must not.
   tick();
+}
+
+/**
+ * Record whether a build is in flight, and reflect it in the toolbar.
+ *
+ * The banner's control is re-rendered from _cacheBuilding wherever the banner
+ * is written, but the toolbar's ↻ Refresh lives outside that HTML and would
+ * otherwise stay clickable through a build — two refresh controls side by side
+ * disagreeing about whether one is allowed. Routing every change through here
+ * is what keeps them in step.
+ *
+ * ↻ Refresh is NOT the same control as ↻ Refetch Violations: it reloads the
+ * project hierarchy from DependencyTrack as well. That is why it is disabled
+ * rather than removed — nothing else picks up a newly added project without a
+ * full page reload.
+ */
+function setCacheBuilding(building) {
+  _cacheBuilding = building;
+  const btn = document.getElementById('refreshBtn');
+  if (!btn) return;
+  btn.disabled = building;
+  btn.title = building
+    ? 'A refetch is already running for this DependencyTrack connection'
+    : 'Reload projects from DependencyTrack and refresh violation counts';
 }
 
 /**
@@ -3499,7 +3529,7 @@ async function loadViolationCache() {
           `⚠ Violation cache expired (${ageH}h old) — refreshing in background…`;
         banner.className = 'data-banner';
       } catch(_) {}
-      _cacheBuilding = true;
+      setCacheBuilding(true);
       await apiFetch('/violation-cache/refresh', { method: 'POST' }).catch(() => {});
       startCachePoll();
 
@@ -3507,7 +3537,7 @@ async function loadViolationCache() {
       // Already building — very often because ANOTHER user on the same
       // DependencyTrack connection started it. Adopt their build and show it as
       // in progress rather than offering a button that would only be refused.
-      _cacheBuilding = true;
+      setCacheBuilding(true);
       const prog = (status.progress?.pagesTotal || 0) > 0
         ? `(${status.progress.pagesDone}/${status.progress.pagesTotal} pages)` : '';
       banner.innerHTML =
@@ -3529,7 +3559,7 @@ async function loadViolationCache() {
       banner.innerHTML =
         `✓ Live — ${allProjects.length} projects. ⏳ Refetching violations…`;
       banner.className = 'data-banner';
-      _cacheBuilding = true;
+      setCacheBuilding(true);
       await apiFetch('/violation-cache/refresh', { method: 'POST' }).catch(() => {});
       startCachePoll();
     }
@@ -3557,7 +3587,7 @@ async function triggerCacheRefresh() {
 
   // Disable immediately, before the request goes out, so the window between
   // click and response cannot take a second click.
-  _cacheBuilding = true;
+  setCacheBuilding(true);
   banner.innerHTML =
     `✓ Live — ${allProjects.length} projects. ⏳ Refetching violations… ${refetchButtonHtml()}`;
   banner.className = 'data-banner';
@@ -3569,7 +3599,7 @@ async function triggerCacheRefresh() {
       // connection, which is exactly the sharing the cache exists for. Keep
       // the button disabled and poll for their result.
       const body = await r.json().catch(() => ({}));
-      _cacheBuilding = false;
+      setCacheBuilding(false);
       banner.innerHTML =
         `✓ Live — ${allProjects.length} projects. ` +
         `<span class="banner-warn">⚠ ${escHtml(body.error || 'Refetch failed.')} ` +
@@ -3579,7 +3609,7 @@ async function triggerCacheRefresh() {
     }
     startCachePoll();
   } catch(e) {
-    _cacheBuilding = false;
+    setCacheBuilding(false);
     banner.innerHTML =
       `✓ Live — ${allProjects.length} projects. ` +
       `<span class="banner-warn">⚠ Failed to reach cache service. ` +
@@ -4304,7 +4334,7 @@ window.__cacheWatchTick     = async () => {
   const r = await apiFetch('/violation-cache/status');
   if (!r.ok) return;
   const s = await r.json();
-  if (s.status === 'building') { _cacheBuilding = true; stopCacheWatch(); startCachePoll(); }
+  if (s.status === 'building') { setCacheBuilding(true); stopCacheWatch(); startCachePoll(); }
 };
 window.debouncedFilter      = debouncedFilter;
 window.applyFilters         = applyFilters;

@@ -68,6 +68,10 @@ services:
     environment:
       # How many hours a cached violation map is valid before auto-expiry.
       CACHE_TTL_HOURS: "${VIOLATION_CACHE_TTL_HOURS:-24}"
+      # How long a refetch may go WITHOUT advancing a page before it is presumed
+      # wedged. Not a cap on total run time — a large portfolio that keeps making
+      # progress runs as long as it needs to.
+      VIOLATION_JOB_STALL_MINUTES: "${VIOLATION_JOB_STALL_MINUTES:-15}"
       PORT: "3001"
       # AES-256-GCM key for stored DT API keys and SMTP passwords. The service
       # refuses to start without it — a key saved under a missing encryption key

@@ -1304,6 +1304,112 @@ describe('multi-tenant data access', { skip: !ENABLED && 'TEST_DATABASE_URL not 
       'a failed rebuild must not discard data the dashboard could still show');
   });
 
+  // Q14: 'building' is written by runJob and cleared only by storeResult or
+  // markFailed. A process killed in between leaves the row asserting a build
+  // that nobody is running — which then blocks both the automatic rebuild and
+  // the manual refetch. These pin the two ways out.
+  // A dead builder is simulated by winding its heartbeat back. The updated_at
+  // trigger rewrites the column on every UPDATE, so it has to be suspended for
+  // the statement — which is also a useful reminder that in production nothing
+  // can forge an old heartbeat.
+  const backdateHeartbeat = async (fp, interval) => {
+    await pool.query('ALTER TABLE violation_caches DISABLE TRIGGER trg_violation_caches_updated_at');
+    try {
+      await pool.query(
+        `UPDATE violation_caches SET updated_at = now() - $2::interval WHERE fingerprint = $1`,
+        [fp, interval]);
+    } finally {
+      await pool.query('ALTER TABLE violation_caches ENABLE TRIGGER trg_violation_caches_updated_at');
+    }
+  };
+
+  test('markBuilding stamps a heartbeat the stall check can read', async () => {
+    const fp = 'zz' + '1'.repeat(62);
+    await caches.markBuilding(fp);
+    const meta = await caches.getMeta(fp);
+    assert.ok(meta.updatedAt instanceof Date, 'updated_at must come back with the metadata');
+    assert.ok(Date.now() - meta.updatedAt.getTime() < 60_000, 'and be fresh at the start of a build');
+    assert.equal(caches.deriveStatus(meta, 60_000), 'building');
+    await pool.query('DELETE FROM violation_caches WHERE fingerprint = $1', [fp]);
+  });
+
+  test('a build that stops beating reads as stalled and becomes rebuildable', async () => {
+    const fp = 'zz' + '2'.repeat(62);
+    await caches.markBuilding(fp);
+    // Wind the heartbeat back rather than waiting out a real stall window.
+    await backdateHeartbeat(fp, '40 minutes');
+    const meta = await caches.getMeta(fp);
+    assert.equal(caches.deriveStatus(meta, 15 * 60_000), 'stalled');
+    assert.equal(caches.deriveStatus(meta, 60 * 60_000), 'building',
+      'a longer stall window keeps trusting the same row — the window is the policy');
+    await pool.query('DELETE FROM violation_caches WHERE fingerprint = $1', [fp]);
+  });
+
+  test('touchBuild revives the heartbeat of a running build', async () => {
+    const fp = 'zz' + '3'.repeat(62);
+    await caches.markBuilding(fp);
+    await backdateHeartbeat(fp, '40 minutes');
+    assert.equal(caches.deriveStatus(await caches.getMeta(fp), 15 * 60_000), 'stalled');
+
+    assert.equal(await caches.touchBuild(fp), true);
+    assert.equal(caches.deriveStatus(await caches.getMeta(fp), 15 * 60_000), 'building',
+      'a build that resumes reporting must stop looking dead');
+    await pool.query('DELETE FROM violation_caches WHERE fingerprint = $1', [fp]);
+  });
+
+  test('touchBuild cannot resurrect a build that already finished', async () => {
+    // A heartbeat racing the final store must not drag the row back to
+    // 'building' — the dashboard would poll a build that is already done.
+    const fp = 'zz' + '4'.repeat(62);
+    await caches.markBuilding(fp);
+    await caches.storeResult(fp, { a: 1 }, { projectCount: 1, failedPipelines: 0, ttlMs: 3600_000 });
+    assert.equal(await caches.touchBuild(fp), false, 'no building row was there to touch');
+    assert.equal((await caches.getMeta(fp)).status, 'ready');
+
+    await caches.markFailed(fp, 'boom');
+    assert.equal(await caches.touchBuild(fp), false);
+    assert.equal((await caches.getMeta(fp)).status, 'failed');
+    await pool.query('DELETE FROM violation_caches WHERE fingerprint = $1', [fp]);
+  });
+
+  test('a restart fails builds it orphaned, so the next visit rebuilds', async () => {
+    const orphaned = 'zz' + '5'.repeat(62);
+    const finished = 'zz' + '6'.repeat(62);
+    await caches.markBuilding(orphaned);
+    await caches.markBuilding(finished);
+    await caches.storeResult(finished, { a: 1 }, { projectCount: 1, failedPipelines: 0, ttlMs: 3600_000 });
+
+    const count = await caches.failOrphanedBuilds();
+    assert.ok(count >= 1);
+
+    const orphanMeta = await caches.getMeta(orphaned);
+    assert.equal(orphanMeta.status, 'failed');
+    assert.match(orphanMeta.error, /service restarted/i,
+      'the reason must say what happened, not just that it failed');
+    assert.equal(caches.deriveStatus(orphanMeta), 'failed',
+      'failed is the state the dashboard already knows how to rebuild from');
+
+    assert.equal((await caches.getMeta(finished)).status, 'ready',
+      'a build that completed before the restart must be left alone');
+
+    // Idempotent: a second boot with nothing stranded changes nothing.
+    assert.equal(await caches.failOrphanedBuilds(), 0);
+    await pool.query('DELETE FROM violation_caches WHERE fingerprint = ANY($1)',
+      [[orphaned, finished]]);
+  });
+
+  test('an orphaned build keeps whatever payload it had', async () => {
+    // The row is failed, not emptied: the dashboard can still show yesterday's
+    // counts while the replacement build runs.
+    const fp = 'zz' + '7'.repeat(62);
+    await caches.markBuilding(fp);
+    await caches.storeResult(fp, { a: 2 }, { projectCount: 1, failedPipelines: 0, ttlMs: 3600_000 });
+    await caches.markBuilding(fp);              // a rebuild that then gets killed
+    await caches.failOrphanedBuilds();
+    assert.deepEqual(await caches.getPayload(fp), { a: 2 });
+    await pool.query('DELETE FROM violation_caches WHERE fingerprint = $1', [fp]);
+  });
+
   test('caches nobody points at any more are swept away', async () => {
     const orphan = 'zz' + '0'.repeat(62);
     await caches.markBuilding(orphan);

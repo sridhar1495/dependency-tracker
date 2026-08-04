@@ -204,7 +204,7 @@ Inline comments use lettered prefixes to trace design decisions:
 - **O-numbers** — observability notes (`// O3: JSON log format for log aggregators`)
 - **S-numbers** — security rationale (`// S2: token hashed before storage`) — **new in revision 2**
 
-Highest numbers currently in use: **Q13, P17, O5, S28**. When adding logic with a
+Highest numbers currently in use: **Q15, P17, O5, S28**. When adding logic with a
 non-obvious trade-off, add the next number in the appropriate series. Check the
 current maximum before assigning — parallel branches can claim the same number.
 
@@ -332,6 +332,31 @@ The violation cache builds via 9 parallel pipelines: 3 risk types
 2. **Phase 2** — fetch pages 2+ with a `makeSemaphore` to limit concurrency.
 
 Preserve this two-phase structure for any new paginated fetch logic.
+
+**A build must always be able to end.** `violation_caches.status = 'building'` is
+written when a crawl starts and cleared only by `storeResult` or `markFailed`, so
+a builder that dies without running its `finally` leaves the row asserting a
+build nobody is running — and that shuts every door: the dashboard adopts the
+phantom build and polls it forever, and `POST /refresh` answers 409 because a
+build is supposedly already in progress. Two mechanisms keep it recoverable, and
+neither may be removed without replacing it:
+
+- **`caches.failOrphanedBuilds()` at boot**, beside `reportsDb.failOrphaned()`.
+  It runs before the listener starts, so every `building` row belongs to a dead
+  process by construction. Rows are marked failed, not rebuilt: kicking them off
+  here would crawl DT once per stranded fingerprint at every start-up.
+- **`updated_at` as a heartbeat.** The build touches the row only while its page
+  count is advancing, so silence is meaningful. `deriveStatus` reports a build
+  quiet for longer than `VIOLATION_JOB_STALL_MINUTES` as `'stalled'`, which the
+  status route treats as "restart it". A false positive is harmless — `_building`
+  and the advisory lock still refuse a second concurrent crawl.
+
+**The watchdog measures silence, not elapsed time.** It is not a cap on how long
+a refetch may take: a large portfolio that keeps advancing runs to completion
+however long that needs. Only a build that has not finished a single page within
+the stall window is stopped. Do not reintroduce an absolute deadline — the flat
+30-minute one it replaced killed healthy crawls for having a lot of data and
+discarded every page they had already fetched.
 
 ### 6.4 Semaphore
 
@@ -562,6 +587,14 @@ Flat, module-scoped globals, no reactive framework.
 | `dtHasApiKey` | boolean | A key is stored — **never its value** |
 | `_cacheBuilding` | boolean | A violation-cache build is in flight for this connection |
 | `_cacheWatchTimer` | number \| null | Slow poll that notices builds started by other users |
+
+`_cacheBuilding` is never assigned directly — every write goes through
+`setCacheBuilding()`, which also disables the toolbar's ↻ Refresh. The toolbar
+button lives outside the banner's HTML and so is not re-rendered when the banner
+is; left to itself it stayed clickable through a build, beside a banner control
+that was visibly disabled. It is disabled rather than removed because it is not
+the same control: ↻ Refresh reloads the project hierarchy as well, and nothing
+else picks up a newly added project without a full page reload.
 
 Never mutate `allProjects` after initial load. Derive everything else from it.
 
@@ -941,6 +974,7 @@ aspirations, and each is verifiable.
 | `SESSION_ABSOLUTE_HOURS` | server | Absolute session lifetime (default 8) |
 | `SESSION_IDLE_HOURS` | server | Idle session lifetime (default 2) |
 | `VIOLATION_CACHE_TTL_HOURS` | server | Cache expiry in hours (default 24) |
+| `VIOLATION_JOB_STALL_MINUTES` | server | Silence after which a refetch is presumed wedged (default 15) |
 | `PORT` | server | Cache service listen port (default 3001) |
 | `REPORT_CONCURRENCY` | server | Max parallel project fetches (default 5) |
 | `VIOLATION_CONCURRENCY` | server | Max parallel violation fetches (default 3) |
