@@ -36,7 +36,12 @@ const EMAIL_RE = /^[^@\s]+@[^@\s]+\.[^@\s]+$/;
 // Login IDs that must never belong to a database user. The administrator is
 // authenticated against an on-disk file, so a database row with the same login
 // ID would shadow it (decision D11).
-const ALWAYS_RESERVED = ['root', 'system', 'administrator'];
+// '__administrator__' is the reserved principal seeded by migration 004 to hold
+// the administrator's own dashboard configuration. Underscore IS a legal login
+// character, so nothing else stops someone typing it: without this entry the
+// registration would be refused only by the unique index, with a message
+// implying an ordinary account holds the name.
+const ALWAYS_RESERVED = ['root', 'system', 'administrator', '__administrator__'];
 
 /** Build the reserved set, including the configured administrator login ID. */
 function reservedLoginIds(adminLoginId) {

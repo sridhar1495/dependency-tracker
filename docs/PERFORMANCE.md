@@ -136,11 +136,19 @@ Measured as the change in `pg_stat_user_tables.idx_scan + seq_scan` for
 ### 2.4 `last_seen_at` is throttled
 
 ```
-✓ 40 requests caused 1 write to user_sessions
+✓ 40 requests inside the touch interval caused no session write
+  (last_seen_at unchanged)
 ```
 
 One write per minute per session, not one per request — the difference between
 ~1 write per request and ~1 per minute under load.
+
+Measured by reading `user_sessions.last_seen_at` for the one session under test,
+not `pg_stat_user_tables.n_tup_upd`. That counter is table-wide, so every other
+session's `touch()` lands in it, and PostgreSQL flushes a backend's statistics
+only about once a second — which puts a neighbouring phase's tail inside the
+measurement window and reports writes that this phase did not cause. The column
+value is exact and attributable to one session.
 
 ### 2.5 Report progress is throttled
 
@@ -174,7 +182,7 @@ rows**, because the fingerprint is `sha256(url + key)` rather than a user id.
   `REPORT_CONCURRENCY` (5) and `VIOLATION_CONCURRENCY` (3).
 - **A real DependencyTrack instance.** Every measurement above uses a stub, by
   design: these are properties of this service, and a live DT would add variance
-  without adding information. CLAUDE.md §10.4 forbids tests that need a live DT.
+  without adding information. CLAUDE.md §10.5 forbids tests that need a live DT.
 - **Multi-replica operation.** One replica is the supported topology. The
   scheduler's `FOR UPDATE SKIP LOCKED` and the cache's advisory lock are already
   correct across replicas; the in-process token cache is not, and would need

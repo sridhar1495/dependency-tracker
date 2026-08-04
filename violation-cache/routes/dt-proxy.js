@@ -44,11 +44,12 @@ async function handle({ method, url, path: parsedPath, res, principal }) {
     return true;
   }
 
-  // The administrator has no DependencyTrack connection of their own; there is
-  // no per-user data to read on their behalf.
+  // Every principal that reaches here has an id to scope by, the administrator
+  // included (migration 004). This stays as a guard: a principal without one
+  // must never reach an unscoped connection lookup.
   if (!principal.userId) {
     jsonReply(res, 403, {
-      error: 'The administrator account has no DependencyTrack connection.',
+      error: 'This session has no DependencyTrack connection of its own.',
       code: 'USER_ONLY',
     });
     return true;

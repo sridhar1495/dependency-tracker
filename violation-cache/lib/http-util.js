@@ -65,18 +65,22 @@ async function readJson(req, res, maxBytes = 64 * 1024) {
 }
 
 /**
- * Resolve the owning user for a per-user route.
+ * Resolve the owning principal for a per-user route.
  *
- * The administrator principal has no `userId` and therefore no data of its own;
- * every per-user route is scoped by `user_id` without exception (CLAUDE.md §7.5),
- * so there is nothing sensible to return.
+ * Every per-user route is scoped by `user_id` without exception (CLAUDE.md §7.5)
+ * — this returns the id to scope by. The administrator has one too, from
+ * migration 004, so they configure their own DependencyTrack connection and see
+ * their own dashboard through exactly these routes rather than a parallel set.
  *
- * @returns {string|null} the user id, or null once a 403 has been sent
+ * The 403 below is now unreachable in normal operation and stays as a guard: a
+ * principal with no id must never fall through to an unscoped query.
+ *
+ * @returns {string|null} the id to scope by, or null once a 403 has been sent
  */
 function requireUser(principal, res) {
   if (principal && principal.userId) return principal.userId;
   jsonReply(res, 403, {
-    error: 'This is a per-user setting and the administrator account has none.',
+    error: 'This session has no configuration of its own.',
     code: 'USER_ONLY',
   });
   return null;

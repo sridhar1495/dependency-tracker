@@ -11,6 +11,13 @@
 
 const { query, tx } = require('../db/pool');
 
+// The administrator's reserved data identity, seeded by migration 004. It holds
+// the administrator's own DependencyTrack connection, settings, mail config and
+// schedule so those flow through the ordinary per-user paths — it is NOT an
+// account, is never authenticated against, and is excluded from every listing
+// (S28). See db/migrations/004_admin_principal.sql.
+const ADMIN_PRINCIPAL_ID = '00000000-0000-4000-8000-000000000001';
+
 // Columns returned to callers. password_hash is deliberately excluded from every
 // projection except verifyLookup(), so it cannot leak into an API response by
 // accident (S7).
@@ -185,7 +192,9 @@ async function findTakenIdentifiers({ loginId, email }) {
 
 /** Total account count. Used by the administration panel. */
 async function count() {
-  const { rows } = await query('SELECT count(*)::int AS n FROM users');
+  const { rows } = await query(
+    'SELECT count(*)::int AS n FROM users WHERE id <> $1', [ADMIN_PRINCIPAL_ID]
+  );
   return rows[0].n;
 }
 
@@ -224,7 +233,7 @@ async function listWithStats({ limit = 500 } = {}) {
             COALESCE(sc.enabled, false)            AS "scheduleEnabled"
        FROM (
          SELECT id, login_id, email, first_name, last_name, created_at, last_login_at
-           FROM users ORDER BY created_at LIMIT $1
+           FROM users WHERE id <> $2 ORDER BY created_at LIMIT $1
        ) u
        LEFT JOIN LATERAL (
          SELECT id, last_seen_at FROM user_sessions
@@ -239,7 +248,7 @@ async function listWithStats({ limit = 500 } = {}) {
        LEFT JOIN dt_connections c ON c.user_id = u.id
        LEFT JOIN schedules sc      ON sc.user_id = u.id
       ORDER BY u.created_at`,
-    [limit]
+    [limit, ADMIN_PRINCIPAL_ID]
   );
   return rows;
 }
@@ -312,8 +321,8 @@ async function detailForAdmin(loginId) {
        LEFT JOIN user_settings st ON st.user_id = u.id
        LEFT JOIN mail_settings m  ON m.user_id  = u.id
        LEFT JOIN schedules sc     ON sc.user_id = u.id
-      WHERE u.login_id = $1`,
-    [loginId]
+      WHERE u.login_id = $1 AND u.id <> $2`,
+    [loginId, ADMIN_PRINCIPAL_ID]
   );
   return rows[0] || null;
 }
@@ -322,5 +331,5 @@ module.exports = {
   create, findById, findByLoginId, verifyLookup, updateProfile,
   touchLastLogin, deleteById, isLoginIdAvailable, isEmailAvailable,
   findTakenIdentifiers, count,
-  listWithStats, detailForAdmin, PUBLIC_COLUMNS,
+  listWithStats, detailForAdmin, PUBLIC_COLUMNS, ADMIN_PRINCIPAL_ID,
 };

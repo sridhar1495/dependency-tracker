@@ -109,3 +109,12 @@ Copy `.env.example` to `.env` and set:
 - [Installation Guide](docs/INSTALLATION.md)
 - [Dashboard Integration Guide](docs/DASHBOARD_INTEGRATION.md)
 - [Performance validation](docs/PERFORMANCE.md) — query plans and load evidence
+
+## Continuous integration
+
+`.github/workflows/ci.yml` runs on every push and pull request: an **offline**
+job (unit, route, frontend-contract and installer tests — no database, no
+Docker, no network), a **database** job against a real `postgres:16-alpine`
+service container, and an informational **audit** job recording `npm ls` and
+`npm audit`. See CLAUDE.md §10.3 for what each job is for and what it
+deliberately does not do.

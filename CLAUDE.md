@@ -204,7 +204,7 @@ Inline comments use lettered prefixes to trace design decisions:
 - **O-numbers** — observability notes (`// O3: JSON log format for log aggregators`)
 - **S-numbers** — security rationale (`// S2: token hashed before storage`) — **new in revision 2**
 
-Highest numbers currently in use: **Q13, P17, O5, S27**. When adding logic with a
+Highest numbers currently in use: **Q13, P17, O5, S28**. When adding logic with a
 non-obvious trade-off, add the next number in the appropriate series. Check the
 current maximum before assigning — parallel branches can claim the same number.
 
@@ -448,6 +448,19 @@ if (method === 'GET' && path === '/violation-cache/status') {
 ### 7.4 Administrator principal
 
 - Validated against `/data/admin-credentials.json`, never against the database.
+- The administrator nevertheless has a **reserved data identity** — a fixed
+  `users` row seeded by migration 004, id `00000000-0000-4000-8000-000000000001`,
+  login `__administrator__`. It holds their own DependencyTrack connection,
+  quota, mail settings and schedule so those flow through the ordinary per-user
+  routes rather than a parallel set. It is **not an account**: nothing
+  authenticates against it, its stored hash can never verify, its login ID is in
+  `ALWAYS_RESERVED`, and it is excluded from the administration listing, the
+  account count and the account detail view.
+- The administrator's session row still has `user_id IS NULL` — the
+  `sessions_principal_shape` constraint requires it. The reserved id is attached
+  to the **resolved principal** in `auth.resolveToken`, not to the session.
+- Profile editing and account deletion remain closed to the administrator: their
+  name and password live in the credentials file, not the database.
 - Created by `install.sh`. If the file is absent the service starts normally with
   administrator login **disabled**, logs a warning at boot, and returns an
   actionable error to anyone attempting an administrator login. It must never be
@@ -547,6 +560,8 @@ Flat, module-scoped globals, no reactive framework.
 | `dtConfigured` | boolean | Server reports a usable DT connection for this user |
 | `dtApiUrl` / `dtFrontendUrl` | string | Shown in Settings; requests never use them directly |
 | `dtHasApiKey` | boolean | A key is stored — **never its value** |
+| `_cacheBuilding` | boolean | A violation-cache build is in flight for this connection |
+| `_cacheWatchTimer` | number \| null | Slow poll that notices builds started by other users |
 
 Never mutate `allProjects` after initial load. Derive everything else from it.
 
@@ -593,6 +608,11 @@ The frontend never performs uniqueness checks — those are backend-only, via
 - Search input debounced at `SEARCH_DEBOUNCE_MS` (200 ms), minimum 2 characters.
 - `inferSuffix(name, version)` strips a trailing version by character scan, not
   regex (P3).
+- The violation cache is shared by connection fingerprint, so the refetch control
+  is disabled for **every** dashboard on that connection while a build runs, not
+  just the one that started it. A slow idle watch (`CACHE_WATCH_MS`) notices a
+  build somebody else began; the fast poll (`CACHE_POLL_MS`) takes over while it
+  runs and renders immediately rather than after a full interval.
 
 ### 8.10 CSS conventions
 
@@ -608,7 +628,14 @@ The frontend never performs uniqueness checks — those are backend-only, via
 - Accent colour `--accent: #6366f1`. Severity colours are variables
   (`--critical`, `--high`, …).
 - Never hard-code a colour hex inside a component rule.
-- Responsive breakpoints: 1200 px → 900 px → 768 px.
+- Responsive breakpoints: 1200 px → 900 px → 768 px. `login.html` adds 640 px
+  (the name pair stacks) and **height** breakpoints at 720 px and 560 px.
+  Browser zoom shrinks the CSS viewport, and it shortens it before it narrows
+  it, so a page with only width breakpoints hides its own buttons when zoomed.
+- **Never put `overflow: hidden` on `body`.** A decorative layer that overflows
+  clips itself inside a `position: fixed` wrapper. Centre a card taller than the
+  viewport with `margin: auto`, not `align-items: center` — the latter overflows
+  equally in both directions and the part above the top edge cannot be reached.
 
 ### 8.11 Utility helpers (do not duplicate)
 
@@ -755,7 +782,46 @@ the database tier against a `postgres:16-alpine` service container
 which no test may do. It is run by hand before a release and its output lives in
 `docs/PERFORMANCE.md`.
 
-### 10.3 Conventions
+### 10.3 Continuous integration — `.github/workflows/ci.yml`
+
+Nobody runs it locally; **GitHub Actions** runs it on every push to any branch
+and on every pull request, and reports each job as a check on the PR. Nothing in
+it is bespoke — it runs the same commands listed in §10.1.
+
+| Job | What it runs | Why it is separate |
+|---|---|---|
+| `offline` | `server.test.js`, `dashboard.test.js`, `installer.test.js`, `bash -n install.sh` | Needs no database, no Docker, no network. Keeping it its own job is what proves that tier really is offline: if someone adds a hidden dependency on a database, this job fails while the others pass. |
+| `database` | `db.test.js` against a `postgres:16-alpine` **service container** | The opt-in tier. Migrations, the partial indexes, cascade deletes, `SKIP LOCKED` and chunked byte round-trips can only be checked against a real PostgreSQL. |
+| `audit` | `npm ls --omit=dev`, `npm audit --omit=dev` | Recorded, `continue-on-error`. Deliberately does not fail the build — see below. |
+
+**Why the audit job does not gate merges.** One advisory has no non-destructive
+fix: `uuid < 11.1.1`, reachable only through `exceljs`, whose only offered remedy
+is a major downgrade. `exceljs` calls `uuid.v4()` with no buffer argument and the
+advisory covers v3/v5/v6 with a caller-supplied buffer, so it is not reachable
+here. A red X nobody can clear teaches people to ignore red X's. The output stays
+in the log, and §3 still requires it in the description of any dependency change.
+
+**Current scope.** Correctness and isolation. It does not build the Docker image,
+does not deploy, and does not run `docs/perf-check.js`.
+
+**Known gap, and how it is covered.** Because CI never builds the image, a
+Dockerfile that cannot build is not caught by running it — that is exactly how
+`COPY package-lock.json` shipped while `.dockerignore` still excluded the file.
+`installer.test.js` therefore checks the Dockerfile and `.dockerignore` against
+each other **statically**, which catches that whole class offline. Adding a real
+`docker build` job is the obvious next step and would make the static check
+redundant.
+
+**Future scope**, in the order it is worth doing:
+
+1. A `docker build` job, replacing the static Dockerfile check with the real thing.
+2. Running the browser checks headless, so frontend regressions are caught in CI
+   rather than by hand.
+3. A release job that runs `docs/perf-check.js` and fails on a query plan
+   regression — the harness already exits non-zero for that.
+4. Publishing the built image to a registry on a tag.
+
+### 10.4 Conventions
 
 - **Do not import `server.js`** in a test — it would start the HTTP server.
   Duplicate the helper under test, or re-implement it taking its dependencies as
@@ -768,7 +834,7 @@ which no test may do. It is run by hand before a release and its output lives in
 - Integration tests create their own schema via the migration runner and drop it
   afterwards. They never assume pre-existing data.
 
-### 10.4 What to test
+### 10.5 What to test
 
 - `.env` parsing edge cases: CRLF, quoted values, comments, missing `=`, duplicates.
 - Every validation rule, including boundary lengths and rejected characters.
