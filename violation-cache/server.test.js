@@ -1896,6 +1896,7 @@ const routeDtProxy  = require('./routes/dt-proxy');
 const reportsDbMod     = require('./lib/reports-db');
 const reportsMod       = require('./lib/reports');
 const userSettingsMod  = require('./lib/user-settings');
+const appSettingsMod   = require('./lib/app-settings');
 const dtConnectionsMod = require('./lib/dt-connections');
 const cachesMod        = require('./lib/caches');
 const violationCacheMod = require('./lib/violation-cache');
@@ -2486,19 +2487,45 @@ describe('mail settings — recipient parsing', () => {
 });
 
 // ── lib/user-settings.js — quota bounds ──────────────────────────────────────
+// The report ceiling moved from a preference each user set for themselves to a
+// capacity decision the administrator makes, globally or per account (migration
+// 005). The bounds are unchanged; who may set them is not.
 describe('user settings — maxReports bounds', () => {
-  test('the documented default is 10', () => {
-    assert.equal(userSettingsMod.DEFAULT_MAX_REPORTS, 10);
+  test('the per-account bounds match the global ones exactly', () => {
+    // A global default an override could not express would be a value the
+    // administrator could set once and never change back.
+    assert.equal(userSettingsMod.MIN_MAX_REPORTS, appSettingsMod.MIN_MAX_REPORTS);
+    assert.equal(userSettingsMod.MAX_MAX_REPORTS, appSettingsMod.MAX_MAX_REPORTS);
+    assert.equal(userSettingsMod.MIN_MAX_REPORTS, 1);
+    assert.equal(userSettingsMod.MAX_MAX_REPORTS, 1000);
   });
 
-  test('out-of-range values are rejected with a field-tagged error', async () => {
+  test('an out-of-range override is rejected with a field-tagged error', async () => {
     for (const bad of [0, -1, 1001, 2.5, 'ten', null]) {
       await assert.rejects(
-        () => userSettingsMod.setMaxReports(USER_A, bad),
+        () => userSettingsMod.setMaxReportsOverride(USER_A, bad),
         (e) => e.code === 'VALIDATION_FAILED' && e.field === 'maxReports',
         `expected ${bad} to be rejected`
       );
     }
+  });
+
+  test('an out-of-range global default is rejected the same way', async () => {
+    for (const bad of [0, -1, 1001, 2.5, 'ten', null, undefined]) {
+      await assert.rejects(
+        () => appSettingsMod.setDefaultMaxReports(bad),
+        (e) => e.code === 'VALIDATION_FAILED' && e.field === 'defaultMaxReports',
+        `expected ${bad} to be rejected`
+      );
+    }
+  });
+
+  test('the user-facing setter is gone, not merely unused', () => {
+    // Leaving it exported would invite a route to call it and quietly hand the
+    // limit back to users.
+    assert.equal(userSettingsMod.setMaxReports, undefined);
+    assert.equal(typeof userSettingsMod.setMaxReportsOverride, 'function');
+    assert.equal(typeof userSettingsMod.clearMaxReportsOverride, 'function');
   });
 });
 

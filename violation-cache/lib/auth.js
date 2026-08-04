@@ -165,6 +165,11 @@ async function resolveToken(token) {
     lastName:      row.lastName  || null,
     email:         row.email     || null,
     isAdmin,
+    // S30: set when an administrator reset this password. Dispatch refuses
+    // every route except set-password and logout while it is true, so the
+    // password the administrator chose can only ever be spent replacing
+    // itself — it never becomes a working credential for this user's data.
+    mustChangePassword: row.mustChangePassword === true,
   };
 
   _tokenCache.set(key, { principal, cachedAt: now, lastTouchedAt: now });

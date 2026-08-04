@@ -216,6 +216,10 @@ async function handle({ method, path: parsedPath, req, res, principal }) {
 
       let principalType = 'user';
       let userId = null;
+      // Set when an administrator reset this password. The session is still
+      // issued — the user has to be signed in to choose a new password — but
+      // dispatch refuses every other route until they do (server.js, S30).
+      let mustChangePassword = false;
 
       if (isAdmin) {
         if (!admin.isEnabled()) {
@@ -243,6 +247,7 @@ async function handle({ method, path: parsedPath, req, res, principal }) {
           return true;
         }
         userId = row.id;
+        mustChangePassword = row.mustChangePassword === true;
       }
 
       // Single active session: report the conflict unless the caller forces it.
@@ -280,7 +285,7 @@ async function handle({ method, path: parsedPath, req, res, principal }) {
         ? { loginId: admin.loginId(), firstName: 'Administrator', lastName: '', email: null, isAdmin: true }
         : principalToApi({ ...(await users.findById(userId)), isAdmin: false });
 
-      jsonReply(res, 200, { token, user: profile });
+      jsonReply(res, 200, { token, user: profile, mustChangePassword });
     } catch (err) {
       if (err.code === 'SESSION_EXISTS') {
         // Lost a race against a concurrent login; the partial unique index won.
@@ -292,6 +297,58 @@ async function handle({ method, path: parsedPath, req, res, principal }) {
       }
       log('error', `Login failed: ${err.message}`);
       jsonReply(res, 500, { error: 'Could not sign in.', code: 'INTERNAL' });
+    }
+    return true;
+  }
+
+  // ── POST /auth/set-password ─────────────────────────────────────────────
+  // The way out of a forced password change. Authenticated, but reachable while
+  // PASSWORD_CHANGE_REQUIRED is in force — it is on the allow-list in server.js.
+  //
+  // S31: the current password is deliberately NOT asked for. The user does not
+  // know it: an administrator set it, and requiring them to type a value they
+  // were told out of band would make the reset useless. The bearer token, minted
+  // seconds earlier from that very password, is the proof of possession.
+  if (method === 'POST' && parsedPath === '/auth/set-password') {
+    if (!principal || principal.isAdmin || !principal.userId) {
+      // The administrator's password lives in the credentials file, not the
+      // database, so there is nothing here for them to set (CLAUDE.md §7.4).
+      jsonReply(res, 403, {
+        error: 'This session cannot set a password.',
+        code: 'USER_ONLY',
+      });
+      return true;
+    }
+
+    const body = await readJson(req, res);
+    if (body === null) return true;
+
+    try {
+      const problem = validate.validatePassword(body.password)
+        || validate.validatePasswordConfirm(body.password, body.confirmPassword);
+      if (problem) {
+        jsonReply(res, 400, { error: problem, code: 'VALIDATION_FAILED', field: 'password' });
+        return true;
+      }
+
+      const hash = await crypto.hashPassword(body.password);
+      const updated = await users.completePasswordChange(principal.userId, hash);
+      if (!updated) {
+        jsonReply(res, 404, { error: 'No such account.', code: 'NOT_FOUND' });
+        return true;
+      }
+
+      // The cached principal still says mustChangePassword. Evicting it is what
+      // makes the very next request succeed rather than bounce for up to a
+      // minute (CLAUDE.md §7.3). The session itself stays live, so the user
+      // continues straight into the dashboard.
+      auth.evictUser(principal.userId);
+      log('info', 'User completed a required password change', { userId: principal.userId });
+
+      jsonReply(res, 200, { ok: true });
+    } catch (err) {
+      log('error', `Set password failed: ${err.message}`, { userId: principal.userId });
+      jsonReply(res, 500, { error: 'Could not set the password.', code: 'INTERNAL' });
     }
     return true;
   }

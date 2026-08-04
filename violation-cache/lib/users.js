@@ -99,11 +99,14 @@ async function findByLoginId(loginId) {
  * Fetch the stored password hash for an authentication attempt.
  * Separate from findByLoginId so the hash is only read where it is needed.
  *
- * @returns {Promise<{ id: string, passwordHash: string }|null>}
+ * @returns {Promise<{ id: string, passwordHash: string, mustChangePassword: boolean }|null>}
  */
 async function verifyLookup(loginId) {
   const { rows } = await query(
-    'SELECT id, password_hash AS "passwordHash" FROM users WHERE login_id = $1', [loginId]
+    `SELECT id, password_hash AS "passwordHash",
+            must_change_password AS "mustChangePassword"
+       FROM users WHERE login_id = $1`,
+    [loginId]
   );
   return rows[0] || null;
 }
@@ -131,6 +134,57 @@ async function updateProfile(id, patch) {
   const { rows } = await query(
     `UPDATE users SET ${sets.join(', ')} WHERE id = $1 RETURNING ${PUBLIC_COLUMNS}`,
     params
+  );
+  return rows[0] || null;
+}
+
+/**
+ * Replace an account's password on an administrator's behalf.
+ *
+ * `must_change_password` is set in the same statement, so there is no window in
+ * which the administrator's chosen password works as an ordinary credential.
+ * Until the user picks their own, their session can reach only the set-password
+ * and logout routes — which is what stops a password reset from doubling as a
+ * way to read that user's DependencyTrack connection and reports.
+ *
+ * Revoking the existing session is the caller's job (auth.revokeUserSessions),
+ * because it must also evict the in-process token cache.
+ *
+ * @returns {Promise<object|null>} null when no such account, so the caller 404s
+ */
+async function adminResetPassword(id, passwordHash, { loginIdAttempted = null } = {}) {
+  // The audit row is written in the SAME transaction as the password change,
+  // not after it. Writing it afterwards meant a failure there left the password
+  // already replaced while the caller was told the reset had failed — the
+  // administrator would retry against a credential that had silently changed.
+  // Either both happen or neither does.
+  return tx(async (client) => {
+    const { rows } = await client.query(
+      `UPDATE users SET password_hash = $2, must_change_password = TRUE
+        WHERE id = $1 AND id <> $3
+        RETURNING ${PUBLIC_COLUMNS}`,
+      [id, passwordHash, ADMIN_PRINCIPAL_ID]
+    );
+    if (!rows[0]) return null;
+    await client.query(
+      `INSERT INTO login_audit (user_id, login_id_attempted, event)
+       VALUES ($1, $2, 'admin_password_reset')`,
+      [id, loginIdAttempted]
+    );
+    return rows[0];
+  });
+}
+
+/**
+ * Store a password the user chose themselves and clear the forced-change flag.
+ * Separate from updateProfile so the flag can only ever be cleared by this one
+ * path — the user actually setting a password.
+ */
+async function completePasswordChange(id, passwordHash) {
+  const { rows } = await query(
+    `UPDATE users SET password_hash = $2, must_change_password = FALSE
+      WHERE id = $1 RETURNING ${PUBLIC_COLUMNS}`,
+    [id, passwordHash]
   );
   return rows[0] || null;
 }
@@ -230,7 +284,13 @@ async function listWithStats({ limit = 500 } = {}) {
             COALESCE(r.reports, 0)::int            AS "reportCount",
             COALESCE(r.bytes, 0)::bigint           AS "storageBytes",
             COALESCE(c.is_configured, false)       AS "dtConfigured",
-            COALESCE(sc.enabled, false)            AS "scheduleEnabled"
+            COALESCE(sc.enabled, false)            AS "scheduleEnabled",
+            -- The number actually enforced, and whether it was chosen for this
+            -- account or inherited. The screen shows both: a limit with no
+            -- indication of where it came from cannot be acted on, because the
+            -- administrator cannot tell what changing the global default does.
+            COALESCE(st.max_reports, a.default_max_reports)::int AS "maxReports",
+            (st.max_reports IS NOT NULL)           AS "maxReportsOverridden"
        FROM (
          SELECT id, login_id, email, first_name, last_name, created_at, last_login_at
            FROM users WHERE id <> $2 ORDER BY created_at LIMIT $1
@@ -247,6 +307,11 @@ async function listWithStats({ limit = 500 } = {}) {
        ) r ON true
        LEFT JOIN dt_connections c ON c.user_id = u.id
        LEFT JOIN schedules sc      ON sc.user_id = u.id
+       LEFT JOIN user_settings st  ON st.user_id = u.id
+       -- One row by construction (singleton primary key), so this is a constant
+       -- the planner materialises once, not a join that grows the result.
+       CROSS JOIN app_settings a
+      WHERE a.id = TRUE
       ORDER BY u.created_at`,
     [limit, ADMIN_PRINCIPAL_ID]
   );
@@ -282,7 +347,9 @@ async function detailForAdmin(loginId) {
             (c.api_key_ciphertext IS NOT NULL) AS "dtHasApiKey",
             c.updated_at AS "dtUpdatedAt",
 
-            st.max_reports AS "maxReports",
+            COALESCE(st.max_reports, aps.default_max_reports)::int AS "maxReports",
+            (st.max_reports IS NOT NULL) AS "maxReportsOverridden",
+            aps.default_max_reports::int AS "defaultMaxReports",
 
             m.enabled AS "mailEnabled", m.smtp_host AS "mailHost",
             m.smtp_port AS "mailPort", m.from_addr AS "mailFrom",
@@ -321,7 +388,9 @@ async function detailForAdmin(loginId) {
        LEFT JOIN user_settings st ON st.user_id = u.id
        LEFT JOIN mail_settings m  ON m.user_id  = u.id
        LEFT JOIN schedules sc     ON sc.user_id = u.id
-      WHERE u.login_id = $1 AND u.id <> $2`,
+       -- Singleton, so this stays a constant rather than multiplying rows.
+       CROSS JOIN app_settings aps
+      WHERE u.login_id = $1 AND u.id <> $2 AND aps.id = TRUE`,
     [loginId, ADMIN_PRINCIPAL_ID]
   );
   return rows[0] || null;
@@ -329,6 +398,7 @@ async function detailForAdmin(loginId) {
 
 module.exports = {
   create, findById, findByLoginId, verifyLookup, updateProfile,
+  adminResetPassword, completePasswordChange,
   touchLastLogin, deleteById, isLoginIdAvailable, isEmailAvailable,
   findTakenIdentifiers, count,
   listWithStats, detailForAdmin, PUBLIC_COLUMNS, ADMIN_PRINCIPAL_ID,

@@ -14,6 +14,9 @@ const { query } = require('../db/pool');
 
 const EVENTS = new Set([
   'register', 'login', 'logout', 'failed', 'force_disconnect', 'delete', 'lockout',
+  // An administrator set somebody else's password. The most privileged thing
+  // the administration screen can do, so it is never silent.
+  'admin_password_reset',
 ]);
 
 /**

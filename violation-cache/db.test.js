@@ -335,8 +335,17 @@ describe('schema and data access', { skip: !ENABLED && 'TEST_DATABASE_URL not se
     );
     assert.equal(cfg.rows[0].c, false, 'a new account starts unconfigured, so it sees mock data');
 
+    // A new account inherits the administrator's default rather than storing a
+    // copy of it. A stored 10 could not be told apart from a deliberate 10, so
+    // raising the default would skip everybody who happened to sit on the old
+    // one (migration 005).
     const st = await pool.query('SELECT max_reports AS m FROM user_settings WHERE user_id = $1', [u.id]);
-    assert.equal(st.rows[0].m, 10);
+    assert.equal(st.rows[0].m, null, 'the seeded row must inherit, not pin');
+    const eff = await pool.query(
+      `SELECT COALESCE(s.max_reports, a.default_max_reports) AS m
+         FROM user_settings s CROSS JOIN app_settings a
+        WHERE s.user_id = $1 AND a.id = TRUE`, [u.id]);
+    assert.equal(eff.rows[0].m, 10, 'and resolve to the global default');
   });
 
   test('duplicate login ID is rejected with a field-aware error', async () => {
@@ -879,7 +888,7 @@ describe('admin credential file', { skip: !ENABLED && 'TEST_DATABASE_URL not set
 // keyed by connection fingerprint, and single-claim scheduling.
 
 describe('multi-tenant data access', { skip: !ENABLED && 'TEST_DATABASE_URL not set' }, () => {
-  let pool, users, dtCrypto, dtConnections, userSettings, mailSettings,
+  let pool, users, dtCrypto, dtConnections, userSettings, appSettings, mailSettings,
       schedulesDb, reportsDb, caches;
   let alice, bob;
 
@@ -906,6 +915,7 @@ describe('multi-tenant data access', { skip: !ENABLED && 'TEST_DATABASE_URL not 
     dtCrypto      = require('./lib/crypto');
     dtConnections = require('./lib/dt-connections');
     userSettings  = require('./lib/user-settings');
+    appSettings   = require('./lib/app-settings');
     mailSettings  = require('./lib/mail-settings');
     schedulesDb   = require('./lib/schedules');
     reportsDb     = require('./lib/reports-db');
@@ -1007,12 +1017,61 @@ describe('multi-tenant data access', { skip: !ENABLED && 'TEST_DATABASE_URL not 
     assert.equal(second.ran, false, 'a second boot must not re-seed anyone');
   });
 
-  // ── user_settings ──────────────────────────────────────────────────────
-  test('the report ceiling is per user', async () => {
-    await userSettings.setMaxReports(alice.id, 3);
-    assert.equal(await userSettings.getMaxReports(alice.id), 3);
-    assert.equal(await userSettings.getMaxReports(bob.id), userSettings.DEFAULT_MAX_REPORTS,
-      "changing one user's limit must not touch anybody else's");
+  // ── user_settings / app_settings ───────────────────────────────────────
+  test('the report ceiling is still enforced per user', async () => {
+    await userSettings.setMaxReportsOverride(alice.id, 3);
+    try {
+      assert.equal(await userSettings.getMaxReports(alice.id), 3);
+      assert.equal(await userSettings.getMaxReports(bob.id), 10,
+        "overriding one account's limit must not touch anybody else's");
+    } finally {
+      await userSettings.clearMaxReportsOverride(alice.id);
+    }
+  });
+
+  test('the global default reaches every account that has no override', async () => {
+    await userSettings.setMaxReportsOverride(alice.id, 3);
+    try {
+      await appSettings.setDefaultMaxReports(77);
+      assert.equal(await userSettings.getMaxReports(bob.id), 77, 'bob follows the default');
+      assert.equal(await userSettings.getMaxReports(alice.id), 3, 'alice is pinned and does not');
+
+      // Clearing hands the account back to the default, whatever it is now.
+      const cleared = await userSettings.clearMaxReportsOverride(alice.id);
+      assert.equal(cleared.maxReports, 77);
+      assert.equal(cleared.maxReportsOverride, null);
+    } finally {
+      await appSettings.setDefaultMaxReports(10);
+      await userSettings.clearMaxReportsOverride(alice.id);
+    }
+  });
+
+  test('an override is distinguishable from an inherited value of the same number', async () => {
+    // The whole reason the column is nullable. Without this distinction the
+    // administration screen cannot say what changing the default would do.
+    await appSettings.setDefaultMaxReports(10);
+    await userSettings.setMaxReportsOverride(alice.id, 10);
+    try {
+      const pinned    = await userSettings.get(alice.id);
+      const inherited = await userSettings.get(bob.id);
+      assert.equal(pinned.maxReports, inherited.maxReports, 'the same effective number');
+      assert.equal(pinned.maxReportsOverride, 10, 'but one is pinned');
+      assert.equal(inherited.maxReportsOverride, null, 'and the other is not');
+
+      await appSettings.setDefaultMaxReports(30);
+      assert.equal(await userSettings.getMaxReports(alice.id), 10, 'the pin holds');
+      assert.equal(await userSettings.getMaxReports(bob.id), 30, 'the inherited one moves');
+    } finally {
+      await appSettings.setDefaultMaxReports(10);
+      await userSettings.clearMaxReportsOverride(alice.id);
+    }
+  });
+
+  test('the singleton settings row cannot be duplicated', async () => {
+    await assert.rejects(
+      () => pool.query('INSERT INTO app_settings (id, default_max_reports) VALUES (TRUE, 5)'),
+      (e) => e.code === '23505', 'a second global settings row must collide'
+    );
   });
 
   // ── mail_settings ──────────────────────────────────────────────────────
@@ -1082,7 +1141,7 @@ describe('multi-tenant data access', { skip: !ENABLED && 'TEST_DATABASE_URL not 
     }
   });
 
-  test('the active count and the trim are both scoped to one user', async () => {
+  test('the active count is scoped to one user', async () => {
     const mine = [];
     for (let i = 0; i < 3; i++) {
       const r = await reportsDb.create(alice.id, { riskTypes: ['security'], projectCount: 1 });
@@ -1095,11 +1154,12 @@ describe('multi-tenant data access', { skip: !ENABLED && 'TEST_DATABASE_URL not 
       assert.equal((await reportsDb.activeCount(alice.id)).completed, 3);
       assert.equal((await reportsDb.activeCount(bob.id)).completed, 1);
 
-      const removed = await reportsDb.trimToLimit(alice.id, 1);
-      assert.equal(removed, 2);
-      assert.equal((await reportsDb.activeCount(alice.id)).completed, 1);
-      assert.equal((await reportsDb.activeCount(bob.id)).completed, 1,
-        "trimming Alice's reports must not touch Bob's");
+      // trimToLimit() was removed with migration 005: the limit is now an
+      // administrator's, and one global change must not delete reports across
+      // many accounts. Being over the limit blocks new reports; it never
+      // deletes existing ones.
+      assert.equal(reportsDb.trimToLimit, undefined,
+        'a report-deleting helper must not sit unwired waiting to be re-called');
     } finally {
       for (const id of mine) await reportsDb.deleteForUser(alice.id, id);
       await reportsDb.deleteForUser(bob.id, theirs.id);
@@ -1769,7 +1829,7 @@ describe('taken-identifier detection', { skip: !ENABLED && 'TEST_DATABASE_URL no
 
 // ── The administrator's reserved data identity (migration 004) ──────────────
 describe('administrator principal', { skip: !ENABLED && 'TEST_DATABASE_URL not set' }, () => {
-  let pool, users, dtCrypto, dtConnections, userSettings, reportsDb;
+  let pool, users, dtCrypto, dtConnections, userSettings, appSettings, reportsDb;
 
   before(async () => {
     pool = require('./db/pool');
@@ -1788,6 +1848,7 @@ describe('administrator principal', { skip: !ENABLED && 'TEST_DATABASE_URL not s
     dtCrypto      = require('./lib/crypto');
     dtConnections = require('./lib/dt-connections');
     userSettings  = require('./lib/user-settings');
+    appSettings   = require('./lib/app-settings');
     reportsDb     = require('./lib/reports-db');
     dtConnections.configure(dtCrypto.parseEncryptionKey(process.env.SECRET_ENCRYPTION_KEY));
   });
@@ -1832,9 +1893,18 @@ describe('administrator principal', { skip: !ENABLED && 'TEST_DATABASE_URL not s
     assert.equal(resolved.apiKey, 'admin_own_secret_key');
   });
 
-  test('the administrator has their own settings and quota', async () => {
-    await userSettings.setMaxReports(ADMIN(), 4);
-    assert.equal(await userSettings.getMaxReports(ADMIN()), 4);
+  test('the administrator takes their quota from the global default', async () => {
+    // They are not listed in the administration screen, so no override can ever
+    // be set for them through the UI. Their limit is whatever everyone else's
+    // default is (CLAUDE.md §7.4).
+    const before = await userSettings.get(ADMIN());
+    assert.equal(before.maxReportsOverride, null, 'the reserved row inherits');
+    try {
+      await appSettings.setDefaultMaxReports(42);
+      assert.equal(await userSettings.getMaxReports(ADMIN()), 42);
+    } finally {
+      await appSettings.setDefaultMaxReports(10);
+    }
   });
 
   test('the administrator owns their own reports, scoped like anyone else', async () => {

@@ -9,13 +9,19 @@
 //
 // Endpoints:
 //   POST   /auth/register  /auth/login  /auth/logout  /auth/check-availability
+//   POST   /auth/set-password                   — finish an administrator reset
 //   GET    /auth/me
 //   DELETE /auth/account
 //   GET    /profile                             — signed-in user's details
 //   PUT    /profile                             — update name / password
 //   GET    /admin/users                         — accounts and their counts (administrator)
 //   GET    /admin/overview                      — service-wide totals (administrator)
-//   GET    /admin/users/:loginId                — one account's detail (administrator)
+//   GET    /admin/users/:loginId                — one account's detail
+//   GET    /admin/storage                       — disk and database usage
+//   GET    /admin/settings                      — service-wide settings
+//   PUT    /admin/settings                      — default report limit
+//   PUT    /admin/users/:loginId/settings       — one account's report limit
+//   POST   /admin/users/:loginId/password       — reset one account's password (administrator)
 //   GET    /violation-cache/status              — build state for this user's connection
 //   GET    /violation-cache/data                — the cached map (gzipped)
 //   POST   /violation-cache/refresh             — trigger a background rebuild
@@ -57,6 +63,7 @@ const schedulesDb   = require('./lib/schedules');
 const auth          = require('./lib/auth');
 const admin         = require('./lib/admin');
 const dtConnections = require('./lib/dt-connections');
+const disk          = require('./lib/disk');
 const mailSettings  = require('./lib/mail-settings');
 
 const routeModules = [
@@ -83,6 +90,21 @@ function isPublic(path) {
   return PUBLIC_PATHS.has(path);
 }
 
+// ── Forced password change ────────────────────────────────────────────────────
+// S30: after an administrator resets a password, the account is authenticated
+// but may reach only these two routes until the user chooses their own. That is
+// what stops the password the administrator typed from being a usable
+// credential for that user's DependencyTrack connection, settings and reports —
+// it can be spent on exactly one thing, replacing itself.
+//
+// Enforced here rather than per route for the same reason authentication is:
+// a route added later is covered by default instead of by remembering.
+const PASSWORD_CHANGE_ALLOWED = new Set([
+  '/auth/set-password',  // the only way out
+  '/auth/logout',        // walking away must always be possible
+  '/auth/me',            // the login page asks who it is talking to
+]);
+
 // ── Boot step 1: read and validate configuration ──────────────────────────────
 // Done before anything else so a misconfigured container fails immediately with
 // an actionable message instead of half-starting.
@@ -99,6 +121,9 @@ try {
 configureLog(cfg.logFormat);
 
 cache.configure({ cacheTtlMs: cfg.cacheTtlMs, jobStallMs: cfg.jobStallMs });
+// The directory this container already mounts. It shares a filesystem with the
+// database's bind mount, so its headroom is the database's headroom (lib/disk.js).
+disk.configure({ dataPath: cfg.cacheDir });
 reports.configure({
   reportConcurrency:    cfg.reportConcurrency,
   violationConcurrency: cfg.violationConcurrency,
@@ -145,6 +170,17 @@ const server = http.createServer(async (req, res) => {
         return;
       }
       ctx.principal = principal;
+
+      // 403 rather than 401: the session is perfectly valid, it is simply not
+      // permitted to do anything else yet. A 401 would send the frontend to a
+      // fresh sign-in, which would land right back here.
+      if (principal.mustChangePassword && !PASSWORD_CHANGE_ALLOWED.has(parsedPath)) {
+        jsonReply(res, 403, {
+          error: 'Your password was reset by an administrator. Choose a new one to continue.',
+          code:  'PASSWORD_CHANGE_REQUIRED',
+        });
+        return;
+      }
     }
 
     for (const mod of routeModules) {
