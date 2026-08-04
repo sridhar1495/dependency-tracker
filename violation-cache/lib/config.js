@@ -22,6 +22,7 @@ const DEFAULTS = {
   CACHE_TTL_HOURS:           '24',
   REPORT_CONCURRENCY:        '5',
   VIOLATION_CONCURRENCY:     '3',
+  VIOLATION_JOB_STALL_MINUTES: '15',
   POSTGRES_HOST:             'dt-postgres',
   POSTGRES_PORT:             '5432',
   POSTGRES_USER:             'dtdash',
@@ -103,6 +104,12 @@ function parseConfig(env) {
     cacheTtlMs:           positiveInt(env, 'CACHE_TTL_HOURS', { min: 1, max: 8760 }) * 3_600_000,
     reportConcurrency:    positiveInt(env, 'REPORT_CONCURRENCY', { min: 1, max: 50 }),
     violationConcurrency: positiveInt(env, 'VIOLATION_CONCURRENCY', { min: 1, max: 50 }),
+
+    // How long a violation-cache build may go WITHOUT advancing a page before it
+    // is presumed wedged. This is not a cap on how long a build may take: a
+    // large portfolio that keeps making progress runs to completion however long
+    // that needs (CLAUDE.md §6.3).
+    jobStallMs:           positiveInt(env, 'VIOLATION_JOB_STALL_MINUTES', { min: 1, max: 1440 }) * 60_000,
 
     // S1: session lifetimes, enforced from phase 2 onward.
     session: {

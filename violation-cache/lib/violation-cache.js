@@ -16,7 +16,10 @@
 // page counts, phase 2 fetches the remainder (CLAUDE.md §6.3).
 
 const { log } = require('./log');
-const { dtGetWithRetry } = require('./dt-fetch');
+// Held as a module reference rather than destructured so the offline tests can
+// substitute it (CLAUDE.md §10.1). It is still the one and only entry point to
+// the DT API (§6.2).
+const dtFetch = require('./dt-fetch');
 const caches = require('./caches');
 
 const PAGE_SIZE  = 100;
@@ -25,7 +28,15 @@ const STATES     = ['FAIL', 'WARN', 'INFO'];
 const CAT        = { OPERATIONAL: 'ops', LICENSE: 'lic', SECURITY: 'secpolicy' };
 const SEV        = { FAIL: 'fail', WARN: 'warn', INFO: 'info' };
 
-const JOB_TIMEOUT_MS = 30 * 60_000;   // 30-minute watchdog, as before
+// Q15: the watchdog measures SILENCE, not elapsed time. It used to be a flat
+// 30-minute deadline, which killed a healthy crawl purely for having a lot of
+// data to get through and threw away every page it had already fetched. How
+// long a portfolio takes to walk is a property of the portfolio; how long it
+// can sit without advancing a single page is a property of it being broken.
+// The window is configurable because "broken" depends on how slow the upstream
+// DependencyTrack is allowed to be.
+const DEFAULT_STALL_MS     = 15 * 60_000;
+const HEARTBEAT_MS         = 30_000;  // how often a progressing build touches the row
 const PROGRESS_INTERVAL_MS = 1000;    // P14: publish progress at most once a second
 
 // Fingerprints being built by THIS process. The advisory lock is the real guard
@@ -37,6 +48,11 @@ function configure(cfg) { _cfg = cfg; }
 function cfg() {
   if (!_cfg) throw new Error('violation-cache has not been configured — call configure() during boot');
   return _cfg;
+}
+
+/** The stall window, falling back to the default when not configured. */
+function stallMs() {
+  return (_cfg && _cfg.jobStallMs) || DEFAULT_STALL_MS;
 }
 
 /** Is this process currently building for that connection? */
@@ -51,11 +67,15 @@ async function getStatus(conn) {
   if (!conn || !conn.isConfigured || !conn.fingerprint) return { status: 'no-key' };
 
   const meta = await caches.getMeta(conn.fingerprint);
-  const status = caches.deriveStatus(meta);
+  const status = caches.deriveStatus(meta, stallMs());
 
   if (status === 'building') {
     return { status: 'building', progress: (meta && meta.progress) || { pagesDone: 0, pagesTotal: 0 } };
   }
+  // A build that stopped reporting is reported as its own state so the caller
+  // can restart it, rather than being hidden behind 'building' — which is what
+  // made a stranded row unrecoverable.
+  if (status === 'stalled') return { status: 'stalled' };
   if (status === 'none') return { status: 'none' };
   if (status === 'failed') return { status: 'error', error: meta.error };
 
@@ -109,14 +129,39 @@ async function runJob(conn) {
     try { await caches.setProgress(fingerprint, progress); } catch (_) { /* non-fatal */ }
   };
 
-  let timedOut = false;
-  const watchdog = setTimeout(() => {
-    timedOut = true;
-    log('error', 'Violation cache watchdog fired', {
-      fingerprint: fingerprint.slice(0, 12),
-      progress: `${progress.pagesDone}/${progress.pagesTotal}`,
-    });
-  }, JOB_TIMEOUT_MS);
+  // ── Stall watchdog and heartbeat ──────────────────────────────────────
+  // One timer does both jobs, because they are the same observation. If the
+  // page count has moved since the last beat the build is alive, so touch the
+  // row; if it has not moved for the whole stall window the build is wedged, so
+  // stop it. The row is touched ONLY when progress advanced — a heartbeat that
+  // ticked regardless would keep a hung build looking healthy to every other
+  // process, which is precisely the failure being fixed.
+  const limitMs = stallMs();
+  // The beat has to be finer than the window it is measuring, or a short window
+  // is decided by one or two samples. Half the window, capped at HEARTBEAT_MS so
+  // a long window still refreshes the row often enough for other processes.
+  const beatMs  = Math.max(1, Math.min(HEARTBEAT_MS, Math.floor(limitMs / 2)));
+  let timedOut     = false;
+  let lastSeenPages = -1;
+  let lastMovedAt   = Date.now();
+
+  const watchdog = setInterval(() => {
+    if (progress.pagesDone !== lastSeenPages) {
+      lastSeenPages = progress.pagesDone;
+      lastMovedAt   = Date.now();
+      caches.touchBuild(fingerprint).catch(() => { /* the next beat retries */ });
+      return;
+    }
+    if ((Date.now() - lastMovedAt) > limitMs) {
+      timedOut = true;
+      log('error', 'Violation cache build stalled — no progress within the stall window', {
+        fingerprint: fingerprint.slice(0, 12),
+        progress: `${progress.pagesDone}/${progress.pagesTotal}`,
+        stallMinutes: Math.round(limitMs / 60_000),
+      });
+    }
+  }, beatMs);
+  if (watchdog.unref) watchdog.unref();
 
   const map    = {};
   const emptyV = () => ({ fail: 0, warn: 0, info: 0, unassigned: 0 });
@@ -135,7 +180,7 @@ async function runJob(conn) {
     const phase1 = await Promise.all(pipelines.map(async ({ rt, st }) => {
       const baseUrl = `/api/v1/violation?riskType=${rt}&violationState=${st}&pageSize=${PAGE_SIZE}`;
       try {
-        const r1 = await dtGetWithRetry(`${baseUrl}&pageNumber=1`, apiUrl, apiKey);
+        const r1 = await dtFetch.dtGetWithRetry(`${baseUrl}&pageNumber=1`, apiUrl, apiKey);
         const totalCount = parseInt(r1.headers['x-total-count'] || '0', 10);
         const totalPages = totalCount > 0 ? Math.ceil(totalCount / PAGE_SIZE) : 1;
         return { rt, st, r1, totalPages, baseUrl, failed: false };
@@ -163,8 +208,8 @@ async function runJob(conn) {
         const ck = CAT[rt], sk = SEV[st];
         try {
           for (let page = 2; page <= totalPages; page++) {
-            if (timedOut) throw new Error('Job timed out');
-            const r = await dtGetWithRetry(`${baseUrl}&pageNumber=${page}`, apiUrl, apiKey);
+            if (timedOut) throw new Error('Build stalled');
+            const r = await dtFetch.dtGetWithRetry(`${baseUrl}&pageNumber=${page}`, apiUrl, apiKey);
             const items = Array.isArray(r.json) ? r.json : (r.json.violations || []);
             apply(items, ck, sk);
             progress.pagesDone++;
@@ -177,8 +222,10 @@ async function runJob(conn) {
       }));
 
     if (timedOut) {
-      await caches.markFailed(fingerprint, `Timed out after ${JOB_TIMEOUT_MS / 60_000} minutes`);
-      return { started: true, completed: false };
+      await caches.markFailed(fingerprint,
+        `Stopped: no progress for ${Math.round(limitMs / 60_000)} minutes ` +
+        `(reached page ${progress.pagesDone} of ${progress.pagesTotal}).`);
+      return { started: true, completed: false, stalled: true };
     }
 
     await caches.storeResult(fingerprint, map, {
@@ -195,7 +242,7 @@ async function runJob(conn) {
     await caches.markFailed(fingerprint, err.message).catch(() => {});
     return { started: true, completed: false, error: err.message };
   } finally {
-    clearTimeout(watchdog);
+    clearInterval(watchdog);
     _building.delete(fingerprint);
     await lock.release();
   }
@@ -203,5 +250,9 @@ async function runJob(conn) {
 
 module.exports = {
   configure, runJob, getStatus, isBuilding,
-  PAGE_SIZE, RISK_TYPES, STATES, CAT, SEV, JOB_TIMEOUT_MS,
+  // Exposed so a caller reading a row directly applies the same stall window
+  // this module builds with, rather than a second copy of the default.
+  stallWindowMs: stallMs,
+  PAGE_SIZE, RISK_TYPES, STATES, CAT, SEV,
+  DEFAULT_STALL_MS, HEARTBEAT_MS,
 };

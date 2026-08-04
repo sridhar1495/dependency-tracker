@@ -167,6 +167,7 @@ docker compose --env-file .env up -d
 | `DT_FRONTEND_URL` | _(blank)_ | **Upgrade only**, as above |
 | `SECRET_ENCRYPTION_KEY` | _(generated)_ | AES-256-GCM key protecting stored DependencyTrack API keys and SMTP passwords. **Required.** Back it up: losing it makes every stored secret unreadable and users must re-enter their API key |
 | `VIOLATION_CACHE_TTL_HOURS` | `24` | Hours a built violation map stays valid. The cache is shared by accounts that use the same DependencyTrack connection, so this is not multiplied by the number of users |
+| `VIOLATION_JOB_STALL_MINUTES` | `15` | How long a refetch may go **without finishing a page** before it is presumed wedged and stopped. This is not a limit on total run time — a large portfolio runs as long as it needs. Raise it if a single page can legitimately take longer than this to come back |
 | `POSTGRES_USER` | `dtdash` | Database role |
 | `POSTGRES_PASSWORD` | _(generated)_ | Database password. `install.sh` generates one when absent. **Changing it after first start will break the connection** — PostgreSQL only reads it when initialising the cluster |
 | `POSTGRES_DB` | `dtdash` | Database name |

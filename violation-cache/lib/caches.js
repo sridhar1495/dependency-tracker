@@ -31,11 +31,17 @@ function lockKeyFor(fingerprint) {
   return { hi, lo };
 }
 
+// How long a build may go without publishing progress before it is presumed
+// dead. Overridden from configuration at boot; the constant is the fallback for
+// callers that read a row without going through the service (tests, tooling).
+const DEFAULT_STALL_MS = 15 * 60_000;
+
 // Metadata only — payload_gzip is bytea and is never selected alongside it.
+// updated_at comes along because it is the build heartbeat (see deriveStatus).
 const META_COLUMNS = `
   fingerprint, status, project_count AS "projectCount",
   failed_pipelines AS "failedPipelines", generated_at AS "generatedAt",
-  expires_at AS "expiresAt", progress, error
+  expires_at AS "expiresAt", progress, error, updated_at AS "updatedAt"
 `;
 
 /** Cache metadata for a connection, without the payload. */
@@ -66,11 +72,34 @@ async function getPayload(fingerprint) {
 
 /**
  * Derive the status the dashboard should act on.
- * Mirrors the previous file-based semantics: none / building / ready / stale.
+ * none / building / stalled / ready / stale / failed.
+ *
+ * Q14: 'stalled' exists because 'building' is otherwise a one-way door. The row
+ * is only cleared by storeResult or markFailed, so a builder that dies without
+ * running its finally block — a killed container, an OOM, a severed network —
+ * leaves the row saying "building" forever. Every escape route is then shut:
+ * the dashboard adopts the phantom build and polls it indefinitely, and
+ * POST /refresh answers 409 because a build is supposedly already running. The
+ * only recovery was deleting the row by hand.
+ *
+ * updated_at is the heartbeat. The build touches it while, and only while, it
+ * is making progress (see violation-cache.js), so a row that has gone quiet
+ * longer than the stall window is presumed dead and becomes eligible for
+ * rebuilding. A false positive is harmless: the advisory lock and the
+ * in-process guard both still refuse a second concurrent crawl.
+ *
+ * @param {object|null} row       metadata from getMeta()
+ * @param {number} [stallMs]      quiet period after which a build is presumed dead
  */
-function deriveStatus(row) {
+function deriveStatus(row, stallMs = DEFAULT_STALL_MS) {
   if (!row) return 'none';
-  if (row.status === 'building') return 'building';
+  if (row.status === 'building') {
+    // A row with no heartbeat at all (an older row, or a test fixture) is taken
+    // at its word rather than declared dead.
+    if (!row.updatedAt) return 'building';
+    const quietMs = Date.now() - new Date(row.updatedAt).getTime();
+    return quietMs > stallMs ? 'stalled' : 'building';
+  }
   if (row.status === 'failed') return 'failed';
   if (!row.generatedAt || !row.expiresAt) return 'none';
   return new Date(row.expiresAt).getTime() < Date.now() ? 'stale' : 'ready';
@@ -128,6 +157,50 @@ async function setProgress(fingerprint, progress) {
   );
 }
 
+/**
+ * Beat the heart of a running build.
+ *
+ * Called only when the build has actually advanced, which is what makes the
+ * absence of a beat meaningful — a hung crawl stops touching the row and
+ * deriveStatus can then see it is dead. The status guard means a heartbeat that
+ * arrives late, after the build already finished or failed, cannot resurrect
+ * the row into 'building'.
+ *
+ * @returns {Promise<boolean>} whether a building row was still there to touch
+ */
+async function touchBuild(fingerprint) {
+  const { rowCount } = await query(
+    `UPDATE violation_caches SET updated_at = now()
+      WHERE fingerprint = $1 AND status = 'building'`,
+    [fingerprint]
+  );
+  return rowCount > 0;
+}
+
+/**
+ * Fail builds orphaned by a restart, mirroring reports-db.failOrphaned().
+ *
+ * Runs during boot, before the listener starts, so by construction no build of
+ * this process can be running yet: every row still marked 'building' belongs to
+ * a process that is gone. Marking them failed — rather than leaving them — is
+ * what lets the dashboard's existing recovery path start a fresh build on the
+ * next load instead of polling a corpse.
+ *
+ * Kicking those builds off here instead was rejected deliberately: it would
+ * crawl DependencyTrack once per stranded fingerprint at every start-up, with
+ * nobody necessarily signed in to want the result.
+ */
+async function failOrphanedBuilds() {
+  const { rowCount } = await query(
+    `UPDATE violation_caches
+        SET status = 'failed', progress = '{}'::jsonb,
+            error = 'The service restarted while this refetch was running.'
+      WHERE status = 'building'`
+  );
+  if (rowCount) log('info', 'Marked interrupted violation cache builds as failed', { count: rowCount });
+  return rowCount;
+}
+
 /** Store a finished map, gzipped, and set the TTL. */
 async function storeResult(fingerprint, map, { projectCount, failedPipelines, ttlMs }) {
   const payload = await gzip(Buffer.from(JSON.stringify(map), 'utf8'));
@@ -181,6 +254,7 @@ async function count() {
 
 module.exports = {
   getMeta, getPayload, getPayloadGzip, deriveStatus,
-  acquireBuildLock, markBuilding, setProgress, storeResult, markFailed,
-  sweepOrphaned, count, lockKeyFor,
+  acquireBuildLock, markBuilding, setProgress, touchBuild, storeResult, markFailed,
+  failOrphanedBuilds, sweepOrphaned, count, lockKeyFor,
+  DEFAULT_STALL_MS,
 };

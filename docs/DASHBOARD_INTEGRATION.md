@@ -225,6 +225,16 @@ docker exec dt-postgres psql -U dtdash -d dtdash -c 'DELETE FROM violation_cache
 ### TTL and rebuild
 
 - Default TTL: **24 hours** (configurable via `VIOLATION_CACHE_TTL_HOURS` in `.env`)
+- **There is no time limit on a refetch.** A large portfolio takes as long as it
+  takes. What is bounded is *silence*: if a build does not finish a single page
+  within `VIOLATION_JOB_STALL_MINUTES` (default 15) it is presumed wedged and
+  stopped, with an error naming how far it got. Raise that value if your
+  DependencyTrack can legitimately take longer than this to return one page.
+- **A refetch interrupted by a restart recovers by itself.** The service marks
+  builds orphaned by a restart as failed during boot, and a build that stops
+  reporting progress is treated the same way once the stall window passes. Either
+  way the next dashboard load starts a fresh crawl — there is nothing to clean up
+  by hand, and no need to delete rows from `violation_caches`.
 - **The ↻ Refetch Violations button is disabled while a build is running**, and
   not only for the person who started it. The cache is shared by connection
   fingerprint, so everyone pointing at the same DependencyTrack instance sees the

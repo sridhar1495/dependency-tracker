@@ -98,7 +98,7 @@ try {
 }
 configureLog(cfg.logFormat);
 
-cache.configure({ cacheTtlMs: cfg.cacheTtlMs });
+cache.configure({ cacheTtlMs: cfg.cacheTtlMs, jobStallMs: cfg.jobStallMs });
 reports.configure({
   reportConcurrency:    cfg.reportConcurrency,
   violationConcurrency: cfg.violationConcurrency,
@@ -217,7 +217,10 @@ async function boot() {
   if (seeded.ran) log('info', 'Legacy DT connection migrated', { accounts: seeded.seeded });
 
   // Step 5: recover from a restart, then start background timers.
+  // Both sweeps run before the listener starts, so nothing can be legitimately
+  // in flight: anything still marked running belongs to the process that died.
   await reportsDb.failOrphaned();
+  await caches.failOrphanedBuilds();
   await scheduler.start();
   housekeepingTimer = setInterval(() => { housekeeping(); }, HOUSEKEEPING_INTERVAL_MS);
   if (housekeepingTimer.unref) housekeepingTimer.unref();
@@ -237,6 +240,7 @@ async function boot() {
     cacheTtlHrs:          cfg.cacheTtlMs / 3_600_000,
     reportConcurrency:    cfg.reportConcurrency,
     violationConcurrency: cfg.violationConcurrency,
+    jobStallMinutes:      cfg.jobStallMs / 60_000,
     schedulerPollSeconds: scheduler.POLL_INTERVAL_MS / 1000,
     logFormat:            cfg.logFormat,
     // Connections are per-user now; there is no service-wide DT URL or key to

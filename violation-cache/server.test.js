@@ -1272,6 +1272,7 @@ describe('parseConfig — defaults', () => {
     assert.equal(c.reportConcurrency, 5);
     assert.equal(c.violationConcurrency, 3);
     assert.equal(c.cacheTtlMs, 24 * 3_600_000);
+    assert.equal(c.jobStallMs, 15 * 60_000);
     assert.equal(c.session.absoluteHours, 8);
     assert.equal(c.session.idleHours, 2);
   });
@@ -1311,6 +1312,7 @@ describe('parseConfig — overrides', () => {
       POSTGRES_HOST: 'db.internal', POSTGRES_PORT: '6543',
       POSTGRES_USER: 'app', POSTGRES_DB: 'appdb',
       CACHE_TTL_HOURS: '6', REPORT_CONCURRENCY: '9', VIOLATION_CONCURRENCY: '2',
+      VIOLATION_JOB_STALL_MINUTES: '90',
       SESSION_ABSOLUTE_HOURS: '12', SESSION_IDLE_HOURS: '3',
     });
     assert.equal(c.port, 4000);
@@ -1322,6 +1324,7 @@ describe('parseConfig — overrides', () => {
     assert.equal(c.cacheTtlMs, 6 * 3_600_000);
     assert.equal(c.reportConcurrency, 9);
     assert.equal(c.violationConcurrency, 2);
+    assert.equal(c.jobStallMs, 90 * 60_000);
     assert.equal(c.session.absoluteHours, 12);
     assert.equal(c.session.idleHours, 3);
   });
@@ -1422,6 +1425,23 @@ describe('parseConfig — fail-fast validation', () => {
       () => parseConfig({ ...baseEnv(), VIOLATION_CONCURRENCY: '-1' }),
       (e) => e.code === 'CONFIG_INVALID'
     );
+  });
+
+  test('a zero or negative stall window is rejected', () => {
+    // A zero window would declare every build dead the moment it started.
+    for (const bad of ['0', '-5', 'soon', '2.5']) {
+      assert.throws(
+        () => parseConfig({ ...baseEnv(), VIOLATION_JOB_STALL_MINUTES: bad }),
+        (e) => e.code === 'CONFIG_INVALID', `VIOLATION_JOB_STALL_MINUTES=${bad}`
+      );
+    }
+  });
+
+  test('the stall window may be raised well past the old 30-minute cap', () => {
+    // The whole point of the change: a slow upstream is a tuning problem, not a
+    // reason to abandon a crawl that is still making progress.
+    const c = parseConfig({ ...baseEnv(), VIOLATION_JOB_STALL_MINUTES: '720' });
+    assert.equal(c.jobStallMs, 720 * 60_000);
   });
 
   test('idle session lifetime may not exceed the absolute lifetime', () => {
@@ -2202,6 +2222,95 @@ describe('routes — the shared violation cache is keyed by connection', () => {
       assert.equal(started, false);
     } finally { restoreConn(); restoreCaches(); restoreCache(); }
   });
+
+  // Q14: a builder that dies without running its finally block leaves the row
+  // saying 'building'. Before the heartbeat, that shut every door — the refetch
+  // answered 409 for ever and the dashboard polled a build nobody was running.
+  const abandoned = () => ({
+    status: 'building',
+    updatedAt: new Date(Date.now() - (violationCacheMod.DEFAULT_STALL_MS + 60_000)),
+    progress: { pagesDone: 7, pagesTotal: 40 },
+  });
+  const beating = () => ({
+    status: 'building', updatedAt: new Date(),
+    progress: { pagesDone: 7, pagesTotal: 40 },
+  });
+
+  test('a refresh recovers a build abandoned by a dead process instead of 409ing', async () => {
+    let started = false;
+    const restoreConn = stub(dtConnectionsMod, { getResolved: async () => connFor('abc123abc123') });
+    const restoreCaches = stub(cachesMod, { getMeta: async () => abandoned() });
+    const restoreCache = stub(violationCacheMod, { runJob: async () => { started = true; return {}; } });
+    try {
+      const res = makeRes();
+      await routeCache.handle({
+        method: 'POST', url: '/violation-cache/refresh', path: '/violation-cache/refresh',
+        res, principal: asUser(USER_A),
+      });
+      assert.equal(res.statusCode, 202, 'the stranded row must not block a new build');
+      assert.equal(started, true);
+    } finally { restoreConn(); restoreCaches(); restoreCache(); }
+  });
+
+  test('status restarts an abandoned build and reports it as building', async () => {
+    let started = 0;
+    const restoreConn = stub(dtConnectionsMod, { getResolved: async () => connFor('abc123abc123') });
+    const restoreCaches = stub(cachesMod, { getMeta: async () => abandoned() });
+    const restoreCache = stub(violationCacheMod, { runJob: async () => { started++; return {}; } });
+    try {
+      const res = makeRes();
+      await routeCache.handle({
+        method: 'GET', url: '/violation-cache/status', path: '/violation-cache/status',
+        res, principal: asUser(USER_A),
+      });
+      assert.equal(res.statusCode, 200);
+      assert.equal(res.json.status, 'building',
+        'a build has just been started, so "building" is the truthful answer');
+      assert.equal(started, 1);
+      assert.equal(res.json.progress.pagesDone, 0,
+        'the dead build\'s page count must not be presented as the new one\'s');
+    } finally { restoreConn(); restoreCaches(); restoreCache(); }
+  });
+
+  test('status leaves a build that is still beating alone', async () => {
+    let started = 0;
+    const restoreConn = stub(dtConnectionsMod, { getResolved: async () => connFor('abc123abc123') });
+    const restoreCaches = stub(cachesMod, { getMeta: async () => beating() });
+    const restoreCache = stub(violationCacheMod, { runJob: async () => { started++; return {}; } });
+    try {
+      const res = makeRes();
+      await routeCache.handle({
+        method: 'GET', url: '/violation-cache/status', path: '/violation-cache/status',
+        res, principal: asUser(USER_A),
+      });
+      assert.equal(res.json.status, 'building');
+      assert.equal(started, 0, 'a live build must never be duplicated');
+      assert.equal(res.json.progress.pagesDone, 7, 'the live build\'s real progress is shown');
+    } finally { restoreConn(); restoreCaches(); restoreCache(); }
+  });
+
+  test('the recovery path is shared: every user on the connection sees it restart once', async () => {
+    // The whole point of the shared cache. Two dashboards hitting a stranded row
+    // must not produce two crawls — the in-process guard and the advisory lock
+    // are what stop that, and runJob is where they live.
+    const restoreConn = stub(dtConnectionsMod, { getResolved: async () => connFor('abc123abc123') });
+    const restoreCaches = stub(cachesMod, { getMeta: async () => abandoned() });
+    let calls = 0;
+    const restoreCache = stub(violationCacheMod, {
+      runJob: async () => { calls++; return { started: calls === 1, reason: 'already building' }; },
+    });
+    try {
+      for (const user of [USER_A, USER_B]) {
+        const res = makeRes();
+        await routeCache.handle({
+          method: 'GET', url: '/violation-cache/status', path: '/violation-cache/status',
+          res, principal: asUser(user),
+        });
+        assert.equal(res.json.status, 'building');
+      }
+      assert.equal(calls, 2, 'both asked; runJob itself elects the single builder');
+    } finally { restoreConn(); restoreCaches(); restoreCache(); }
+  });
 });
 
 describe('routes — arming a schedule', () => {
@@ -2283,6 +2392,52 @@ describe('caches — status derivation and lock keys', () => {
     assert.equal(cachesMod.deriveStatus({ status: 'failed' }), 'failed');
   });
 
+  // Q14: 'building' used to be a one-way door — a builder that died left the row
+  // saying building forever, which made both the automatic rebuild and the
+  // manual refetch impossible. updated_at is the heartbeat that reopens it.
+  test('a build still beating is "building"', () => {
+    assert.equal(
+      cachesMod.deriveStatus({ status: 'building', updatedAt: new Date(Date.now() - 5_000) }, 60_000),
+      'building');
+  });
+
+  test('a build that stopped beating is "stalled"', () => {
+    assert.equal(
+      cachesMod.deriveStatus({ status: 'building', updatedAt: new Date(Date.now() - 120_000) }, 60_000),
+      'stalled');
+  });
+
+  test('the stall window is exclusive at its own boundary', () => {
+    const at = (ms) => cachesMod.deriveStatus(
+      { status: 'building', updatedAt: new Date(Date.now() - ms) }, 60_000);
+    assert.equal(at(59_000), 'building');
+    assert.equal(at(61_000), 'stalled');
+  });
+
+  test('a row with no heartbeat at all is taken at its word, not declared dead', () => {
+    // Belt and braces for a row written before updated_at was selected: guessing
+    // "dead" there would restart a build that is genuinely running.
+    assert.equal(cachesMod.deriveStatus({ status: 'building' }, 1), 'building');
+    assert.equal(cachesMod.deriveStatus({ status: 'building', updatedAt: null }, 1), 'building');
+  });
+
+  test('the default stall window applies when none is passed', () => {
+    const justInside  = cachesMod.DEFAULT_STALL_MS - 60_000;
+    const wellOutside = cachesMod.DEFAULT_STALL_MS + 60_000;
+    assert.equal(cachesMod.deriveStatus({ status: 'building', updatedAt: new Date(Date.now() - justInside) }), 'building');
+    assert.equal(cachesMod.deriveStatus({ status: 'building', updatedAt: new Date(Date.now() - wellOutside) }), 'stalled');
+  });
+
+  test('the stall window never reinterprets a settled row', () => {
+    // Only 'building' is time-sensitive. A ready row an hour old is still ready.
+    const ready = {
+      status: 'ready', updatedAt: new Date(Date.now() - 3_600_000),
+      generatedAt: new Date(Date.now() - 3_600_000), expiresAt: new Date(Date.now() + 60_000),
+    };
+    assert.equal(cachesMod.deriveStatus(ready, 1_000), 'ready');
+    assert.equal(cachesMod.deriveStatus({ status: 'failed', updatedAt: new Date(0) }, 1_000), 'failed');
+  });
+
   test('the advisory lock key is deterministic and fits in two 32-bit halves', () => {
     const fp = 'a3f1b2c4d5e6f708' + '9'.repeat(48);
     const k1 = cachesMod.lockKeyFor(fp);
@@ -2344,6 +2499,114 @@ describe('user settings — maxReports bounds', () => {
         `expected ${bad} to be rejected`
       );
     }
+  });
+});
+
+// ── The build watchdog measures silence, not elapsed time ────────────────────
+// It used to be a flat 30-minute deadline. A large portfolio that was working
+// through its pages perfectly happily got killed at the half hour and every page
+// it had already fetched was thrown away. How long a crawl takes is a property
+// of the data; how long it can sit without advancing is a property of it being
+// broken. These pin that distinction, which is the whole of the change.
+describe('violation cache — the stall watchdog', () => {
+  const CONN = { apiUrl: 'http://dt:8080', apiKey: 'k123', fingerprint: 'f'.repeat(64) };
+
+  // A caches stand-in: the watchdog's collaborators, none of which touch a database.
+  function fakeCaches() {
+    const calls = { markBuilding: 0, touches: 0, stored: null, failed: null };
+    return {
+      calls,
+      patch: {
+        acquireBuildLock: async () => ({ acquired: true, release: async () => {} }),
+        markBuilding: async () => { calls.markBuilding++; },
+        setProgress:  async () => {},
+        touchBuild:   async () => { calls.touches++; return true; },
+        storeResult:  async (_fp, map, meta) => { calls.stored = { map, meta }; },
+        markFailed:   async (_fp, message) => { calls.failed = message; },
+      },
+    };
+  }
+
+  // One violation on page 1 of every pipeline, `pages` pages each, `delayMs` per
+  // request. Nine pipelines run in parallel, so wall time is about pages*delayMs.
+  function pagedFetch({ pages, delayMs, hangOnPage }) {
+    return async (url) => {
+      const page = Number(/pageNumber=(\d+)/.exec(url)[1]);
+      await new Promise(r => setTimeout(r, page === hangOnPage ? delayMs * 12 : delayMs));
+      return {
+        headers: { 'x-total-count': String(pages * 100) },
+        json: [{ project: { uuid: 'p1' } }],
+      };
+    };
+  }
+
+  test('a slow build that keeps advancing is allowed to finish', async () => {
+    // Total run time deliberately exceeds the stall window several times over.
+    const fake = fakeCaches();
+    const restoreCaches = stub(cachesMod, fake.patch);
+    const restoreFetch  = stub(dtFetchMod, { dtGetWithRetry: pagedFetch({ pages: 6, delayMs: 40 }) });
+    violationCacheMod.configure({ cacheTtlMs: 3600_000, jobStallMs: 150 });
+    try {
+      const r = await violationCacheMod.runJob(CONN);
+      assert.equal(r.completed, true, 'steady progress must never trip the watchdog');
+      assert.ok(!r.stalled);
+      assert.equal(fake.calls.failed, null);
+      assert.ok(fake.calls.stored, 'the finished map must be stored, not discarded');
+    } finally { restoreCaches(); restoreFetch(); violationCacheMod.configure(null); }
+  });
+
+  test('a build that goes silent past the window is stopped', async () => {
+    const fake = fakeCaches();
+    const restoreCaches = stub(cachesMod, fake.patch);
+    const restoreFetch  = stub(dtFetchMod, {
+      dtGetWithRetry: pagedFetch({ pages: 8, delayMs: 30, hangOnPage: 3 }),
+    });
+    violationCacheMod.configure({ cacheTtlMs: 3600_000, jobStallMs: 120 });
+    try {
+      const r = await violationCacheMod.runJob(CONN);
+      assert.equal(r.stalled, true);
+      assert.equal(r.completed, false);
+      assert.match(fake.calls.failed, /no progress for/i);
+      assert.match(fake.calls.failed, /reached page/i,
+        'the message must say how far it got, so a real stall is distinguishable from a slow start');
+      assert.equal(fake.calls.stored, null);
+    } finally { restoreCaches(); restoreFetch(); violationCacheMod.configure(null); }
+  });
+
+  test('a progressing build beats its heartbeat so other processes see it alive', async () => {
+    const fake = fakeCaches();
+    const restoreCaches = stub(cachesMod, fake.patch);
+    const restoreFetch  = stub(dtFetchMod, { dtGetWithRetry: pagedFetch({ pages: 6, delayMs: 40 }) });
+    violationCacheMod.configure({ cacheTtlMs: 3600_000, jobStallMs: 150 });
+    try {
+      await violationCacheMod.runJob(CONN);
+      assert.ok(fake.calls.touches > 0,
+        'without a heartbeat the row goes stale under a build that is actually running');
+    } finally { restoreCaches(); restoreFetch(); violationCacheMod.configure(null); }
+  });
+
+  test('the stall message names the window, so the fix is discoverable', async () => {
+    const fake = fakeCaches();
+    const restoreCaches = stub(cachesMod, fake.patch);
+    const restoreFetch  = stub(dtFetchMod, {
+      dtGetWithRetry: pagedFetch({ pages: 8, delayMs: 30, hangOnPage: 3 }),
+    });
+    violationCacheMod.configure({ cacheTtlMs: 3600_000, jobStallMs: 60_000 * 2 });
+    try {
+      // A two-minute window rounds to 2 in the message.
+      violationCacheMod.configure({ cacheTtlMs: 3600_000, jobStallMs: 120 });
+      const r = await violationCacheMod.runJob(CONN);
+      assert.equal(r.stalled, true);
+      assert.match(fake.calls.failed, /minutes/);
+    } finally { restoreCaches(); restoreFetch(); violationCacheMod.configure(null); }
+  });
+
+  test('the configured window is used, not a hardcoded constant', () => {
+    violationCacheMod.configure({ cacheTtlMs: 1, jobStallMs: 7 * 60_000 });
+    assert.equal(violationCacheMod.stallWindowMs(), 7 * 60_000);
+    violationCacheMod.configure(null);
+    assert.equal(violationCacheMod.stallWindowMs(), violationCacheMod.DEFAULT_STALL_MS,
+      'an unconfigured reader falls back to the documented default');
   });
 });
 

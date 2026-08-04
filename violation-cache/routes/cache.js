@@ -61,12 +61,22 @@ async function handle({ method, path: parsedPath, res, principal }) {
 
       const status = await cache.getStatus(conn);
 
-      // Missing or expired: try to become the builder. A caller that loses the
-      // election gets `started:false` back straight away and simply polls.
-      if (status.status === 'none' || status.status === 'stale') {
+      // Missing, expired or abandoned: try to become the builder. A caller that
+      // loses the election gets `started:false` back straight away and polls.
+      //
+      // 'stalled' is the recovery path for a build whose process died. It is
+      // answered as 'building' because that is what it now is — a fresh build
+      // has just been started — and reporting it any other way would make the
+      // dashboard offer a refetch it has already begun.
+      if (status.status === 'none' || status.status === 'stale' || status.status === 'stalled') {
+        if (status.status === 'stalled') {
+          log('warn', 'Restarting an abandoned violation cache build', {
+            fingerprint: conn.fingerprint.slice(0, 12),
+          });
+        }
         cache.runJob(conn).catch(err =>
           log('error', `Cache build error: ${err.message}`, { userId }));
-        if (status.status === 'none') {
+        if (status.status !== 'stale') {
           jsonReply(res, 200, { status: 'building', progress: { pagesDone: 0, pagesTotal: 0 } });
           return true;
         }
@@ -117,8 +127,12 @@ async function handle({ method, path: parsedPath, res, principal }) {
       const conn = await connectionFor(userId, res);
       if (!conn) return true;
 
+      // Only a build that is genuinely alive blocks a new one. A row left
+      // saying 'building' by a process that died reads as 'stalled' and falls
+      // through, so the button recovers on its own instead of answering 409
+      // forever (CLAUDE.md §6.3).
       const meta = await caches.getMeta(conn.fingerprint);
-      if (caches.deriveStatus(meta) === 'building') {
+      if (caches.deriveStatus(meta, cache.stallWindowMs()) === 'building') {
         jsonReply(res, 409, { status: 'building', message: 'A build is already in progress.' });
         return true;
       }

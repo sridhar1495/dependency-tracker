@@ -1307,7 +1307,7 @@ describe('index.html refetch control', () => {
       'a second call while building must be a no-op');
     // The flag must be set before the await, or the window between click and
     // response takes a second click.
-    const setAt  = fn.indexOf('_cacheBuilding = true');
+    const setAt  = fn.indexOf('setCacheBuilding(true)');
     const fetchAt = fn.indexOf('await apiFetch');
     assert.ok(setAt > -1 && setAt < fetchAt,
       'the control must be disabled before the request goes out');
@@ -1346,9 +1346,47 @@ describe('index.html refetch control', () => {
 
   test('the building state is cleared on every terminal outcome', () => {
     const fn = /function startCachePoll[\s\S]*?\n  tick\(\);\n\}/.exec(INDEX_HTML)[0];
-    const cleared = (fn.match(/_cacheBuilding = false/g) || []).length;
+    const cleared = (fn.match(/setCacheBuilding\(false\)/g) || []).length;
     assert.ok(cleared >= 2,
       'ready and failed must both re-enable the control, otherwise it sticks disabled');
+  });
+
+  // The toolbar's ↻ Refresh sits outside the banner HTML, so it does not get
+  // re-rendered when the banner does. Left alone it stayed clickable right
+  // through a build, next to a banner control that was visibly disabled.
+  test('the toolbar refresh button is addressable and described', () => {
+    const btn = /<button class="btn primary" id="refreshBtn"[\s\S]*?<\/button>/.exec(INDEX_HTML);
+    assert.ok(btn, 'the toolbar refresh button needs an id for the setter to reach it');
+    assert.match(btn[0], /onclick="refreshData\(\)"/);
+    assert.match(btn[0], /title="/, 'it does a different job from the banner control — say so');
+  });
+
+  test('one setter owns the building flag, so the two controls cannot disagree', () => {
+    assert.match(INDEX_HTML, /function setCacheBuilding\(building\)/);
+    const fn = /function setCacheBuilding[\s\S]*?\n\}/.exec(INDEX_HTML)[0];
+    assert.match(fn, /_cacheBuilding = building;/);
+    assert.match(fn, /getElementById\('refreshBtn'\)/);
+    assert.match(fn, /btn\.disabled = building;/);
+  });
+
+  test('nothing assigns the building flag behind the setter\'s back', () => {
+    // A stray `_cacheBuilding = true` would disable the banner control and
+    // leave the toolbar enabled — exactly the inconsistency being fixed.
+    // The declaration and the setter's own line are the two legitimate writes.
+    const assignments = INDEX_HTML.match(/(?<!let )_cacheBuilding\s*=(?!\s*building;)/g) || [];
+    assert.equal(assignments.length, 0,
+      'assign through setCacheBuilding() so the toolbar stays in step');
+  });
+
+  test('the toolbar refresh is disabled during a build, not deleted', () => {
+    // It reloads the project hierarchy as well as the violation counts, so it is
+    // not redundant with the banner's refetch — removing it would drop the only
+    // way to pick up a newly added project without a full page reload.
+    assert.match(INDEX_HTML, /onclick="refreshData\(\)"/,
+      'the project reload must still be reachable');
+    const fn = /function setCacheBuilding[\s\S]*?\n\}/.exec(INDEX_HTML)[0];
+    assert.match(fn, /A refetch is already running/,
+      'the disabled state must explain itself');
   });
 });
 
