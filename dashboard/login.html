@@ -416,18 +416,15 @@
     <div class="banner info" style="display:block" id="spIntro">
       Your password was reset by an administrator. Choose your own to continue.
     </div>
-    <div class="field">
-      <label class="label" for="spPassword">New password</label>
-      <input class="input" id="spPassword" type="password" autocomplete="new-password"
-             placeholder="At least 8 characters, no spaces">
-      <div class="err" id="spPasswordErr"></div>
-    </div>
-    <div class="field">
-      <label class="label" for="spConfirm">Confirm new password</label>
-      <input class="input" id="spConfirm" type="password" autocomplete="new-password"
-             placeholder="Type it again">
-      <div class="err" id="spConfirmErr"></div>
-    </div>
+    <label class="cfg-label" for="spPassword">New password</label>
+    <input class="cfg-input" id="spPassword" type="password" autocomplete="new-password"
+           placeholder="At least 8 characters, no spaces">
+    <div class="field-error" id="spPasswordErr"></div>
+
+    <label class="cfg-label" for="spConfirm">Confirm new password</label>
+    <input class="cfg-input" id="spConfirm" type="password" autocomplete="new-password"
+           placeholder="Type it again">
+    <div class="field-error" id="spConfirmErr"></div>
     <button class="btn primary block" id="spSubmit" onclick="doSetPassword()">Set password and continue</button>
     <div class="auth-alt">
       <button class="link" onclick="abandonSetPassword()">Sign out instead</button>
