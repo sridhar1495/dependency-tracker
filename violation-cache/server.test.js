@@ -2693,3 +2693,128 @@ describe('routes — administration user detail', () => {
     }
   });
 });
+
+// ── The administrator's reserved data identity ──────────────────────────────
+// The administrator is authenticated against the credentials file and never
+// against the users table (CLAUDE.md §7.4) — unchanged. What migration 004 adds
+// is somewhere to KEEP their own dashboard configuration, so Settings, reports
+// and a schedule work for them through the ordinary per-user routes.
+
+const { requireUser } = require('./lib/http-util');
+
+describe('administrator principal', () => {
+  test('the reserved id is fixed, not generated', () => {
+    assert.equal(usersMod.ADMIN_PRINCIPAL_ID, '00000000-0000-4000-8000-000000000001');
+  });
+
+  test('the reserved login ID is refused by name at registration', () => {
+    // Underscore is a legal login character, so the charset does NOT put this
+    // name out of reach — it has to be reserved explicitly. Without that, the
+    // only thing stopping it is the unique index, whose message would imply an
+    // ordinary account holds the name.
+    assert.ok(v.ALWAYS_RESERVED.includes('__administrator__'));
+    const reserved = v.reservedLoginIds('admin');
+    assert.ok(v.validateLoginId('__administrator__', reserved),
+      'the reserved principal name must fail validation');
+    assert.ok(v.validateLoginId('__ADMINISTRATOR__', reserved),
+      'and case must not evade it');
+  });
+
+  test('the migration seeds the principal and every per-user row', () => {
+    const sql = fs.readFileSync(
+      path.join(__dirname, 'db', 'migrations', '004_admin_principal.sql'), 'utf8');
+    assert.match(sql, /INSERT INTO users/);
+    for (const t of ['dt_connections', 'user_settings', 'mail_settings', 'schedules']) {
+      assert.match(sql, new RegExp(`INSERT INTO ${t}`),
+        `${t} must be seeded, or the administrator's first read finds no row`);
+    }
+    // Idempotent at the file level (CLAUDE.md §5.3).
+    const inserts = (sql.match(/INSERT INTO/g) || []).length;
+    const conflicts = (sql.match(/ON CONFLICT/g) || []).length;
+    assert.equal(inserts, conflicts, 'every INSERT needs an ON CONFLICT guard');
+  });
+
+  test('the seeded password hash can never authenticate', async () => {
+    const sql = fs.readFileSync(
+      path.join(__dirname, 'db', 'migrations', '004_admin_principal.sql'), 'utf8');
+    const hash = /'(reserved-principal-no-password)'/.exec(sql);
+    assert.ok(hash, 'the reserved row must carry an obviously unusable hash');
+    // verifyPassword returns false for a malformed hash rather than throwing.
+    assert.equal(await dtCrypto.verifyPassword('anything', hash[1]), false);
+    assert.equal(await dtCrypto.verifyPassword('', hash[1]), false);
+  });
+
+  test('requireUser now resolves an id for the administrator too', () => {
+    const res = makeRes();
+    assert.equal(
+      requireUser({ userId: usersMod.ADMIN_PRINCIPAL_ID, isAdmin: true }, res),
+      usersMod.ADMIN_PRINCIPAL_ID);
+    assert.equal(res.statusCode, null, 'no error response should have been sent');
+  });
+
+  test('requireUser still refuses a principal with no id at all', () => {
+    // Unreachable in normal operation, and it must stay a hard stop: a request
+    // without an id must never fall through to an unscoped query.
+    const res = makeRes();
+    assert.equal(requireUser({ isAdmin: true }, res), null);
+    assert.equal(res.statusCode, 403);
+    assert.equal(res.json.code, 'USER_ONLY');
+  });
+});
+
+describe('routes — the administrator uses the ordinary per-user routes', () => {
+  const asAdminPrincipal = () => ({
+    userId: usersMod.ADMIN_PRINCIPAL_ID, principalType: 'admin',
+    isAdmin: true, loginId: null,
+  });
+
+  test('the config route serves the administrator, scoped to their own id', async () => {
+    const seen = [];
+    const restore = stub(dtConnectionsMod, {
+      getForClient: async (id) => { seen.push(id); return { apiUrl: 'http://dt', isConfigured: true, hasApiKey: true, frontendUrl: '' }; },
+    });
+    const r2 = stub(userSettingsMod, { get: async () => ({ maxReports: 10 }) });
+    const r3 = stub(require('./lib/mail-settings'), { getForClient: async () => ({ enabled: false }) });
+    const r4 = stub(schedulesMod, { get: async () => null, getProjects: async () => [] });
+    try {
+      const res = makeRes();
+      await routeConfig.handle({
+        method: 'GET', url: '/violation-cache/config', path: '/violation-cache/config',
+        req: {}, res, principal: asAdminPrincipal(),
+      });
+      assert.equal(res.statusCode, 200, res.body);
+      assert.deepEqual(seen, [usersMod.ADMIN_PRINCIPAL_ID]);
+      assert.equal(res.json.connection.isConfigured, true);
+    } finally { restore(); r2(); r3(); r4(); }
+  });
+
+  test('the DT proxy forwards for the administrator', async () => {
+    const restoreConn = stub(dtConnectionsMod, {
+      getResolved: async (id) => {
+        assert.equal(id, usersMod.ADMIN_PRINCIPAL_ID);
+        return { apiUrl: 'http://dt:8080', apiKey: 'k', isConfigured: true, fingerprint: 'f' };
+      },
+    });
+    const restoreFetch = stub(dtFetchMod, {
+      dtGetWithRetry: async () => ({ json: [{ uuid: 'p1' }], headers: {} }),
+    });
+    try {
+      const res = makeRes();
+      await routeDtProxy.handle({
+        method: 'GET', url: '/violation-cache/dt/api/v1/project',
+        path: '/violation-cache/dt/api/v1/project', res, principal: asAdminPrincipal(),
+      });
+      assert.equal(res.statusCode, 200, res.body);
+    } finally { restoreConn(); restoreFetch(); }
+  });
+
+  test('the administrator still cannot be listed or deleted as an account', () => {
+    // routes/profile.js and DELETE /auth/account branch on isAdmin before they
+    // ever reach users.updateProfile / users.deleteById, so a data identity
+    // does not open either path.
+    const profileSrc = fs.readFileSync(path.join(__dirname, 'routes', 'profile.js'), 'utf8');
+    assert.match(profileSrc, /if \(principal\.isAdmin\)/);
+    const authSrc = fs.readFileSync(path.join(__dirname, 'routes', 'auth.js'), 'utf8');
+    assert.match(authSrc, /ADMIN_IMMUTABLE/);
+  });
+});

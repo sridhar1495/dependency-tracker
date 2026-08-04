@@ -769,7 +769,21 @@ describe('auth token cache and revocation', { skip: !ENABLED && 'TEST_DATABASE_U
     const ap = await auth.resolveToken(adminSession.token);
     assert.equal(up.isAdmin, false);
     assert.equal(ap.isAdmin, true);
-    assert.equal(ap.userId, null, 'the administrator is not a database user');
+
+    // The resolved principal carries the reserved configuration identity, so
+    // Settings, reports and a schedule work for the administrator through the
+    // ordinary per-user routes (migration 004).
+    assert.equal(ap.userId, require('./lib/users').ADMIN_PRINCIPAL_ID);
+    assert.notEqual(ap.userId, up.userId, 'and it is nobody else\'s data');
+
+    // The SESSION row is unchanged: sessions_principal_shape requires
+    // user_id IS NULL for an administrator, and it still is. The reserved id
+    // exists only on the resolved principal.
+    const { rows } = await pool.query(
+      'SELECT user_id, principal_type FROM user_sessions WHERE id = $1', [ap.sessionId]);
+    assert.equal(rows[0].user_id, null,
+      'the administrator session row must keep user_id NULL');
+    assert.equal(rows[0].principal_type, 'admin');
 
     // Revoking the administrator must not disturb the user.
     await auth.revokeToken(adminSession.token);
@@ -1644,5 +1658,112 @@ describe('taken-identifier detection', { skip: !ENABLED && 'TEST_DATABASE_URL no
       await users.findTakenIdentifiers({ loginId: 'zz_frank', email: 'frank@example.com' });
       assert.equal(calls, 1);
     } finally { pg.query = realQuery; }
+  });
+});
+
+// ── The administrator's reserved data identity (migration 004) ──────────────
+describe('administrator principal', { skip: !ENABLED && 'TEST_DATABASE_URL not set' }, () => {
+  let pool, users, dtCrypto, dtConnections, userSettings, reportsDb;
+
+  before(async () => {
+    pool = require('./db/pool');
+    if (!pool.isReady()) {
+      const url = new URL(DB_URL);
+      process.env.POSTGRES_HOST     = url.hostname;
+      process.env.POSTGRES_PORT     = url.port || '5432';
+      process.env.POSTGRES_USER     = decodeURIComponent(url.username);
+      process.env.POSTGRES_PASSWORD = decodeURIComponent(url.password) || 'x';
+      process.env.POSTGRES_DB       = url.pathname.replace(/^\//, '');
+      const { parseConfig } = require('./lib/config');
+      pool.init(parseConfig(process.env).db);
+      await migrate({ pool: pool.getPool(), dir: MIGRATIONS_DIR });
+    }
+    users         = require('./lib/users');
+    dtCrypto      = require('./lib/crypto');
+    dtConnections = require('./lib/dt-connections');
+    userSettings  = require('./lib/user-settings');
+    reportsDb     = require('./lib/reports-db');
+    dtConnections.configure(dtCrypto.parseEncryptionKey(process.env.SECRET_ENCRYPTION_KEY));
+  });
+
+  after(async () => { if (pool && pool.isReady()) await pool.close(); });
+
+  const ADMIN = () => users.ADMIN_PRINCIPAL_ID;
+
+  test('the migration seeded the principal and all four per-user rows', async () => {
+    const { rows } = await pool.query(
+      'SELECT login_id AS "loginId", first_name AS "firstName" FROM users WHERE id = $1', [ADMIN()]);
+    assert.equal(rows.length, 1, 'the reserved row must exist');
+    assert.equal(rows[0].loginId, '__administrator__');
+
+    for (const t of ['dt_connections', 'user_settings', 'mail_settings', 'schedules']) {
+      const { rows: r } = await pool.query(
+        `SELECT count(*)::int AS n FROM ${t} WHERE user_id = $1`, [ADMIN()]);
+      assert.equal(r[0].n, 1, `${t} must have a row for the administrator`);
+    }
+  });
+
+  test('re-running the migration changes nothing', async () => {
+    // Migrations must be idempotent at the file level (CLAUDE.md §5.3).
+    const sql = fs.readFileSync(
+      path.join(MIGRATIONS_DIR, '004_admin_principal.sql'), 'utf8');
+    await pool.query(sql);
+    const { rows } = await pool.query('SELECT count(*)::int AS n FROM users WHERE id = $1', [ADMIN()]);
+    assert.equal(rows[0].n, 1, 'a second application must not duplicate anything');
+  });
+
+  test('the administrator gets a working connection through the ordinary module', async () => {
+    await dtConnections.save(ADMIN(), {
+      apiUrl: 'https://admin-dt.example.com', apiKey: 'admin_own_secret_key',
+    });
+    const client = await dtConnections.getForClient(ADMIN());
+    assert.equal(client.isConfigured, true);
+    assert.equal(client.hasApiKey, true);
+    assert.doesNotMatch(JSON.stringify(client), /admin_own_secret_key/,
+      'the key is no more readable for the administrator than for anyone else');
+
+    const resolved = await dtConnections.getResolved(ADMIN());
+    assert.equal(resolved.apiKey, 'admin_own_secret_key');
+  });
+
+  test('the administrator has their own settings and quota', async () => {
+    await userSettings.setMaxReports(ADMIN(), 4);
+    assert.equal(await userSettings.getMaxReports(ADMIN()), 4);
+  });
+
+  test('the administrator owns their own reports, scoped like anyone else', async () => {
+    const r = await reportsDb.create(ADMIN(), { riskTypes: ['security'], projectCount: 1 });
+    try {
+      assert.ok(await reportsDb.getForUser(ADMIN(), r.id), 'the administrator can read their own');
+      const someoneElse = '11111111-1111-4111-8111-111111111111';
+      assert.equal(await reportsDb.getForUser(someoneElse, r.id), null,
+        "and nobody else can — the administrator's reports are scoped too");
+    } finally { await reportsDb.deleteForUser(ADMIN(), r.id); }
+  });
+
+  test('the reserved principal is excluded from the administration listing', async () => {
+    const rows = await users.listWithStats();
+    assert.equal(rows.some(u => u.id === ADMIN()), false,
+      'it holds configuration, it is not an account');
+    assert.equal(rows.some(u => u.loginId === '__administrator__'), false);
+  });
+
+  test('it is excluded from the account count', async () => {
+    const listed = (await users.listWithStats()).length;
+    assert.equal(await users.count(), listed,
+      'the count and the listing must agree, or the panel contradicts itself');
+  });
+
+  test('it cannot be opened as an account detail', async () => {
+    assert.equal(await users.detailForAdmin('__administrator__'), null);
+  });
+
+  test('the seeded hash cannot authenticate even if the name is submitted', async () => {
+    const row = await users.verifyLookup('__administrator__');
+    assert.ok(row, 'the row is findable — the protection is the hash, not obscurity');
+    for (const attempt of ['', 'password', 'reserved-principal-no-password']) {
+      assert.equal(await dtCrypto.verifyPassword(attempt, row.passwordHash), false,
+        `"${attempt}" must not authenticate`);
+    }
   });
 });

@@ -50,8 +50,18 @@
     body {
       background: var(--bg); color: var(--text); min-height: 100vh;
       font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-      display: flex; align-items: center; justify-content: center; padding: 24px;
-      position: relative; overflow: hidden;
+      /* The card is centred with `margin: auto` rather than `align-items:
+         center`. Both centre it, but a flex item centred by align-items
+         overflows EQUALLY in both directions once it is taller than the
+         container — and the part above the top edge cannot be scrolled to.
+         `margin: auto` degrades to top-aligned-and-scrollable instead, which is
+         what browser zoom and short windows need.
+
+         `overflow: hidden` is deliberately NOT set here: it would clip the card
+         with no way to reach the rest of it. The decorative layers are all
+         position: fixed and clip themselves. */
+      display: flex; padding: 24px;
+      position: relative;
     }
 
     /* ── Animated background ────────────────────────────────────────────────
@@ -105,8 +115,14 @@
     }
 
     /* A slow grid drifting over the blobs, for a little depth. */
+    /* The grid pans by translating a box larger than the screen. That box is
+       clipped by this fixed wrapper rather than by `overflow: hidden` on the
+       body, so it cannot produce a scrollbar or hide the card. */
+    .bg-grid-clip {
+      position: fixed; inset: 0; z-index: -1; pointer-events: none; overflow: hidden;
+    }
     .bg-grid {
-      position: fixed; inset: -50%; z-index: -1; pointer-events: none;
+      position: absolute; inset: -50%;
       background-image:
         linear-gradient(var(--grid-line) 1px, transparent 1px),
         linear-gradient(90deg, var(--grid-line) 1px, transparent 1px);
@@ -136,6 +152,7 @@
       background: var(--surface); border: 1px solid var(--border);
       border-radius: 14px; width: 100%; max-width: 430px;
       padding: 32px; box-shadow: 0 18px 48px rgba(0,0,0,0.28);
+      margin: auto;   /* centres, and stays scrollable when taller than the viewport */
     }
     /* Progressive enhancement: browsers with backdrop-filter get a frosted
        card; the rest keep the solid surface above, which is already legible. */
@@ -247,10 +264,52 @@
 
     .pw-hint { font-size: 11px; color: var(--text-muted); margin-top: 5px; }
 
-    @media (max-width: 480px) {
-      .auth-card { padding: 24px 20px; }
+    /* Browser zoom shrinks the CSS viewport, so these fire on a zoomed desktop
+       exactly as they do on a small screen — which is the point. The dashboard
+       uses the same 1200/900/768 ladder (CLAUDE.md §8.10); the card only needs
+       the narrow end of it. */
+    @media (max-width: 768px) {
+      body { padding: 16px; }
+      .auth-card { padding: 26px 22px; }
+    }
+
+    /* Below this the first/last name pair is too cramped side by side. It is a
+       card-specific step rather than one of the dashboard's 1200/900/768 page
+       breakpoints, because the card is 430px wide and hits the limit earlier. */
+    @media (max-width: 640px) {
       .row-2 { grid-template-columns: 1fr; }
     }
+
+    @media (max-width: 480px) {
+      body { padding: 12px; }
+      .auth-card { padding: 22px 18px; border-radius: 12px; }
+      .row-2 { grid-template-columns: 1fr; }
+      .auth-title { font-size: 15px; }
+      .auth-brand h1 { font-size: 17px; }
+    }
+
+    /* Zooming in makes the viewport SHORT before it makes it narrow, and that is
+       what pushes the buttons off screen. Tighten the vertical rhythm and drop
+       the decorative header rather than let anything become unreachable. */
+    @media (max-height: 720px) {
+      .auth-brand { margin-bottom: 16px; }
+      .auth-card  { padding-top: 22px; padding-bottom: 22px; }
+      .cfg-input  { padding: 8px 10px; }
+      .cfg-label  { margin-top: 10px; }
+    }
+
+    @media (max-height: 560px) {
+      .auth-logo { display: none; }
+      .auth-brand .sub { display: none; }
+      .auth-brand { margin-bottom: 10px; }
+      .pw-hint { display: none; }
+      .admin-toggle .hint { display: none; }
+    }
+
+    /* The session dialog has the same problem: it must scroll rather than
+       centre-clip when the window is short. */
+    .modal-overlay { overflow-y: auto; }
+    .modal { margin: auto; }
   </style>
 </head>
 <body>
@@ -264,7 +323,7 @@
   <div class="blob b1"></div><div class="blob b2"></div>
   <div class="blob b3"></div><div class="blob b4"></div>
 </div>
-<div class="bg-grid" aria-hidden="true"></div>
+<div class="bg-grid-clip" aria-hidden="true"><div class="bg-grid"></div></div>
 
 <button class="theme-btn" id="themeBtn" onclick="toggleTheme()" title="Toggle light / dark theme">🌓</button>
 

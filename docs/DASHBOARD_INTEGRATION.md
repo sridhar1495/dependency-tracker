@@ -225,6 +225,15 @@ docker exec dt-postgres psql -U dtdash -d dtdash -c 'DELETE FROM violation_cache
 ### TTL and rebuild
 
 - Default TTL: **24 hours** (configurable via `VIOLATION_CACHE_TTL_HOURS` in `.env`)
+- **The ↻ Refetch Violations button is disabled while a build is running**, and
+  not only for the person who started it. The cache is shared by connection
+  fingerprint, so everyone pointing at the same DependencyTrack instance sees the
+  control greyed out with a progress count until that one build finishes. This is
+  the visible half of the shared-cache design: without it, five people on one
+  connection would each keep asking for a crawl the first of them is already
+  waiting on. The server refuses the duplicates anyway — the advisory lock elects
+  a single builder and a second request answers 409 — but a button that looks
+  live and does nothing is worse than one that shows why it is inert.
 - On page load: if no cache row exists for your connection, a rebuild starts automatically.
   `pg_try_advisory_lock` elects exactly one builder, so simultaneous visitors trigger
   one crawl between them, not one each

@@ -1243,7 +1243,13 @@
 const CONFIG = {
   SEARCH_DEBOUNCE_MS:  200,   // ms to wait after last keypress before re-filtering
   PROJECT_PAGE_SIZE:   500,   // projects per page when fetching from DT API
-  CACHE_POLL_MS:      5000,   // ms between /violation-cache/status polls
+  CACHE_POLL_MS:      5000,   // ms between /violation-cache/status polls while building
+  // Slow idle watch. The violation cache is shared by connection fingerprint, so
+  // a build another user starts must disable this dashboard's refetch too —
+  // otherwise everyone on that connection keeps asking for a crawl one of them
+  // is already waiting on. Cheap: two indexed reads per user per interval, and
+  // the session behind it is served from the token cache.
+  CACHE_WATCH_MS:     30000,
   PROBE_RETRY_MS:     3000,   // ms between Connect-modal DT API probe retries
   PROBE_TIMEOUT_MS:   3000,   // abort timeout for each probe request
   MIN_SEARCH_LENGTH:     2,   // min chars before text filter activates (avoids O(n) on single char)
@@ -1284,6 +1290,12 @@ let dtApiUrl         = '';     // shown in Settings; requests never use it direc
 let dtFrontendUrl    = '';     // DT UI base URL for project hyperlinks
 let dtHasApiKey      = false;  // a key is stored — never its value
 let _cachePollTimer  = null;   // setInterval id for polling /violation-cache/status
+// True while a violation-cache build is in flight for THIS user's connection.
+// The cache is shared by connection fingerprint, so a build another user started
+// reports as 'building' here too and disables this dashboard's refetch as well —
+// which is the point: one crawl is enough for everybody on that connection.
+let _cacheBuilding   = false;
+let _cacheWatchTimer = null;   // slow poll that notices builds started elsewhere
 let flatView         = false;  // when true: leaf-only flat list, no hierarchy
 let _searchDebounce    = null;   // timer id for search input debounce (200 ms)
 let _fetchController   = null;   // AbortController — cancelled on every new connect/refresh
@@ -1386,15 +1398,12 @@ function renderUserMenu() {
   const adminItem = document.getElementById('userMenuAdmin');
   if (adminItem) adminItem.style.display = _currentUser.isAdmin ? '' : 'none';
 
-  // The administrator owns no DependencyTrack connection, settings or reports —
-  // every one of those routes answers 403 for them (CLAUDE.md §7.5). Hiding the
-  // controls is honest about that rather than offering buttons that only fail.
-  if (_currentUser.isAdmin) {
-    for (const id of ['settingsBtn', 'reportsBtn']) {
-      const el = document.getElementById(id);
-      if (el) el.style.display = 'none';
-    }
-  }
+  // Settings and Reports stay available to the administrator: they have their
+  // own DependencyTrack connection, quota, mail settings and schedule, held
+  // against a reserved principal id (migration 004), so those panels work for
+  // them exactly as they do for anyone else. Only Profile is hidden — the
+  // administrator's name and password live in the installation credentials
+  // file, not in the database, so there is nothing there to edit.
 }
 
 // ── Administration panel (read-only) ──────────────────────────────────────
@@ -3324,12 +3333,44 @@ function extractMetrics(p, violationMap) {
 
 // Poll /violation-cache/status every 5 s until the job completes, then apply.
 // Cancelled automatically when _fetchController changes (i.e. on Refresh/reconnect).
+/**
+ * Watch for a build somebody else started.
+ *
+ * Runs only while the cache is settled. The moment it sees 'building' it hands
+ * over to the fast poller, which shows progress and re-enables the control when
+ * the build — whoever started it — finishes.
+ */
+function startCacheWatch() {
+  stopCacheWatch();
+  if (!liveMode) return;
+  const capturedCtrl = _fetchController;
+
+  _cacheWatchTimer = setInterval(async () => {
+    if (capturedCtrl !== _fetchController || _cacheBuilding) { stopCacheWatch(); return; }
+    try {
+      const r = await apiFetch('/violation-cache/status');
+      if (!r.ok) return;
+      const s = await r.json();
+      if (s.status === 'building') {
+        _cacheBuilding = true;
+        stopCacheWatch();
+        startCachePoll();
+      }
+    } catch (_) { /* transient — keep watching */ }
+  }, CONFIG.CACHE_WATCH_MS);
+}
+
+function stopCacheWatch() {
+  if (_cacheWatchTimer) { clearInterval(_cacheWatchTimer); _cacheWatchTimer = null; }
+}
+
 function startCachePoll() {
+  stopCacheWatch();
   if (_cachePollTimer) { clearInterval(_cachePollTimer); _cachePollTimer = null; }
   const banner      = document.getElementById('dataBanner');
   const capturedCtrl = _fetchController;
 
-  _cachePollTimer = setInterval(async () => {
+  const tick = async () => {
     if (capturedCtrl !== _fetchController) {
       clearInterval(_cachePollTimer); _cachePollTimer = null; return;
     }
@@ -3339,14 +3380,18 @@ function startCachePoll() {
       const s = await r.json();
 
       if (s.status === 'building') {
+        _cacheBuilding = true;
         const prog = (s.progress?.pagesTotal || 0) > 0
-          ? ` (${s.progress.pagesDone}/${s.progress.pagesTotal} pages)` : '';
+          ? `(${s.progress.pagesDone}/${s.progress.pagesTotal} pages)` : '';
         banner.innerHTML =
-          `✓ Live — ${allProjects.length} projects. ⏳ Refetching violations${prog}…`;
+          `✓ Live — ${allProjects.length} projects. ` +
+          `⏳ Refetching violations${prog ? ' ' + prog : ''}… ${refetchButtonHtml(prog)}`;
         banner.className = 'data-banner';
 
       } else if (s.status === 'ready') {
+        _cacheBuilding = false;
         clearInterval(_cachePollTimer); _cachePollTimer = null;
+        startCacheWatch();
         try {
           applyViolationData(await fetchCacheMap());
           banner.innerHTML = buildReadyBanner(s);
@@ -3360,7 +3405,9 @@ function startCachePoll() {
 
       } else {
         // error or unexpected terminal state
+        _cacheBuilding = false;
         clearInterval(_cachePollTimer); _cachePollTimer = null;
+        startCacheWatch();
         banner.innerHTML =
           `✓ Live — ${allProjects.length} projects. ` +
           `<span class="banner-warn">⚠ Violation cache build failed. ` +
@@ -3368,7 +3415,31 @@ function startCachePoll() {
         banner.className = 'data-banner';
       }
     } catch(_) { /* network hiccup — keep polling */ }
-  }, CONFIG.CACHE_POLL_MS);
+  };
+
+  _cachePollTimer = setInterval(tick, CONFIG.CACHE_POLL_MS);
+  // Run once straight away. Waiting a whole interval before the first render
+  // leaves the control looking clickable for five seconds after a build starts —
+  // including a build somebody else started, which is exactly when it must not.
+  tick();
+}
+
+/**
+ * The banner's refetch control.
+ *
+ * Disabled while a build is running so a user cannot queue another one by
+ * clicking repeatedly. The server would refuse anyway — the advisory lock
+ * elects a single builder and a second request answers 409 — but a button that
+ * looks live and does nothing is worse than one that shows why it is inert.
+ *
+ * @param {string} [progress] page counter to show while building
+ */
+function refetchButtonHtml(progress) {
+  if (_cacheBuilding) {
+    return `<button class="btn-xs" disabled title="A refetch is already running for this DependencyTrack connection">`
+         + `⏳ Refetching${progress ? ' ' + escHtml(progress) : ''}…</button>`;
+  }
+  return `<button class="btn-xs" onclick="triggerCacheRefresh()">↻ Refetch Violations</button>`;
 }
 
 /**
@@ -3396,7 +3467,7 @@ function buildReadyBanner(status) {
     `✓ Live — ${allProjects.length} projects. ` +
     `Violations from cache (built ${ageStr}).` +
     `${failNote} ` +
-    `<button class="btn-xs" onclick="triggerCacheRefresh()">↻ Refetch Violations</button>`
+    refetchButtonHtml()
   );
 }
 
@@ -3414,6 +3485,7 @@ async function loadViolationCache() {
       applyViolationData(await fetchCacheMap());
       banner.innerHTML = buildReadyBanner(status);
       banner.className = 'data-banner live';
+      startCacheWatch();
 
     } else if (status.status === 'stale') {
       // ── Stale: apply old data immediately, rebuild silently in background ─
@@ -3427,15 +3499,20 @@ async function loadViolationCache() {
           `⚠ Violation cache expired (${ageH}h old) — refreshing in background…`;
         banner.className = 'data-banner';
       } catch(_) {}
+      _cacheBuilding = true;
       await apiFetch('/violation-cache/refresh', { method: 'POST' }).catch(() => {});
       startCachePoll();
 
     } else if (status.status === 'building') {
-      // ── Already building (e.g. another user triggered it): just poll ─────
+      // Already building — very often because ANOTHER user on the same
+      // DependencyTrack connection started it. Adopt their build and show it as
+      // in progress rather than offering a button that would only be refused.
+      _cacheBuilding = true;
       const prog = (status.progress?.pagesTotal || 0) > 0
-        ? ` (${status.progress.pagesDone}/${status.progress.pagesTotal} pages)` : '';
+        ? `(${status.progress.pagesDone}/${status.progress.pagesTotal} pages)` : '';
       banner.innerHTML =
-        `✓ Live — ${allProjects.length} projects. ⏳ Refetching violations${prog}…`;
+        `✓ Live — ${allProjects.length} projects. ` +
+        `⏳ Refetching violations${prog ? ' ' + prog : ''}… ${refetchButtonHtml(prog)}`;
       banner.className = 'data-banner';
       startCachePoll();
 
@@ -3452,6 +3529,7 @@ async function loadViolationCache() {
       banner.innerHTML =
         `✓ Live — ${allProjects.length} projects. ⏳ Refetching violations…`;
       banner.className = 'data-banner';
+      _cacheBuilding = true;
       await apiFetch('/violation-cache/refresh', { method: 'POST' }).catch(() => {});
       startCachePoll();
     }
@@ -3470,29 +3548,38 @@ async function loadViolationCache() {
 // Called by the ↻ Refresh button rendered inside the banner.
 // Only triggers a violation cache rebuild — does not re-fetch projects.
 async function triggerCacheRefresh() {
+  // Re-entrancy guard. The button is rendered disabled while a build runs, but
+  // a stale banner or a very fast double-click could still get here.
+  if (_cacheBuilding) return;
+
   const banner = document.getElementById('dataBanner');
   if (_cachePollTimer) { clearInterval(_cachePollTimer); _cachePollTimer = null; }
+
+  // Disable immediately, before the request goes out, so the window between
+  // click and response cannot take a second click.
+  _cacheBuilding = true;
+  banner.innerHTML =
+    `✓ Live — ${allProjects.length} projects. ⏳ Refetching violations… ${refetchButtonHtml()}`;
+  banner.className = 'data-banner';
+
   try {
     const r = await apiFetch('/violation-cache/refresh', { method: 'POST' });
-    if (r.status === 409) {
-      // Already building — just resume polling
-      banner.innerHTML =
-        `✓ Live — ${allProjects.length} projects. ⏳ Refetching violations…`;
-    } else if (!r.ok) {
+    if (!r.ok && r.status !== 409) {
+      // 409 is not a failure: it means another builder already holds this
+      // connection, which is exactly the sharing the cache exists for. Keep
+      // the button disabled and poll for their result.
       const body = await r.json().catch(() => ({}));
+      _cacheBuilding = false;
       banner.innerHTML =
         `✓ Live — ${allProjects.length} projects. ` +
-        `<span class="banner-warn">⚠ ${body.error || 'Refetch failed.'} ` +
+        `<span class="banner-warn">⚠ ${escHtml(body.error || 'Refetch failed.')} ` +
         `<button class="btn-xs" onclick="triggerCacheRefresh()">↻ Retry</button></span>`;
       banner.className = 'data-banner';
       return;
-    } else {
-      banner.innerHTML =
-        `✓ Live — ${allProjects.length} projects. ⏳ Refetching violations…`;
     }
-    banner.className = 'data-banner';
     startCachePoll();
   } catch(e) {
+    _cacheBuilding = false;
     banner.innerHTML =
       `✓ Live — ${allProjects.length} projects. ` +
       `<span class="banner-warn">⚠ Failed to reach cache service. ` +
@@ -4211,6 +4298,14 @@ window.openModal            = openModal;
 window.closeModal           = closeModal;
 window.refreshData          = refreshData;
 window.triggerCacheRefresh  = triggerCacheRefresh;
+// Exposed so an end-to-end test can drive one watch tick instead of waiting out
+// the 30-second interval. It only does what the timer does.
+window.__cacheWatchTick     = async () => {
+  const r = await apiFetch('/violation-cache/status');
+  if (!r.ok) return;
+  const s = await r.json();
+  if (s.status === 'building') { _cacheBuilding = true; stopCacheWatch(); startCachePoll(); }
+};
 window.debouncedFilter      = debouncedFilter;
 window.applyFilters         = applyFilters;
 window.toggleLatestFilter   = toggleLatestFilter;
@@ -4269,22 +4364,19 @@ window.scheduleReports      = scheduleReports;
     if (wrap && !wrap.contains(e.target)) closeUserMenu();
   });
 
-  if (_currentUser.isAdmin) {
-    // An administrator session has no per-user data to load. Show demo data so
-    // the page is not empty, and say plainly where the useful view is.
-    loadMockData();
-    const banner = document.getElementById('dataBanner');
-    banner.innerHTML =
-      'Signed in as <strong>administrator</strong> — showing demo data. ' +
-      'Open <strong>👤 → 🛡 Administration</strong> for accounts and usage.';
-    banner.className = 'data-banner';
-    return;
-  }
-
-  // loadDtConnection() connects when this account has a DependencyTrack
-  // connection saved. Fall back to demo data when it does not.
+  // The administrator loads their own connection through the same path as
+  // anybody else; only the hint differs when nothing is configured yet.
   loadDtConnection().then(connected => {
-    if (!connected) loadMockData();
+    if (connected) return;
+    loadMockData();
+    if (_currentUser.isAdmin) {
+      const banner = document.getElementById('dataBanner');
+      banner.innerHTML =
+        'Signed in as <strong>administrator</strong> — showing demo data. ' +
+        'Open <strong>⚙ Settings</strong> to connect DependencyTrack, or ' +
+        '<strong>👤 → 🛡 Administration</strong> for accounts and usage.';
+      banner.className = 'data-banner';
+    }
   });
 
   // Check for schedule failure notifications from the server

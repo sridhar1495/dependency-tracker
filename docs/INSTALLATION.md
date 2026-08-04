@@ -188,10 +188,20 @@ The dashboard requires an account. Opening it while signed out redirects to
 3. Sign in with the login ID you chose.
 
 **Administrator sign-in** — tick **Administrator login** on the sign-in page and
-use the credentials `install.sh` created. These are validated against
-`violation-cache/data/admin-credentials.json`, never against the user table, so
-a registered user can never impersonate the administrator. To reset them, delete
-that file and re-run the installer.
+use the credentials `install.sh` created. The page changes colour when you tick
+it, so which credential set you are about to use is obvious before you type.
+These are validated against `violation-cache/data/admin-credentials.json`, never
+against the user table, so a registered user can never impersonate the
+administrator. To reset them, delete that file and re-run the installer — or
+answer **y** when the installer offers to reset them.
+
+The administrator has **⚙ Settings and 📥 Reports of their own**: their own
+DependencyTrack connection, report quota, mail configuration and schedule, held
+separately from every user account. They see their own dashboard exactly as a
+user does. What they do **not** have is a Profile panel — their name and password
+live in the credentials file rather than the database — and they cannot read any
+other account's DependencyTrack key, SMTP password or report contents. The
+🛡 Administration panel shows metadata and usage totals only.
 
 **One session per account.** Signing in somewhere else asks whether to disconnect
 the existing session. Choosing *no* leaves the original session untouched;

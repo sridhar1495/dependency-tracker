@@ -1279,3 +1279,146 @@ describe('index.html administration detail', () => {
     assert.match(INDEX_HTML, /are not readable from here/);
   });
 });
+
+// ── Refetch control: one build per connection, visible to everyone on it ─────
+// The violation cache is shared by connection fingerprint, so a build one user
+// starts must disable the control for every dashboard on that connection —
+// otherwise they all keep asking for a crawl one of them is already waiting on.
+describe('index.html refetch control', () => {
+  test('the control is rendered from one helper, not open-coded per banner', () => {
+    assert.match(INDEX_HTML, /function refetchButtonHtml\(progress\)/);
+    // Every "Refetch Violations" button must come from it, so no banner can
+    // render an enabled one during a build.
+    const literal = INDEX_HTML.match(/onclick="triggerCacheRefresh\(\)">↻ Refetch Violations/g) || [];
+    assert.equal(literal.length, 1,
+      'the enabled label may appear only inside refetchButtonHtml()');
+  });
+
+  test('it renders disabled while a build is running', () => {
+    const fn = /function refetchButtonHtml[\s\S]*?\n\}/.exec(INDEX_HTML)[0];
+    assert.match(fn, /if \(_cacheBuilding\)/);
+    assert.match(fn, /<button class="btn-xs" disabled/);
+    assert.match(fn, /title="A refetch is already running/);
+  });
+
+  test('triggerCacheRefresh refuses to re-enter and disables before the request', () => {
+    const fn = /async function triggerCacheRefresh[\s\S]*?\n\}/.exec(INDEX_HTML)[0];
+    assert.match(fn, /if \(_cacheBuilding\) return;/,
+      'a second call while building must be a no-op');
+    // The flag must be set before the await, or the window between click and
+    // response takes a second click.
+    const setAt  = fn.indexOf('_cacheBuilding = true');
+    const fetchAt = fn.indexOf('await apiFetch');
+    assert.ok(setAt > -1 && setAt < fetchAt,
+      'the control must be disabled before the request goes out');
+  });
+
+  test('409 is treated as sharing, not failure', () => {
+    const fn = /async function triggerCacheRefresh[\s\S]*?\n\}/.exec(INDEX_HTML)[0];
+    assert.match(fn, /r\.status !== 409/,
+      '409 means another builder already holds this connection — keep polling');
+  });
+
+  test('a build started elsewhere is noticed by an idle watch', () => {
+    assert.match(INDEX_HTML, /CACHE_WATCH_MS:\s*\d+/);
+    assert.match(INDEX_HTML, /function startCacheWatch\(\)/);
+    assert.match(INDEX_HTML, /function stopCacheWatch\(\)/);
+    const fn = /function startCacheWatch[\s\S]*?\n\}/.exec(INDEX_HTML)[0];
+    assert.match(fn, /apiFetch\('\/violation-cache\/status'\)/);
+    assert.match(fn, /s\.status === 'building'/);
+    assert.match(fn, /startCachePoll\(\)/);
+  });
+
+  test('the watch is slower than the build poll', () => {
+    const poll  = Number(/CACHE_POLL_MS:\s*(\d+)/.exec(INDEX_HTML)[1]);
+    const watch = Number(/CACHE_WATCH_MS:\s*(\d+)/.exec(INDEX_HTML)[1]);
+    assert.ok(watch > poll,
+      `the idle watch (${watch}ms) must be cheaper than the build poll (${poll}ms)`);
+  });
+
+  test('the poller renders immediately rather than after a full interval', () => {
+    // Waiting one interval leaves the control looking clickable for seconds
+    // after a build starts — including one somebody else started.
+    const fn = /function startCachePoll[\s\S]*?\n  tick\(\);\n\}/.exec(INDEX_HTML);
+    assert.ok(fn, 'startCachePoll must call tick() once immediately');
+    assert.match(fn[0], /_cachePollTimer = setInterval\(tick, CONFIG\.CACHE_POLL_MS\);/);
+  });
+
+  test('the building state is cleared on every terminal outcome', () => {
+    const fn = /function startCachePoll[\s\S]*?\n  tick\(\);\n\}/.exec(INDEX_HTML)[0];
+    const cleared = (fn.match(/_cacheBuilding = false/g) || []).length;
+    assert.ok(cleared >= 2,
+      'ready and failed must both re-enable the control, otherwise it sticks disabled');
+  });
+});
+
+// ── The administrator is an ordinary principal for configuration ─────────────
+describe('index.html administrator chrome', () => {
+  test('Settings and Reports are no longer hidden from the administrator', () => {
+    // They have their own connection, quota, mail settings and schedule against
+    // a reserved principal id, so these panels work for them.
+    assert.doesNotMatch(INDEX_HTML, /for \(const id of \['settingsBtn', 'reportsBtn'\]\)/,
+      'the administrator must not have Settings and Reports hidden');
+  });
+
+  test('Profile stays hidden for the administrator', () => {
+    // Their name and password live in the installation credentials file, not in
+    // the database, so there is nothing there to edit.
+    assert.match(INDEX_HTML, /profileItem\.style\.display = _currentUser\.isAdmin \? 'none' : ''/);
+  });
+
+  test('the administrator loads a connection through the same path as anyone else', () => {
+    assert.match(INDEX_HTML, /loadDtConnection\(\)\.then\(connected => \{/);
+    // No early return that skips connection loading for administrators.
+    assert.doesNotMatch(INDEX_HTML, /An administrator session has no per-user data to load/);
+  });
+});
+
+// ── Login page survives browser zoom ────────────────────────────────────────
+describe('login.html responsiveness', () => {
+  // CSS comments explain these rules in prose that mentions the very properties
+  // under test, so strip them before asserting — otherwise a comment satisfies
+  // the assertion and the rule itself goes unchecked.
+  const rules = (selector) => {
+    const re = new RegExp(selector.replace(/[.*+?^${}()|[\]\\]/g, '\\$&') + ' \\{([\\s\\S]*?)\\n    \\}');
+    const block = re.exec(LOGIN_HTML);
+    assert.ok(block, `no rule block found for ${selector}`);
+    return block[1].replace(/\/\*[\s\S]*?\*\//g, '');
+  };
+
+  test('the page is never clipped', () => {
+    // `overflow: hidden` on the body hid the card at high zoom with no way to
+    // scroll to it. The decorative layers clip themselves instead.
+    assert.doesNotMatch(rules('body'), /overflow:\s*hidden/,
+      'the body must not clip — the card has to stay reachable when zoomed');
+  });
+
+  test('the card is centred by margin, not by align-items', () => {
+    // A flex item centred with align-items overflows equally in both directions
+    // once taller than the container, and the part above the top edge cannot be
+    // scrolled to. `margin: auto` degrades to scrollable instead.
+    assert.match(rules('.auth-card'), /margin:\s*auto/);
+    assert.doesNotMatch(rules('body'), /align-items:\s*center/);
+  });
+
+  test('the oversized grid layer is clipped by its own wrapper', () => {
+    assert.match(LOGIN_HTML, /\.bg-grid-clip \{[^}]*overflow: hidden/);
+    assert.match(LOGIN_HTML, /<div class="bg-grid-clip" aria-hidden="true"><div class="bg-grid"><\/div><\/div>/);
+    assert.match(rules('.bg-grid'), /position: absolute/,
+      'must be absolute inside the clip, not fixed');
+  });
+
+  test('there are height breakpoints, because zoom shortens before it narrows', () => {
+    assert.match(LOGIN_HTML, /@media \(max-height: 720px\)/);
+    assert.match(LOGIN_HTML, /@media \(max-height: 560px\)/);
+  });
+
+  test('the name pair stacks before it becomes cramped', () => {
+    assert.match(LOGIN_HTML, /@media \(max-width: 640px\) \{\s*\n\s*\.row-2 \{ grid-template-columns: 1fr; \}/);
+  });
+
+  test('the session dialog scrolls rather than centre-clipping', () => {
+    assert.match(LOGIN_HTML, /\.modal-overlay \{ overflow-y: auto; \}/);
+    assert.match(LOGIN_HTML, /\.modal \{ margin: auto; \}/);
+  });
+});

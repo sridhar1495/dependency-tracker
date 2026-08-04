@@ -148,15 +148,23 @@ async function resolveToken(token) {
     return null;
   }
 
+  const isAdmin = row.principalType === 'admin';
+
   const principal = {
     sessionId:     row.id,
-    userId:        row.userId,
+    // S28: the SESSION row keeps user_id NULL for the administrator — the
+    // sessions_principal_shape constraint requires it and nothing here changes
+    // that. The resolved principal instead carries the reserved data identity
+    // from migration 004, so the administrator's own settings, DependencyTrack
+    // connection and reports flow through the ordinary per-user paths without
+    // any route needing to know they are the administrator.
+    userId:        isAdmin ? users.ADMIN_PRINCIPAL_ID : row.userId,
     principalType: row.principalType,
-    loginId:       row.principalType === 'admin' ? null : row.loginId,
+    loginId:       isAdmin ? null : row.loginId,
     firstName:     row.firstName || null,
     lastName:      row.lastName  || null,
     email:         row.email     || null,
-    isAdmin:       row.principalType === 'admin',
+    isAdmin,
   };
 
   _tokenCache.set(key, { principal, cachedAt: now, lastTouchedAt: now });
