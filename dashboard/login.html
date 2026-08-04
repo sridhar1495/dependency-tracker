@@ -406,6 +406,34 @@
     </div>
   </div>
 
+  <!-- ── Set a new password ───────────────────────────────────────────────
+       Reached only after signing in with a password an administrator set. The
+       current password is deliberately not asked for: the user does not know
+       it, and the session they are holding was minted from it seconds ago,
+       which is the proof of possession. -->
+  <div class="view" id="viewSetPassword">
+    <div class="auth-title">Choose a new password</div>
+    <div class="banner info" style="display:block" id="spIntro">
+      Your password was reset by an administrator. Choose your own to continue.
+    </div>
+    <div class="field">
+      <label class="label" for="spPassword">New password</label>
+      <input class="input" id="spPassword" type="password" autocomplete="new-password"
+             placeholder="At least 8 characters, no spaces">
+      <div class="err" id="spPasswordErr"></div>
+    </div>
+    <div class="field">
+      <label class="label" for="spConfirm">Confirm new password</label>
+      <input class="input" id="spConfirm" type="password" autocomplete="new-password"
+             placeholder="Type it again">
+      <div class="err" id="spConfirmErr"></div>
+    </div>
+    <button class="btn primary block" id="spSubmit" onclick="doSetPassword()">Set password and continue</button>
+    <div class="auth-alt">
+      <button class="link" onclick="abandonSetPassword()">Sign out instead</button>
+    </div>
+  </div>
+
   <!-- ── Forgot password (deferred — decision D5) ────────────────────────── -->
   <div class="view" id="viewForgot">
     <div class="auth-title">Forgot password</div>
@@ -541,10 +569,11 @@ function busy(buttonId, isBusy, labelWhenBusy, labelWhenIdle) {
 // ── View switching ────────────────────────────────────────────────────────
 function showView(name) {
   clearBanner();
-  ['login', 'register', 'forgot'].forEach(v => {
+  ['login', 'register', 'forgot', 'setPassword'].forEach(v => {
     $('view' + v.charAt(0).toUpperCase() + v.slice(1)).classList.toggle('active', v === name);
   });
-  const focus = { login: 'liLoginId', register: 'rgFirstName', forgot: null }[name];
+  const focus = { login: 'liLoginId', register: 'rgFirstName', forgot: null,
+                  setPassword: 'spPassword' }[name];
   if (focus) { const el = $(focus); if (el) el.focus(); }
 }
 
@@ -604,6 +633,12 @@ async function doLogin(force) {
     }
 
     localStorage.setItem(TOKEN_KEY, data.token);
+
+    // An administrator reset this password. The token is real, but the backend
+    // refuses every route except set-password until a new one is chosen, so
+    // going to the dashboard would only bounce.
+    if (data.mustChangePassword) { showView('setPassword'); return; }
+
     window.location.replace('index.html');
   } catch (e) {
     showBanner('Could not reach the server: ' + e.message, 'error');
@@ -822,6 +857,59 @@ $('rgEmail').addEventListener('blur',     onEmailBlur);
 })();
 
 // ── Exports required by inline onclick handlers ───────────────────────────
+/**
+ * Finish an administrator-initiated password reset.
+ *
+ * Uses the session that has just been issued. The backend re-validates and is
+ * the authority; these checks exist only so the user hears about a bad password
+ * before the round trip (CLAUDE.md §8.8).
+ */
+async function doSetPassword() {
+  const password = $('spPassword').value;
+  const confirm  = $('spConfirm').value;
+
+  const pErr = validatePassword(password);
+  const cErr = password === confirm ? null : 'Passwords do not match.';
+  $('spPasswordErr').textContent = pErr || '';
+  $('spConfirmErr').textContent  = cErr || '';
+  if (pErr || cErr) return;
+
+  const token = localStorage.getItem(TOKEN_KEY);
+  if (!token) { showView('login'); showBanner('Please sign in again.', 'error'); return; }
+
+  busy('spSubmit', true, 'Saving…', 'Set password and continue');
+  try {
+    const r = await fetch('/auth/set-password', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: 'Bearer ' + token },
+      body: JSON.stringify({ password, confirmPassword: confirm }),
+    });
+    const data = await r.json().catch(() => ({}));
+    if (!r.ok) {
+      $('spPasswordErr').textContent = data.error || 'Could not set the password.';
+      return;
+    }
+    // The same session continues — the backend cleared the flag and evicted the
+    // cached principal, so the dashboard's first request already succeeds.
+    window.location.replace('index.html');
+  } catch (e) {
+    showBanner('Could not reach the server: ' + e.message, 'error');
+  } finally {
+    busy('spSubmit', false, 'Saving…', 'Set password and continue');
+  }
+}
+
+/** Walk away instead. The session is dropped rather than left half-usable. */
+function abandonSetPassword() {
+  localStorage.removeItem(TOKEN_KEY);
+  $('spPassword').value = '';
+  $('spConfirm').value  = '';
+  showView('login');
+  showBanner('Signed out. Your password still needs changing at the next sign-in.', 'info');
+}
+
+window.doSetPassword         = doSetPassword;
+window.abandonSetPassword    = abandonSetPassword;
 window.showView              = showView;
 window.doLogin               = doLogin;
 window.doRegister            = doRegister;

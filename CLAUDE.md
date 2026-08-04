@@ -65,7 +65,7 @@ write code that assumes a later phase has landed.
 | 6 | Reports in the database | **Merged** |
 | 7 | Shared violation cache | **Merged** |
 | 8 | Installer, infrastructure, documentation | **In review** |
-| 9 | Administration panel (read-only) | **In review** |
+| 9 | Administration panel (separate screen) | **In review** |
 | 10 | Performance validation | **In review** |
 
 **Milestone M1 = phases 0–3.** At the end of M1 the dashboard is gated behind login
@@ -92,8 +92,9 @@ After M3 the migration is complete and the phase table above is history.
 ```
 dependency-tracker/
 ├── dashboard/
-│   ├── index.html              # Single-file dashboard SPA (~3 600 lines)
-│   ├── login.html              # Single-file login/register page  [phase 3]
+│   ├── index.html              # Single-file dashboard SPA
+│   ├── login.html              # Single-file login/register/set-password page
+│   ├── admin.html              # Single-file administration screen
 │   └── nginx.conf.template     # nginx config with envsubst placeholders
 ├── violation-cache/
 │   ├── server.js               # Routing + boot only (~400 lines after phase 0)
@@ -106,7 +107,8 @@ dependency-tracker/
 │   │   ├── auth.js             # Sessions, token cache, rate limiting
 │   │   ├── validate.js         # Field validators (mirrored in the frontend)
 │   │   ├── users.js sessions.js login-audit.js admin.js
-│   │   ├── dt-connections.js user-settings.js mail-settings.js
+│   │   ├── dt-connections.js user-settings.js app-settings.js mail-settings.js
+│   │   ├── disk.js             # Filesystem headroom and database size
 │   │   ├── reports-db.js caches.js schedules.js scheduler.js
 │   │   └── dt-fetch.js excel.js mail.js reports.js violation-cache.js
 │   ├── routes/                 # auth.js profile.js admin.js dt-proxy.js config.js reports.js schedule.js cache.js
@@ -138,6 +140,7 @@ dependency-tracker/
 | Password hashing | Built-in `crypto.scrypt` | OWASP-recommended KDF, zero dependencies |
 | Session tokens | Built-in `crypto.randomBytes` + SHA-256 | Revocable, no JWT library |
 | Secret encryption | Built-in AES-256-GCM | Protects DT API keys and SMTP passwords at rest |
+| Filesystem headroom | Built-in `fs.statfs` | One syscall, zero dependencies |
 | Excel generation | `exceljs` ^4.4.0 | MIT |
 | Email delivery | `nodemailer` ^6.10.1 | MIT |
 | Frontend | Vanilla HTML5 / CSS3 / ES2020+ | Zero build step, no npm |
@@ -204,7 +207,7 @@ Inline comments use lettered prefixes to trace design decisions:
 - **O-numbers** — observability notes (`// O3: JSON log format for log aggregators`)
 - **S-numbers** — security rationale (`// S2: token hashed before storage`) — **new in revision 2**
 
-Highest numbers currently in use: **Q15, P17, O5, S28**. When adding logic with a
+Highest numbers currently in use: **Q15, P18, O5, S31**. When adding logic with a
 non-obvious trade-off, add the next number in the appropriate series. Check the
 current maximum before assigning — parallel branches can claim the same number.
 
@@ -281,7 +284,8 @@ await tx(async (client) => {
 | `user_sessions` | Bearer-token sessions (one live per user) |
 | `login_audit` | Authentication event trail |
 | `dt_connections` | Per-user DT URL and encrypted API key |
-| `user_settings` | Per-user preferences (`max_reports`) |
+| `app_settings` | Service-wide settings the administrator owns (singleton row) |
+| `user_settings` | Per-user report limit — `NULL` means "follow the global default" |
 | `mail_settings` | Per-user SMTP configuration |
 | `schedules`, `schedule_projects`, `schedule_runs` | Scheduled reports |
 | `reports`, `report_file_chunks` | Report metadata and file bytes |
@@ -485,7 +489,10 @@ if (method === 'GET' && path === '/violation-cache/status') {
   `sessions_principal_shape` constraint requires it. The reserved id is attached
   to the **resolved principal** in `auth.resolveToken`, not to the session.
 - Profile editing and account deletion remain closed to the administrator: their
-  name and password live in the credentials file, not the database.
+  name and password live in the credentials file, not the database. That is also
+  why the reserved row cannot have its password reset — `adminResetPassword`
+  excludes it explicitly, so there is never a second, silent way to authenticate
+  as the administrator.
 - Created by `install.sh`. If the file is absent the service starts normally with
   administrator login **disabled**, logs a warning at boot, and returns an
   actionable error to anyone attempting an administrator login. It must never be
@@ -505,12 +512,61 @@ is a correctness bug, not a style issue.
   administrator paths.
 - **Cross-user access returns 404, not 403.** Never confirm that another user's
   resource exists.
-- **Quotas are per user** (report limits, storage), never global counters.
+- **Quotas are enforced per user** (report limits, storage), never as a global
+  counter. Who *chooses* the number changed in migration 005 — the administrator
+  sets it, globally or for one account — but it is still counted and applied per
+  user, and one account can never consume another's allowance.
+  `user_settings.max_reports IS NULL` means "follow `app_settings`"; a value is
+  an administrator's override. That distinction cannot be encoded as a number:
+  a stored 10 is indistinguishable from an unset 10, so raising the default
+  would silently skip everyone sitting on the old one. Resolution happens in
+  `userSettings.get()` and nowhere else.
+- **Being over a limit blocks, it never deletes.** `trimToLimit()` was removed
+  with migration 005. It was defensible while each user chose their own number;
+  the same call from a global change would destroy reports across many accounts
+  at once. Do not reintroduce a trim without deciding that question again.
 - **Shared caches are keyed by a fingerprint**, never by user, so that users with
   identical upstream credentials share one build. Single-builder election uses
   `pg_try_advisory_lock`.
 
-### 7.6 Secrets at rest
+### 7.6 Administration writes
+
+Administration was read-only by design. It is not any more, and what it may do is
+a **closed list of three**, not a general-purpose account editor:
+
+| Route | Effect |
+|---|---|
+| `PUT /admin/settings` | The default report limit every non-overridden account follows |
+| `PUT /admin/users/:loginId/settings` | One account's limit; `null` returns it to the default |
+| `POST /admin/users/:loginId/password` | Reset one account's password |
+
+Everything else about an account stays readable only. A test asserts exactly
+these three are handled and every other method/path combination is not — a
+blanket ban that had to be deleted would have stopped protecting anything, so
+the allow-list is the contract and adding a fourth write means editing it in a
+diff somebody reads.
+
+**S29 — the password reset is the most privileged thing in the service**, because
+the administrator chooses a value that authenticates as somebody else. Three
+things bound it, and none may be removed on its own:
+
+- The account's sessions are revoked and its cached token evicted, so the person
+  is signed out rather than silently followed.
+- `users.must_change_password` is set, and dispatch then refuses every route
+  except `/auth/set-password`, `/auth/logout` and `/auth/me`. The password the
+  administrator typed can only ever be spent replacing itself — it never becomes
+  a working credential for that user's DependencyTrack connection or reports.
+- Every reset is written to `login_audit`, **in the same transaction as the
+  password change**. Writing it afterwards meant a failure there left the
+  password already replaced while the caller was told the reset had failed.
+
+`/auth/set-password` deliberately does not ask for the current password: the user
+does not know it, and the bearer token minted from it seconds earlier is the
+proof of possession. Clearing the flag evicts the cached principal, so the same
+session continues straight into the dashboard rather than bouncing for up to a
+minute.
+
+### 7.7 Secrets at rest
 
 - DT API keys and SMTP passwords are encrypted with AES-256-GCM using
   `SECRET_ENCRYPTION_KEY`, with a per-record nonce and the auth tag stored alongside.
@@ -523,10 +579,17 @@ is a correctness bug, not a style issue.
 
 ## 8. Frontend
 
-### 8.1 Two single-file pages
+### 8.1 Three single-file pages
 
-The dashboard is `index.html`; the login/registration page is `login.html`. Each is
-a self-contained HTML file with inline `<style>` and a single `<script>`.
+The dashboard is `index.html`, the login/registration/set-password page is
+`login.html`, and administration is `admin.html`. Each is a self-contained HTML
+file with inline `<style>` and a single `<script>`.
+
+Administration was a slide-in panel while it did one read-only thing. It became a
+page when it grew a master/detail split and service configuration: a panel that
+has to host both is a page wearing the wrong clothes, and `index.html` was
+already ~4,400 lines. **The old panel was deleted, not hidden** — a dead second
+implementation is one that gets rendered by accident.
 
 **Do not split either file into separate JS/CSS assets** — the no-build-step
 constraint requires this. Adding a *page* is allowed; splitting a *page* is not.
@@ -537,9 +600,14 @@ constraint requires this. Adding a *page* is allowed; splitting a *page* is not.
 <script>  — IIFE wrapping all state and logic
 ```
 
-`login.html` reuses the same CSS custom properties and form classes as `index.html`
-so the two are visually identical. Duplicating a small amount of CSS between the two
-files is accepted and preferred over introducing a shared asset.
+`login.html` and `admin.html` reuse the same CSS custom properties and form
+classes as `index.html` so the three are visually identical. Duplicating a small
+amount of CSS between them is accepted and preferred over introducing a shared
+asset. A test asserts every custom property is present in all three, so they
+cannot drift apart silently.
+
+Adding a page needs no nginx change: `try_files` serves a real file before the
+SPA fallback is considered.
 
 ### 8.2 IIFE + window exports
 
@@ -564,6 +632,15 @@ no DependencyTrack credentials at all.
 
 `index.html` validates the session before any data loading, theme initialisation or
 rendering. An unauthenticated visitor never sees dashboard chrome.
+
+`admin.html` goes further: being signed in is not enough, the principal must be
+the administrator. An ordinary user reaching that URL is sent to the dashboard
+rather than shown a screen whose every request would 403.
+
+A session with `mustChangePassword` set is authenticated but may reach nothing
+else, so `apiFetch` treats a 403 carrying `PASSWORD_CHANGE_REQUIRED` as "go and
+choose a password" — without it the dashboard fills with identical error toasts
+as each call fails in turn.
 
 ### 8.5 State management
 
@@ -706,7 +783,7 @@ The frontend never performs uniqueness checks — those are backend-only, via
 - SPA routing: `try_files $uri $uri/ /index.html`; `login.html` served directly.
 - There is **no `/api/*` block and no `/dt-config` block**. DependencyTrack is
   per-user, reached through `/violation-cache/dt/`; forwarding `/api/*` to one
-  shared instance would defeat both the per-user connection and §7.6.
+  shared instance would defeat both the per-user connection and §7.7.
 
 ### 9.2 docker-compose.yml conventions
 
@@ -922,7 +999,7 @@ redundant.
 
 - **Authentication is mandatory on every backend route.** New routes are
   authenticated by default; a public route must be listed explicitly and justified.
-- Secrets never appear in responses or logs (§6.5, §7.6).
+- Secrets never appear in responses or logs (§6.5, §7.7).
 - Parameterised SQL only (§5.1).
 - `crypto.timingSafeEqual` for all credential and token comparisons.
 - Brute-force protection: five failures per `(login_id, ip)` triggers a
@@ -980,6 +1057,11 @@ aspirations, and each is verifiable.
 | `VIOLATION_CONCURRENCY` | server | Max parallel violation fetches (default 3) |
 | `LOG_FORMAT` | server | `text` (default) or `json` |
 | `TEST_DATABASE_URL` | tests | Enables the database integration tier |
+
+The report limit is **not** an environment variable. It is service configuration
+the administrator owns at runtime, held in `app_settings` and edited from the
+administration screen — an operator should not have to restart a container to
+change a quota.
 
 `DT_API_INTERNAL_URL`, `DT_API_KEY` and `DT_FRONTEND_URL` are **no longer read at
 request time**. They survive in `.env` only so an installation upgrading from the

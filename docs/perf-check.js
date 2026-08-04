@@ -238,11 +238,17 @@ function summarise(plan, rowsIn) {
              api_key_ciphertext, api_key_nonce, api_key_tag
         FROM dt_connections WHERE user_id = $1`, [userId]],
 
+    // Must stay identical to lib/users.js listWithStats(). It is a copy, which
+    // is the weakness of this harness: a change there and not here measures
+    // yesterday's query. The CROSS JOIN on app_settings arrived with migration
+    // 005 and is included here for exactly that reason.
     ['lib/users.js — administration listing', `
       SELECT u.id, u.login_id, u.email, u.first_name, u.last_name, u.created_at, u.last_login_at,
              (s.id IS NOT NULL), s.last_seen_at,
              COALESCE(r.reports, 0)::int, COALESCE(r.bytes, 0)::bigint,
-             COALESCE(c.is_configured, false), COALESCE(sc.enabled, false)
+             COALESCE(c.is_configured, false), COALESCE(sc.enabled, false),
+             COALESCE(st.max_reports, a.default_max_reports)::int,
+             (st.max_reports IS NOT NULL)
         FROM (SELECT id, login_id, email, first_name, last_name, created_at, last_login_at
                 FROM users ORDER BY created_at LIMIT 500) u
         LEFT JOIN LATERAL (SELECT id, last_seen_at FROM user_sessions
@@ -252,7 +258,19 @@ function summarise(plan, rowsIn) {
                              FROM reports WHERE user_id = u.id) r ON true
         LEFT JOIN dt_connections c ON c.user_id = u.id
         LEFT JOIN schedules sc      ON sc.user_id = u.id
+        LEFT JOIN user_settings st  ON st.user_id = u.id
+        CROSS JOIN app_settings a
+       WHERE a.id = TRUE
        ORDER BY u.created_at`, []],
+
+    ['lib/disk.js — storage by account', `
+      SELECT u.login_id, count(rr.id)::int, COALESCE(sum(rr.file_size_bytes), 0)::bigint
+        FROM users u
+        JOIN reports rr ON rr.user_id = u.id
+       GROUP BY u.login_id
+      HAVING COALESCE(sum(rr.file_size_bytes), 0) > 0
+       ORDER BY 3 DESC
+       LIMIT 5`, []],
   ];
 
   const results = [];

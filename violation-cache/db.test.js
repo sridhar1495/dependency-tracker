@@ -1857,6 +1857,17 @@ describe('administrator principal', { skip: !ENABLED && 'TEST_DATABASE_URL not s
 
   const ADMIN = () => users.ADMIN_PRINCIPAL_ID;
 
+  // A throwaway account for the password-reset tests. Created here rather than
+  // borrowed from another block so this suite owns its own data (CLAUDE.md §10.4).
+  let alice;
+  before(async () => {
+    alice = await users.create({
+      loginId: 'resettarget', email: null, firstName: 'Reset', lastName: 'Target',
+      passwordHash: await dtCrypto.hashPassword('originalpass1'),
+    });
+  });
+  after(async () => { if (alice) await users.deleteById(alice.id); });
+
   test('the migration seeded the principal and all four per-user rows', async () => {
     const { rows } = await pool.query(
       'SELECT login_id AS "loginId", first_name AS "firstName" FROM users WHERE id = $1', [ADMIN()]);
@@ -1891,6 +1902,75 @@ describe('administrator principal', { skip: !ENABLED && 'TEST_DATABASE_URL not s
 
     const resolved = await dtConnections.getResolved(ADMIN());
     assert.equal(resolved.apiKey, 'admin_own_secret_key');
+  });
+
+  test('an administrator password reset and its audit row commit together', async () => {
+    // They were two statements. A failure on the second left the password
+    // already replaced while the caller was told the reset had failed — the
+    // administrator would then retry against a credential that had silently
+    // moved. Either both land or neither does.
+    const before = await pool.query(
+      'SELECT password_hash AS h, must_change_password AS m FROM users WHERE id = $1', [alice.id]);
+    const auditBefore = await pool.query(
+      "SELECT count(*)::int AS n FROM login_audit WHERE user_id = $1 AND event = 'admin_password_reset'",
+      [alice.id]);
+
+    const hash = await dtCrypto.hashPassword('adminchosen123');
+    const updated = await users.adminResetPassword(alice.id, hash, { loginIdAttempted: 'resettarget' });
+    assert.ok(updated, 'the account exists, so the reset returns it');
+
+    const after = await pool.query(
+      'SELECT password_hash AS h, must_change_password AS m FROM users WHERE id = $1', [alice.id]);
+    assert.notEqual(after.rows[0].h, before.rows[0].h, 'the hash changed');
+    assert.equal(after.rows[0].m, true, 'and the account must now choose its own');
+
+    const auditAfter = await pool.query(
+      "SELECT count(*)::int AS n FROM login_audit WHERE user_id = $1 AND event = 'admin_password_reset'",
+      [alice.id]);
+    assert.equal(auditAfter.rows[0].n, auditBefore.rows[0].n + 1, 'exactly one audit row');
+  });
+
+  test('the audit event is accepted by the database, not only by the application', async () => {
+    // The event list is a CHECK constraint as well as a Set in login-audit.js.
+    // Adding one to the Set alone made the reset fail at the INSERT.
+    await pool.query(
+      "INSERT INTO login_audit (user_id, login_id_attempted, event) VALUES ($1, 'x', 'admin_password_reset')",
+      [alice.id]);
+    await assert.rejects(
+      () => pool.query(
+        "INSERT INTO login_audit (user_id, login_id_attempted, event) VALUES ($1, 'x', 'not_an_event')",
+        [alice.id]),
+      (e) => e.code === '23514', 'an unknown event must still be refused');
+  });
+
+  test('the reserved principal cannot have its password reset', async () => {
+    // Their credentials live in the on-disk file. A row that could be reset
+    // here would be a second, silent way to authenticate as the administrator.
+    const hash = await dtCrypto.hashPassword('shouldnotwork1');
+    const result = await users.adminResetPassword(ADMIN(), hash, { loginIdAttempted: '__administrator__' });
+    assert.equal(result, null, 'the reserved row must be untouchable');
+    const row = await pool.query(
+      'SELECT must_change_password AS m FROM users WHERE id = $1', [ADMIN()]);
+    assert.equal(row.rows[0].m, false);
+  });
+
+  test('completing a password change clears the flag and only the flag', async () => {
+    const hash = await dtCrypto.hashPassword('chosenbyme1234');
+    const done = await users.completePasswordChange(alice.id, hash);
+    assert.ok(done);
+    const row = await pool.query(
+      'SELECT password_hash AS h, must_change_password AS m FROM users WHERE id = $1', [alice.id]);
+    assert.equal(row.rows[0].m, false);
+    assert.equal(row.rows[0].h, hash);
+  });
+
+  test('verifyLookup carries the flag, so login can act on it', async () => {
+    const hash = await dtCrypto.hashPassword('adminchosen456');
+    await users.adminResetPassword(alice.id, hash, { loginIdAttempted: 'resettarget' });
+    const row = await users.verifyLookup('resettarget');
+    assert.equal(row.mustChangePassword, true);
+    await users.completePasswordChange(alice.id, hash);
+    assert.equal((await users.verifyLookup('resettarget')).mustChangePassword, false);
   });
 
   test('the administrator takes their quota from the global default', async () => {

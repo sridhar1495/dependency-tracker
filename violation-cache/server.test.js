@@ -2750,18 +2750,68 @@ describe('routes — the administration listing exposes no secrets', () => {
     } finally { restore(); restore2(); }
   });
 
-  test('there is no route that changes anything', async () => {
-    // A write route here would be a much larger blast radius than the panel is
-    // worth. If one is ever added, this test should be the thing that stops it.
-    for (const method of ['POST', 'PUT', 'DELETE', 'PATCH']) {
-      for (const path of ['/admin/users', '/admin/overview', '/admin/users/alice']) {
-        const res = makeRes();
-        const handled = await routeAdmin.handle({
-          method, url: path, path, res, principal: asAdmin(),
-        });
-        assert.equal(handled, false,
-          `${method} ${path} must not be handled — administration is read-only`);
+  // Administration was read-only, and this test used to forbid every write.
+  // It now allows exactly three and forbids everything else, because a blanket
+  // ban that had to be deleted would have stopped protecting anything. The
+  // list is the contract: adding a fourth write means changing this line, in a
+  // diff somebody has to read.
+  const ALLOWED_WRITES = new Set([
+    'PUT /admin/settings',
+    'PUT /admin/users/:loginId/settings',
+    'POST /admin/users/:loginId/password',
+  ]);
+
+  test('only the three intended writes are handled', async () => {
+    const paths = [
+      '/admin/users', '/admin/overview', '/admin/storage', '/admin/settings',
+      '/admin/users/alice', '/admin/users/alice/settings', '/admin/users/alice/password',
+    ];
+    const restore = stub(usersMod, {
+      detailForAdmin: async () => { throw new Error('must not reach the data layer'); },
+    });
+    try {
+      for (const method of ['POST', 'PUT', 'DELETE', 'PATCH']) {
+        for (const path of paths) {
+          const key = `${method} ${path.replace(/alice/, ':loginId')}`;
+          const res = makeRes();
+          let handled;
+          try {
+            handled = await routeAdmin.handle({
+              method, url: path, path, res, principal: asAdmin(),
+              req: mockReq('{}'),
+            });
+          } catch (_) {
+            // Reaching the data layer means the route WAS handled.
+            handled = true;
+          }
+          if (ALLOWED_WRITES.has(key)) {
+            assert.equal(handled, true, `${key} is on the allow-list and must be handled`);
+          } else {
+            assert.equal(handled, false,
+              `${key} is not on the allow-list — administration writes are a closed set`);
+          }
+        }
       }
+    } finally { restore(); }
+  });
+
+  test('a normal user is refused every write, not only the reads', async () => {
+    for (const [method, path] of [
+      ['PUT',  '/admin/settings'],
+      ['PUT',  '/admin/users/alice/settings'],
+      ['POST', '/admin/users/alice/password'],
+    ]) {
+      const res = makeRes();
+      const restore = stub(usersMod, {
+        detailForAdmin: async () => { throw new Error('must not query on an unauthorised request'); },
+      });
+      try {
+        await routeAdmin.handle({
+          method, url: path, path, res, principal: asUser(USER_A), req: mockReq('{}'),
+        });
+        assert.equal(res.statusCode, 403, `${method} ${path}`);
+        assert.equal(res.json.code, 'ADMIN_ONLY');
+      } finally { restore(); }
     }
   });
 });
@@ -2974,7 +3024,10 @@ describe('routes — administration user detail', () => {
     } finally { restore(); }
   });
 
-  test('the detail route is read-only too', async () => {
+  test('the detail route itself stays read-only', async () => {
+    // The writes live on their own sub-paths — /settings and /password — so
+    // /admin/users/:loginId remains a GET and nothing else. A PUT here would
+    // be a general-purpose account editor, which is not what was asked for.
     for (const method of ['POST', 'PUT', 'DELETE', 'PATCH']) {
       const ctx = { method, url: '/admin/users/alice', path: '/admin/users/alice',
                     res: makeRes(), principal: asAdmin() };

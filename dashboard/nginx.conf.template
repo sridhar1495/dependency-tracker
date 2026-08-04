@@ -12,8 +12,9 @@ server {
     resolver 127.0.0.11 8.8.8.8 valid=10s ipv6=off;
 
     # Serve the dashboard SPA
-    # login.html is a real file, so try_files serves it directly before the
-    # /index.html fallback is ever considered.
+    # login.html and admin.html are real files, so try_files serves them
+    # directly before the /index.html fallback is ever considered. No extra
+    # block is needed for either; adding a page needs no nginx change.
     location / {
         try_files $uri $uri/ /index.html;
     }

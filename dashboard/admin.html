@@ -1,0 +1,1067 @@
+<!DOCTYPE html>
+<!--
+  Administration — a page of its own, not a side panel.
+
+  It was a slide-in panel while it did one read-only thing. It now holds account
+  management and service configuration, with more sections expected, and a panel
+  that has to host a master/detail split is a page wearing the wrong clothes.
+
+  A third page is allowed; splitting one is not (CLAUDE.md §8.1). Like
+  login.html, this file repeats the custom properties and a handful of form
+  classes from index.html rather than importing them — duplicating a little CSS
+  is the accepted cost of the no-build-step rule.
+-->
+<html lang="en" data-theme="dark">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Administration — DependencyTrack Dashboard</title>
+  <style>
+    /* ── Theme ────────────────────────────────────────────────────────────
+       Identical custom properties to index.html and login.html, so the three
+       pages cannot drift apart visually. */
+    :root {
+      --bg:           #0f1117;
+      --surface:      #1a1d27;
+      --surface2:     #21253a;
+      --border:       #2e3352;
+      --text:         #e2e8f0;
+      --text-muted:   #8892a4;
+      --accent:       #6366f1;
+
+      --critical:     #ef4444;
+      --critical-bg:  rgba(239,68,68,0.12);
+      --high:         #f97316;
+      --high-bg:      rgba(249,115,22,0.12);
+      --medium:       #eab308;
+      --medium-bg:    rgba(234,179,8,0.12);
+      --low:          #3b82f6;
+      --low-bg:       rgba(59,130,246,0.12);
+      --ok:           #22c55e;
+      --ok-bg:        rgba(34,197,94,0.08);
+
+      --header-h:     64px;
+      --radius:       8px;
+    }
+
+    [data-theme="light"] {
+      --bg:           #f0f2f8;
+      --surface:      #ffffff;
+      --surface2:     #e8ecf5;
+      --border:       #c8d0e0;
+      --text:         #1a2035;
+      --text-muted:   #5c6a85;
+      --accent:       #4f52d9;
+
+      --critical:     #dc2626;
+      --critical-bg:  rgba(220,38,38,0.10);
+      --high:         #ea6500;
+      --high-bg:      rgba(234,101,0,0.10);
+      --medium:       #b45309;
+      --medium-bg:    rgba(180,83,9,0.10);
+      --low:          #1d4ed8;
+      --low-bg:       rgba(29,78,216,0.10);
+      --ok:           #15803d;
+      --ok-bg:        rgba(21,128,61,0.08);
+    }
+
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body { height: 100%; }
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+      font-size: 14px;
+      /* Never overflow: hidden on body — a tall pane must stay reachable
+         when the viewport is short (CLAUDE.md §8.10). */
+      overflow: auto;
+    }
+
+    .app { display: flex; flex-direction: column; min-height: 100vh; }
+
+    /* ── Top bar ──────────────────────────────────────────────────────── */
+    .topbar {
+      height: var(--header-h);
+      background: var(--surface);
+      border-bottom: 1px solid var(--border);
+      display: flex; align-items: center; gap: 12px;
+      padding: 0 20px; flex-shrink: 0;
+    }
+    .brand { font-size: 16px; font-weight: 600; letter-spacing: .2px; }
+    .brand .tag {
+      font-size: 11px; font-weight: 500; color: var(--accent);
+      border: 1px solid var(--accent); border-radius: 4px;
+      padding: 1px 6px; margin-left: 8px; vertical-align: middle;
+    }
+    .spacer { flex: 1; }
+
+    .btn {
+      background: var(--surface2); color: var(--text);
+      border: 1px solid var(--border); border-radius: var(--radius);
+      padding: 8px 14px; font-size: 13px; cursor: pointer;
+      font-family: inherit; transition: background .15s, border-color .15s;
+    }
+    .btn:hover:not(:disabled) { background: var(--border); }
+    .btn:disabled { opacity: .5; cursor: not-allowed; }
+    .btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+    .btn.primary:hover:not(:disabled) { filter: brightness(1.1); }
+    .btn.danger { border-color: var(--critical); color: var(--critical); }
+    .btn.danger:hover:not(:disabled) { background: var(--critical-bg); }
+    .btn-xs {
+      background: var(--surface2); color: var(--text);
+      border: 1px solid var(--border); border-radius: 5px;
+      padding: 3px 9px; font-size: 12px; cursor: pointer; font-family: inherit;
+    }
+    .btn-xs:hover:not(:disabled) { background: var(--border); }
+    .btn-xs:disabled { opacity: .5; cursor: not-allowed; }
+    .btn-theme {
+      background: none; border: 1px solid var(--border); border-radius: var(--radius);
+      color: var(--text); cursor: pointer; font-size: 15px; padding: 6px 10px;
+    }
+
+    /* ── 60 / 40 split with a draggable divider ───────────────────────────
+       The left column holds the accordions; the right is the detail region.
+       Percentages are set inline by the splitter, so the ratio survives a
+       re-render of either side. */
+    .split {
+      flex: 1; display: flex; align-items: stretch;
+      min-height: 0; padding: 16px; gap: 0;
+    }
+    .pane-left  { width: 60%; min-width: 260px; display: flex; flex-direction: column; gap: 12px; }
+    .pane-right { width: 40%; min-width: 260px; display: flex; flex-direction: column; }
+
+    .splitter {
+      width: 10px; flex: 0 0 10px; cursor: col-resize;
+      display: flex; align-items: center; justify-content: center;
+      position: relative;
+    }
+    .splitter::before {
+      content: ''; width: 2px; height: 100%;
+      background: var(--border); border-radius: 2px; transition: background .15s;
+    }
+    .splitter:hover::before, .splitter.dragging::before { background: var(--accent); }
+    /* While dragging, stop the pointer selecting table text as it sweeps. */
+    body.resizing { user-select: none; cursor: col-resize; }
+
+    /* ── Accordion ────────────────────────────────────────────────────────
+       All sections start closed: the screen opens as a menu of what is here,
+       rather than a wall of data nobody asked for yet. */
+    .acc {
+      background: var(--surface); border: 1px solid var(--border);
+      border-radius: var(--radius); overflow: hidden;
+    }
+    .acc-head {
+      display: flex; align-items: center; gap: 10px;
+      padding: 12px 14px; cursor: pointer; user-select: none;
+      background: none; border: none; width: 100%;
+      color: var(--text); font-family: inherit; font-size: 14px; text-align: left;
+    }
+    .acc-head:hover { background: var(--surface2); }
+    .acc-head h2 { font-size: 14px; font-weight: 600; }
+    .acc-caret { transition: transform .18s; color: var(--text-muted); }
+    .acc.open .acc-caret { transform: rotate(90deg); }
+    .acc-count {
+      font-size: 12px; color: var(--text-muted);
+      border: 1px solid var(--border); border-radius: 10px; padding: 0 8px;
+    }
+    .acc-body { display: none; padding: 0 14px 14px; }
+    .acc.open .acc-body { display: block; }
+
+    /* ── Tables ───────────────────────────────────────────────────────── */
+    .table-wrap { overflow-x: auto; border: 1px solid var(--border); border-radius: var(--radius); }
+    table.grid { width: 100%; border-collapse: collapse; font-size: 13px; }
+    table.grid th {
+      text-align: left; padding: 8px 10px; font-weight: 600; font-size: 12px;
+      color: var(--text-muted); background: var(--surface2);
+      border-bottom: 1px solid var(--border); white-space: nowrap;
+    }
+    table.grid td { padding: 8px 10px; border-bottom: 1px solid var(--border); white-space: nowrap; }
+    table.grid tr:last-child td { border-bottom: none; }
+    tr.row { cursor: pointer; }
+    tr.row:hover { background: var(--surface2); }
+    tr.row.selected { background: var(--accent); color: #fff; }
+    tr.row.selected .muted, tr.row.selected .pill-inherit { color: #fff; opacity: .85; }
+    .chev { color: var(--text-muted); text-align: right; }
+
+    .dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; margin-right: 6px; }
+    .dot.on  { background: var(--ok); }
+    .dot.off { background: var(--text-muted); }
+    .muted { color: var(--text-muted); }
+
+    /* The override marker. A number on its own cannot be acted on: the
+       administrator has to know whether changing the default would move it. */
+    .pill-set {
+      display: inline-block; font-size: 11px; font-weight: 600;
+      color: var(--accent); border: 1px solid var(--accent);
+      border-radius: 10px; padding: 0 7px; margin-left: 6px;
+    }
+    .pill-inherit { font-size: 11px; color: var(--text-muted); margin-left: 6px; }
+
+    /* ── Detail pane ──────────────────────────────────────────────────── */
+    .detail {
+      background: var(--surface); border: 1px solid var(--border);
+      border-radius: var(--radius); flex: 1; display: flex; flex-direction: column;
+      overflow: hidden;
+    }
+    .detail-head {
+      display: flex; align-items: center; gap: 10px;
+      padding: 12px 14px; border-bottom: 1px solid var(--border);
+    }
+    .detail-head h2 { font-size: 14px; font-weight: 600; }
+    .detail-body { padding: 14px; overflow-y: auto; flex: 1; }
+    .detail-empty {
+      display: flex; align-items: center; justify-content: center;
+      height: 100%; color: var(--text-muted); text-align: center; padding: 24px;
+    }
+
+    .card {
+      background: var(--surface2); border: 1px solid var(--border);
+      border-radius: var(--radius); padding: 12px; margin-bottom: 10px;
+    }
+    .card h3 {
+      font-size: 12px; font-weight: 600; text-transform: uppercase;
+      letter-spacing: .5px; color: var(--text-muted); margin-bottom: 8px;
+    }
+    .kv { display: flex; justify-content: space-between; gap: 12px; padding: 3px 0; font-size: 13px; }
+    .kv dt { color: var(--text-muted); }
+    .kv dd { text-align: right; word-break: break-word; }
+
+    .note {
+      font-size: 12px; color: var(--text-muted);
+      background: var(--surface2); border: 1px solid var(--border);
+      border-radius: var(--radius); padding: 10px 12px; margin-bottom: 12px;
+      line-height: 1.5;
+    }
+
+    /* ── Stat strip ───────────────────────────────────────────────────── */
+    .stats { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 12px; }
+    .stat {
+      background: var(--surface2); border: 1px solid var(--border);
+      border-radius: var(--radius); padding: 8px 12px; min-width: 96px;
+    }
+    .stat-label { font-size: 11px; color: var(--text-muted); }
+    .stat-value { font-size: 17px; font-weight: 600; }
+    .stat.warning .stat-value  { color: var(--medium); }
+    .stat.critical .stat-value { color: var(--critical); }
+
+    .bar { height: 6px; background: var(--surface2); border-radius: 3px; overflow: hidden; margin-top: 6px; }
+    .bar > span { display: block; height: 100%; background: var(--ok); }
+    .bar.warning  > span { background: var(--medium); }
+    .bar.critical > span { background: var(--critical); }
+
+    /* ── Forms ────────────────────────────────────────────────────────── */
+    .field { margin-bottom: 12px; }
+    .label { display: block; font-size: 12px; color: var(--text-muted); margin-bottom: 5px; }
+    .input {
+      width: 100%; background: var(--bg); color: var(--text);
+      border: 1px solid var(--border); border-radius: var(--radius);
+      padding: 9px 11px; font-size: 13px; font-family: inherit;
+    }
+    .input:focus { outline: none; border-color: var(--accent); }
+    .hint { font-size: 12px; color: var(--text-muted); margin-top: 5px; line-height: 1.5; }
+    .err  { font-size: 12px; color: var(--critical); margin-top: 5px; min-height: 16px; }
+
+    /* ── Modal ────────────────────────────────────────────────────────── */
+    .modal-overlay {
+      position: fixed; inset: 0; background: rgba(0,0,0,.6);
+      display: none; z-index: 100; overflow-y: auto; padding: 20px;
+    }
+    .modal-overlay.open { display: flex; }
+    .modal {
+      background: var(--surface); border: 1px solid var(--border);
+      border-radius: var(--radius); padding: 20px; width: 100%; max-width: 420px;
+      /* margin auto, not align-items:center — a modal taller than the viewport
+         must stay scrollable to its top edge (CLAUDE.md §8.10). */
+      margin: auto;
+    }
+    .modal h2 { font-size: 15px; margin-bottom: 10px; }
+    .modal p  { font-size: 13px; color: var(--text-muted); line-height: 1.55; margin-bottom: 14px; }
+    .modal-actions { display: flex; justify-content: flex-end; gap: 8px; margin-top: 16px; }
+
+    /* ── Toast ────────────────────────────────────────────────────────── */
+    .toast-wrap { position: fixed; bottom: 20px; right: 20px; z-index: 200; display: flex; flex-direction: column; gap: 8px; }
+    .toast {
+      background: var(--surface); border: 1px solid var(--border);
+      border-left: 3px solid var(--accent); border-radius: var(--radius);
+      padding: 11px 15px; font-size: 13px; max-width: 380px;
+      box-shadow: 0 6px 20px rgba(0,0,0,.35);
+    }
+    .toast.error   { border-left-color: var(--critical); }
+    .toast.success { border-left-color: var(--ok); }
+    .toast.warn    { border-left-color: var(--medium); }
+
+    /* ── Responsive ───────────────────────────────────────────────────────
+       Below 900px the split stacks: a 40% detail column on a phone is a
+       column of ellipses. Height breakpoints matter as much as width, because
+       zoom shortens the viewport before it narrows it (CLAUDE.md §8.10). */
+    @media (max-width: 900px) {
+      .split { flex-direction: column; }
+      .pane-left, .pane-right { width: 100% !important; }
+      .splitter { display: none; }
+      .pane-right { min-height: 320px; }
+    }
+    @media (max-width: 768px) {
+      .topbar { padding: 0 12px; gap: 8px; }
+      .brand .tag { display: none; }
+      .split { padding: 10px; }
+    }
+    @media (max-height: 600px) {
+      .topbar { height: 52px; }
+      .split { padding: 8px; }
+    }
+  </style>
+</head>
+<body>
+  <div class="app">
+    <header class="topbar">
+      <div class="brand">🛡 Administration<span class="tag">Admin</span></div>
+      <div class="spacer"></div>
+      <button class="btn-theme" id="themeBtn" onclick="toggleTheme()" title="Toggle dark/light mode">🌙</button>
+      <button class="btn" onclick="reloadAll()" title="Reload every section">↻ Refresh</button>
+      <button class="btn primary" onclick="backToDashboard()">← Dashboard</button>
+    </header>
+
+    <div class="split" id="split">
+      <!-- 60% — configuration accordions, all closed on arrival -->
+      <div class="pane-left" id="paneLeft">
+        <section class="acc" id="accUsers">
+          <button class="acc-head" onclick="toggleAccordion('accUsers')" aria-expanded="false" aria-controls="accUsersBody">
+            <span class="acc-caret">›</span>
+            <h2>Users</h2>
+            <span class="acc-count" id="usersCount">—</span>
+          </button>
+          <div class="acc-body" id="accUsersBody">
+            <div class="stats" id="overviewStats"></div>
+            <div class="table-wrap">
+              <table class="grid">
+                <thead>
+                  <tr>
+                    <th>Login ID</th><th>Name</th><th>Last sign-in</th>
+                    <th>Session</th><th>DT</th><th>Reports</th>
+                    <th>Report limit</th><th>Storage</th><th></th>
+                  </tr>
+                </thead>
+                <tbody id="usersBody"></tbody>
+              </table>
+            </div>
+            <div class="hint" id="usersEmpty" style="display:none">No accounts yet.</div>
+          </div>
+        </section>
+
+        <section class="acc" id="accReports">
+          <button class="acc-head" onclick="toggleAccordion('accReports')" aria-expanded="false" aria-controls="accReportsBody">
+            <span class="acc-caret">›</span>
+            <h2>Report Configuration</h2>
+            <span class="acc-count" id="defaultLimitBadge">—</span>
+          </button>
+          <div class="acc-body" id="accReportsBody">
+            <div class="note">
+              The default applies to every account that has no limit of its own.
+              Changing it never deletes a report — an account over the new limit
+              simply cannot create more until it is back under.
+            </div>
+            <div class="field">
+              <label class="label" for="defaultMaxReports">Default maximum reports per account</label>
+              <input class="input" id="defaultMaxReports" type="number" min="1" max="1000" step="1">
+              <div class="err" id="defaultMaxReportsErr"></div>
+              <div class="hint" id="defaultMaxReportsHint"></div>
+            </div>
+            <button class="btn primary" id="saveDefaults" onclick="saveDefaultLimit()">Save</button>
+          </div>
+        </section>
+
+        <section class="acc" id="accStorage">
+          <button class="acc-head" onclick="toggleAccordion('accStorage')" aria-expanded="false" aria-controls="accStorageBody">
+            <span class="acc-caret">›</span>
+            <h2>Storage</h2>
+            <span class="acc-count" id="storageBadge">—</span>
+          </button>
+          <div class="acc-body" id="accStorageBody">
+            <div id="storageBody"></div>
+          </div>
+        </section>
+      </div>
+
+      <div class="splitter" id="splitter" role="separator" aria-orientation="vertical"
+           title="Drag to resize"></div>
+
+      <!-- 40% — detail for whatever is selected on the left -->
+      <div class="pane-right" id="paneRight">
+        <div class="detail">
+          <div class="detail-head">
+            <h2 id="detailTitle">Detail</h2>
+            <div class="spacer"></div>
+            <button class="btn-xs" id="detailClose" onclick="clearSelection()" style="display:none">Close</button>
+          </div>
+          <div class="detail-body" id="detailBody">
+            <div class="detail-empty" id="detailEmpty">
+              Select an account on the left to see its detail.
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── Report limit editor ──────────────────────────────────────────── -->
+  <div class="modal-overlay" id="limitModal">
+    <div class="modal">
+      <h2>Change report limit</h2>
+      <p id="limitModalText"></p>
+      <div class="field">
+        <label class="label" for="limitInput">Maximum reports</label>
+        <input class="input" id="limitInput" type="number" min="1" max="1000" step="1">
+        <div class="err" id="limitErr"></div>
+        <div class="hint">
+          Leave it blank to return this account to the global default.
+        </div>
+      </div>
+      <div class="modal-actions">
+        <button class="btn" onclick="closeLimitModal()">Cancel</button>
+        <button class="btn primary" id="limitOk" onclick="confirmLimit()">Update</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- ── Password reset ───────────────────────────────────────────────── -->
+  <div class="modal-overlay" id="pwModal">
+    <div class="modal">
+      <h2>Reset password</h2>
+      <p id="pwModalText"></p>
+      <div class="field">
+        <label class="label" for="pwInput">New password</label>
+        <input class="input" id="pwInput" type="password" autocomplete="new-password">
+        <div class="err" id="pwErr"></div>
+        <div class="hint">
+          The account is signed out immediately, and is asked to choose its own
+          password on the next sign-in. This password works only for that.
+        </div>
+      </div>
+      <div class="modal-actions">
+        <button class="btn" onclick="closePwModal()">Cancel</button>
+        <button class="btn danger" id="pwOk" onclick="confirmPasswordReset()">Reset password</button>
+      </div>
+    </div>
+  </div>
+
+  <div class="toast-wrap" id="toasts"></div>
+
+<script>
+(function () {
+  'use strict';
+
+  // ── Configuration ──────────────────────────────────────────────────────
+  const CONFIG = {
+    TOAST_MS:       4000,
+    MIN_PANE_PCT:   25,   // neither pane may be squeezed into uselessness
+    MAX_PANE_PCT:   75,
+  };
+
+  const TOKEN_KEY = 'dt_session_token';
+  const THEME_KEY = 'dt_theme';
+
+  // ── State ──────────────────────────────────────────────────────────────
+  let _users            = [];     // last fetched account list
+  let _settings         = null;   // last fetched service settings
+  let _selectedLogin    = null;   // whose detail is open
+  let _limitTarget      = null;   // account the limit modal is editing
+  let _pwTarget         = null;   // account the reset modal is editing
+
+  // ── Utilities, mirrored from index.html ────────────────────────────────
+  const $ = (id) => document.getElementById(id);
+
+  function escHtml(s) {
+    return String(s === null || s === undefined ? '' : s)
+      .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+  }
+
+  function formatBytes(n) {
+    const b = Number(n) || 0;
+    if (b === 0) return '—';
+    const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+    let i = 0, v = b;
+    while (v >= 1024 && i < units.length - 1) { v /= 1024; i++; }
+    return `${v < 10 && i > 0 ? v.toFixed(1) : Math.round(v)} ${units[i]}`;
+  }
+
+  const fmtDate = (v) => (v ? new Date(v).toLocaleString() : '—');
+
+  function showToast(text, type) {
+    const el = document.createElement('div');
+    el.className = 'toast' + (type ? ' ' + type : '');
+    el.textContent = text;
+    $('toasts').appendChild(el);
+    setTimeout(() => el.remove(), CONFIG.TOAST_MS);
+  }
+
+  // ── Session ────────────────────────────────────────────────────────────
+  const getToken = () => localStorage.getItem(TOKEN_KEY);
+
+  function goToLogin(message) {
+    localStorage.removeItem(TOKEN_KEY);
+    const q = message ? '?msg=' + encodeURIComponent(message) : '';
+    window.location.href = 'login.html' + q;
+  }
+
+  /**
+   * Authenticated backend call. Same contract as index.html's: every backend
+   * request goes through it, and any 401 means "go to the login page"
+   * (CLAUDE.md §8.3).
+   */
+  async function apiFetch(path, opts) {
+    const token = getToken();
+    if (!token) { goToLogin('Please sign in to continue.'); return new Promise(() => {}); }
+    const options = Object.assign({}, opts);
+    options.headers = Object.assign({}, options.headers, { Authorization: 'Bearer ' + token });
+    const response = await fetch(path, options);
+    if (response.status === 401) {
+      goToLogin('Your session has expired. Please sign in again.');
+      return new Promise(() => {});
+    }
+    return response;
+  }
+
+  /**
+   * Nobody sees administration chrome before the session is known to be an
+   * administrator's. Being signed in is not enough — an ordinary user reaching
+   * this URL is sent back to the dashboard rather than shown a page whose every
+   * request would 403.
+   */
+  async function requireAdminSession() {
+    const token = getToken();
+    if (!token) { goToLogin(); return null; }
+    try {
+      const r = await fetch('/auth/me', { headers: { Authorization: 'Bearer ' + token } });
+      if (!r.ok) { goToLogin('Your session has expired. Please sign in again.'); return null; }
+      const me = await r.json();
+      const user = me.user || me;
+      if (!user.isAdmin) { window.location.href = 'index.html'; return null; }
+      return user;
+    } catch (e) {
+      goToLogin('Could not reach the server. Please sign in again.');
+      return null;
+    }
+  }
+
+  function backToDashboard() { window.location.href = 'index.html'; }
+
+  // ── Theme ──────────────────────────────────────────────────────────────
+  function initTheme() {
+    const saved = localStorage.getItem(THEME_KEY) || 'dark';
+    document.documentElement.setAttribute('data-theme', saved);
+    $('themeBtn').textContent = saved === 'light' ? '☀️' : '🌙';
+  }
+  function toggleTheme() {
+    const next = document.documentElement.getAttribute('data-theme') === 'light' ? 'dark' : 'light';
+    document.documentElement.setAttribute('data-theme', next);
+    localStorage.setItem(THEME_KEY, next);
+    $('themeBtn').textContent = next === 'light' ? '☀️' : '🌙';
+  }
+
+  // ── Accordions ─────────────────────────────────────────────────────────
+  // Closed by default and independent of one another: this screen is a menu of
+  // what is available, not a report that dumps everything at once.
+  function toggleAccordion(id) {
+    const sec = $(id);
+    const open = sec.classList.toggle('open');
+    sec.querySelector('.acc-head').setAttribute('aria-expanded', String(open));
+    if (open && id === 'accStorage') loadStorage();
+  }
+
+  // ── Splitter ───────────────────────────────────────────────────────────
+  // Percentages, not pixels, so the ratio holds when the window resizes.
+  function initSplitter() {
+    const bar   = $('splitter');
+    const left  = $('paneLeft');
+    const right = $('paneRight');
+    const host  = $('split');
+    let dragging = false;
+
+    const move = (clientX) => {
+      const rect = host.getBoundingClientRect();
+      let pct = ((clientX - rect.left) / rect.width) * 100;
+      pct = Math.max(CONFIG.MIN_PANE_PCT, Math.min(CONFIG.MAX_PANE_PCT, pct));
+      left.style.width  = pct + '%';
+      right.style.width = (100 - pct) + '%';
+    };
+
+    bar.addEventListener('mousedown', (e) => {
+      dragging = true;
+      bar.classList.add('dragging');
+      document.body.classList.add('resizing');
+      e.preventDefault();
+    });
+    window.addEventListener('mousemove', (e) => { if (dragging) move(e.clientX); });
+    window.addEventListener('mouseup', () => {
+      if (!dragging) return;
+      dragging = false;
+      bar.classList.remove('dragging');
+      document.body.classList.remove('resizing');
+    });
+  }
+
+  // ── Users ──────────────────────────────────────────────────────────────
+  async function loadUsers() {
+    try {
+      const [oR, uR] = await Promise.all([apiFetch('/admin/overview'), apiFetch('/admin/users')]);
+      if (!oR.ok || !uR.ok) {
+        const bd = await (oR.ok ? uR : oR).json().catch(() => ({}));
+        showToast(bd.error || 'Could not load the account list.', 'error');
+        return;
+      }
+      const overview = await oR.json();
+      _users = (await uR.json()).users;
+
+      $('usersCount').textContent = String(overview.userCount);
+
+      const stats = [
+        ['Accounts',         overview.userCount],
+        ['Active sessions',  overview.activeSessions],
+        ['DT configured',    overview.dtConfigured],
+        ['Schedules on',     overview.schedulesActive],
+        ['Reports stored',   overview.reportCount],
+        ['Report storage',   formatBytes(overview.storageBytes)],
+        // Fewer caches than configured accounts means users are sharing a
+        // build, which is the point of the fingerprint key (CLAUDE.md §7.5).
+        ['Violation caches', overview.cacheCount],
+      ];
+      $('overviewStats').innerHTML = stats.map(([label, value]) => `
+        <div class="stat">
+          <div class="stat-label">${escHtml(label)}</div>
+          <div class="stat-value">${escHtml(String(value))}</div>
+        </div>`).join('');
+
+      $('usersEmpty').style.display = _users.length ? 'none' : '';
+      $('usersBody').innerHTML = _users.map(u => `
+        <tr class="row" data-login="${escHtml(u.loginId)}">
+          <td><strong>${escHtml(u.loginId)}</strong></td>
+          <td>${escHtml(u.name)}</td>
+          <td>${escHtml(fmtDate(u.lastLoginAt))}</td>
+          <td><span class="dot ${u.sessionActive ? 'on' : 'off'}"></span>${u.sessionActive ? 'Active' : 'None'}</td>
+          <td><span class="dot ${u.dtConfigured ? 'on' : 'off'}"></span>${u.dtConfigured ? 'Set' : 'Not set'}</td>
+          <td>${escHtml(String(u.reportCount))}</td>
+          <td>${limitCellHtml(u)}</td>
+          <td>${escHtml(formatBytes(u.storageBytes))}</td>
+          <td class="chev">›</td>
+        </tr>`).join('');
+
+      // Delegated on each render, so no inline onclick and no window export.
+      $('usersBody').querySelectorAll('tr.row').forEach(tr => {
+        tr.onclick = () => selectUser(tr.dataset.login);
+      });
+
+      if (_selectedLogin) selectUser(_selectedLogin);
+    } catch (e) {
+      showToast('Could not load the account list: ' + e.message, 'error');
+    }
+  }
+
+  /**
+   * The report-limit cell: the number, plus where it came from.
+   *
+   * Without the marker the administrator cannot tell what changing the global
+   * default would do to any given row, which is the one thing they need to know
+   * before changing it.
+   */
+  function limitCellHtml(u) {
+    return u.maxReportsOverridden
+      ? `${escHtml(String(u.maxReports))}<span class="pill-set">Set</span>`
+      : `${escHtml(String(u.maxReports))}<span class="pill-inherit">default</span>`;
+  }
+
+  // ── Account detail ─────────────────────────────────────────────────────
+  async function selectUser(loginId) {
+    _selectedLogin = loginId;
+    document.querySelectorAll('#usersBody tr.row').forEach(tr => {
+      tr.classList.toggle('selected', tr.dataset.login === loginId);
+    });
+
+    try {
+      const r = await apiFetch('/admin/users/' + encodeURIComponent(loginId));
+      if (!r.ok) {
+        const bd = await r.json().catch(() => ({}));
+        showToast(bd.error || `Could not load ${loginId}.`, 'error');
+        return;
+      }
+      renderDetail(await r.json());
+    } catch (e) {
+      showToast('Could not load the account: ' + e.message, 'error');
+    }
+  }
+
+  function renderDetail(d) {
+    const yes = (b) => `<span class="dot ${b ? 'on' : 'off'}"></span>${b ? 'Yes' : 'No'}`;
+    const kv  = (label, value) => `<div class="kv"><dt>${escHtml(label)}</dt><dd>${value}</dd></div>`;
+    const txt = (v) => escHtml(v === null || v === undefined || v === '' ? '—' : String(v));
+
+    $('detailTitle').textContent =
+      `${d.account.firstName} ${d.account.lastName} · ${d.account.loginId}`;
+    $('detailClose').style.display = '';
+
+    // Built before the template rather than nested inside it. The nested form
+    // was safe — the whole string went through txt() — but "no bare ${d.…} in
+    // the markup" is a rule a reader and a test can both check at a glance,
+    // and one exception is enough to make it unusable.
+    const lastRun = d.schedule.lastRunStatus
+      ? `${fmtDate(d.schedule.lastRunAt)} — ${d.schedule.lastRunStatus}`
+      : null;
+
+    const limitLine = d.settings.overridden
+      ? `${escHtml(String(d.settings.maxReports))}<span class="pill-set">Set</span>`
+      : `${escHtml(String(d.settings.maxReports))}<span class="pill-inherit">default of ${escHtml(String(d.settings.defaultMaxReports))}</span>`;
+
+    $('detailBody').innerHTML = `
+      <div class="card">
+        <h3>Account</h3>
+        ${kv('Login ID', txt(d.account.loginId))}
+        ${kv('Email', txt(d.account.email))}
+        ${kv('Registered', txt(fmtDate(d.account.createdAt)))}
+        ${kv('Last sign-in', txt(fmtDate(d.account.lastLoginAt)))}
+        ${kv('Last updated', txt(fmtDate(d.account.updatedAt)))}
+        <div style="margin-top:10px">
+          <button class="btn-xs" id="btnResetPw">Reset password…</button>
+        </div>
+      </div>
+
+      <div class="card">
+        <h3>Session</h3>
+        ${d.session ? `
+          ${kv('Signed in', txt(fmtDate(d.session.issuedAt)))}
+          ${kv('Last seen', txt(fmtDate(d.session.lastSeenAt)))}
+          ${kv('Expires', txt(fmtDate(d.session.expiresAt)))}
+          ${kv('From', txt(d.session.ipAddress))}
+        ` : kv('Active session', yes(false))}
+      </div>
+
+      <div class="card">
+        <h3>DependencyTrack</h3>
+        ${kv('Configured', yes(d.dependencyTrack.configured))}
+        ${kv('API URL', txt(d.dependencyTrack.apiUrl))}
+        ${kv('API key stored', yes(d.dependencyTrack.hasApiKey))}
+        ${kv('Updated', txt(fmtDate(d.dependencyTrack.updatedAt)))}
+      </div>
+
+      <div class="card">
+        <h3>Reports</h3>
+        ${kv('Completed', txt(d.reports.completed))}
+        ${kv('In progress', txt(d.reports.running))}
+        ${kv('Failed', txt(d.reports.failed))}
+        ${kv('Storage used', escHtml(formatBytes(d.reports.storageBytes)))}
+        ${kv('Limit', `${limitLine} <button class="btn-xs" id="btnEditLimit" title="Change this account's report limit">✎</button>`)}
+      </div>
+
+      <div class="card">
+        <h3>Email</h3>
+        ${kv('Enabled', yes(d.mail.enabled))}
+        ${kv('SMTP host', txt(d.mail.host))}
+        ${kv('From', txt(d.mail.from))}
+        ${kv('Recipients', txt(d.mail.recipients))}
+        ${kv('Password stored', yes(d.mail.hasPassword))}
+      </div>
+
+      <div class="card">
+        <h3>Schedule</h3>
+        ${kv('Enabled', yes(d.schedule.enabled))}
+        ${kv('Frequency', txt(d.schedule.frequency))}
+        ${kv('Projects', txt(d.schedule.projectCount))}
+        ${kv('Next run', txt(fmtDate(d.schedule.nextRunAt)))}
+        ${kv('Last run', txt(lastRun))}
+      </div>
+
+      <div class="note">
+        Values are shown as configured. Stored secrets — the DependencyTrack API
+        key and the SMTP password — are reported only as present or absent, and
+        are not readable from here.
+      </div>`;
+
+    $('btnEditLimit').onclick = () => openLimitModal(d);
+    $('btnResetPw').onclick   = () => openPwModal(d);
+  }
+
+  function clearSelection() {
+    _selectedLogin = null;
+    document.querySelectorAll('#usersBody tr.row').forEach(tr => tr.classList.remove('selected'));
+    $('detailTitle').textContent = 'Detail';
+    $('detailClose').style.display = 'none';
+    $('detailBody').innerHTML =
+      '<div class="detail-empty">Select an account on the left to see its detail.</div>';
+  }
+
+  // ── Report limit editing ───────────────────────────────────────────────
+  function openLimitModal(d) {
+    _limitTarget = d.account.loginId;
+    $('limitModalText').textContent =
+      `${d.account.loginId} is currently limited to ${d.settings.maxReports} report` +
+      `${d.settings.maxReports === 1 ? '' : 's'}` +
+      (d.settings.overridden
+        ? ', set for this account.'
+        : `, inherited from the global default of ${d.settings.defaultMaxReports}.`);
+    $('limitInput').value = d.settings.overridden ? String(d.settings.maxReports) : '';
+    $('limitErr').textContent = '';
+    $('limitModal').classList.add('open');
+    $('limitInput').focus();
+  }
+
+  function closeLimitModal() {
+    _limitTarget = null;
+    $('limitModal').classList.remove('open');
+  }
+
+  async function confirmLimit() {
+    if (!_limitTarget) return;
+    const raw = $('limitInput').value.trim();
+    // Blank is meaningful: it clears the override and returns the account to
+    // the global default.
+    let value = null;
+    if (raw !== '') {
+      const n = Number(raw);
+      if (!Number.isInteger(n) || n < 1 || n > 1000) {
+        $('limitErr').textContent = 'Enter a whole number between 1 and 1000, or leave it blank.';
+        return;
+      }
+      value = n;
+    }
+
+    const target = _limitTarget;
+    $('limitOk').disabled = true;
+    try {
+      const r = await apiFetch(`/admin/users/${encodeURIComponent(target)}/settings`, {
+        method:  'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body:    JSON.stringify({ maxReports: value }),
+      });
+      const bd = await r.json().catch(() => ({}));
+      if (!r.ok) {
+        $('limitErr').textContent = bd.error || 'Could not save the limit.';
+        return;
+      }
+      closeLimitModal();
+      showToast(
+        bd.overridden
+          ? `${target} is now limited to ${bd.maxReports} reports.`
+          : `${target} follows the global default of ${bd.maxReports} reports.`,
+        'success'
+      );
+      await loadUsers();
+    } catch (e) {
+      $('limitErr').textContent = 'Could not save the limit: ' + e.message;
+    } finally {
+      $('limitOk').disabled = false;
+    }
+  }
+
+  // ── Password reset ─────────────────────────────────────────────────────
+  function openPwModal(d) {
+    _pwTarget = d.account.loginId;
+    $('pwModalText').textContent =
+      `Set a new password for ${d.account.loginId}. They will be signed out of ` +
+      `any active session immediately.`;
+    $('pwInput').value = '';
+    $('pwErr').textContent = '';
+    $('pwModal').classList.add('open');
+    $('pwInput').focus();
+  }
+
+  function closePwModal() {
+    _pwTarget = null;
+    $('pwInput').value = '';
+    $('pwModal').classList.remove('open');
+  }
+
+  async function confirmPasswordReset() {
+    if (!_pwTarget) return;
+    const password = $('pwInput').value;
+
+    // Mirrors lib/validate.js. The backend is the authority and re-checks;
+    // this is only so the administrator is told before the round trip
+    // (CLAUDE.md §8.8).
+    if (!password) { $('pwErr').textContent = 'Password is required.'; return; }
+    if (/\s/.test(password)) { $('pwErr').textContent = 'Password cannot contain spaces.'; return; }
+    if (password.length < 8)   { $('pwErr').textContent = 'Password must be at least 8 characters.'; return; }
+    if (password.length > 128) { $('pwErr').textContent = 'Password must be at most 128 characters.'; return; }
+
+    const target = _pwTarget;
+    $('pwOk').disabled = true;
+    try {
+      const r = await apiFetch(`/admin/users/${encodeURIComponent(target)}/password`, {
+        method:  'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body:    JSON.stringify({ password }),
+      });
+      const bd = await r.json().catch(() => ({}));
+      if (!r.ok) {
+        $('pwErr').textContent = bd.error || 'Could not reset the password.';
+        return;
+      }
+      closePwModal();
+      showToast(`${target} was signed out and must choose a new password at next sign-in.`, 'success');
+      await loadUsers();
+      if (_selectedLogin === target) await selectUser(target);
+    } catch (e) {
+      $('pwErr').textContent = 'Could not reset the password: ' + e.message;
+    } finally {
+      $('pwOk').disabled = false;
+    }
+  }
+
+  // ── Report configuration ───────────────────────────────────────────────
+  async function loadSettings() {
+    try {
+      const r = await apiFetch('/admin/settings');
+      if (!r.ok) { showToast('Could not load the settings.', 'error'); return; }
+      _settings = await r.json();
+      $('defaultMaxReports').value = String(_settings.defaultMaxReports);
+      $('defaultLimitBadge').textContent = `default ${_settings.defaultMaxReports}`;
+      $('defaultMaxReportsHint').textContent =
+        `Between ${_settings.limits.min} and ${_settings.limits.max}. ` +
+        `Accounts with a limit of their own are unaffected.`;
+    } catch (e) {
+      showToast('Could not load the settings: ' + e.message, 'error');
+    }
+  }
+
+  async function saveDefaultLimit() {
+    const raw = $('defaultMaxReports').value.trim();
+    const n = Number(raw);
+    $('defaultMaxReportsErr').textContent = '';
+    if (!Number.isInteger(n) || n < 1 || n > 1000) {
+      $('defaultMaxReportsErr').textContent = 'Enter a whole number between 1 and 1000.';
+      return;
+    }
+
+    $('saveDefaults').disabled = true;
+    try {
+      const r = await apiFetch('/admin/settings', {
+        method:  'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body:    JSON.stringify({ defaultMaxReports: n }),
+      });
+      const bd = await r.json().catch(() => ({}));
+      if (!r.ok) {
+        $('defaultMaxReportsErr').textContent = bd.error || 'Could not save the default.';
+        return;
+      }
+      // Say what it did to people, not just that it saved. Nothing was deleted;
+      // these accounts simply cannot create more until they are back under.
+      const over = bd.affectedAccounts || 0;
+      showToast(
+        over > 0
+          ? `Default is now ${bd.defaultMaxReports}. ${over} account${over === 1 ? ' is' : 's are'} over it and cannot create new reports until under.`
+          : `Default is now ${bd.defaultMaxReports}.`,
+        over > 0 ? 'warn' : 'success'
+      );
+      await loadSettings();
+      await loadUsers();
+      if (_selectedLogin) await selectUser(_selectedLogin);
+    } catch (e) {
+      $('defaultMaxReportsErr').textContent = 'Could not save the default: ' + e.message;
+    } finally {
+      $('saveDefaults').disabled = false;
+    }
+  }
+
+  // ── Storage ────────────────────────────────────────────────────────────
+  async function loadStorage() {
+    const box = $('storageBody');
+    box.innerHTML = '<div class="hint">Reading…</div>';
+    try {
+      const r = await apiFetch('/admin/storage');
+      if (!r.ok) { box.innerHTML = '<div class="hint">Could not read storage usage.</div>'; return; }
+      const s = await r.json();
+      const fsInfo = s.filesystem;
+      const level  = fsInfo.level || 'unknown';
+
+      $('storageBadge').textContent =
+        fsInfo.freePercent === null ? 'unknown' : `${fsInfo.freePercent}% free`;
+
+      const unavailable = fsInfo.availableBytes === null;
+      const usedPct = unavailable || !fsInfo.totalBytes
+        ? 0
+        : Math.round((fsInfo.usedBytes / fsInfo.totalBytes) * 100);
+
+      box.innerHTML = `
+        <div class="stats">
+          <div class="stat ${level === 'ok' ? '' : level}">
+            <div class="stat-label">Free space</div>
+            <div class="stat-value">${unavailable ? '—' : escHtml(formatBytes(fsInfo.availableBytes))}</div>
+          </div>
+          <div class="stat">
+            <div class="stat-label">Volume size</div>
+            <div class="stat-value">${unavailable ? '—' : escHtml(formatBytes(fsInfo.totalBytes))}</div>
+          </div>
+          <div class="stat">
+            <div class="stat-label">Database</div>
+            <div class="stat-value">${s.databaseBytes === null ? '—' : escHtml(formatBytes(s.databaseBytes))}</div>
+          </div>
+        </div>
+        <div class="bar ${level === 'ok' ? '' : level}"><span style="width:${usedPct}%"></span></div>
+        <div class="hint">
+          ${unavailable
+            ? 'The filesystem could not be read on this host.'
+            : `${escHtml(String(usedPct))}% of the volume is in use.`}
+          Measured at <code>${escHtml(fsInfo.path || 'unknown')}</code>, which shares a
+          filesystem with the database's storage. If the database directory has been
+          relocated to another disk, this figure describes the wrong one.
+        </div>
+        ${s.topAccounts && s.topAccounts.length ? `
+          <div class="table-wrap" style="margin-top:10px">
+            <table class="grid">
+              <thead><tr><th>Account</th><th>Reports</th><th>Storage</th></tr></thead>
+              <tbody>
+                ${s.topAccounts.map(a => `
+                  <tr>
+                    <td>${escHtml(a.loginId)}</td>
+                    <td>${escHtml(String(a.reportCount))}</td>
+                    <td>${escHtml(formatBytes(a.bytes))}</td>
+                  </tr>`).join('')}
+              </tbody>
+            </table>
+          </div>` : '<div class="hint" style="margin-top:8px">No account is storing reports yet.</div>'}`;
+    } catch (e) {
+      box.innerHTML = '<div class="hint">Could not read storage usage: ' + escHtml(e.message) + '</div>';
+    }
+  }
+
+  // ── Boot ───────────────────────────────────────────────────────────────
+  async function reloadAll() {
+    await Promise.all([loadUsers(), loadSettings()]);
+    if ($('accStorage').classList.contains('open')) await loadStorage();
+  }
+
+  async function boot() {
+    initTheme();
+    // Gate first: no administration chrome renders for a session that is not
+    // the administrator's (CLAUDE.md §8.4).
+    const me = await requireAdminSession();
+    if (!me) return;
+    initSplitter();
+    await reloadAll();
+  }
+
+  // Escape closes whichever modal is open, before it reaches anything else.
+  document.addEventListener('keydown', (e) => {
+    if (e.key !== 'Escape') return;
+    if ($('limitModal').classList.contains('open')) closeLimitModal();
+    else if ($('pwModal').classList.contains('open')) closePwModal();
+  });
+
+  // ── window exports ─────────────────────────────────────────────────────
+  // Every onclick="" in the markup resolves here. A handler missing from this
+  // block fails silently (CLAUDE.md §8.2).
+  window.toggleTheme           = toggleTheme;
+  window.toggleAccordion       = toggleAccordion;
+  window.reloadAll             = reloadAll;
+  window.backToDashboard       = backToDashboard;
+  window.clearSelection        = clearSelection;
+  window.closeLimitModal       = closeLimitModal;
+  window.confirmLimit          = confirmLimit;
+  window.closePwModal          = closePwModal;
+  window.confirmPasswordReset  = confirmPasswordReset;
+  window.saveDefaultLimit      = saveDefaultLimit;
+
+  boot();
+})();
+</script>
+</body>
+</html>

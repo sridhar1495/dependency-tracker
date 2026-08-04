@@ -316,7 +316,7 @@ async function handle({ method, path: parsedPath, req, res, principal }) {
           ipAddress: row.sessionIpAddress,
         } : null,
         // Whether a key exists, never the key. Same rule as the user's own
-        // Settings panel (CLAUDE.md §7.6).
+        // Settings panel (CLAUDE.md §7.7).
         dependencyTrack: {
           configured:  row.dtConfigured === true,
           apiUrl:      row.dtApiUrl || '',

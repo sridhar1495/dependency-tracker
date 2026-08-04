@@ -110,6 +110,18 @@ Copy `.env.example` to `.env` and set:
 - [Dashboard Integration Guide](docs/DASHBOARD_INTEGRATION.md)
 - [Performance validation](docs/PERFORMANCE.md) — query plans and load evidence
 
+## Administration
+
+The administrator signs in with the credentials `install.sh` created and gets a
+screen of their own at `/admin.html`: the account list with each account's report
+limit, a detail pane, the service-wide default report limit, and storage headroom
+for the volume the database sits on.
+
+It can do exactly three things beyond reading — set the default report limit, set
+one account's limit, and reset one account's password. Everything else about an
+account is readable only: no administrator route can read anybody's
+DependencyTrack key, SMTP password or report contents.
+
 ## Continuous integration
 
 `.github/workflows/ci.yml` runs on every push and pull request: an **offline**
