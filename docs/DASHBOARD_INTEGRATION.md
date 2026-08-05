@@ -343,19 +343,40 @@ License Fail, License Warn, License Info
 
 1. *(Optional)* Select specific projects using the checkboxes in the table. If no projects are checked, all currently visible projects are included.
 2. Click **📋 Generate Report** in the toolbar.
-3. Choose which risk categories to include (Security, License, Operational) and confirm.
-4. A background job is started. Monitor progress in **📥 Reports** (top-right button).
-5. When the report is `completed`, click **↓ Download** to save the Excel file.
+3. Choose which risk categories to include (Security, License, Operational).
+4. *(Optional)* Give the report a name. Leave it blank and one is generated —
+   `vulnerability_report_<timestamp>.xlsx`, exactly as before the field existed.
+5. A background job is started. Monitor progress in **📥 Reports** (top-right button).
+   The name you chose is shown there while the job runs, not only when it finishes.
+6. When the report is `completed`, click **↓ Download** to save the Excel file.
+
+Nothing but the limit below stands in the way: generating a second report on the
+same day, or while another is still running, needs no confirmation.
+
+### Naming a report
+
+A name may use letters, numbers, spaces and `. _ - ( )`. It becomes the
+filename, so anything that would break it — quotes, slashes, control characters
+— is refused rather than silently rewritten. `.xlsx` is added if you do not type
+it. Up to 120 characters.
+
+A **scheduled** report is named the same way, from **⚙ Settings → Schedule →
+Report name**. That name is used on every run; clear the field to go back to the
+generated `scheduled_report_<timestamp>.xlsx` form.
 
 ### Report limits
 
-The maximum number of active reports (completed + in-progress) is configurable in **⚙ Settings → Max Report Downloads** (default: 10). When the limit is reached, new reports cannot be created until old ones are cleared.
+The maximum number of active reports (completed + in-progress) is set by your
+administrator — globally, or for one account — from the 🛡 Administration
+screen. **⚙ Settings** shows the number that applies to you but cannot change
+it. When the limit is reached, new reports cannot be created until old ones are
+deleted; nothing is ever deleted for you.
 
 ### Report endpoints
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
-| `POST /violation-cache/report/generate` | POST | Start a report job; returns `{id}` |
+| `POST /violation-cache/report/generate` | POST | Start a report job. Optional `reportName`; returns `{id, filename}` |
 | `GET /violation-cache/report/list` | GET | List all jobs with status and progress |
 | `GET /violation-cache/report/:id/download` | GET | Stream the completed Excel file |
 | `DELETE /violation-cache/report/:id` | DELETE | Delete job and file |

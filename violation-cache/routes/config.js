@@ -38,6 +38,7 @@ function scheduleForClient(row, projects) {
     weekDays:            row.weekDays || [],
     monthDay:            row.monthDay,
     riskTypes:           row.riskTypes || [],
+    reportName:          row.reportName || '',
     nextRun:             row.nextRunAt,
     lastRun:             row.lastRunAt,
     lastRunStatus:       row.lastRunStatus,

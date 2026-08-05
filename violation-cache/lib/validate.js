@@ -20,6 +20,7 @@ const NAME_MIN = 3,   NAME_MAX = 128;
 const LOGIN_MIN = 3,  LOGIN_MAX = 64;
 const PASSWORD_MIN = 8, PASSWORD_MAX = 128;
 const EMAIL_MAX = 254;
+const REPORT_NAME_MAX = 120;
 
 // Unicode letters, with single spaces permitted between words but never at the
 // start or end. \p{L} covers accented and non-Latin scripts.
@@ -27,6 +28,13 @@ const NAME_RE = /^\p{L}+(?: \p{L}+)*$/u;
 
 // Conservative identifier charset: letters, digits, dot, underscore, hyphen.
 const LOGIN_RE = /^[A-Za-z0-9._-]+$/;
+
+// A report name becomes a filename and travels in a Content-Disposition header,
+// so the charset is deliberately narrow: letters, digits, space, dot, underscore,
+// hyphen and parentheses. That excludes the three things that actually cause
+// trouble — the quote that would terminate the header, the slash and backslash
+// that would make it a path, and control characters.
+const REPORT_NAME_RE = /^[A-Za-z0-9 ._()-]+$/;
 
 // Deliberately pragmatic rather than RFC 5322 exhaustive: one @, no whitespace
 // anywhere, a dot in the domain. Special characters are allowed between the
@@ -97,6 +105,27 @@ function validatePassword(value) {
   return null;
 }
 
+/**
+ * An optional name for a generated report.
+ *
+ * Empty means "generate one", which is the behaviour every report had before
+ * the field existed — so an untouched field must never be an error.
+ *
+ * @returns {string|null} an error message, or null when acceptable
+ */
+function validateReportName(value) {
+  if (value === undefined || value === null || String(value).trim() === '') return null;
+  const v = String(value).trim();
+  if (v.length > REPORT_NAME_MAX) return `Report name must be at most ${REPORT_NAME_MAX} characters.`;
+  if (!REPORT_NAME_RE.test(v)) {
+    return 'Report name can use letters, numbers, spaces and . _ - ( ) only.';
+  }
+  // A name that is only dots and spaces produces a filename that is either
+  // empty or a directory reference once the extension is stripped.
+  if (!/[A-Za-z0-9]/.test(v)) return 'Report name must contain at least one letter or number.';
+  return null;
+}
+
 /** Confirmation must match exactly. Added beyond the original field list. */
 function validatePasswordConfirm(password, confirm) {
   if (typeof confirm !== 'string' || confirm.length === 0) return 'Please confirm the password.';
@@ -148,9 +177,10 @@ function validateProfileUpdate(input) {
 
 module.exports = {
   validateFirstName, validateLastName, validateLoginId, validateEmail,
-  validatePassword, validatePasswordConfirm,
+  validatePassword, validatePasswordConfirm, validateReportName,
   validateRegistration, validateProfileUpdate,
   reservedLoginIds, ALWAYS_RESERVED,
   NAME_MIN, NAME_MAX, LOGIN_MIN, LOGIN_MAX, PASSWORD_MIN, PASSWORD_MAX, EMAIL_MAX,
-  NAME_RE, LOGIN_RE, EMAIL_RE,
+  REPORT_NAME_MAX,
+  NAME_RE, LOGIN_RE, EMAIL_RE, REPORT_NAME_RE,
 };

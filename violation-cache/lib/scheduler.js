@@ -18,7 +18,10 @@ const { log } = require('./log');
 const { dtGetWithRetry } = require('./dt-fetch');
 const { buildExcelReport } = require('./excel');
 const { sendEmail } = require('./mail');
-const { collectReportData } = require('./reports');
+// Module reference as well as the destructured collector: reportFilename() is
+// the single rule for what a report is called, shared with the manual path.
+const reports = require('./reports');
+const { collectReportData } = reports;
 const { makeSemaphore } = require('./async-utils');
 const schedulesDb = require('./schedules');
 const mailSettings = require('./mail-settings');
@@ -129,8 +132,10 @@ async function runScheduledJob(schedule) {
 
     const mail = await mailSettings.getResolved(userId);
     if (mail && mail.enabled) {
-      const ts = new Date().toISOString().replace(/[:.]/g, '-');
-      await sendEmail(mail, { filename: `scheduled_report_${ts}.xlsx`, content: buffer });
+      // The same naming rule manual reports use. A schedule with a name sends
+      // it verbatim on every run; without one it keeps the timestamped form.
+      const filename = reports.reportFilename(schedule.reportName, 'scheduled_report');
+      await sendEmail(mail, { filename, content: buffer });
       log('info', 'Scheduled report emailed', { userId, bytes: buffer.length });
     } else {
       log('warn', 'Scheduled report built but email is disabled — nothing was sent', { userId });

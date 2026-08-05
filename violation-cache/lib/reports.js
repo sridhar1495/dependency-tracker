@@ -274,7 +274,31 @@ async function streamViolationsForProject(apiUrl, apiKey, proj, riskType, cancel
  * @param {Array}  projects
  * @param {string[]} riskTypes
  */
-async function runReportJob(userId, reportId, conn, projects, riskTypes) {
+/**
+ * The filename a report is delivered under.
+ *
+ * One function for both paths — a manual report and a scheduled one — so the
+ * two can never disagree about what a name means or how it is made safe.
+ *
+ * An absent name keeps the generated form, which is what every report used
+ * before the field existed. A supplied name is used as given, with `.xlsx`
+ * appended if the user did not type it. validate.validateReportName() has
+ * already refused anything that could break a Content-Disposition header or
+ * turn the name into a path; this only normalises what survived that.
+ *
+ * @param {string|null|undefined} name
+ * @param {string} [prefix] the generated stem when no name is given
+ */
+function reportFilename(name, prefix = 'vulnerability_report') {
+  const given = typeof name === 'string' ? name.trim() : '';
+  if (!given) {
+    const ts = new Date().toISOString().replace(/[:.]/g, '-');
+    return `${prefix}_${ts}.xlsx`;
+  }
+  return /\.xlsx$/i.test(given) ? given : `${given}.xlsx`;
+}
+
+async function runReportJob(userId, reportId, conn, projects, riskTypes, filename) {
   const cancelFlag = registerCancelFlag(reportId);
 
   // One counter per selected risk type, so the UI shows an independent bar.
@@ -301,8 +325,10 @@ async function runReportJob(userId, reportId, conn, projects, riskTypes) {
       }
     );
 
-    const ts       = new Date().toISOString().replace(/[:.]/g, '-');
-    const filename = `vulnerability_report_${ts}.xlsx`;
+    // Decided when the job was created, so the row's filename and the stored
+    // file always agree — and so the Reports list can show the intended name
+    // while the job is still running.
+    const outName = filename || reportFilename(null);
 
     const totalRows = reportData.secFindings.length
       + reportData.licViolations.length + reportData.opsViolations.length;
@@ -312,7 +338,7 @@ async function runReportJob(userId, reportId, conn, projects, riskTypes) {
     // touch the filesystem any more.
     const buffer = await buildExcelReport(null, { riskTypes, ...reportData });
     await reportsDb.writeProgress(reportId, progress, { force: true });
-    await reportsDb.storeFile(reportId, buffer, filename);
+    await reportsDb.storeFile(reportId, buffer, outName);
 
     log('info', 'Report completed', { userId, reportId, bytes: buffer.length });
     return { completed: true, bytes: buffer.length };
@@ -337,6 +363,6 @@ async function runReportJob(userId, reportId, conn, projects, riskTypes) {
 
 module.exports = {
   configure, collectReportData, fetchAllFindings, streamViolationsForProject,
-  runReportJob, registerCancelFlag, requestCancel, isRunningHere,
+  runReportJob, reportFilename, registerCancelFlag, requestCancel, isRunningHere,
   REPORT_TIMEOUT_MS, FINDINGS_PAGE_SIZE, VIOLATIONS_PAGE_SIZE, VALID_RISK_TYPES,
 };

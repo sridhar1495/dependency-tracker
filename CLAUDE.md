@@ -287,7 +287,7 @@ await tx(async (client) => {
 | `app_settings` | Service-wide settings the administrator owns (singleton row) |
 | `user_settings` | Per-user report limit — `NULL` means "follow the global default" |
 | `mail_settings` | Per-user SMTP configuration |
-| `schedules`, `schedule_projects`, `schedule_runs` | Scheduled reports |
+| `schedules`, `schedule_projects`, `schedule_runs` | Scheduled reports; `report_name` `NULL` means "generate one" |
 | `reports`, `report_file_chunks` | Report metadata and file bytes |
 | `violation_caches` | Shared violation cache, keyed by connection fingerprint |
 | `schema_migrations` | Migration ledger |
@@ -424,6 +424,22 @@ if (method === 'GET' && path === '/violation-cache/status') {
 - `collectReportData()` awaits `Promise.allSettled` so a job reaches its terminal
   status only after every pipeline has actually stopped.
 - Progress is persisted **at most once per second**, never per project.
+- **`reports.reportFilename()` is the only rule for what a report is called**,
+  shared by the manual and scheduled paths so the two cannot disagree. An empty
+  name keeps the generated `<prefix>_<timestamp>.xlsx` form; a supplied one is
+  used as given, with `.xlsx` added if absent. The name is decided and stored
+  when the row is created, not at completion, so the row and the stored file
+  always agree and the list can show the intended name while the job runs.
+- **A report name is validated, not sanitised.** It becomes a filename and
+  travels in a `Content-Disposition` header, so `validate.validateReportName()`
+  refuses what would break either — quotes, path separators, control characters
+  — rather than silently rewriting what the user typed.
+- **The quota is the only thing standing between a user and a report.** Two
+  further prompts once lived in the frontend: one when a job was already
+  running, one when a report had already been generated that day. Neither
+  protected anything the quota does not, and re-asking for a second report on
+  the same day second-guessed a deliberate action. Do not reintroduce a
+  pre-flight that is not enforced server-side.
 - A 30-minute watchdog fails stale `running` jobs; a startup sweep does the same
   for jobs orphaned by a restart.
 

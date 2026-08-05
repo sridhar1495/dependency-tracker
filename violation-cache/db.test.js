@@ -1271,6 +1271,46 @@ describe('multi-tenant data access', { skip: !ENABLED && 'TEST_DATABASE_URL not 
       "replacing Alice's selection must not touch Bob's");
   });
 
+  test('a schedule remembers the name its reports go out under', async () => {
+    // NULL means "generate one", which is what every schedule did before the
+    // column existed (migration 006).
+    const fresh = await schedulesDb.get(alice.id);
+    assert.equal(fresh.reportName, null, 'a new schedule inherits the generated form');
+
+    const named = await schedulesDb.save(alice.id, { reportName: 'Nightly Risk' });
+    assert.equal(named.reportName, 'Nightly Risk');
+
+    // Omitting the key must leave it alone, or every unrelated save would wipe it.
+    const untouched = await schedulesDb.save(alice.id, { hour: 7 });
+    assert.equal(untouched.reportName, 'Nightly Risk');
+    assert.equal(untouched.hour, 7);
+
+    // An empty string is how the form says "go back to automatic". It has to be
+    // distinguishable from "not supplied", which is why it is stored as NULL.
+    const cleared = await schedulesDb.save(alice.id, { reportName: '   ' });
+    assert.equal(cleared.reportName, null);
+  });
+
+  test('a schedule name that could escape the filename is refused', async () => {
+    for (const bad of ['a/b', 'a"b', '../x', 'x'.repeat(121)]) {
+      await assert.rejects(
+        () => schedulesDb.save(alice.id, { reportName: bad }),
+        (e) => e.code === 'VALIDATION_FAILED' && e.field === 'reportName',
+        JSON.stringify(bad).slice(0, 40)
+      );
+    }
+  });
+
+  test('the database enforces the length ceiling as well as the application', async () => {
+    // Constraints belong in the database, not only in application code
+    // (CLAUDE.md §5.4).
+    await assert.rejects(
+      () => pool.query('UPDATE schedules SET report_name = $2 WHERE user_id = $1',
+                       [alice.id, 'x'.repeat(121)]),
+      (e) => e.code === '23514'
+    );
+  });
+
   test('a malformed project uuid is dropped instead of failing the whole save', async () => {
     // The list comes from the browser; one bad entry must not cost the user
     // their entire selection.
