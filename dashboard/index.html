@@ -604,6 +604,14 @@
     /* A value the user may see but not change. Styled like the input it
        replaced so the panel does not look broken, but it is plain text —
        there is nothing to type into. */
+    /* Inline field error, matching login.html's .field-error so a validation
+       message looks the same wherever it appears. Reserved height stops the
+       form jumping as messages appear and clear. */
+    .field-error {
+      color: var(--critical); font-size: 11.5px; margin-top: 4px;
+      min-height: 15px; line-height: 1.3;
+    }
+
     .cfg-readonly-value {
       display: inline-block; min-width: 52px; text-align: center;
       background: var(--surface2); border: 1px solid var(--border);
@@ -962,6 +970,10 @@
         </div>
       </label>
     </div>
+    <label class="cfg-label" for="rptOptName">Report name <span style="font-size:10px;color:var(--text-muted)">(optional)</span></label>
+    <input class="cfg-input" id="rptOptName" maxlength="120" placeholder="Leave blank to name it automatically">
+    <div class="field-error" id="rptOptNameErr"></div>
+
     <p class="report-options-count" id="reportOptionsCount"></p>
     <div style="display:flex;gap:8px;margin-top:16px">
       <button class="btn primary" id="rptOptGenerateBtn" onclick="confirmReportOptions()">Generate</button>
@@ -1129,6 +1141,11 @@
             <option value="weekly">Weekly</option>
             <option value="monthly">Monthly</option>
           </select>
+          <label class="cfg-label">Report name <span style="font-size:10px">(optional)</span></label>
+          <input id="cfgSchedName" class="cfg-input" maxlength="120" style="margin-bottom:4px"
+                 placeholder="Leave blank to name it automatically" oninput="markConfigDirty()" />
+          <div class="field-error" id="cfgSchedNameErr" style="margin-bottom:4px"></div>
+
           <label class="cfg-label">Send at hour <span style="font-size:10px">(0–23, server local time)</span></label>
           <input id="cfgSchedHour" type="number" min="0" max="23" class="cfg-input" style="width:80px;margin-bottom:8px" value="9" oninput="markConfigDirty()" />
           <div id="cfgSchedWeekRow" style="display:none;margin-bottom:8px">
@@ -1641,6 +1658,9 @@ async function loadConfigFromServer() {
     document.getElementById('cfgSchedFreq').value         = sched.frequency || 'daily';
     document.getElementById('cfgSchedHour').value         = sched.hour !== undefined ? sched.hour : 9;
     document.getElementById('cfgSchedMonthDay').value     = sched.monthDay || 1;
+    document.getElementById('cfgSchedName').value         = sched.reportName || '';
+    const schedNameErr = document.getElementById('cfgSchedNameErr');
+    if (schedNameErr) schedNameErr.textContent = '';
     onSchedFreqChange();
     const wds = sched.weekDays || [];
     document.querySelectorAll('.cfg-weekday input').forEach(cb => {
@@ -1798,6 +1818,14 @@ async function saveConfigPanel() {
         return;
       }
 
+      // Optional, and blank is meaningful: it clears any stored name so the
+      // schedule goes back to naming its reports automatically.
+      const schedName    = document.getElementById('cfgSchedName').value;
+      const schedNameErr = document.getElementById('cfgSchedNameErr');
+      const nameProblem  = validateReportName(schedName);
+      if (schedNameErr) schedNameErr.textContent = nameProblem || '';
+      if (nameProblem) return;
+
       schedConfig = {
         ...existingSched,
         enabled:  true,
@@ -1806,6 +1834,7 @@ async function saveConfigPanel() {
         weekDays,
         monthDay:  freq === 'monthly' ? monthDayVal : (existingSched.monthDay || 1),
         riskTypes,
+        reportName: String(schedName).trim(),
       };
     } else {
       // Preserve all schedule fields; only flip the enabled flag off.
@@ -3893,6 +3922,13 @@ function openReportOptionsModal(projects) {
   if (secCb) secCb.checked = true;
   if (licCb) licCb.checked = false;
   if (opsCb) opsCb.checked = false;
+  // Cleared on every open: a name left over from the previous report would be
+  // reused silently, which is the opposite of "blank means name it for me".
+  const nameEl = document.getElementById('rptOptName');
+  const nameErr = document.getElementById('rptOptNameErr');
+  if (nameEl)  nameEl.value = '';
+  if (nameErr) nameErr.textContent = '';
+
   const countEl = document.getElementById('reportOptionsCount');
   if (countEl) {
     countEl.textContent = selectedProjectUuids.size > 0
@@ -3923,8 +3959,12 @@ async function confirmReportOptions() {
   }
 
   if (!_pendingReportProjects) return;
+  // Read, but NOT cleared here. Every early return below leaves the modal open
+  // so the user can correct something; clearing the selection at the top made
+  // the next click a silent no-op, because this guard would fire on a pending
+  // list that had already been consumed. It is cleared in the finally, and only
+  // when the modal is actually closing.
   const projectsToReport = _pendingReportProjects;
-  _pendingReportProjects = null;
 
   // Disable Generate button for the duration so the user cannot double-submit.
   const genBtn    = document.getElementById('rptOptGenerateBtn');
@@ -3963,53 +4003,60 @@ async function confirmReportOptions() {
       return;
     }
 
-    // ── Already running ────────────────────────────────────────────────
-    const runningNow = reports.filter(j => j.status === 'running');
-    if (runningNow.length > 0) {
-      const ok = await showConfirm(
-        '⏳ Report Already In Progress',
-        `A report is already being generated (${runningNow.length} job${runningNow.length > 1 ? 's' : ''} running). ` +
-        `Do you want to start another one for the ${projectsToReport.length} currently shown project(s)?`,
-        'Start Another',
-        'Cancel'
-      );
-      if (!ok) {
-        showToast('Open 📥 Reports to track the current report.', 'info');
-        return;  // user cancelled — leave modal open
-      }
-    } else {
-      // ── Already completed today ──────────────────────────────────────
-      const todayStr       = new Date().toISOString().slice(0, 10);
-      const completedToday = reports.filter(
-        j => j.status === 'completed' && (j.createdAt || '').startsWith(todayStr)
-      );
-      if (completedToday.length > 0) {
-        const ok = await showConfirm(
-          '📋 Report Already Generated Today',
-          `${completedToday.length} report${completedToday.length > 1 ? 's have' : ' has'} already been generated today. ` +
-          `Do you want to create a new one for the ${projectsToReport.length} currently shown project(s)?`,
-          'Create New',
-          'Cancel'
-        );
-        if (!ok) {
-          showToast('Open 📥 Reports to download today\'s report.', 'info');
-          return;  // user cancelled — leave modal open
-        }
-      }
-    }
+    // Nothing else stands between the user and a report. There used to be two
+    // more prompts here — one when a job was already running and one when a
+    // report had already been generated today — but neither protected anything:
+    // the quota above is the real constraint, and asking again for a second
+    // report on the same day was second-guessing a deliberate action.
+
+    // A bad name is shown in place and leaves the modal open, so the user can
+    // correct it rather than losing their project selection to a toast.
+    const reportName = readReportName();
+    if (reportName === null) return;
 
     // ── Fire the request; close modal only after response ───────────────
     closeAfter = true;
-    await doTriggerReport(projectsToReport, riskTypes);
+    await doTriggerReport(projectsToReport, riskTypes, reportName);
   } finally {
     if (genBtn)    { genBtn.disabled    = false; genBtn.textContent    = 'Generate'; }
     if (cancelBtn) { cancelBtn.disabled = false; }
-    if (closeAfter) closeModal('reportOptionsModal');
+    if (closeAfter) {
+      _pendingReportProjects = null;
+      closeModal('reportOptionsModal');
+    }
   }
 }
 
+// Mirrors lib/validate.js validateReportName. The backend re-validates and is
+// the authority; this only tells the user before the round trip (CLAUDE.md §8.8).
+const REPORT_NAME_MAX = 120;
+const REPORT_NAME_RE  = /^[A-Za-z0-9 ._()-]+$/;
+
+function validateReportName(value) {
+  if (value === undefined || value === null || String(value).trim() === '') return null;
+  const v = String(value).trim();
+  if (v.length > REPORT_NAME_MAX) return `Report name must be at most ${REPORT_NAME_MAX} characters.`;
+  if (!REPORT_NAME_RE.test(v)) return 'Report name can use letters, numbers, spaces and . _ - ( ) only.';
+  if (!/[A-Za-z0-9]/.test(v)) return 'Report name must contain at least one letter or number.';
+  return null;
+}
+
+/**
+ * The name typed on the Generate Report modal, or '' for "name it for me".
+ * Shows the error in place and returns null when the field is unusable, so the
+ * caller can stop without a toast the user has to dismiss.
+ */
+function readReportName() {
+  const el  = document.getElementById('rptOptName');
+  const err = document.getElementById('rptOptNameErr');
+  const raw = el ? el.value : '';
+  const problem = validateReportName(raw);
+  if (err) err.textContent = problem || '';
+  return problem ? null : String(raw).trim();
+}
+
 /** Send the generate request to the backend and show a toast. */
-async function doTriggerReport(projectsToReport, riskTypes = ['security']) {
+async function doTriggerReport(projectsToReport, riskTypes = ['security'], reportName = '') {
   try {
     const projects = projectsToReport.map(p => ({
       uuid:    p.uuid,
@@ -4020,12 +4067,15 @@ async function doTriggerReport(projectsToReport, riskTypes = ['security']) {
     const r = await apiFetch('/violation-cache/report/generate', {
       method:  'POST',
       headers: { 'Content-Type': 'application/json' },
-      body:    JSON.stringify({ projects, riskTypes }),
+      body:    JSON.stringify({ projects, riskTypes, reportName }),
     });
 
     if (r.status === 429) {
       const body = await r.json().catch(() => ({}));
-      showToast(`Report limit reached: ${body.error || 'max 10 reports'}. Open 📥 Reports to manage.`, 'warn');
+      // The server's message carries the real numbers and who to ask; the
+      // hardcoded "max 10" it used to fall back to has been wrong since the
+      // limit became the administrator's to set.
+      showToast(body.error || 'Report limit reached. Open 📥 Reports to delete one.', 'warn');
       return;
     }
     if (!r.ok) {

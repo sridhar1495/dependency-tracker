@@ -19,6 +19,7 @@ const reportsDb     = require('../lib/reports-db');
 const reports       = require('../lib/reports');
 const userSettings  = require('../lib/user-settings');
 const dtConnections = require('../lib/dt-connections');
+const validate      = require('../lib/validate');
 
 // Report ids are uuids. Anything else is rejected here rather than handed to
 // PostgreSQL, which would raise a type error for a malformed literal.
@@ -97,25 +98,42 @@ async function handle({ method, path: parsedPath, req, res, principal }) {
       if (completed + running >= maxReports) {
         jsonReply(res, 429, {
           error: `Report limit reached (${completed} completed + ${running} in progress = `
-               + `${completed + running} / ${maxReports}). Delete existing reports or raise the limit in Settings.`,
+               + `${completed + running} / ${maxReports}). Delete an existing report, or ask your `
+               + `administrator to raise the limit.`,
           code: 'QUOTA_REACHED',
           completedCount: completed, runningCount: running, maxReports,
         });
         return true;
       }
 
+      // An optional name. Empty means "generate one", which is what every
+      // report did before the field existed, so an untouched field is not an
+      // error. The validator has already refused anything that could break a
+      // Content-Disposition header or turn the name into a path.
+      const nameProblem = validate.validateReportName(body.reportName);
+      if (nameProblem) {
+        jsonReply(res, 400, { error: nameProblem, code: 'VALIDATION_FAILED', field: 'reportName' });
+        return true;
+      }
+      const filename = reports.reportFilename(body.reportName);
+
+      // Stored now rather than at completion, so the list can show the name
+      // while the job runs and the row can never disagree with the file.
       const report = await reportsDb.create(userId, {
-        riskTypes, projectCount: body.projects.length,
+        riskTypes, projectCount: body.projects.length, filename,
       });
 
       // Fire and forget — the browser polls /report/list (CLAUDE.md §6.6).
-      reports.runReportJob(userId, report.id, conn, body.projects, riskTypes)
+      reports.runReportJob(userId, report.id, conn, body.projects, riskTypes, filename)
         .catch(err => log('error', `Unhandled report job error: ${err.message}`, {
           userId, reportId: report.id,
         }));
 
-      log('info', 'Report job created', { userId, reportId: report.id, projects: body.projects.length });
-      jsonReply(res, 201, { id: report.id, message: 'Report generation started' });
+      log('info', 'Report job created', {
+        userId, reportId: report.id, projects: body.projects.length,
+        named: Boolean(body.reportName && String(body.reportName).trim()),
+      });
+      jsonReply(res, 201, { id: report.id, filename, message: 'Report generation started' });
     } catch (err) {
       log('error', `Report generate failed: ${err.message}`, { userId });
       jsonReply(res, 500, { error: 'Could not start the report.', code: 'INTERNAL' });

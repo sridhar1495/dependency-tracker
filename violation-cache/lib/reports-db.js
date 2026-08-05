@@ -35,12 +35,15 @@ const PUBLIC_COLUMNS = `
 `;
 
 /** Create a pending report and return its row. */
-async function create(userId, { riskTypes, projectCount }) {
+async function create(userId, { riskTypes, projectCount, filename = null }) {
+  // The filename is decided at creation, not at completion, so the row and the
+  // stored file can never disagree and the list can show the intended name
+  // while the job is still running.
   const { rows } = await query(
-    `INSERT INTO reports (user_id, status, risk_types, project_count, progress)
-     VALUES ($1, 'pending', $2, $3, '{}'::jsonb)
+    `INSERT INTO reports (user_id, status, risk_types, project_count, progress, filename)
+     VALUES ($1, 'pending', $2, $3, '{}'::jsonb, $4)
      RETURNING ${PUBLIC_COLUMNS}`,
-    [userId, riskTypes, projectCount]
+    [userId, riskTypes, projectCount, filename]
   );
   return rows[0];
 }

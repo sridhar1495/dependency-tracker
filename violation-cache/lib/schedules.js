@@ -11,6 +11,7 @@
 // if the service is ever run as more than one replica (CLAUDE.md §6.8).
 
 const { query, tx } = require('../db/pool');
+const validate = require('./validate');
 
 const VALID_FREQUENCIES = new Set(['daily', 'weekly', 'monthly']);
 const VALID_RISK_TYPES  = new Set(['security', 'license', 'operational']);
@@ -20,7 +21,8 @@ const SCHEDULE_COLUMNS = `
   week_days AS "weekDays", month_day AS "monthDay", risk_types AS "riskTypes",
   next_run_at AS "nextRunAt", running_since AS "runningSince",
   last_run_at AS "lastRunAt", last_run_status AS "lastRunStatus",
-  last_run_error AS "lastRunError", failure_notification AS "failureNotification"
+  last_run_error AS "lastRunError", failure_notification AS "failureNotification",
+  report_name AS "reportName"
 `;
 
 /** The schedule plus its selected project count. */
@@ -69,6 +71,18 @@ async function save(userId, input) {
     throw Object.assign(new Error('Select at least one risk type.'),
       { code: 'VALIDATION_FAILED', field: 'riskTypes' });
   }
+  // An optional delivery name. NULL means "generate one", so an empty string
+  // from the form is stored as NULL rather than as a name nobody typed.
+  let reportName;
+  if (input.reportName !== undefined) {
+    const problem = validate.validateReportName(input.reportName);
+    if (problem) {
+      throw Object.assign(new Error(problem), { code: 'VALIDATION_FAILED', field: 'reportName' });
+    }
+    const trimmed = typeof input.reportName === 'string' ? input.reportName.trim() : '';
+    reportName = trimmed === '' ? null : trimmed;
+  }
+
   const weekDays = Array.isArray(input.weekDays)
     ? input.weekDays.map(Number).filter(n => Number.isInteger(n) && n >= 0 && n <= 6)
     : null;
@@ -80,7 +94,10 @@ async function save(userId, input) {
         hour       = COALESCE($4, hour),
         week_days  = COALESCE($5::smallint[], week_days),
         month_day  = COALESCE($6, month_day),
-        risk_types = COALESCE($7::text[], risk_types)
+        risk_types = COALESCE($7::text[], risk_types),
+        -- $8 distinguishes "not supplied" from "cleared": undefined leaves the
+        -- stored name alone, an empty field clears it back to auto-generated.
+        report_name = CASE WHEN $9 THEN $8 ELSE report_name END
       WHERE user_id = $1`,
     [userId,
      input.enabled === undefined ? null : Boolean(input.enabled),
@@ -88,7 +105,9 @@ async function save(userId, input) {
      input.hour === undefined ? null : Number(input.hour),
      weekDays,
      input.monthDay === undefined ? null : Number(input.monthDay),
-     riskTypes]
+     riskTypes,
+     reportName ?? null,
+     input.reportName !== undefined]
   );
   return get(userId);
 }

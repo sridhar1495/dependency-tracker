@@ -1894,6 +1894,7 @@ const routeSchedule = require('./routes/schedule');
 const routeDtProxy  = require('./routes/dt-proxy');
 
 const reportsDbMod     = require('./lib/reports-db');
+const validateMod      = require('./lib/validate');
 const reportsMod       = require('./lib/reports');
 const userSettingsMod  = require('./lib/user-settings');
 const appSettingsMod   = require('./lib/app-settings');
@@ -2526,6 +2527,71 @@ describe('user settings — maxReports bounds', () => {
     assert.equal(userSettingsMod.setMaxReports, undefined);
     assert.equal(typeof userSettingsMod.setMaxReportsOverride, 'function');
     assert.equal(typeof userSettingsMod.clearMaxReportsOverride, 'function');
+  });
+});
+
+// ── Report naming ───────────────────────────────────────────────────────────
+// The name becomes a filename and travels in a Content-Disposition header, so
+// the validator's job is to refuse the three things that actually cause
+// trouble: the quote that would terminate the header, the separators that would
+// make it a path, and control characters.
+describe('validate — report name', () => {
+  test('an absent name is not an error', () => {
+    // Every report was auto-named before the field existed, so an untouched
+    // field must stay valid.
+    for (const empty of [undefined, null, '', '   ']) {
+      assert.equal(validateMod.validateReportName(empty), null, JSON.stringify(empty));
+    }
+  });
+
+  test('ordinary names pass', () => {
+    for (const good of ['Q3 Audit', 'report_2026-01', 'security (final)', 'a.b.c', 'X']) {
+      assert.equal(validateMod.validateReportName(good), null, good);
+    }
+  });
+
+  test('anything that could escape the filename is refused', () => {
+    for (const bad of ['a/b', 'a\\b', 'a"b', '../etc/passwd', 'a\u0000b', 'a\nb', 'a;b', 'a*b']) {
+      assert.ok(validateMod.validateReportName(bad), `${JSON.stringify(bad)} must be refused`);
+    }
+  });
+
+  test('a name of only punctuation is refused', () => {
+    // It would leave an empty or dot-only filename once the extension is added.
+    for (const bad of ['..', '.', '   .  ', '---']) {
+      assert.ok(validateMod.validateReportName(bad), JSON.stringify(bad));
+    }
+  });
+
+  test('the length ceiling is enforced at the boundary', () => {
+    const max = validateMod.REPORT_NAME_MAX;
+    assert.equal(validateMod.validateReportName('x'.repeat(max)), null);
+    assert.ok(validateMod.validateReportName('x'.repeat(max + 1)));
+  });
+});
+
+describe('reports — the filename rule', () => {
+  test('no name keeps the generated form', () => {
+    assert.match(reportsMod.reportFilename(null), /^vulnerability_report_.*\.xlsx$/);
+    assert.match(reportsMod.reportFilename('   '), /^vulnerability_report_.*\.xlsx$/);
+  });
+
+  test('the generated stem is caller-chosen, so a schedule reads as one', () => {
+    assert.match(reportsMod.reportFilename('', 'scheduled_report'), /^scheduled_report_.*\.xlsx$/);
+  });
+
+  test('a supplied name is used, with the extension added once', () => {
+    assert.equal(reportsMod.reportFilename('Q3 Audit'), 'Q3 Audit.xlsx');
+    assert.equal(reportsMod.reportFilename('Q3 Audit.xlsx'), 'Q3 Audit.xlsx');
+    assert.equal(reportsMod.reportFilename('Q3 Audit.XLSX'), 'Q3 Audit.XLSX');
+    assert.equal(reportsMod.reportFilename('  Q3 Audit  '), 'Q3 Audit.xlsx');
+  });
+
+  test('two auto-named reports do not collide', () => {
+    // The timestamp carries milliseconds, so a burst still produces distinct
+    // names rather than silently overwriting a previous download.
+    const a = reportsMod.reportFilename(null);
+    assert.match(a, /\d{4}-\d{2}-\d{2}T[\d-]+Z\.xlsx$/);
   });
 });
 

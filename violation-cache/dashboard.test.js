@@ -957,6 +957,9 @@ const path = require('node:path');
 
 const LOGIN_HTML  = fs.readFileSync(path.join(__dirname, '..', 'dashboard', 'login.html'), 'utf8');
 const ADMIN_HTML  = fs.readFileSync(path.join(__dirname, '..', 'dashboard', 'admin.html'), 'utf8');
+// Read as text, not required: the comparison is between the two SOURCES, which
+// is what proves the mirrored rules were edited together (CLAUDE.md §8.8).
+const VALIDATE_SRC = fs.readFileSync(path.join(__dirname, 'lib', 'validate.js'), 'utf8');
 const INDEX_HTML  = fs.readFileSync(path.join(__dirname, '..', 'dashboard', 'index.html'), 'utf8');
 const backendValidate = require('./lib/validate');
 
@@ -1596,6 +1599,87 @@ describe('index.html refetch control', () => {
     const fn = /function setCacheBuilding[\s\S]*?\n\}/.exec(INDEX_HTML)[0];
     assert.match(fn, /A refetch is already running/,
       'the disabled state must explain itself');
+  });
+});
+
+// ── Report naming, and what no longer stands in the way of a report ─────────
+describe('index.html report naming', () => {
+  test('both report dialogs offer an optional name', () => {
+    assert.match(INDEX_HTML, /id="rptOptName"/,  'the Generate Report modal');
+    assert.match(INDEX_HTML, /id="cfgSchedName"/, 'the schedule panel');
+    // The placeholder is where the user learns that blank is allowed.
+    const count = (INDEX_HTML.match(/Leave blank to name it automatically/g) || []).length;
+    assert.equal(count, 2, 'both fields must say that blank is acceptable');
+  });
+
+  test('the fields use classes this page actually defines', () => {
+    // An unknown class name fails silently and renders as a browser default.
+    for (const cls of ['cfg-input', 'cfg-label', 'field-error']) {
+      assert.match(INDEX_HTML, new RegExp('\\.' + cls + '\\s*\\{'),
+        `.${cls} is used by the name fields and must be defined in this file`);
+    }
+  });
+
+  test('the validator mirrors lib/validate.js', () => {
+    // CLAUDE.md §8.8: the two are changed together or they drift.
+    const feRe  = /const REPORT_NAME_RE\s*=\s*(\/.*?\/[a-z]*)\s*;/.exec(INDEX_HTML);
+    const feMax = /const REPORT_NAME_MAX\s*=\s*(\d+)/.exec(INDEX_HTML);
+    const beRe  = /const REPORT_NAME_RE\s*=\s*(\/.*?\/[a-z]*)\s*;/.exec(VALIDATE_SRC);
+    const beMax = /const REPORT_NAME_MAX\s*=\s*(\d+)/.exec(VALIDATE_SRC);
+    assert.ok(feRe && beRe, 'both files must define the pattern');
+    assert.equal(feRe[1], beRe[1], 'the character rule must match the backend exactly');
+    assert.equal(feMax[1], beMax[1], 'so must the length ceiling');
+  });
+
+  test('an invalid name keeps the modal open instead of submitting', () => {
+    const fn = /async function confirmReportOptions[\s\S]*?\n\}/.exec(INDEX_HTML)[0];
+    assert.match(fn, /const reportName = readReportName\(\)/);
+    assert.match(fn, /if \(reportName === null\) return;/,
+      'a rejected name must not fall through to the request');
+    // Against the request, not against the first `closeAfter = true` — the
+    // quota branch legitimately sets that earlier and then returns.
+    const guardAt = fn.indexOf('reportName === null');
+    const sendAt  = fn.indexOf('await doTriggerReport');
+    assert.ok(guardAt > -1 && sendAt > -1 && guardAt < sendAt,
+      'a rejected name must be caught before the request goes out');
+  });
+
+  test('the name is cleared when the dialog opens', () => {
+    // A name left from the previous report would be reused silently, which is
+    // the opposite of "blank means name it for me".
+    assert.match(INDEX_HTML, /if \(nameEl\)\s+nameEl\.value = '';/);
+  });
+
+  test('the name reaches the backend', () => {
+    const fn = /async function doTriggerReport[\s\S]*?\n\}/.exec(INDEX_HTML)[0];
+    assert.match(fn, /JSON\.stringify\(\{ projects, riskTypes, reportName \}\)/);
+  });
+
+  test('a blank schedule name is sent, so it can be cleared', () => {
+    // Omitting the key means "leave it alone"; sending '' means "go back to
+    // automatic". The form must send the field for the second to be reachable.
+    assert.match(INDEX_HTML, /reportName: String\(schedName\)\.trim\(\)/);
+  });
+});
+
+describe('index.html report pre-flight', () => {
+  test('only the quota stands between the user and a report', () => {
+    // Two further prompts used to live here — one when a job was already
+    // running, one when a report had been generated today. Neither protected
+    // anything: the quota is the real constraint, and re-asking for a second
+    // report on the same day second-guessed a deliberate action.
+    const fn = /async function confirmReportOptions[\s\S]*?\n\}/.exec(INDEX_HTML)[0]
+      .replace(/\/\/[^\n]*/g, '');
+    assert.match(fn, /maxReportsLimit/, 'the quota check stays');
+    assert.doesNotMatch(fn, /Already In Progress/i);
+    assert.doesNotMatch(fn, /Already Generated Today/i);
+    assert.doesNotMatch(fn, /completedToday/);
+    assert.doesNotMatch(fn, /runningNow/);
+  });
+
+  test('nothing anywhere still compares a report against today', () => {
+    assert.doesNotMatch(INDEX_HTML, /completedToday/,
+      'the same-day check is gone, not merely unreferenced');
   });
 });
 
