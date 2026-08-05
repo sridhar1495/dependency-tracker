@@ -114,6 +114,10 @@
     }
     .btn-xs:hover:not(:disabled) { background: var(--border); }
     .btn-xs:disabled { opacity: .5; cursor: not-allowed; }
+    /* Same treatment as .btn.danger, so the control that opens the reset dialog
+       and the one that confirms it read as the same action rather than two. */
+    .btn-xs.danger { border-color: var(--critical); color: var(--critical); }
+    .btn-xs.danger:hover:not(:disabled) { background: var(--critical-bg); }
     .btn-theme {
       background: none; border: 1px solid var(--border); border-radius: var(--radius);
       color: var(--text); cursor: pointer; font-size: 15px; padding: 6px 10px;
@@ -720,7 +724,7 @@
         ${kv('Last sign-in', txt(fmtDate(d.account.lastLoginAt)))}
         ${kv('Last updated', txt(fmtDate(d.account.updatedAt)))}
         <div style="margin-top:10px">
-          <button class="btn-xs" id="btnResetPw">Reset password…</button>
+          <button class="btn-xs danger" id="btnResetPw">Reset password</button>
         </div>
       </div>
 

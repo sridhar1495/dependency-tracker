@@ -215,27 +215,59 @@ async function handle({ method, path: parsedPath, req, res, principal }) {
         return true;
       }
 
-      // One cheap authenticated call: /version needs a valid key and returns
-      // a tiny body.
-      const { json } = await dtFetch.dtGetWithRetry('/api/v1/version', apiUrl, apiKey);
-      jsonReply(res, 200, {
-        ok: true,
-        version: json && json.version ? json.version : null,
-        application: json && json.application ? json.application : null,
-      });
+      // Probe the endpoint the dashboard itself depends on, one page of one
+      // project. That tests all three things at once — the URL is a
+      // DependencyTrack API root, the key is accepted, and the key carries the
+      // permission this dashboard needs.
+      //
+      // It used to probe /api/v1/version, which does not exist: DependencyTrack
+      // serves its version at /api/version (see docs/INSTALLATION.md). Every
+      // test therefore came back as a 404 "connection failed" on a connection
+      // that was in fact fine. /api/version would not have been a good probe
+      // either — it is unauthenticated, so it proves nothing about the key.
+      await dtFetch.dtGetWithRetry('/api/v1/project?pageSize=1&pageNumber=1', apiUrl, apiKey);
+
+      // The version is a nicety, not part of the verdict. It lives on an
+      // unauthenticated path, so a deployment that blocks it must not turn a
+      // working connection into a failure.
+      let version = null, application = null;
+      try {
+        const { json } = await dtFetch.dtGetWithRetry('/api/version', apiUrl, apiKey);
+        if (json) { version = json.version || null; application = json.application || null; }
+      } catch (_) { /* advisory only */ }
+
+      jsonReply(res, 200, { ok: true, version, application });
     } catch (err) {
       if (err.code === 'DT_KEY_UNREADABLE') {
         jsonReply(res, 503, { error: err.message, code: 'DT_KEY_UNREADABLE' });
         return true;
       }
+
+      // Say what is actually wrong. "HTTP 401" and "HTTP 404" are different
+      // problems with different fixes, and telling somebody to "check the URL
+      // and API key" when only one of them is wrong makes them re-check both.
       const dtStatus = err.statusCode || null;
-      jsonReply(res, 200, {
-        ok: false,
-        dtStatus,
-        error: dtStatus
-          ? `DependencyTrack returned HTTP ${dtStatus}. Check the URL and API key.`
-          : `DependencyTrack could not be reached: ${err.message}`,
-      });
+      let code = 'DT_UNREACHABLE';
+      let message;
+      if (dtStatus === 401) {
+        code = 'DT_KEY_REJECTED';
+        message = 'DependencyTrack rejected the API key. Check the key itself.';
+      } else if (dtStatus === 403) {
+        code = 'DT_KEY_FORBIDDEN';
+        message = 'The API key was accepted but is not permitted to list projects. '
+                + 'It needs the VIEW_PORTFOLIO permission.';
+      } else if (dtStatus === 404) {
+        code = 'DT_NOT_DT';
+        message = 'The server answered, but there is no DependencyTrack API at that URL. '
+                + 'Give the API base URL without a trailing path, for example '
+                + 'http://dependency-track:8080';
+      } else if (dtStatus) {
+        code = 'DT_HTTP_ERROR';
+        message = `DependencyTrack returned HTTP ${dtStatus}.`;
+      } else {
+        message = `DependencyTrack could not be reached: ${err.message}`;
+      }
+      jsonReply(res, 200, { ok: false, dtStatus, code, error: message });
     }
     return true;
   }

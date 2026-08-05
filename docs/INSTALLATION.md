@@ -296,6 +296,21 @@ Nothing goes in `.env`. Sign in, open **⚙ Settings**, and fill in:
 Use **Test Connection** to check it before saving. The key is encrypted immediately
 and is never returned to the browser.
 
+The test fetches one page of one project — the same call the dashboard makes —
+so it proves the URL, the key and the permission together. What it reports:
+
+| Result | Meaning |
+|---|---|
+| ✅ Connected | The URL, the key and its `VIEW_PORTFOLIO` permission are all good |
+| The API key was rejected | The key is wrong or has been revoked. The URL is fine |
+| Not permitted to list projects | The key works but lacks `VIEW_PORTFOLIO` |
+| No DependencyTrack API at that URL | The server answered but is not DT here — usually a trailing path on the URL. Give the API base only, e.g. `http://dependency-track:8080` |
+| Could not be reached | Wrong host or port, DNS, or the service is down |
+
+The DependencyTrack version is shown when the test succeeds, but it is read from
+an unauthenticated endpoint and a deployment that blocks it will simply omit the
+version — it never turns a working connection into a failure.
+
 No CORS configuration is needed on the DependencyTrack server: every call originates
 from the backend container, never from the browser.
 

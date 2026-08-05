@@ -305,7 +305,20 @@
       background-attachment: local, local, scroll, scroll;
     }
     table { width: 100%; border-collapse: collapse; min-width: 900px; }
-    thead tr { position: sticky; top: 0; z-index: 10; }
+
+    /* ── Sticky header, BOTH rows ──────────────────────────────────────────
+       Both rows used to be `position: sticky; top: 0`, so they occupied the
+       same strip and the second — later in the DOM, therefore painted on top —
+       hid the first. Scrolling down left the sub-columns frozen with no way to
+       tell which risk group they belonged to.
+
+       Stick the cells rather than the rows, and give the second row a top
+       offset equal to the first row's height. That height depends on font size
+       and zoom, so it is a custom property kept in sync by syncStickyHeader()
+       rather than a number guessed here. The rowspan cells belong to row 1 and
+       stay at 0: they span both rows and should hold from the very top. */
+    thead th { position: sticky; top: 0; z-index: 11; }
+    thead tr:nth-child(2) th { top: var(--th-group-h, 30px); z-index: 10; }
 
     .th-group {
       background: var(--surface2); padding: 8px 0;
@@ -852,7 +865,7 @@
           <button class="rpt-drop-item" onclick="scheduleReports(); closeReportDropdown()">📅 Schedule Reports</button>
         </div>
       </div>
-      <button class="btn export" onclick="exportCSV()">↓ Export CSV</button>
+      <button class="btn export" id="exportBtn" onclick="exportCSV()">↓ Export CSV</button>
     </div>
 
     <!-- Table -->
@@ -2305,6 +2318,50 @@ function computeSummaryTotals() {
 }
 
 // ── After data load: build tree + populate caches ─────────────────────────
+// Controls that operate on the project table. Meaningless before there is a
+// table, so they are held disabled until the first render (CLAUDE.md §8.5).
+const TABLE_CONTROL_IDS = [
+  'searchInput', 'latestFilterBtn', 'flatViewBtn',
+  'riskFilter', 'categoryFilter', 'tagFilter',
+  'expandCollapseBtn', 'genReportBtn', 'exportBtn',
+];
+
+/**
+ * Enable or disable every control that acts on the table.
+ *
+ * On first load these were live while the banner still said "Connecting…" and
+ * the table was empty, so a filter chosen in that window was applied to nothing
+ * and then overwritten the moment the data arrived — the user's selection
+ * silently did not survive its own page load.
+ */
+function setTableControlsEnabled(enabled) {
+  for (const id of TABLE_CONTROL_IDS) {
+    const el = document.getElementById(id);
+    if (!el) continue;
+    // Remember the real tooltip the first time, so restoring it later cannot
+    // hand back the "still loading" text.
+    if (el.dataset.titleOriginal === undefined) el.dataset.titleOriginal = el.title || '';
+    el.disabled = !enabled;
+    el.title = enabled ? el.dataset.titleOriginal
+                       : 'Available once the project data has loaded';
+  }
+}
+
+/**
+ * Keep the second header row's sticky offset equal to the first row's height.
+ *
+ * The group row's height moves with font size, zoom and the responsive
+ * breakpoints, so it cannot be a constant in the stylesheet. Measured once
+ * after render and on resize — never per scroll event, which would be a layout
+ * read on every frame.
+ */
+function syncStickyHeader() {
+  const groupRow = document.querySelector('thead tr');
+  if (!groupRow) return;
+  const h = Math.round(groupRow.getBoundingClientRect().height);
+  if (h > 0) document.documentElement.style.setProperty('--th-group-h', h + 'px');
+}
+
 function afterLoad() {
   treeRoots = buildTree(allProjects);
   // Cache parentUuids once — used by applyFilters() and computeSummaryTotals()
@@ -2314,6 +2371,9 @@ function afterLoad() {
   expandedUuids = new Set(allProjects.map(p => p.uuid));
   buildFilterOptions();
   applyFilters(); // sets filtered + currentMatchSet, then renders summary + tree
+  syncStickyHeader();
+  // The table exists now, so the controls that act on it mean something.
+  setTableControlsEnabled(true);
 }
 
 // ── hasMatch: does this node or any descendant match the set? ──────────────
@@ -2653,8 +2713,13 @@ function setRiskFilter(val) {
 function buildFilterOptions() {
   const allTags = [...new Set(allProjects.flatMap(p => p.tags || []))].sort();
   const sel = document.getElementById('tagFilter');
+  // Rewriting innerHTML resets the selection to "All tags". On a reload that
+  // silently discarded the user's chosen tag, so remember it and put it back
+  // when the tag still exists in the new data.
+  const chosen = sel.value;
   sel.innerHTML = '<option value="all">All tags</option>' +
     allTags.map(t => `<option value="${escHtml(t)}">${escHtml(t)}</option>`).join('');
+  if (chosen && chosen !== 'all' && allTags.includes(chosen)) sel.value = chosen;
 }
 
 // ── Search debounce ────────────────────────────────────────────────────────
@@ -3392,11 +3457,22 @@ function applyViolationData(map) {
       node.secpolicy  = p.secpolicy;
     }
   });
-  // Recompute summary totals and re-render without resetting filters / expansion
+  // Recompute totals, then re-run the user's filters against the DATA THAT JUST
+  // ARRIVED rather than re-rendering the old match set.
+  //
+  // This used to call renderTree(currentMatchSet), which was wrong twice over.
+  // The risk and category filters are computed FROM violation counts, so a
+  // match set built while those counts were still zero is stale the moment the
+  // refetch lands — the table kept showing what matched before the data
+  // existed. And renderTree ignores flatView, so a refetch finishing while the
+  // flat list was on flipped the table back to the tree.
+  //
+  // applyFilters() re-reads the controls, so whatever the user chose while the
+  // build was running is preserved and is now correct; it also picks the right
+  // renderer for the current view.
   summaryTotals = null;
   computeSummaryTotals();
-  renderSummary();
-  renderTree(currentMatchSet);
+  applyFilters();
 }
 
 // ── Connect to live API ────────────────────────────────────────────────────
@@ -4067,6 +4143,10 @@ async function cancelReport(id) {
 
 // ── Expose functions required by inline HTML event handlers ───────────────
 // The IIFE scope is not window-global; onclick="fn()" attributes need explicit exposure.
+// Zoom and window resizes change the group row's height, so the second header
+// row's offset has to follow. Passive: this only reads layout.
+window.addEventListener('resize', syncStickyHeader);
+
 window.toggleUserMenu       = toggleUserMenu;
 window.doLogout             = doLogout;
 window.openProfilePanel     = openProfilePanel;
@@ -4136,6 +4216,9 @@ window.scheduleReports      = scheduleReports;
   initTheme();
   renderUserMenu();
   buildColHeaders();
+  // Held until afterLoad() has rendered a table. Set here rather than in the
+  // markup so the disabled state and the reason for it live together.
+  setTableControlsEnabled(false);
 
   // Close the user menu when clicking anywhere outside it.
   document.addEventListener('click', (e) => {

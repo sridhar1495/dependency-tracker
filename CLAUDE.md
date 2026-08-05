@@ -327,6 +327,15 @@ All DT API calls go through `dtGetWithRetry()`:
 
 Do **not** add ad-hoc `fetch`/`https.get` calls outside this helper.
 
+**DependencyTrack serves its version at `/api/version`, not `/api/v1/version`,
+and that path is unauthenticated.** The connection test therefore probes
+`/api/v1/project?pageSize=1`, the endpoint the dashboard itself depends on:
+one call that proves the URL is a DT API root, the key is accepted, and the key
+carries `VIEW_PORTFOLIO`. The version is fetched separately and tolerated to
+fail — it is a nicety, never part of the verdict. A probe of a path that does
+not exist returned 404 on every healthy connection, and the stub answered it
+anyway, so nothing caught it. Stubs must mirror the upstream's real routing.
+
 ### 6.3 Concurrent pipelines
 
 The violation cache builds via 9 parallel pipelines: 3 risk types
@@ -675,6 +684,19 @@ else picks up a newly added project without a full page reload.
 
 Never mutate `allProjects` after initial load. Derive everything else from it.
 
+**A refetch must re-run `applyFilters()`, not replay `currentMatchSet`.** The
+risk and category filters are computed *from* violation counts, so a match set
+built while those counts were still zero is stale the moment new data lands;
+and `renderTree` ignores `flatView`, so replaying it flipped the flat list back
+to a tree. `applyFilters()` re-reads the controls, so the user's choices survive
+and are correct against the data that just arrived.
+
+**Controls that act on the table are disabled until there is a table.** They
+are listed once in `TABLE_CONTROL_IDS` and switched by `setTableControlsEnabled()`
+— closed during bootstrap, opened at the end of `afterLoad()`. Left live, a
+filter chosen while the banner still said "Connecting…" applied to nothing and
+was then overwritten by the first render.
+
 ### 8.6 Data model
 
 ```javascript
@@ -742,6 +764,12 @@ The frontend never performs uniqueness checks — those are backend-only, via
   (the name pair stacks) and **height** breakpoints at 720 px and 560 px.
   Browser zoom shrinks the CSS viewport, and it shortens it before it narrows
   it, so a page with only width breakpoints hides its own buttons when zoomed.
+- **A multi-row table header sticks per cell, not per row.** `thead tr {
+  position: sticky; top: 0 }` puts every row at the same offset, so the later
+  one paints over the first and the group captions vanish on scroll. Stick the
+  `th` cells and give the second row `top: var(--th-group-h)`, a custom property
+  `syncStickyHeader()` keeps equal to the first row's measured height — it moves
+  with font size, zoom and the breakpoints, so it cannot be a constant.
 - **Never put `overflow: hidden` on `body`.** A decorative layer that overflows
   clips itself inside a `position: fixed` wrapper. Centre a card taller than the
   viewport with `margin: auto`, not `align-items: center` — the latter overflows
