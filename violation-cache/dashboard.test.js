@@ -1455,6 +1455,17 @@ describe('admin.html write actions', () => {
     assert.match(fn, /\/password/);
   });
 
+  test('the reset trigger matches the dialog that confirms it', () => {
+    // Different colour and a trailing ellipsis made them look like two
+    // different actions rather than one in two steps.
+    const trigger = /<button class="[^"]*" id="btnResetPw">([^<]*)<\/button>/.exec(ADMIN_HTML);
+    assert.ok(trigger, 'the reset trigger must exist');
+    assert.match(trigger[0], /\bdanger\b/, 'it carries the same danger styling as the confirm');
+    assert.equal(trigger[1].trim(), 'Reset password', 'and the same words, with no ellipsis');
+    assert.match(ADMIN_HTML, /\.btn-xs\.danger \{[^}]*var\(--critical\)/,
+      'the danger variant must be defined for the small button too');
+  });
+
   test('the reset dialog says what it will do before it is used', () => {
     assert.match(ADMIN_HTML, /signed out/i);
     // The sentence wraps in the source, so match across whitespace.
@@ -1585,6 +1596,101 @@ describe('index.html refetch control', () => {
     const fn = /function setCacheBuilding[\s\S]*?\n\}/.exec(INDEX_HTML)[0];
     assert.match(fn, /A refetch is already running/,
       'the disabled state must explain itself');
+  });
+});
+
+// ── The project table's header stays legible while scrolling ────────────────
+// Both header rows used to be `position: sticky; top: 0`, so they occupied the
+// same strip and the second — later in the DOM, painted on top — hid the first.
+// Scrolling left the sub-columns frozen with no way to tell which risk group
+// they belonged to.
+describe('index.html sticky table header', () => {
+  test('the cells are sticky, not the rows', () => {
+    assert.match(INDEX_HTML, /thead th \{[^}]*position:\s*sticky/);
+    assert.doesNotMatch(INDEX_HTML, /thead tr \{[^}]*position:\s*sticky[^}]*top:\s*0/,
+      'sticking the rows put both at the same offset');
+  });
+
+  test('the second row is offset by the first row\'s height', () => {
+    assert.match(INDEX_HTML, /thead tr:nth-child\(2\) th \{[^}]*top:\s*var\(--th-group-h/);
+  });
+
+  test('that height is measured rather than guessed', () => {
+    // It moves with font size, zoom and the responsive breakpoints, so a
+    // constant in the stylesheet would be wrong at most sizes.
+    assert.match(INDEX_HTML, /function syncStickyHeader\(\)/);
+    const fn = /function syncStickyHeader[\s\S]*?\n\}/.exec(INDEX_HTML)[0];
+    assert.match(fn, /getBoundingClientRect\(\)\.height/);
+    assert.match(fn, /setProperty\('--th-group-h'/);
+    assert.match(INDEX_HTML, /addEventListener\('resize', syncStickyHeader\)/,
+      'zoom and resize change the height, so the offset has to follow');
+  });
+
+  test('the group row paints above the sub-column row', () => {
+    const group = /thead th \{([^}]*)\}/.exec(INDEX_HTML)[1];
+    const sub   = /thead tr:nth-child\(2\) th \{([^}]*)\}/.exec(INDEX_HTML)[1];
+    const z = (css) => Number(/z-index:\s*(\d+)/.exec(css)[1]);
+    assert.ok(z(group) > z(sub), `group ${z(group)} must sit above sub ${z(sub)}`);
+  });
+});
+
+// ── Table controls are inert until there is a table ─────────────────────────
+describe('index.html table controls gate', () => {
+  test('the controls are listed in one place', () => {
+    assert.match(INDEX_HTML, /const TABLE_CONTROL_IDS = \[/);
+    const list = /const TABLE_CONTROL_IDS = \[([\s\S]*?)\]/.exec(INDEX_HTML)[1];
+    for (const id of ['searchInput', 'latestFilterBtn', 'flatViewBtn', 'riskFilter',
+                      'categoryFilter', 'tagFilter', 'expandCollapseBtn']) {
+      assert.match(list, new RegExp("'" + id + "'"), `${id} acts on the table and must be gated`);
+    }
+  });
+
+  test('every gated id exists in the markup', () => {
+    // A typo here would silently gate nothing.
+    const list = /const TABLE_CONTROL_IDS = \[([\s\S]*?)\]/.exec(INDEX_HTML)[1];
+    for (const [, id] of list.matchAll(/'([^']+)'/g)) {
+      assert.match(INDEX_HTML, new RegExp('id="' + id + '"'), `no element carries id="${id}"`);
+    }
+  });
+
+  test('they start disabled and are enabled only after a render', () => {
+    assert.match(INDEX_HTML, /setTableControlsEnabled\(false\)/,
+      'the gate must be closed during bootstrap');
+    const afterLoad = /function afterLoad\(\)[\s\S]*?\n\}/.exec(INDEX_HTML)[0];
+    assert.match(afterLoad, /setTableControlsEnabled\(true\)/,
+      'and opened once afterLoad() has rendered a table');
+  });
+
+  test('the disabled state explains itself and the real tooltip is restored', () => {
+    const fn = /function setTableControlsEnabled[\s\S]*?\n\}/.exec(INDEX_HTML)[0];
+    assert.match(fn, /once the project data has loaded/i);
+    assert.match(fn, /dataset\.titleOriginal/,
+      'the original tooltip must be remembered, or re-enabling hands back the wrong text');
+  });
+});
+
+// ── A refetch must not throw away what the user chose ───────────────────────
+describe('index.html filter state across a refetch', () => {
+  test('applyViolationData re-runs the filters instead of replaying a match set', () => {
+    // The risk and category filters are computed FROM violation counts, so a
+    // match set built while those counts were zero is stale the moment the
+    // refetch lands. renderTree also ignores flatView.
+    // Comments stripped first: this one explains what it replaced, in prose
+    // that would otherwise match the very call being forbidden.
+    const fn = /function applyViolationData[\s\S]*?\n\}/.exec(INDEX_HTML)[0]
+      .replace(/\/\/[^\n]*/g, '');
+    assert.match(fn, /applyFilters\(\);/,
+      'the filters must be recomputed against the data that just arrived');
+    assert.doesNotMatch(fn, /renderTree\(currentMatchSet\)/,
+      'replaying the old match set shows what matched before the data existed');
+  });
+
+  test('rebuilding the tag list keeps the chosen tag', () => {
+    const fn = /function buildFilterOptions[\s\S]*?\n\}/.exec(INDEX_HTML)[0];
+    assert.match(fn, /const chosen = sel\.value/);
+    assert.match(fn, /sel\.value = chosen/);
+    assert.match(fn, /allTags\.includes\(chosen\)/,
+      'only restore a tag that still exists in the new data');
   });
 });
 

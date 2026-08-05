@@ -2529,6 +2529,115 @@ describe('user settings — maxReports bounds', () => {
   });
 });
 
+// ── The connection test says what is actually wrong ─────────────────────────
+// It used to probe /api/v1/version, which DependencyTrack does not serve — the
+// version lives at /api/version. Every test therefore came back 404 "connection
+// failed" on connections that were fine. The probe is now the endpoint the
+// dashboard itself depends on, which tests the URL, the key and the permission
+// in one call.
+describe('routes — the DependencyTrack connection test', () => {
+  const conn = { apiUrl: 'http://dt:8080', apiKey: 'k', isConfigured: true, fingerprint: 'f'.repeat(64) };
+
+  const post = (body) => ({
+    method: 'POST',
+    url: '/violation-cache/config/test-connection',
+    path: '/violation-cache/config/test-connection',
+    req: mockReq(JSON.stringify(body)),
+    res: makeRes(),
+    principal: asUser(USER_A),
+  });
+
+  test('it probes an endpoint DependencyTrack actually serves', async () => {
+    const asked = [];
+    const restoreConn = stub(dtConnectionsMod, { getResolved: async () => conn });
+    const restoreFetch = stub(dtFetchMod, {
+      dtGetWithRetry: async (path) => { asked.push(path); return { json: { version: '4.11.0' }, headers: {} }; },
+    });
+    try {
+      const ctx = post({ apiUrl: 'http://dt:8080', apiKey: 'k' });
+      await routeConfig.handle(ctx);
+      assert.equal(ctx.res.statusCode, 200);
+      assert.equal(ctx.res.json.ok, true);
+      assert.ok(asked.some(p => p.startsWith('/api/v1/project')),
+        `the probe must exercise the portfolio the dashboard reads: ${JSON.stringify(asked)}`);
+      assert.ok(!asked.some(p => p === '/api/v1/version'),
+        '/api/v1/version does not exist in DependencyTrack');
+    } finally { restoreConn(); restoreFetch(); }
+  });
+
+  test('the version is a nicety and never decides the verdict', async () => {
+    // It is served unauthenticated, so a deployment that blocks it must not
+    // turn a working connection into a failure.
+    const restoreConn = stub(dtConnectionsMod, { getResolved: async () => conn });
+    const restoreFetch = stub(dtFetchMod, {
+      dtGetWithRetry: async (path) => {
+        if (path.startsWith('/api/version')) throw Object.assign(new Error('HTTP 403'), { statusCode: 403 });
+        return { json: [], headers: {} };
+      },
+    });
+    try {
+      const ctx = post({ apiUrl: 'http://dt:8080', apiKey: 'k' });
+      await routeConfig.handle(ctx);
+      assert.equal(ctx.res.json.ok, true, 'the portfolio probe succeeded, so the connection works');
+      assert.equal(ctx.res.json.version, null);
+    } finally { restoreConn(); restoreFetch(); }
+  });
+
+  // Each status is a different problem with a different fix. Telling somebody
+  // to "check the URL and API key" when only one of them is wrong makes them
+  // re-check both.
+  const cases = [
+    [401, 'DT_KEY_REJECTED',  /rejected the API key/i],
+    [403, 'DT_KEY_FORBIDDEN', /VIEW_PORTFOLIO/],
+    [404, 'DT_NOT_DT',        /no DependencyTrack API at that URL/i],
+    [500, 'DT_HTTP_ERROR',    /HTTP 500/],
+  ];
+  for (const [status, code, messageRe] of cases) {
+    test(`HTTP ${status} is reported as ${code}`, async () => {
+      const restoreConn = stub(dtConnectionsMod, { getResolved: async () => conn });
+      const restoreFetch = stub(dtFetchMod, {
+        dtGetWithRetry: async () => { throw Object.assign(new Error(`HTTP ${status}`), { statusCode: status }); },
+      });
+      try {
+        const ctx = post({ apiUrl: 'http://dt:8080', apiKey: 'k' });
+        await routeConfig.handle(ctx);
+        assert.equal(ctx.res.statusCode, 200, 'a failed probe is an answer, not a server error');
+        assert.equal(ctx.res.json.ok, false);
+        assert.equal(ctx.res.json.code, code);
+        assert.equal(ctx.res.json.dtStatus, status);
+        assert.match(ctx.res.json.error, messageRe);
+      } finally { restoreConn(); restoreFetch(); }
+    });
+  }
+
+  test('an unreachable host is distinguished from a rejected one', async () => {
+    const restoreConn = stub(dtConnectionsMod, { getResolved: async () => conn });
+    const restoreFetch = stub(dtFetchMod, {
+      dtGetWithRetry: async () => { throw new Error('connect ECONNREFUSED 10.0.0.1:8080'); },
+    });
+    try {
+      const ctx = post({ apiUrl: 'http://dt:8080', apiKey: 'k' });
+      await routeConfig.handle(ctx);
+      assert.equal(ctx.res.json.ok, false);
+      assert.equal(ctx.res.json.code, 'DT_UNREACHABLE');
+      assert.equal(ctx.res.json.dtStatus, null);
+      assert.match(ctx.res.json.error, /could not be reached/i);
+    } finally { restoreConn(); restoreFetch(); }
+  });
+
+  test('no API key ever appears in the response', async () => {
+    const restoreConn = stub(dtConnectionsMod, { getResolved: async () => conn });
+    const restoreFetch = stub(dtFetchMod, {
+      dtGetWithRetry: async () => { throw Object.assign(new Error('HTTP 401'), { statusCode: 401 }); },
+    });
+    try {
+      const ctx = post({ apiUrl: 'http://dt:8080', apiKey: 'supersecretkey' });
+      await routeConfig.handle(ctx);
+      assert.doesNotMatch(ctx.res.body, /supersecretkey/, 'S22: the key is never echoed back');
+    } finally { restoreConn(); restoreFetch(); }
+  });
+});
+
 // ── The build watchdog measures silence, not elapsed time ────────────────────
 // It used to be a flat 30-minute deadline. A large portfolio that was working
 // through its pages perfectly happily got killed at the half hour and every page

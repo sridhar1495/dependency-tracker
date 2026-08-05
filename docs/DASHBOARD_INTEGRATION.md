@@ -235,6 +235,14 @@ docker exec dt-postgres psql -U dtdash -d dtdash -c 'DELETE FROM violation_cache
   reporting progress is treated the same way once the stall window passes. Either
   way the next dashboard load starts a fresh crawl — there is nothing to clean up
   by hand, and no need to delete rows from `violation_caches`.
+- **Your filters survive a refetch.** A search term, tag, risk level, category,
+  Latest Only or Flat View chosen while a refetch is in flight is still applied
+  when it finishes, and is re-evaluated against the counts that just arrived —
+  so a "has failures" filter shows what actually has failures now, not what did
+  before the data existed.
+- **The filter controls are inert until the table has loaded.** On first open
+  they stay disabled while the banner reads "Connecting…", because a filter
+  applied to an empty table would be discarded by the first render.
 - **The ↻ Refetch Violations button is disabled while a build is running**, and
   not only for the person who started it. The cache is shared by connection
   fingerprint, so everyone pointing at the same DependencyTrack instance sees the
