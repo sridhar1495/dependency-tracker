@@ -5,26 +5,29 @@
 // Multi-sheet XLSX generation. The only consumer of exceljs.
 
 const ExcelJS = require('exceljs');    // MIT-licensed Excel generation library
+const { cweLabel, cweReference, vulnReference } = require('./cwe');
 
 // ── Excel report builder ──────────────────────────────────────────────────────
 /**
  * Build a multi-sheet XLSX report and write it to filePath.
  * Sheets are added only for the risk types present in reportData.riskTypes:
  *
- *   security    → Vulnerability Findings, Security Project Summary, Component Summary
+ *   security    → Vulnerability Findings, Security Project Summary,
+ *                 Component Summary, CWE Summary
  *   license     → License Violations, License Project Summary
  *   operational → Operational Violations, Operational Project Summary
  *
  * @param {string} filePath
  * @param {{ riskTypes: string[],
  *           secFindings: object[], secProjectSummary: Map, secComponentMap: Map,
+ *           secCweMap: Map,
  *           licViolations: object[], licProjectSummary: Map,
  *           opsViolations: object[], opsProjectSummary: Map }} reportData
  */
 async function buildExcelReport(filePath, reportData) {
   const {
     riskTypes,
-    secFindings, secProjectSummary, secComponentMap,
+    secFindings, secProjectSummary, secComponentMap, secCweMap,
     licViolations, licProjectSummary,
     opsViolations, opsProjectSummary,
   } = reportData;
@@ -74,7 +77,7 @@ async function buildExcelReport(filePath, reportData) {
     secFindings.forEach((f, idx) => {
       const v    = f.vulnerability || {};
       const c    = f.component     || {};
-      const cwes = (v.cwes || []).map(w => `CWE-${w.cweId}`).join(', ');
+      const cwes = cweLabel(v);
       const comp = [c.name, c.group].filter(Boolean).join('-');
       ws1.addRow({
         sno:       idx + 1,
@@ -129,6 +132,41 @@ async function buildExcelReport(filePath, reportData) {
         projects: [...entry.projects].sort().join(', '),
       });
     }
+
+    // Sheet: CWE Summary — one row per (vulnerability, CWE) pair, so the counts
+    // reconcile with SV_Vulnerability Findings rather than double-counting a
+    // finding that DT mapped to more than one weakness.
+    const ws4 = wb.addWorksheet('SV_CWE Summary');
+    ws4.columns = [
+      { header: 'S.No',                key: 'sno',      width: 6  },
+      { header: 'Vulnerability',       key: 'vulnId',   width: 22 },
+      { header: 'CWE',                 key: 'cwe',      width: 22 },
+      { header: 'Vulnerability Count', key: 'count',    width: 18 },
+      { header: 'Affected Projects',   key: 'projects', width: 55 },
+      { header: 'CVE Reference',       key: 'cveRef',   width: 46 },
+      { header: 'CWE Reference',       key: 'cweRef',   width: 46 },
+    ];
+    styleHeader(ws4);
+    let sno4 = 1;
+    // Most-frequent first, then by identifier, so two runs over the same data
+    // produce the same sheet.
+    const sortedCwes = [...(secCweMap || new Map()).values()].sort((a, b) =>
+      b.count - a.count ||
+      String(a.vulnId).localeCompare(String(b.vulnId)) ||
+      String(a.cwe).localeCompare(String(b.cwe))
+    );
+    for (const entry of sortedCwes) {
+      ws4.addRow({
+        sno:      sno4++,
+        vulnId:   entry.vulnId,
+        cwe:      entry.cwe,
+        count:    entry.count,
+        projects: [...entry.projects].sort().join(', '),
+        cveRef:   vulnReference(entry.vulnId),
+        cweRef:   cweReference(entry.cweIds),
+      });
+    }
+    alternateShading(ws4);
   }
 
   // ── License sheets ────────────────────────────────────────────────────────
