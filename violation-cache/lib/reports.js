@@ -11,9 +11,12 @@
 // runtime-only (CLAUDE.md §7.5).
 
 const { log } = require('./log');
-const { dtGetWithRetry } = require('./dt-fetch');
+// Held as a module reference, not destructured, so tests can substitute the
+// upstream without a live DependencyTrack — the same pattern as violation-cache.js.
+const dtFetch = require('./dt-fetch');
 const { makeSemaphore } = require('./async-utils');
 const { buildExcelReport } = require('./excel');
+const { cweIdsOf, cweLabel } = require('./cwe');
 const reportsDb = require('./reports-db');
 
 const REPORT_TIMEOUT_MS     = 30 * 60_000;  // 30 min hard limit per job
@@ -70,6 +73,7 @@ async function collectReportData(apiUrl, apiKey, projects, riskTypes, cancelFlag
   const secFindings       = [];
   const secProjectSummary = new Map();
   const secComponentMap   = new Map();
+  const secCweMap         = new Map();
   const licViolations     = [];
   const licProjectSummary = new Map();
   const opsViolations     = [];
@@ -97,6 +101,22 @@ async function collectReportData(apiUrl, apiKey, projects, riskTypes, cancelFlag
                   entry.count++;
                   entry.projects.add(proj.name);
                   secComponentMap.set(cKey, entry);
+                }
+
+                // CWE summary: unique on (vulnerability, CWE cell) — the same
+                // pair the findings sheet shows, built from the very same
+                // finding object, so no second DT call is involved.
+                const vulnId = (f.vulnerability?.vulnId || '').trim();
+                if (vulnId) {
+                  const cwe  = cweLabel(f.vulnerability);
+                  const wKey = `${vulnId}\u0000${cwe}`;
+                  const entry = secCweMap.get(wKey) || {
+                    vulnId, cwe, cweIds: cweIdsOf(f.vulnerability),
+                    count: 0, projects: new Set(),
+                  };
+                  entry.count++;
+                  entry.projects.add(proj.name);
+                  secCweMap.set(wKey, entry);
                 }
               }
               secProjectSummary.set(proj.uuid, { name: proj.name, version: proj.version, ...sev });
@@ -171,7 +191,7 @@ async function collectReportData(apiUrl, apiKey, projects, riskTypes, cancelFlag
   }
 
   return {
-    secFindings, secProjectSummary, secComponentMap,
+    secFindings, secProjectSummary, secComponentMap, secCweMap,
     licViolations, licProjectSummary,
     opsViolations, opsProjectSummary,
   };
@@ -202,7 +222,7 @@ async function fetchAllFindings(apiUrl, apiKey, name, version, cancelFlag) {
     if (cancelFlag.cancelled) throw Object.assign(new Error('__CANCELLED__'), { isCancelled: true });
     const urlPath = `/api/v1/finding?${baseQs}&pageNumber=${page}`;
     log('info', `[report-fetch] GET ${apiUrl}${urlPath}`);
-    const { json, headers } = await dtGetWithRetry(urlPath, apiUrl, apiKey);
+    const { json, headers } = await dtFetch.dtGetWithRetry(urlPath, apiUrl, apiKey);
     const batch = Array.isArray(json) ? json : [];
     all.push(...batch);
     const total = parseInt(headers['x-total-count'] || '0', 10);
@@ -245,7 +265,7 @@ async function streamViolationsForProject(apiUrl, apiKey, proj, riskType, cancel
     if (cancelFlag.cancelled) throw Object.assign(new Error('__CANCELLED__'), { isCancelled: true });
     const urlPath = `/api/v1/violation?${baseQs}&pageNumber=${page}`;
     log('info', `[report-fetch] GET ${apiUrl}${urlPath}`);
-    const { json, headers } = await dtGetWithRetry(urlPath, apiUrl, apiKey);
+    const { json, headers } = await dtFetch.dtGetWithRetry(urlPath, apiUrl, apiKey);
     const batch = Array.isArray(json) ? json : (json?.violations || []);
     for (const v of batch) {
       // Only keep violations whose project UUID matches exactly — guards against

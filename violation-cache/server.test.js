@@ -1903,6 +1903,8 @@ const cachesMod        = require('./lib/caches');
 const violationCacheMod = require('./lib/violation-cache');
 const schedulesMod     = require('./lib/schedules');
 const dtFetchMod       = require('./lib/dt-fetch');
+const cweMod           = require('./lib/cwe');
+const excelMod         = require('./lib/excel');
 
 /** Minimal response double: records the status and parsed JSON body. */
 function makeRes() {
@@ -3334,5 +3336,244 @@ describe('routes — the administrator uses the ordinary per-user routes', () =>
     assert.match(profileSrc, /if \(principal\.isAdmin\)/);
     const authSrc = fs.readFileSync(path.join(__dirname, 'routes', 'auth.js'), 'utf8');
     assert.match(authSrc, /ADMIN_IMMUTABLE/);
+  });
+});
+
+// ── SV_CWE Summary ───────────────────────────────────────────────────────────
+// The sheet is built from the finding objects /api/v1/finding already returns.
+// If somebody ever adds a second upstream call to populate it, the "no extra
+// request" test below fails — that is the whole point of it.
+describe('reports — CWE labelling and references', () => {
+  test('the label is the findings sheet cell, and both sides share it', () => {
+    assert.equal(cweMod.cweLabel({ cwes: [{ cweId: 79 }] }), 'CWE-79');
+    assert.equal(cweMod.cweLabel({ cwes: [{ cweId: 79 }, { cweId: 89 }] }), 'CWE-79, CWE-89');
+  });
+
+  test('a vulnerability DT mapped to no weakness yields an empty cell', () => {
+    assert.equal(cweMod.cweLabel({}), '');
+    assert.equal(cweMod.cweLabel({ cwes: [] }), '');
+    assert.equal(cweMod.cweLabel(null), '');
+  });
+
+  test('an id that already carries the prefix is not doubled', () => {
+    // Some deployments send "CWE-79" rather than 79; the old inline join
+    // rendered that as CWE-CWE-79.
+    assert.equal(cweMod.cweLabel({ cwes: [{ cweId: 'CWE-79' }] }), 'CWE-79');
+  });
+
+  test('references are derived from the identifier, never invented', () => {
+    assert.equal(cweMod.vulnReference('CVE-2021-44228'),
+      'https://nvd.nist.gov/vuln/detail/CVE-2021-44228');
+    assert.equal(cweMod.vulnReference('GHSA-jfh8-c2jp-5v3q'),
+      'https://github.com/advisories/GHSA-jfh8-c2jp-5v3q');
+    assert.equal(cweMod.vulnReference('GO-2022-0001'),
+      'https://osv.dev/vulnerability/GO-2022-0001');
+    assert.equal(cweMod.cweReference(['79']),
+      'https://cwe.mitre.org/data/definitions/79.html');
+  });
+
+  test('an unrecognised identifier gets a blank cell, not a broken link', () => {
+    // A guessed URL costs somebody a click to discover it 404s.
+    assert.equal(cweMod.vulnReference('INT-000123'), '');
+    assert.equal(cweMod.vulnReference(''), '');
+    assert.equal(cweMod.cweReference([]), '');
+  });
+});
+
+describe('reports — the CWE summary needs no extra DependencyTrack call', () => {
+  const findingsFor = (rows) => rows.map(([vulnId, cweIds, comp]) => ({
+    vulnerability: {
+      vulnId, severity: 'HIGH',
+      cwes: cweIds.map(id => ({ cweId: id, name: 'x' })),
+    },
+    component: { name: comp, version: '1.0' },
+  }));
+
+  // name → the findings that project reports
+  function stubDt(byProject) {
+    return stub(dtFetchMod, {
+      dtGetWithRetry: async (urlPath) => {
+        const m = /textSearchInput=([^&]*)/.exec(urlPath);
+        const key = decodeURIComponent(m ? m[1] : '').trim().split(' ')[0];
+        const rows = byProject[key] || [];
+        return { json: rows, headers: { 'x-total-count': String(rows.length) } };
+      },
+    });
+  }
+
+  test('it is populated from the same /api/v1/finding response', async () => {
+    reportsMod.configure({ reportConcurrency: 2, violationConcurrency: 2 });
+    const asked = [];
+    const restore = stub(dtFetchMod, {
+      dtGetWithRetry: async (urlPath) => {
+        asked.push(urlPath);
+        return {
+          json: findingsFor([['CVE-1', [79], 'lib-a']]),
+          headers: { 'x-total-count': '1' },
+        };
+      },
+    });
+    try {
+      const data = await reportsMod.collectReportData(
+        'http://dt', 'k',
+        [{ uuid: 'p1', name: 'Alpha', version: '1' }],
+        ['security'], { cancelled: false }
+      );
+      assert.equal(data.secCweMap.size, 1);
+      assert.equal(asked.length, 1, `one findings page only: ${JSON.stringify(asked)}`);
+      assert.ok(asked.every(p => p.startsWith('/api/v1/finding')),
+        'the CWE summary must not introduce a second upstream endpoint');
+    } finally { restore(); }
+  });
+
+  test('rows are unique on the vulnerability and CWE pair', async () => {
+    reportsMod.configure({ reportConcurrency: 2, violationConcurrency: 2 });
+    const restore = stubDt({
+      Alpha: findingsFor([
+        ['CVE-1', [79], 'lib-a'],
+        ['CVE-1', [79], 'lib-b'],   // same pair, different component → one row, count 2
+        ['CVE-1', [89], 'lib-c'],   // same CVE, different CWE       → its own row
+        ['CVE-2', [79], 'lib-d'],
+      ]),
+    });
+    try {
+      const data = await reportsMod.collectReportData(
+        'http://dt', 'k',
+        [{ uuid: 'p1', name: 'Alpha', version: '1' }],
+        ['security'], { cancelled: false }
+      );
+      const rows = [...data.secCweMap.values()]
+        .map(e => [e.vulnId, e.cwe, e.count])
+        .sort((a, b) => String(a).localeCompare(String(b)));
+      assert.deepEqual(rows, [
+        ['CVE-1', 'CWE-79', 2],
+        ['CVE-1', 'CWE-89', 1],
+        ['CVE-2', 'CWE-79', 1],
+      ]);
+    } finally { restore(); }
+  });
+
+  test('affected projects accumulate across projects', async () => {
+    reportsMod.configure({ reportConcurrency: 2, violationConcurrency: 2 });
+    const restore = stubDt({
+      Alpha: findingsFor([['CVE-1', [79], 'lib-a']]),
+      Beta:  findingsFor([['CVE-1', [79], 'lib-a']]),
+    });
+    try {
+      const data = await reportsMod.collectReportData(
+        'http://dt', 'k',
+        [{ uuid: 'p1', name: 'Alpha', version: '1' },
+         { uuid: 'p2', name: 'Beta',  version: '1' }],
+        ['security'], { cancelled: false }
+      );
+      assert.equal(data.secCweMap.size, 1);
+      const entry = [...data.secCweMap.values()][0];
+      assert.equal(entry.count, 2);
+      assert.deepEqual([...entry.projects].sort(), ['Alpha', 'Beta']);
+    } finally { restore(); }
+  });
+
+  test('the counts reconcile with the findings sheet', async () => {
+    // A finding with no CWE still gets a row, so the summary accounts for
+    // every finding rather than quietly dropping the unmapped ones.
+    reportsMod.configure({ reportConcurrency: 2, violationConcurrency: 2 });
+    const restore = stubDt({
+      Alpha: findingsFor([
+        ['CVE-1', [79], 'lib-a'],
+        ['CVE-2', [],   'lib-b'],
+        ['CVE-3', [20, 79], 'lib-c'],
+      ]),
+    });
+    try {
+      const data = await reportsMod.collectReportData(
+        'http://dt', 'k',
+        [{ uuid: 'p1', name: 'Alpha', version: '1' }],
+        ['security'], { cancelled: false }
+      );
+      const summed = [...data.secCweMap.values()].reduce((n, e) => n + e.count, 0);
+      assert.equal(summed, data.secFindings.length,
+        'every finding is represented exactly once');
+      const noCwe = [...data.secCweMap.values()].find(e => e.vulnId === 'CVE-2');
+      assert.equal(noCwe.cwe, '');
+      const multi = [...data.secCweMap.values()].find(e => e.vulnId === 'CVE-3');
+      assert.equal(multi.cwe, 'CWE-20, CWE-79', 'multi-CWE findings stay on one row');
+    } finally { restore(); }
+  });
+});
+
+describe('reports — the CWE summary sheet', () => {
+  const reportData = () => ({
+    riskTypes: ['security'],
+    secFindings: [],
+    secProjectSummary: new Map(),
+    secComponentMap: new Map(),
+    secCweMap: new Map([
+      ['a', { vulnId: 'CVE-1', cwe: 'CWE-79', cweIds: ['79'], count: 1, projects: new Set(['Beta']) }],
+      ['b', { vulnId: 'CVE-2', cwe: 'CWE-89', cweIds: ['89'], count: 5, projects: new Set(['Alpha', 'Beta']) }],
+      ['c', { vulnId: 'INT-9',  cwe: '',      cweIds: [],     count: 2, projects: new Set(['Alpha']) }],
+    ]),
+    licViolations: [], licProjectSummary: new Map(),
+    opsViolations: [], opsProjectSummary: new Map(),
+  });
+
+  async function sheetOf(data, name) {
+    const buf = await excelMod.buildExcelReport(null, data);
+    const wb = new (require('exceljs').Workbook)();
+    await wb.xlsx.load(buf);
+    return wb.getWorksheet(name);
+  }
+
+  test('it sits alongside the three existing security sheets', async () => {
+    const buf = await excelMod.buildExcelReport(null, reportData());
+    const wb = new (require('exceljs').Workbook)();
+    await wb.xlsx.load(buf);
+    const names = wb.worksheets.map(w => w.name);
+    assert.deepEqual(names, [
+      'SV_Vulnerability Findings', 'SV_Project Summary',
+      'SV_Component Summary', 'SV_CWE Summary',
+    ]);
+  });
+
+  test('the columns are the ones asked for, references included', async () => {
+    const ws = await sheetOf(reportData(), 'SV_CWE Summary');
+    assert.deepEqual(ws.getRow(1).values.slice(1), [
+      'S.No', 'Vulnerability', 'CWE', 'Vulnerability Count',
+      'Affected Projects', 'CVE Reference', 'CWE Reference',
+    ]);
+  });
+
+  test('rows run most-frequent first and carry their links', async () => {
+    const ws = await sheetOf(reportData(), 'SV_CWE Summary');
+    assert.deepEqual(ws.getRow(2).values.slice(1), [
+      1, 'CVE-2', 'CWE-89', 5, 'Alpha, Beta',
+      'https://nvd.nist.gov/vuln/detail/CVE-2',
+      'https://cwe.mitre.org/data/definitions/89.html',
+    ]);
+    assert.equal(ws.getRow(3).getCell(2).value, 'INT-9');   // count 2
+    assert.equal(ws.getRow(4).getCell(2).value, 'CVE-1');   // count 1
+  });
+
+  test('an unrecognised identifier leaves both reference cells empty', async () => {
+    const ws = await sheetOf(reportData(), 'SV_CWE Summary');
+    const row = ws.getRow(3);
+    assert.equal(row.getCell(3).value ?? '', '');
+    assert.equal(row.getCell(6).value ?? '', '');
+    assert.equal(row.getCell(7).value ?? '', '');
+  });
+
+  test('a report without security risk has no CWE sheet', async () => {
+    const data = { ...reportData(), riskTypes: ['license'] };
+    const buf = await excelMod.buildExcelReport(null, data);
+    const wb = new (require('exceljs').Workbook)();
+    await wb.xlsx.load(buf);
+    assert.equal(wb.getWorksheet('SV_CWE Summary'), undefined);
+  });
+
+  test('an older caller that omits secCweMap still builds a workbook', async () => {
+    // scheduler.js and reports.js both spread collectReportData's result, so
+    // the key is always present — but an empty sheet beats a thrown job.
+    const data = { ...reportData(), secCweMap: undefined };
+    const ws = await sheetOf(data, 'SV_CWE Summary');
+    assert.equal(ws.rowCount, 1, 'header only');
   });
 });

@@ -110,7 +110,7 @@ dependency-tracker/
 │   │   ├── dt-connections.js user-settings.js app-settings.js mail-settings.js
 │   │   ├── disk.js             # Filesystem headroom and database size
 │   │   ├── reports-db.js caches.js schedules.js scheduler.js
-│   │   └── dt-fetch.js excel.js mail.js reports.js violation-cache.js
+│   │   └── dt-fetch.js excel.js cwe.js mail.js reports.js violation-cache.js
 │   ├── routes/                 # auth.js profile.js admin.js dt-proxy.js config.js reports.js schedule.js cache.js
 │   ├── package.json            # Dependencies: exceljs, nodemailer, pg
 │   ├── Dockerfile
@@ -207,7 +207,7 @@ Inline comments use lettered prefixes to trace design decisions:
 - **O-numbers** — observability notes (`// O3: JSON log format for log aggregators`)
 - **S-numbers** — security rationale (`// S2: token hashed before storage`) — **new in revision 2**
 
-Highest numbers currently in use: **Q15, P18, O5, S31**. When adding logic with a
+Highest numbers currently in use: **Q16, P18, O5, S31**. When adding logic with a
 non-obvious trade-off, add the next number in the appropriate series. Check the
 current maximum before assigning — parallel branches can claim the same number.
 
@@ -430,6 +430,16 @@ if (method === 'GET' && path === '/violation-cache/status') {
   used as given, with `.xlsx` added if absent. The name is decided and stored
   when the row is created, not at completion, so the row and the stored file
   always agree and the list can show the intended name while the job runs.
+- **`lib/cwe.js` owns the CWE cell, and both sheets call it.** The CWE column on
+  `SV_Vulnerability Findings` and the CWE half of the `SV_CWE Summary` key are
+  the same string by construction — computed apart, they drift, and the summary
+  then splits one vulnerability across two rows. The summary is keyed on
+  (vulnerability, CWE cell), so a finding mapped to several weaknesses stays on
+  one row and the counts still reconcile with the findings sheet.
+- **The CWE summary adds no upstream call.** `cwes` and `vulnId` are already in
+  the `/api/v1/finding` response, and the reference links are derived from the
+  identifier — an unrecognised prefix yields an empty cell, never a guessed URL.
+  A test asserts `collectReportData` touches no endpoint but `/api/v1/finding`.
 - **A report name is validated, not sanitised.** It becomes a filename and
   travels in a `Content-Disposition` header, so `validate.validateReportName()`
   refuses what would break either — quotes, path separators, control characters

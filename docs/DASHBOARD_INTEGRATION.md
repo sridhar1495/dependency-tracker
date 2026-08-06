@@ -364,6 +364,40 @@ A **scheduled** report is named the same way, from **⚙ Settings → Schedule �
 Report name**. That name is used on every run; clear the field to go back to the
 generated `scheduled_report_<timestamp>.xlsx` form.
 
+### What is in the workbook
+
+A sheet is added only for the risk categories you selected.
+
+| Risk category | Sheets |
+|---|---|
+| Security | `SV_Vulnerability Findings`, `SV_Project Summary`, `SV_Component Summary`, `SV_CWE Summary` |
+| License | `LR_Violations`, `LR_Project Summary` |
+| Operational | `OR_Violations`, `OR_Project Summary` |
+
+**`SV_CWE Summary`** has one row per unique **vulnerability + CWE** pair taken
+from `SV_Vulnerability Findings`: S.No, Vulnerability, CWE, Vulnerability Count,
+Affected Projects, CVE Reference and CWE Reference. Rows run most-frequent
+first.
+
+Three things are worth knowing about how it counts:
+
+- A finding DependencyTrack mapped to **several** CWEs stays on **one** row
+  (`CWE-20, CWE-79`) rather than being counted once per weakness, so the
+  Vulnerability Count column adds up to the number of rows in
+  `SV_Vulnerability Findings`.
+- A finding with **no** CWE mapping still gets a row, with the CWE cell blank —
+  the summary accounts for every finding rather than dropping the unmapped ones.
+- The reference columns are derived from the identifier itself
+  (`nvd.nist.gov` for `CVE-…`, `github.com/advisories` for `GHSA-…`,
+  `osv.dev` for `OSV-/GO-/PYSEC-/RUSTSEC-…`, `security.snyk.io` for `SNYK-…`,
+  and `cwe.mitre.org` for the CWE). An identifier with no known advisory site —
+  an internal vulnerability, for instance — leaves the cell blank rather than
+  carrying a link that would 404.
+
+This sheet costs **no additional DependencyTrack API call**: the CWE list and
+the vulnerability id both arrive in the `/api/v1/finding` response the report
+already fetches.
+
 ### Report limits
 
 The maximum number of active reports (completed + in-progress) is set by your
