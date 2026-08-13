@@ -1966,21 +1966,38 @@ describe('branding is consistent across the three pages', () => {
     // index.html and admin.html await this inside the boot gate. An unbounded
     // fetch here would reintroduce the very hang the gate was built to stop.
     for (const [name, html] of PAGES) {
-      const at = html.indexOf('async function applyBranding(');
-      const body = html.slice(at, at + 1400);
+      const at = html.indexOf('async function readBranding(');
+      assert.ok(at > 0, `${name} must have readBranding`);
+      const body = html.slice(at, at + 1800);
       assert.match(body, /new AbortController\(\)/, `${name} must bound the branding fetch`);
       assert.match(body, /BRANDING_TIMEOUT_MS/, `${name} must use the shared deadline`);
     }
   });
 
-  test('a branding failure never blocks a page', () => {
+  test('a branding failure never blocks a page, and never passes silently', () => {
+    // The silent version is what made a proxy misconfiguration look like the
+    // feature simply doing nothing: /branding returned index.html, the parse
+    // threw, and the page kept its defaults with no clue anywhere.
     for (const [name, html] of PAGES) {
-      const at = html.indexOf('async function applyBranding(');
-      assert.ok(at > 0, `${name} must have applyBranding`);
-      // A fixed window rather than brace matching: the function contains inner
-      // blocks, and a lazy regex stops at the first one of those.
-      const body = html.slice(at, at + 1400);
-      assert.match(body, /catch/, `${name} must swallow a branding failure`);
+      const at = html.indexOf('async function readBranding(');
+      const body = html.slice(at, at + 1800);
+      assert.match(body, /catch/, `${name} must tolerate a branding failure`);
+      assert.match(body, /console\.warn\('\[branding\]/,
+        `${name} must report why branding could not be read (CLAUDE.md §11.2)`);
+      assert.ok(!/catch \(_\) \{\s*\}/.test(body), `${name} must not have an empty catch`);
+    }
+  });
+
+  test('a non-JSON branding response names the actual cause', () => {
+    // The one failure that looks like success: 200 OK, but it is the dashboard
+    // page because nginx never proxied the path.
+    for (const [name, html] of PAGES) {
+      const at = html.indexOf('async function readBranding(');
+      const body = html.slice(at, at + 1800);
+      assert.match(body, /content-type/i, `${name} must check what it actually received`);
+      assert.match(body, /application\/json/, `${name} must require JSON`);
+      assert.match(body, /not being proxied|force-recreate/,
+        `${name} must say what to do about it, not just that it failed`);
     }
   });
 });
