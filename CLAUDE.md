@@ -110,8 +110,9 @@ dependency-tracker/
 │   │   ├── dt-connections.js user-settings.js app-settings.js mail-settings.js
 │   │   ├── disk.js             # Filesystem headroom and database size
 │   │   ├── reports-db.js caches.js schedules.js scheduler.js
-│   │   └── dt-fetch.js excel.js cwe.js mail.js reports.js violation-cache.js
-│   ├── routes/                 # auth.js profile.js admin.js dt-proxy.js config.js reports.js schedule.js cache.js
+│   │   ├── dt-fetch.js excel.js cwe.js mail.js reports.js violation-cache.js
+│   │   └── branding.js image.js   # title + sign-in background
+│   ├── routes/                 # auth.js profile.js admin.js dt-proxy.js config.js reports.js schedule.js cache.js branding.js
 │   ├── package.json            # Dependencies: exceljs, nodemailer, pg
 │   ├── Dockerfile
 │   ├── server.test.js          # Unit + route tests for server helpers
@@ -207,7 +208,7 @@ Inline comments use lettered prefixes to trace design decisions:
 - **O-numbers** — observability notes (`// O3: JSON log format for log aggregators`)
 - **S-numbers** — security rationale (`// S2: token hashed before storage`) — **new in revision 2**
 
-Highest numbers currently in use: **Q16, P18, O5, S31**. When adding logic with a
+Highest numbers currently in use: **Q17, P18, O5, S32**. When adding logic with a
 non-obvious trade-off, add the next number in the appropriate series. Check the
 current maximum before assigning — parallel branches can claim the same number.
 
@@ -290,12 +291,17 @@ await tx(async (client) => {
 | `schedules`, `schedule_projects`, `schedule_runs` | Scheduled reports; `report_name` `NULL` means "generate one" |
 | `reports`, `report_file_chunks` | Report metadata and file bytes |
 | `violation_caches` | Shared violation cache, keyed by connection fingerprint |
+| `branding_assets` | The administrator's sign-in background. Bytes live here, **not** on `app_settings`, because the administration listing cross-joins that table |
 | `schema_migrations` | Migration ledger |
 
 ### 5.6 What remains on disk
 
 Only `/data/admin-credentials.json` (mode `0600`), created by `install.sh`.
-Nothing else. The `.env` file holds infrastructure configuration only — never DT
+Nothing else — the administrator's uploaded sign-in background included. It is a
+`bytea` in `branding_assets`, not a file, because a file would need a bind mount
+that the two-level uninstall would then have to reason about, and because the
+database is already the system of record for everything else the administrator
+owns. The `.env` file holds infrastructure configuration only — never DT
 connection values, and never user data.
 
 ---
@@ -574,12 +580,20 @@ a **closed list of three**, not a general-purpose account editor:
 | `PUT /admin/settings` | The default report limit every non-overridden account follows |
 | `PUT /admin/users/:loginId/settings` | One account's limit; `null` returns it to the default |
 | `POST /admin/users/:loginId/password` | Reset one account's password |
+| `PUT /admin/branding` | The application title; empty restores the built-in default |
+| `POST /admin/branding/background` | Upload the sign-in background |
+| `DELETE /admin/branding/background` | Restore the animated background |
 
 Everything else about an account stays readable only. A test asserts exactly
-these three are handled and every other method/path combination is not — a
+these **six** are handled and every other method/path combination is not — a
 blanket ban that had to be deleted would have stopped protecting anything, so
-the allow-list is the contract and adding a fourth write means editing it in a
+the allow-list is the contract and adding a seventh means editing it in a
 diff somebody reads.
+
+The list went from three to six when customisation landed, and the three
+additions were weighed rather than waved through: they change how the product
+*looks*, never what an account is or what it may reach, and none of them reads
+another principal's data. That is the bar a seventh has to clear too.
 
 **S29 — the password reset is the most privileged thing in the service**, because
 the administrator chooses a value that authenticates as somebody else. Three
@@ -635,6 +649,14 @@ constraint requires this. Adding a *page* is allowed; splitting a *page* is not.
 <script>  — IIFE wrapping all state and logic
 ```
 
+**The application title is administrator-configurable, and its default is
+repeated in all three pages.** They cannot `require()` `branding.DEFAULT_TITLE`,
+so a test asserts the four copies still agree. This matters because before the
+feature there were *five* different names in the product — three `<title>` tags,
+a login heading and a footer that read "Internal Security Dashboard". The logo
+mark is derived from the title (up to three initials) rather than a fixed glyph,
+so a renamed installation does not keep wearing the old product's badge.
+
 `login.html` and `admin.html` reuse the same CSS custom properties and form
 classes as `index.html` so the three are visually identical. Duplicating a small
 amount of CSS between them is accepted and preferred over introducing a shared
@@ -658,12 +680,35 @@ Every call to `/violation-cache/*` uses the `apiFetch(path, opts)` wrapper, whic
 2. redirects to `login.html` when no token is present,
 3. clears the token and redirects on any 401.
 
-**Never call `fetch()` directly against a backend route.** There is no exception:
-DependencyTrack is reached through `DT_PROXY` (`/violation-cache/dt/…`) on the same
-backend, which attaches the signed-in user's API key server-side. The browser holds
-no DependencyTrack credentials at all.
+**Never call `fetch()` directly against a backend route**, with exactly one
+documented exception: `/branding`, which `login.html` must read *before* any token
+exists. `apiFetch` would redirect to the sign-in page from the sign-in page.
+Everything else goes through the wrapper — DependencyTrack included, reached via
+`DT_PROXY` (`/violation-cache/dt/…`) on the same backend, which attaches the
+signed-in user's API key server-side. The browser holds no DependencyTrack
+credentials at all.
 
 ### 8.4 Auth gate
+
+**The gate runs in `<head>`, before the body is parsed.** It used to run at the end
+of the script block, which meant the browser painted the whole dashboard, *then*
+awaited `/auth/me`, and only then redirected — so every signed-out visitor saw a
+dashboard flash, and an interrupted network left them staring at empty chrome with
+no explanation and no way out.
+
+Three layers, and none may be removed on its own:
+
+- A **synchronous** token check in `<head>`. No token is decidable without a round
+  trip, so that case never paints at all and `location.replace()` (not `href`)
+  keeps it out of the back history.
+- **`<html class="booting">`**, set by that same script, hides everything except
+  `#bootGate`. A token that turns out to be expired cannot be judged
+  synchronously, so the shell stays hidden until `/auth/me` answers. The class is
+  removed *after* the check, never before — a test asserts that ordering, because
+  reversing it puts the flash straight back.
+- An **`AbortController` deadline** on the check. Without it an unreachable
+  backend leaves the gate spinning forever, which is the same dead end as before,
+  just prettier. The failure renders inside the gate with Retry and Sign in.
 
 `index.html` validates the session before any data loading, theme initialisation or
 rendering. An unauthenticated visitor never sees dashboard chrome.
@@ -1053,6 +1098,11 @@ redundant.
 
 - **Authentication is mandatory on every backend route.** New routes are
   authenticated by default; a public route must be listed explicitly and justified.
+  The list is `/auth/register`, `/auth/check-availability`, `/auth/login`, and —
+  **S32** — `/branding` and `/branding/background`, which the sign-in page needs
+  before a token exists. Branding on a sign-in screen is public by construction:
+  anyone who can reach the page can already see it. They return the title and the
+  image and nothing else — no account, no setting, no count.
 - Secrets never appear in responses or logs (§6.5, §7.7).
 - Parameterised SQL only (§5.1).
 - `crypto.timingSafeEqual` for all credential and token comparisons.

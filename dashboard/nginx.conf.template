@@ -51,6 +51,24 @@ server {
         add_header Cache-Control "no-store" always;
     }
 
+    # Application title and sign-in background. Unauthenticated by design — the
+    # sign-in page reads them before a token exists. Without this block they
+    # would fall through to the SPA fallback and the page would receive
+    # index.html where it expected JSON, silently keeping the default title and
+    # never showing an uploaded background.
+    #
+    # No `Cache-Control: no-store` here, unlike the blocks above: the image URL
+    # carries a version derived from its own bytes, and the backend deliberately
+    # marks it immutable so a browser fetches it once rather than on every
+    # sign-in. Overriding that here would throw the whole point away.
+    location /branding {
+        set $vcbrand "http://dt-violation-cache:3001";
+        proxy_pass $vcbrand;
+        proxy_set_header Host $http_host;
+        proxy_set_header X-Real-IP $remote_addr;
+        proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+    }
+
     # Proxy violation cache service requests to the dt-violation-cache container.
     # Uses a variable so nginx doesn't fail on startup if the container isn't up yet.
     location /violation-cache/ {

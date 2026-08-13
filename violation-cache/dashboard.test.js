@@ -961,6 +961,7 @@ const ADMIN_HTML  = fs.readFileSync(path.join(__dirname, '..', 'dashboard', 'adm
 // is what proves the mirrored rules were edited together (CLAUDE.md §8.8).
 const VALIDATE_SRC = fs.readFileSync(path.join(__dirname, 'lib', 'validate.js'), 'utf8');
 const INDEX_HTML  = fs.readFileSync(path.join(__dirname, '..', 'dashboard', 'index.html'), 'utf8');
+const brandingMod = require('./lib/branding');
 const backendValidate = require('./lib/validate');
 
 describe('validation mirror — login.html vs lib/validate.js', () => {
@@ -1219,9 +1220,13 @@ describe('login.html presentation', () => {
   });
 
   test('the background is decorative and hidden from assistive technology', () => {
+    // Three layers now: the two animated moods, plus the administrator's
+    // uploaded image. Every one of them is decoration and must stay out of the
+    // accessibility tree.
     const layers = LOGIN_HTML.match(/<div class="bg[^"]*" id="bg\w+"[^>]*>/g) || [];
-    assert.equal(layers.length, 2);
+    assert.equal(layers.length, 3);
     for (const l of layers) assert.match(l, /aria-hidden="true"/);
+    assert.ok(layers.some(l => /id="bgCustom"/.test(l)), 'the uploaded background is one of them');
   });
 
   test('login ID and password have placeholders in both modes', () => {
@@ -1277,9 +1282,12 @@ describe('index.html layout', () => {
 // master/detail split and service configuration, which is a page. Adding a page
 // is allowed; splitting one is not (CLAUDE.md §8.1).
 describe('admin.html is a self-contained page', () => {
-  test('it is one file with inline style and a single script', () => {
+  test('it is one file with inline style and no external asset', () => {
     assert.equal((ADMIN_HTML.match(/<style>/g) || []).length, 1);
-    assert.equal((ADMIN_HTML.match(/<script>/g) || []).length, 1);
+    // Two scripts, and the second one is not a relaxation of the single-file
+    // rule: the pre-paint session gate has to run before the body is parsed,
+    // so it cannot live in the IIFE at the end of the document.
+    assert.equal((ADMIN_HTML.match(/<script>/g) || []).length, 2);
     assert.doesNotMatch(ADMIN_HTML, /<script[^>]+src=/, 'no external script — there is no build step');
     assert.doesNotMatch(ADMIN_HTML, /<link[^>]+stylesheet/, 'no external stylesheet either');
   });
@@ -1846,5 +1854,224 @@ describe('login.html responsiveness', () => {
   test('the session dialog scrolls rather than centre-clipping', () => {
     assert.match(LOGIN_HTML, /\.modal-overlay \{ overflow-y: auto; \}/);
     assert.match(LOGIN_HTML, /\.modal \{ margin: auto; \}/);
+  });
+});
+
+// ── The pre-paint session gate ───────────────────────────────────────────────
+// The dashboard used to paint in full, then await /auth/me, then redirect —
+// so every signed-out visitor saw a dashboard flash, and an interrupted network
+// left them looking at empty chrome with no explanation.
+describe('the landing page is gated before it paints', () => {
+  const GATED = [['index.html', INDEX_HTML], ['admin.html', ADMIN_HTML]];
+
+  for (const [name, html] of GATED) {
+    test(`${name} checks the token in <head>, before the body`, () => {
+      const headEnd = html.indexOf('</head>');
+      const bodyAt  = html.indexOf('<body');
+      assert.ok(headEnd > 0 && bodyAt > headEnd);
+      const head = html.slice(0, headEnd);
+      assert.match(head, /localStorage\.getItem\('dt_session_token'\)/,
+        'the token must be read before anything renders');
+      assert.match(head, /window\.location\.replace\('login\.html'\)/,
+        'a visitor with no token must never reach the body');
+    });
+
+    test(`${name} hides the shell until the session is confirmed`, () => {
+      const head = html.slice(0, html.indexOf('</head>'));
+      assert.match(head, /className \+= ' booting'/,
+        'the booting class must be set in the head, not after the body renders');
+      assert.match(html, /html\.booting body > \*:not\(#bootGate\) \{ display: none !important; \}/,
+        'everything but the gate must be hidden while booting');
+      assert.match(html, /classList\.remove\('booting'\)/,
+        'the shell is revealed only after the session check succeeds');
+    });
+
+    test(`${name} reveals the shell only after the session check`, () => {
+      // Ordering, not just presence: revealing before the await would put the
+      // flash straight back.
+      const reveal = html.indexOf("classList.remove('booting')");
+      const check  = html.search(/await require(?:Admin)?Session\(\)/);
+      assert.ok(check > 0 && reveal > check,
+        'booting must be removed after the session check, never before it');
+    });
+
+    test(`${name} bounds the session check and reports failure in the gate`, () => {
+      assert.match(html, /new AbortController\(\)/,
+        'an unreachable backend must not spin forever');
+      assert.match(html, /SESSION_CHECK_TIMEOUT_MS/);
+      assert.match(html, /function bootFailed\(/,
+        'a network failure is reported inside the gate, not over a painted dashboard');
+      assert.match(html, /bootActions/, 'the failure state must offer a way out');
+    });
+  }
+
+  test('index.html no longer overwrites the body on a network failure', () => {
+    // The old handler replaced document.body.innerHTML, which is what left a
+    // half-dead page behind.
+    assert.doesNotMatch(INDEX_HTML, /document\.body\.innerHTML\s*=/);
+  });
+
+  test('an ordinary user is replaced away from admin.html, not pushed', () => {
+    assert.match(ADMIN_HTML, /if \(!user\.isAdmin\) \{ window\.location\.replace\('index\.html'\)/,
+      'back must not step into a screen whose every request would be refused');
+  });
+});
+
+// ── Branding across the three pages ──────────────────────────────────────────
+describe('branding is consistent across the three pages', () => {
+  const PAGES = [['index.html', INDEX_HTML], ['login.html', LOGIN_HTML], ['admin.html', ADMIN_HTML]];
+
+  test('every page ships the same default title as the backend', () => {
+    // Five different spellings existed before this feature. The pages cannot
+    // require() the constant, so a test is what keeps them honest.
+    for (const [name, html] of PAGES) {
+      assert.match(html, /const DEFAULT_APP_TITLE = 'Software Composition Analysis - Risk Dashboard';/,
+        `${name} must carry the shared default`);
+      assert.ok(html.includes('<title>') &&
+        /<title>[^<]*Software Composition Analysis - Risk Dashboard<\/title>/.test(html),
+        `${name}'s static <title> must be the same default`);
+    }
+    assert.equal(brandingMod.DEFAULT_TITLE, 'Software Composition Analysis - Risk Dashboard',
+      'the backend constant is the one the pages mirror');
+  });
+
+  test('no page still carries one of the old names', () => {
+    for (const [name, html] of PAGES) {
+      for (const stale of ['Internal Security Dashboard', 'DependencyTrack Dashboard']) {
+        assert.ok(!html.includes(stale), `${name} still contains "${stale}"`);
+      }
+    }
+  });
+
+  test('the logo mark is derived from the title, not hard-coded', () => {
+    for (const [name, html] of PAGES) {
+      assert.match(html, /function brandInitials\(title\)/, `${name} must derive its mark`);
+      assert.match(html, /letters\.slice\(0, 3\)/, `${name} must cap the mark at three letters`);
+      assert.match(html, /id="brandMark"/, `${name} must have a mark to fill`);
+    }
+    assert.ok(!/>DT</.test(LOGIN_HTML), 'the hard-coded DT badge is gone');
+    assert.ok(!/<svg width="28" height="28"/.test(INDEX_HTML), 'the fixed topbar glyph is gone');
+  });
+
+  test('branding is fetched from the public endpoint, not through apiFetch', () => {
+    // login.html runs before a token exists; that is why /branding is public.
+    for (const [name, html] of PAGES) {
+      assert.match(html, /await fetch\('\/branding'\)/, `${name} must read the public endpoint`);
+    }
+  });
+
+  test('a branding failure never blocks a page', () => {
+    for (const [name, html] of PAGES) {
+      const at = html.indexOf('async function applyBranding(');
+      assert.ok(at > 0, `${name} must have applyBranding`);
+      // A fixed window rather than brace matching: the function contains inner
+      // blocks, and a lazy regex stops at the first one of those.
+      const body = html.slice(at, at + 1400);
+      assert.match(body, /catch/, `${name} must swallow a branding failure`);
+    }
+  });
+});
+
+describe('login.html uses the uploaded background', () => {
+  test('the upload replaces both animated moods', () => {
+    assert.match(LOGIN_HTML, /body\.has-custom-bg \.bg,\s*\n\s*body\.has-custom-bg \.bg-grid-clip \{ display: none; \}/,
+      'one image serves everybody, so both moods stand down');
+    assert.match(LOGIN_HTML, /body\.has-custom-bg \.bg-custom \{ display: block; \}/);
+  });
+
+  test('the card stays readable over an arbitrary image', () => {
+    // The image is whatever the administrator picked; without a scrim a light
+    // photograph makes the form unreadable.
+    // Anchored to the start of the rule: an unanchored match is also satisfied
+    // by the light-theme override, so deleting the base scrim would pass.
+    assert.match(LOGIN_HTML, /\n\s*\.bg-custom::after \{[^}]*background: rgba\(/,
+      'the default (dark) scrim must exist in its own right');
+    assert.match(LOGIN_HTML, /\n\s*\[data-theme="light"\] \.bg-custom::after \{[^}]*background: rgba\(/,
+      'and the light theme needs its own, since a dark scrim would invert it');
+  });
+
+  test('the image URL carries its own version, so it caches forever', () => {
+    assert.match(LOGIN_HTML, /\/branding\/background\?v=' \+ encodeURIComponent\(background\.version\)/);
+  });
+});
+
+describe('admin.html customization section', () => {
+  test('every new handler is window-exported', () => {
+    for (const fn of ['saveAppTitle', 'resetAppTitle', 'uploadBackground', 'removeBackground']) {
+      assert.match(ADMIN_HTML, new RegExp(`window\\.${fn}\\s*=`),
+        `${fn} is called from an onclick and must be exported`);
+      // uploadBackground rides a file input's change event, not a click.
+      assert.match(ADMIN_HTML, new RegExp(`on(?:click|change)="${fn}\\(\\)"`),
+        `${fn} must be wired up`);
+    }
+  });
+
+  test('the title validator mirrors lib/validate.js', () => {
+    // CLAUDE.md §8.8: the two must change together.
+    const max = /const APP_TITLE_MAX\s*=\s*(\d+);/.exec(VALIDATE_SRC);
+    assert.ok(max, 'the backend must declare a ceiling');
+    assert.match(ADMIN_HTML, new RegExp(`maxlength="${max[1]}"`),
+      'the input must stop at the same length the server enforces');
+    for (const rule of [/\\p\{C\}/, /\[A-Za-z0-9\]/]) {
+      assert.ok(rule.test(ADMIN_HTML), 'the frontend must mirror the backend rule');
+    }
+  });
+
+  test('the upload posts raw bytes, not multipart or base64', () => {
+    assert.match(ADMIN_HTML, /body:\s*file,/, 'the File goes straight into the body');
+    assert.ok(!/FormData/.test(ADMIN_HTML), 'no multipart — there is no parser for it');
+    assert.ok(!/btoa\(/.test(ADMIN_HTML), 'no base64 — it would inflate every upload by a third');
+  });
+
+  test('removal takes two clicks and reverts itself', () => {
+    // This page has no showConfirm, and removal changes what everyone sees.
+    assert.match(ADMIN_HTML, /Click again to confirm/);
+    assert.match(ADMIN_HTML, /setTimeout\(disarmBgRemove, \d+\)/);
+    assert.ok(!/showConfirm\(/.test(ADMIN_HTML),
+      'admin.html has no showConfirm helper — calling one would throw');
+  });
+
+  test('the accepted types match what the server will store', () => {
+    assert.match(ADMIN_HTML, /accept="image\/png,image\/jpeg,image\/webp"/);
+    assert.ok(!/image\/svg/.test(ADMIN_HTML), 'SVG must not be offered');
+  });
+});
+
+// ── nginx must know about every backend path ─────────────────────────────────
+// A new top-level path with no location block falls through to the SPA
+// fallback, so the browser receives index.html where it expected JSON — a
+// failure that looks like "the feature silently does nothing".
+describe('nginx routes every backend path to the service', () => {
+  const NGINX = fs.readFileSync(
+    path.join(__dirname, '..', 'dashboard', 'nginx.conf.template'), 'utf8');
+
+  test('every top-level backend prefix has a location block', () => {
+    for (const p of ['/auth/', '/admin/', '/profile', '/violation-cache/', '/branding']) {
+      assert.match(NGINX, new RegExp(`location ${p.replace(/\//g, '\\/')}`),
+        `${p} must be proxied, or the SPA fallback swallows it`);
+    }
+  });
+
+  test('the public branding paths in server.js are all proxied', () => {
+    // Derived from the server's own list rather than hard-coded, so a future
+    // public route cannot be added without nginx learning about it.
+    const SERVER = fs.readFileSync(path.join(__dirname, 'server.js'), 'utf8');
+    const block = /const PUBLIC_PATHS = new Set\(\[([\s\S]*?)\]\);/.exec(SERVER);
+    assert.ok(block, 'server.js must declare its public paths');
+    const paths = [...block[1].matchAll(/'([^']+)'/g)].map(m => m[1]);
+    assert.ok(paths.includes('/branding'), 'branding must be public for the sign-in page');
+    for (const p of paths) {
+      const prefix = '/' + p.split('/')[1];
+      assert.match(NGINX, new RegExp(`location ${prefix.replace(/\//g, '\\/')}`),
+        `${p} is public but nginx has no block for ${prefix}`);
+    }
+  });
+
+  test('the background keeps its immutable caching through the proxy', () => {
+    // The image URL is content-addressed; a no-store override here would make
+    // every sign-in re-download it.
+    const brandBlock = /location \/branding \{[\s\S]*?\n    \}/.exec(NGINX);
+    assert.ok(brandBlock);
+    assert.doesNotMatch(brandBlock[0], /no-store/);
   });
 });

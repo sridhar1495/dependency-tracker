@@ -6,6 +6,7 @@
 3. [Connecting to Live Data](#3-connecting-to-live-data)
 4. [Generating an API Key](#4-generating-an-api-key)
 5. [Violation Cache](#5-violation-cache)
+5a. [Customization (administrator)](#5a-customization-administrator)
 6. [Data Mapping Reference](#6-data-mapping-reference)
 7. [Filtering and Exporting](#7-filtering-and-exporting)
 8. [Vulnerability Reports](#8-vulnerability-reports)
@@ -257,6 +258,57 @@ docker exec dt-postgres psql -U dtdash -d dtdash -c 'DELETE FROM violation_cache
   one crawl between them, not one each
 - On page load: if cache is stale, the old data is shown immediately while a rebuild runs in the background
 - The banner **↻ Refresh** button triggers a violation-only rebuild without re-fetching projects
+
+---
+
+## 5a. Customization (administrator)
+
+**🛡 Administration → Customization.** Both settings are service-wide: everyone
+sees them, from the next page load onward.
+
+### Application title
+
+Appears in the browser tab, the sign-in card, the dashboard header and footer,
+the administration header, the Excel workbook's *creator* property, and the
+default subject and body of scheduled-report emails.
+
+- Up to 60 characters. Control characters are refused; everything else that
+  displays sensibly is allowed.
+- **Leave it blank to restore the built-in default**,
+  `Software Composition Analysis - Risk Dashboard`. There is no separate "use
+  default" switch — an empty field *is* the default.
+- The square logo mark beside it is derived from the title: up to three initials,
+  so `Acme Supply Chain Portal` shows `ASC`. Nothing to upload or maintain.
+
+### Sign-in background
+
+By default the sign-in page shows an animated background — indigo for users,
+amber for the administrator. Upload an image and **it replaces both** for
+everyone; remove it and the animated pair returns.
+
+| Rule | Value |
+|---|---|
+| Formats | PNG, JPEG, WebP |
+| Maximum file size | 5 MB |
+| Minimum resolution | 1280 × 720 |
+| Maximum resolution | 5000 × 5000 |
+
+- **SVG is not accepted.** It is XML that can carry script, and this image is
+  served to visitors who have not signed in yet.
+- The format is decided by the file's own bytes, not by its extension or the
+  `Content-Type` a browser sends — renaming `logo.svg` to `logo.png` does not
+  get it past the check.
+- There is **no minimum file size**. A small file that is a real image at an
+  acceptable resolution is fine.
+- A resolution floor exists because the image is stretched to cover the page,
+  and anything smaller renders visibly blurred.
+- The image is stored in the database and served with a version stamp derived
+  from its own content, so a browser downloads it **once** and re-reads it from
+  cache on every later sign-in. Replacing the image changes the stamp and every
+  browser picks up the new one.
+
+Removing the background takes two clicks — the button asks for confirmation
+before it acts, because it changes what every user sees.
 
 ---
 

@@ -1904,6 +1904,9 @@ const violationCacheMod = require('./lib/violation-cache');
 const schedulesMod     = require('./lib/schedules');
 const dtFetchMod       = require('./lib/dt-fetch');
 const cweMod           = require('./lib/cwe');
+const imageMod         = require('./lib/image');
+const brandingMod      = require('./lib/branding');
+const routeBranding    = require('./routes/branding');
 const excelMod         = require('./lib/excel');
 
 /** Minimal response double: records the status and parsed JSON body. */
@@ -2932,16 +2935,23 @@ describe('routes — the administration listing exposes no secrets', () => {
   // ban that had to be deleted would have stopped protecting anything. The
   // list is the contract: adding a fourth write means changing this line, in a
   // diff somebody has to read.
+  // The closed list of administration writes. It grew from three to six when
+  // customisation was added, and that growth is the point of the list: adding
+  // a seventh means editing this set in a diff somebody reads.
   const ALLOWED_WRITES = new Set([
     'PUT /admin/settings',
     'PUT /admin/users/:loginId/settings',
     'POST /admin/users/:loginId/password',
+    'PUT /admin/branding',
+    'POST /admin/branding/background',
+    'DELETE /admin/branding/background',
   ]);
 
   test('only the three intended writes are handled', async () => {
     const paths = [
       '/admin/users', '/admin/overview', '/admin/storage', '/admin/settings',
       '/admin/users/alice', '/admin/users/alice/settings', '/admin/users/alice/password',
+      '/admin/branding', '/admin/branding/background',
     ];
     const restore = stub(usersMod, {
       detailForAdmin: async () => { throw new Error('must not reach the data layer'); },
@@ -3575,5 +3585,233 @@ describe('reports — the CWE summary sheet', () => {
     const data = { ...reportData(), secCweMap: undefined };
     const ws = await sheetOf(data, 'SV_CWE Summary');
     assert.equal(ws.rowCount, 1, 'header only');
+  });
+});
+
+// ── Image inspection ─────────────────────────────────────────────────────────
+// The uploaded background is served from our own origin to unauthenticated
+// visitors, so what the bytes ARE matters more than what the uploader said.
+describe('branding — image inspection', () => {
+  // Minimal but real headers: enough bytes for sniffing and dimension parsing.
+  function pngOf(w, h, pad = 0) {
+    const b = Buffer.alloc(24 + pad);
+    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]).copy(b, 0);
+    b.write('IHDR', 12, 'ascii');
+    b.writeUInt32BE(w, 16);
+    b.writeUInt32BE(h, 20);
+    return b;
+  }
+  function jpegOf(w, h) {
+    const b = Buffer.alloc(20);
+    Buffer.from([0xff, 0xd8, 0xff]).copy(b, 0);
+    b[2] = 0xff; b[3] = 0xc0;      // SOF0
+    b.writeUInt16BE(11, 4);        // segment length
+    b[6] = 8;                      // precision
+    b.writeUInt16BE(h, 7);
+    b.writeUInt16BE(w, 9);
+    return b;
+  }
+  function webpLosslessOf(w, h) {
+    const b = Buffer.alloc(32);
+    b.write('RIFF', 0, 'ascii');
+    b.write('WEBP', 8, 'ascii');
+    b.write('VP8L', 12, 'ascii');
+    b[20] = 0x2f;
+    b.writeUInt32LE(((w - 1) & 0x3fff) | (((h - 1) & 0x3fff) << 14), 21);
+    return b;
+  }
+
+  test('the format comes from the bytes, never the declared type', () => {
+    assert.equal(imageMod.sniff(pngOf(1920, 1080)), 'image/png');
+    assert.equal(imageMod.sniff(jpegOf(1920, 1080)), 'image/jpeg');
+    assert.equal(imageMod.sniff(webpLosslessOf(1920, 1080)), 'image/webp');
+  });
+
+  test('SVG is refused however it is presented', () => {
+    // XML that can carry <script>, served from the origin that holds the
+    // session. There is no safe way to accept it here.
+    const svg = Buffer.from('<svg xmlns="http://www.w3.org/2000/svg" width="1920" height="1080"/>');
+    assert.equal(imageMod.sniff(svg), null);
+    assert.throws(() => imageMod.inspect(svg), /not a PNG, JPEG or WebP/);
+  });
+
+  test('dimensions are read for each accepted format', () => {
+    for (const buf of [pngOf(1920, 1080), jpegOf(1920, 1080), webpLosslessOf(1920, 1080)]) {
+      const meta = imageMod.inspect(buf);
+      assert.equal(meta.width, 1920);
+      assert.equal(meta.height, 1080);
+    }
+  });
+
+  test('an image below the resolution floor is refused', () => {
+    assert.throws(() => imageMod.inspect(pngOf(800, 600)), /minimum is 1280×720/);
+  });
+
+  test('an image above the resolution ceiling is refused', () => {
+    assert.throws(() => imageMod.inspect(pngOf(6000, 6000)), /maximum is 5000×5000/);
+  });
+
+  test('there is no minimum file size — only a maximum', () => {
+    // A small file that is a real image of an acceptable resolution is fine.
+    const tiny = pngOf(1920, 1080);
+    assert.ok(tiny.length < 100);
+    assert.doesNotThrow(() => imageMod.inspect(tiny));
+
+    const huge = Buffer.alloc(imageMod.MAX_BYTES + 1);
+    pngOf(1920, 1080).copy(huge, 0);
+    assert.throws(() => imageMod.inspect(huge), /maximum is 5\.0 MB/);
+  });
+
+  test('a truncated or damaged file is refused, not guessed at', () => {
+    const truncated = pngOf(1920, 1080).subarray(0, 18);
+    assert.throws(() => imageMod.inspect(truncated), /truncated or damaged|not a PNG/);
+    assert.throws(() => imageMod.inspect(Buffer.alloc(0)), /No image was received/);
+  });
+});
+
+// ── The application title ────────────────────────────────────────────────────
+describe('branding — the title rule', () => {
+  test('blank means the built-in default, and is never an error', () => {
+    assert.equal(validateMod.validateAppTitle(''), null);
+    assert.equal(validateMod.validateAppTitle('   '), null);
+    assert.equal(validateMod.validateAppTitle(null), null);
+    assert.equal(validateMod.validateAppTitle(undefined), null);
+  });
+
+  test('the shipped default is itself acceptable', () => {
+    assert.equal(validateMod.validateAppTitle(brandingMod.DEFAULT_TITLE), null);
+  });
+
+  test('control characters are refused', () => {
+    // They can hide text or reorder how it reads, and this string is rendered
+    // into three pages.
+    assert.ok(validateMod.validateAppTitle('Risk' + String.fromCharCode(7) + 'Dashboard'));
+    assert.ok(validateMod.validateAppTitle('Risk‎Dashboard'));
+  });
+
+  test('the length ceiling is enforced at the boundary', () => {
+    const max = validateMod.APP_TITLE_MAX;
+    assert.equal(validateMod.validateAppTitle('a'.repeat(max)), null);
+    assert.ok(validateMod.validateAppTitle('a'.repeat(max + 1)));
+  });
+
+  test('a title with no letter or number is refused', () => {
+    assert.ok(validateMod.validateAppTitle('---'));
+  });
+});
+
+// ── Branding routes ──────────────────────────────────────────────────────────
+describe('routes — branding is readable without a session', () => {
+  const pub = (path, headers = {}) => ({
+    method: 'GET', url: path, path,
+    req: Object.assign(mockReq(''), { headers }),
+    res: makeRes(),
+    // No principal: these routes are reached before anybody signs in.
+  });
+
+  test('the title is served to an unauthenticated caller', async () => {
+    const restore = stub(brandingMod, {
+      get: async () => ({ title: 'Acme Risk', titleIsDefault: false, background: null }),
+    });
+    try {
+      const ctx = pub('/branding');
+      assert.equal(await routeBranding.handle(ctx), true);
+      assert.equal(ctx.res.statusCode, 200);
+      assert.equal(ctx.res.json.title, 'Acme Risk');
+      assert.equal(ctx.res.json.background, null);
+    } finally { restore(); }
+  });
+
+  test('a failure serves defaults rather than blocking the sign-in page', async () => {
+    // Locking people out of signing in because a title could not be read would
+    // be a far worse outcome than showing the built-in one.
+    const restore = stub(brandingMod, {
+      get: async () => { throw new Error('database is down'); },
+    });
+    try {
+      const ctx = pub('/branding');
+      await routeBranding.handle(ctx);
+      assert.equal(ctx.res.statusCode, 200);
+      assert.equal(ctx.res.json.title, brandingMod.DEFAULT_TITLE);
+    } finally { restore(); }
+  });
+
+  test('the image is served with its sniffed type and a nosniff header', async () => {
+    const bytes = Buffer.from([1, 2, 3, 4]);
+    const restore = stub(brandingMod, {
+      getBackgroundBytes: async () => ({ bytes, mimeType: 'image/png', etag: 'abc123' }),
+    });
+    try {
+      const ctx = pub('/branding/background');
+      await routeBranding.handle(ctx);
+      assert.equal(ctx.res.statusCode, 200);
+      assert.equal(ctx.res.headers['Content-Type'], 'image/png');
+      assert.equal(ctx.res.headers['X-Content-Type-Options'], 'nosniff');
+      assert.equal(ctx.res.headers.ETag, '"abc123"');
+      assert.match(ctx.res.headers['Cache-Control'], /immutable/);
+    } finally { restore(); }
+  });
+
+  test('an unchanged image answers 304 rather than resending the bytes', async () => {
+    const restore = stub(brandingMod, {
+      getBackgroundBytes: async () => ({
+        bytes: Buffer.from([1, 2, 3]), mimeType: 'image/png', etag: 'abc123',
+      }),
+    });
+    try {
+      const ctx = pub('/branding/background', { 'if-none-match': '"abc123"' });
+      await routeBranding.handle(ctx);
+      assert.equal(ctx.res.statusCode, 304);
+    } finally { restore(); }
+  });
+
+  test('no configured image is a 404, not an empty 200', async () => {
+    const restore = stub(brandingMod, { getBackgroundBytes: async () => null });
+    try {
+      const ctx = pub('/branding/background');
+      await routeBranding.handle(ctx);
+      assert.equal(ctx.res.statusCode, 404);
+      assert.equal(ctx.res.json.code, 'NO_BACKGROUND');
+    } finally { restore(); }
+  });
+});
+
+describe('routes — branding writes are administrator-only', () => {
+  const cases = [
+    ['PUT',    '/admin/branding'],
+    ['POST',   '/admin/branding/background'],
+    ['DELETE', '/admin/branding/background'],
+    ['GET',    '/admin/branding'],
+  ];
+
+  for (const [method, path] of cases) {
+    test(`${method} ${path} refuses an ordinary user with 403`, async () => {
+      const res = makeRes();
+      const handled = await routeAdmin.handle({
+        method, url: path, path, req: mockReq('{}'), res, principal: asUser(USER_A),
+      });
+      assert.equal(handled, true);
+      assert.equal(res.statusCode, 403);
+      assert.equal(res.json.code, 'ADMIN_ONLY');
+    });
+  }
+
+  test('the declared Content-Type does not decide what is stored', async () => {
+    // A caller can put anything in a header. The bytes are what count.
+    const svg = Buffer.from('<svg xmlns="http://www.w3.org/2000/svg" width="1920" height="1080"/>');
+    const res = makeRes();
+    const req = mockReq(svg);
+    req.headers = { 'content-type': 'image/png' };
+    const restore = stub(brandingMod, {
+      putBackground: async () => { throw new Error('must not be reached'); },
+    });
+    try {
+      await routeAdmin.handle({
+        method: 'POST', url: '/admin/branding/background',
+        path: '/admin/branding/background', req, res, principal: asAdmin(),
+      });
+      assert.equal(res.statusCode, 400);
+      assert.equal(res.json.code, 'IMAGE_INVALID');
+    } finally { restore(); }
   });
 });

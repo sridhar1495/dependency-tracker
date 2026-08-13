@@ -18,6 +18,7 @@ const { log } = require('./log');
 const { dtGetWithRetry } = require('./dt-fetch');
 const { buildExcelReport } = require('./excel');
 const { sendEmail } = require('./mail');
+const branding = require('./branding');
 // Module reference as well as the destructured collector: reportFilename() is
 // the single rule for what a report is called, shared with the manual path.
 const reports = require('./reports');
@@ -127,7 +128,8 @@ async function runScheduledJob(schedule) {
     const reportData = await collectReportData(
       conn.apiUrl, conn.apiKey, projects, riskTypes, cancelFlag
     );
-    const buffer = await buildExcelReport(null, { riskTypes, ...reportData });
+    const appTitle = await branding.getTitle();
+    const buffer = await buildExcelReport(null, { riskTypes, appTitle, ...reportData });
     fileSize = buffer.length;
 
     const mail = await mailSettings.getResolved(userId);
@@ -135,7 +137,7 @@ async function runScheduledJob(schedule) {
       // The same naming rule manual reports use. A schedule with a name sends
       // it verbatim on every run; without one it keeps the timestamped form.
       const filename = reports.reportFilename(schedule.reportName, 'scheduled_report');
-      await sendEmail(mail, { filename, content: buffer });
+      await sendEmail(mail, { filename, content: buffer }, { appTitle });
       log('info', 'Scheduled report emailed', { userId, bytes: buffer.length });
     } else {
       log('warn', 'Scheduled report built but email is disabled — nothing was sent', { userId });
@@ -159,9 +161,13 @@ async function runScheduledJob(schedule) {
     try {
       const mail = await mailSettings.getResolved(userId);
       if (mail && mail.enabled && mail.from && mail.smtp.host) {
+        // Read here rather than reused from the try block: this path is also
+        // reached when the failure happened before the title was fetched.
+        const alertTitle = await branding.getTitle().catch(() => branding.DEFAULT_TITLE);
         await sendEmail(mail, null, {
           to: [mail.from], cc: [],
-          subject: 'Dependency-Track Scheduled Report Failed',
+          appTitle: alertTitle,
+          subject: `${alertTitle} — scheduled report failed`,
           body: `The scheduled report failed on ${new Date().toLocaleString()}.\n\n`
               + `Error: ${err.message}\n\nCheck the dashboard for details.`,
         });

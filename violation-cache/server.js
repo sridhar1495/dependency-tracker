@@ -70,6 +70,7 @@ const routeModules = [
   require('./routes/auth'),
   require('./routes/profile'),
   require('./routes/admin'),
+  require('./routes/branding'),
   require('./routes/dt-proxy'),
   require('./routes/cache'),
   require('./routes/config'),
@@ -84,6 +85,13 @@ const PUBLIC_PATHS = new Set([
   '/auth/register',            // creating an account cannot require an account
   '/auth/check-availability',  // needed during registration; rate limited, reveals no owner
   '/auth/login',               // the entry point itself
+  // S32: the sign-in page renders these before any token exists, and branding
+  // on a sign-in screen is public by construction — anybody who can reach the
+  // page can already see it. They return the title and the image and nothing
+  // else: no account, no setting, no count. Changing either is administrator-
+  // only and lives in routes/admin.js.
+  '/branding',                 // application title + background metadata
+  '/branding/background',      // the background image bytes
 ]);
 
 function isPublic(path) {

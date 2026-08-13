@@ -22,11 +22,17 @@ const { log } = require('./log');
  *        Scheduled reports are built in memory and attached directly, so
  *        nothing is written to disk (CLAUDE.md §6.8).
  * @param {object} [overrides]  override to/cc/subject/body, used for failure alerts
+ * @param {string} [overrides.appTitle]  the configured application name, used in
+ *        the default subject and body only — a user who wrote their own subject
+ *        keeps it.
  */
 async function sendEmail(mailCfg, attachment, overrides = {}) {
   const now            = new Date();
-  const defaultSubject = `Dependency-Track Risk Report — ${now.toLocaleDateString()}`;
-  const defaultBody    = `Please find attached the latest Dependency-Track risk report generated on ${now.toLocaleString()}.`;
+  const appTitle       = (typeof overrides.appTitle === 'string' && overrides.appTitle.trim())
+    ? overrides.appTitle.trim()
+    : DEFAULT_APP_TITLE;
+  const defaultSubject = `${appTitle} Report — ${now.toLocaleDateString()}`;
+  const defaultBody    = `Please find attached the latest report from ${appTitle}, generated on ${now.toLocaleString()}.`;
 
   const transporter = nodemailer.createTransport({
     host:   mailCfg.smtp.host,

@@ -15,7 +15,9 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Sign in — Dependency-Track Risk Dashboard</title>
+  <!-- Built-in default, matching index.html, admin.html and
+       branding.DEFAULT_TITLE. Replaced at runtime by the configured title. -->
+  <title>Sign in — Software Composition Analysis - Risk Dashboard</title>
   <style>
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
@@ -137,6 +139,26 @@
       from { transform: translate(0, 0); }
       to   { transform: translate(54px, 54px); }
     }
+
+    /* ── Administrator-supplied background ────────────────────────────────
+       When one is uploaded it replaces BOTH animated moods — the decision was
+       that one image serves everybody, so there is no second upload to keep in
+       step and no way to end up with a user background but no admin one.
+       Clearing the upload simply removes .has-custom-bg and the blobs return. */
+    .bg-custom {
+      position: fixed; inset: 0; z-index: -2; display: none;
+      background-size: cover; background-position: center; background-repeat: no-repeat;
+    }
+    body.has-custom-bg .bg-custom { display: block; }
+    body.has-custom-bg .bg,
+    body.has-custom-bg .bg-grid-clip { display: none; }
+    /* A scrim, because the image is arbitrary and the card has to stay
+       readable over a photograph as well as over a flat colour. */
+    .bg-custom::after {
+      content: ''; position: absolute; inset: 0;
+      background: rgba(15, 17, 23, 0.58);
+    }
+    [data-theme="light"] .bg-custom::after { background: rgba(246, 247, 252, 0.55); }
 
     /* Anyone who has asked their system not to animate things gets a still
        gradient. The page must not be a worse experience for saying so. */
@@ -324,13 +346,14 @@
   <div class="blob b3"></div><div class="blob b4"></div>
 </div>
 <div class="bg-grid-clip" aria-hidden="true"><div class="bg-grid"></div></div>
+<div class="bg-custom" id="bgCustom" aria-hidden="true"></div>
 
 <button class="theme-btn" id="themeBtn" onclick="toggleTheme()" title="Toggle light / dark theme">🌓</button>
 
 <div class="auth-card">
   <div class="auth-brand">
-    <div class="auth-logo">DT</div>
-    <h1>Risk Dashboard</h1>
+    <div class="auth-logo" id="brandMark">SCA</div>
+    <h1 id="brandText">Software Composition Analysis - Risk Dashboard</h1>
     <div class="sub">DependencyTrack portfolio risk</div>
   </div>
 
@@ -823,8 +846,50 @@ function toggleTheme() {
   else { document.documentElement.setAttribute('data-theme', 'light'); localStorage.setItem(THEME_KEY, 'light'); }
 }
 
+// ── Branding ──────────────────────────────────────────────────────────────
+// Duplicated verbatim in index.html and admin.html; a test asserts the three
+// copies agree, since the no-build-step rule forbids a shared asset.
+const DEFAULT_APP_TITLE = 'Software Composition Analysis - Risk Dashboard';
+
+/** Up to three initials from the title, for the square logo mark. */
+function brandInitials(title) {
+  const words = String(title || '').split(/[^A-Za-z0-9]+/).filter(Boolean);
+  const letters = words.map(w => w[0].toUpperCase()).join('');
+  return letters.slice(0, 3) || brandInitials(DEFAULT_APP_TITLE);
+}
+
+/**
+ * Title, mark and background, from the one public branding endpoint.
+ * Plain fetch(), not apiFetch(): this page runs before any token exists, which
+ * is exactly why /branding is public (CLAUDE.md §8.3).
+ */
+async function applyBranding() {
+  let title = DEFAULT_APP_TITLE, background = null;
+  try {
+    const r = await fetch('/branding');
+    if (r.ok) {
+      const b = await r.json();
+      if (b && typeof b.title === 'string' && b.title.trim()) title = b.title.trim();
+      if (b && b.background && b.background.version) background = b.background;
+    }
+  } catch (_) {
+    // Decoration. Never stop somebody signing in because it failed.
+  }
+  document.title = 'Sign in — ' + title;
+  $('brandMark').textContent = brandInitials(title);
+  $('brandText').textContent = title;
+  if (background) {
+    // The version is the image's own hash, so this URL is immutable and the
+    // browser re-fetches exactly when the administrator changes the image.
+    $('bgCustom').style.backgroundImage =
+      'url("/branding/background?v=' + encodeURIComponent(background.version) + '")';
+    document.body.classList.add('has-custom-bg');
+  }
+}
+
 // ── Init ──────────────────────────────────────────────────────────────────
 initTheme();
+applyBranding();
 
 // Enter submits the visible form.
 document.addEventListener('keydown', (e) => {

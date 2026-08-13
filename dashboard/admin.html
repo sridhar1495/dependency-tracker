@@ -15,7 +15,22 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Administration — DependencyTrack Dashboard</title>
+  <!-- Built-in default, matching index.html, login.html and
+       branding.DEFAULT_TITLE. Replaced at runtime by the configured title. -->
+  <title>Administration — Software Composition Analysis - Risk Dashboard</title>
+  <script>
+    /* Pre-paint session gate, identical in intent to index.html's: nothing of
+       this screen paints for a visitor with no token. Whether the token belongs
+       to the ADMINISTRATOR cannot be known synchronously, so the shell stays
+       behind .booting until /auth/me answers — an ordinary user never sees
+       administration chrome before being sent back to the dashboard. */
+    (function () {
+      var token = null;
+      try { token = localStorage.getItem('dt_session_token'); } catch (e) { token = null; }
+      document.documentElement.className += ' booting';
+      if (!token) window.location.replace('login.html');
+    })();
+  </script>
   <style>
     /* ── Theme ────────────────────────────────────────────────────────────
        Identical custom properties to index.html and login.html, so the three
@@ -87,7 +102,47 @@
       display: flex; align-items: center; gap: 12px;
       padding: 0 20px; flex-shrink: 0;
     }
-    .brand { font-size: 16px; font-weight: 600; letter-spacing: .2px; }
+    .brand { font-size: 16px; font-weight: 600; letter-spacing: .2px;
+             display: flex; align-items: center; gap: 9px; }
+    /* Initials of the configured title, same square as index.html and login.html. */
+    .brand-mark {
+      width: 26px; height: 26px; border-radius: 7px;
+      background: var(--accent); color: #fff;
+      display: flex; align-items: center; justify-content: center;
+      font-size: 10.5px; font-weight: 700; letter-spacing: .3px; flex-shrink: 0;
+    }
+
+    /* ── Customization ───────────────────────────────────────────────────── */
+    .branding-actions { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 10px; }
+    .bg-preview {
+      margin-top: 8px; border: 1px solid var(--border); border-radius: 8px;
+      height: 150px; background: var(--surface2);
+      background-size: cover; background-position: center;
+      display: flex; align-items: center; justify-content: center; overflow: hidden;
+    }
+    .bg-preview-empty { color: var(--text-muted); font-size: 12.5px; padding: 0 14px; text-align: center; }
+
+    /* ── Boot gate ───────────────────────────────────────────────────────── */
+    #bootGate { display: none; }
+    html.booting #bootGate {
+      display: flex; align-items: center; justify-content: center;
+      position: fixed; inset: 0; z-index: 9999; background: var(--bg);
+    }
+    html.booting body > *:not(#bootGate) { display: none !important; }
+    .boot-card {
+      display: flex; flex-direction: column; align-items: center; gap: 14px;
+      padding: 28px 34px; max-width: 420px; text-align: center;
+    }
+    .boot-spinner {
+      width: 26px; height: 26px; border-radius: 50%;
+      border: 3px solid var(--border); border-top-color: var(--accent);
+      animation: boot-spin .8s linear infinite;
+    }
+    @keyframes boot-spin { to { transform: rotate(360deg); } }
+    .boot-msg { color: var(--text); font-size: 14px; }
+    .boot-sub { color: var(--text-muted); font-size: 12.5px; line-height: 1.5; }
+    .boot-actions { display: flex; gap: 10px; margin-top: 4px; }
+    @media (prefers-reduced-motion: reduce) { .boot-spinner { animation: none; } }
     .brand .tag {
       font-size: 11px; font-weight: 500; color: var(--accent);
       border: 1px solid var(--accent); border-radius: 4px;
@@ -316,9 +371,20 @@
   </style>
 </head>
 <body>
+  <div id="bootGate" aria-live="polite">
+    <div class="boot-card">
+      <div class="boot-spinner" id="bootSpinner" aria-hidden="true"></div>
+      <div class="boot-msg" id="bootMsg">Checking your session…</div>
+      <div class="boot-sub" id="bootSub"></div>
+      <div class="boot-actions" id="bootActions" style="display:none">
+        <button class="btn" onclick="window.location.reload()">Retry</button>
+        <button class="btn primary" onclick="window.location.replace('login.html')">Sign in</button>
+      </div>
+    </div>
+  </div>
   <div class="app">
     <header class="topbar">
-      <div class="brand">🛡 Administration<span class="tag">Admin</span></div>
+      <div class="brand"><span class="brand-mark" id="brandMark">SCA</span><span id="brandText">Administration</span><span class="tag">Admin</span></div>
       <div class="spacer"></div>
       <button class="btn-theme" id="themeBtn" onclick="toggleTheme()" title="Toggle dark/light mode">🌙</button>
       <button class="btn" onclick="reloadAll()" title="Reload every section">↻ Refresh</button>
@@ -371,6 +437,55 @@
               <div class="hint" id="defaultMaxReportsHint"></div>
             </div>
             <button class="btn primary" id="saveDefaults" onclick="saveDefaultLimit()">Save</button>
+          </div>
+        </section>
+
+        <section class="acc" id="accBranding">
+          <button class="acc-head" onclick="toggleAccordion('accBranding')" aria-expanded="false" aria-controls="accBrandingBody">
+            <span class="acc-caret">›</span>
+            <h2>Customization</h2>
+            <span class="acc-count" id="brandingBadge">—</span>
+          </button>
+          <div class="acc-body" id="accBrandingBody">
+            <div class="note">
+              These apply to everyone. A signed-in user sees a change the next
+              time they load a page.
+            </div>
+
+            <div class="field">
+              <label class="label" for="appTitle">Application title</label>
+              <input class="input" id="appTitle" type="text" maxlength="60"
+                     placeholder="Software Composition Analysis - Risk Dashboard">
+              <div class="err" id="appTitleErr"></div>
+              <div class="hint" id="appTitleHint"></div>
+            </div>
+            <div class="branding-actions">
+              <button class="btn primary" id="saveTitle" onclick="saveAppTitle()">Save title</button>
+              <button class="btn" id="resetTitle" onclick="resetAppTitle()">Reset to default</button>
+            </div>
+
+            <div class="field" style="margin-top:18px">
+              <label class="label">Sign-in background</label>
+              <div class="hint" id="bgHint"></div>
+              <div class="bg-preview" id="bgPreview">
+                <div class="bg-preview-empty" id="bgPreviewEmpty">
+                  Using the built-in animated background
+                </div>
+              </div>
+              <div class="err" id="bgErr"></div>
+              <div class="branding-actions">
+                <!-- A plain file input: no drag-and-drop widget to maintain,
+                     and the accept list matches what the server will take. -->
+                <input type="file" id="bgFile" accept="image/png,image/jpeg,image/webp"
+                       style="display:none" onchange="uploadBackground()">
+                <button class="btn primary" id="bgChoose" onclick="document.getElementById('bgFile').click()">
+                  Upload image
+                </button>
+                <button class="btn danger" id="bgRemove" onclick="removeBackground()" style="display:none">
+                  Remove
+                </button>
+              </div>
+            </div>
           </div>
         </section>
 
@@ -532,20 +647,72 @@
    * this URL is sent back to the dashboard rather than shown a page whose every
    * request would 403.
    */
+  const SESSION_CHECK_TIMEOUT_MS = 10000;
+
+  /** Report a boot failure inside the gate, with a way out of it. */
+  function bootFailed(message, detail) {
+    const spinner = $('bootSpinner');
+    if (spinner) spinner.style.display = 'none';
+    if ($('bootMsg')) $('bootMsg').textContent = message;
+    if ($('bootSub')) $('bootSub').textContent = detail || '';
+    if ($('bootActions')) $('bootActions').style.display = 'flex';
+  }
+
   async function requireAdminSession() {
     const token = getToken();
     if (!token) { goToLogin(); return null; }
     try {
-      const r = await fetch('/auth/me', { headers: { Authorization: 'Bearer ' + token } });
+      const ctrl  = new AbortController();
+      const timer = setTimeout(() => ctrl.abort(), SESSION_CHECK_TIMEOUT_MS);
+      let r;
+      try {
+        r = await fetch('/auth/me', {
+          headers: { Authorization: 'Bearer ' + token },
+          signal: ctrl.signal,
+        });
+      } finally { clearTimeout(timer); }
       if (!r.ok) { goToLogin('Your session has expired. Please sign in again.'); return null; }
       const me = await r.json();
       const user = me.user || me;
-      if (!user.isAdmin) { window.location.href = 'index.html'; return null; }
+      // replace(), not href: an ordinary user who reached this URL must not be
+      // able to step back into a screen whose every request would be refused.
+      if (!user.isAdmin) { window.location.replace('index.html'); return null; }
       return user;
     } catch (e) {
-      goToLogin('Could not reach the server. Please sign in again.');
+      // Signing out on a network blip would be wrong — the session may be fine.
+      bootFailed(
+        e.name === 'AbortError' ? 'The server is not responding' : 'Cannot reach the server',
+        'Check that the dt-violation-cache service is running, then try again.'
+      );
       return null;
     }
+  }
+
+  // ── Branding ───────────────────────────────────────────────────────────
+  // Duplicated verbatim in index.html and login.html; a test asserts the three
+  // copies agree, since the no-build-step rule forbids a shared asset.
+  const DEFAULT_APP_TITLE = 'Software Composition Analysis - Risk Dashboard';
+
+  /** Up to three initials from the title, for the square logo mark. */
+  function brandInitials(title) {
+    const words = String(title || '').split(/[^A-Za-z0-9]+/).filter(Boolean);
+    const letters = words.map(w => w[0].toUpperCase()).join('');
+    return letters.slice(0, 3) || brandInitials(DEFAULT_APP_TITLE);
+  }
+
+  /** Title in the tab and the mark in the header. */
+  async function applyBranding() {
+    let title = DEFAULT_APP_TITLE;
+    try {
+      const r = await fetch('/branding');
+      if (r.ok) {
+        const b = await r.json();
+        if (b && typeof b.title === 'string' && b.title.trim()) title = b.title.trim();
+      }
+    } catch (_) { /* decoration only — never block the screen */ }
+    document.title = 'Administration — ' + title;
+    if ($('brandMark')) $('brandMark').textContent = brandInitials(title);
+    return title;
   }
 
   function backToDashboard() { window.location.href = 'index.html'; }
@@ -1028,8 +1195,168 @@
   }
 
   // ── Boot ───────────────────────────────────────────────────────────────
+  // ── Customization ──────────────────────────────────────────────────────
+  let _branding = null;
+
+  function renderBranding() {
+    if (!_branding) return;
+    const b = _branding;
+    $('appTitle').value = b.titleIsDefault ? '' : b.title;
+    $('appTitleHint').textContent = b.titleIsDefault
+      ? `Using the built-in default. Up to ${b.limits.titleMax} characters.`
+      : `Up to ${b.limits.titleMax} characters. Leave blank to use the default.`;
+    $('brandingBadge').textContent =
+      (b.titleIsDefault ? 'default title' : 'custom title') +
+      (b.background ? ' · custom background' : '');
+
+    const prev = $('bgPreview');
+    if (b.background) {
+      prev.style.backgroundImage =
+        'url("/branding/background?v=' + encodeURIComponent(b.background.version) + '")';
+      $('bgPreviewEmpty').style.display = 'none';
+      $('bgRemove').style.display = '';
+      $('bgHint').textContent =
+        `${b.background.width}×${b.background.height}, ` +
+        `${(b.background.byteSize / 1024 / 1024).toFixed(2)} MB. ` +
+        'Replacing it uploads a new image; removing it restores the animated background.';
+    } else {
+      prev.style.backgroundImage = '';
+      $('bgPreviewEmpty').style.display = '';
+      $('bgRemove').style.display = 'none';
+      const mb = Math.round(b.limits.maxBytes / 1024 / 1024);
+      $('bgHint').textContent =
+        `PNG, JPEG or WebP. Up to ${mb} MB, at least ` +
+        `${b.limits.minWidth}×${b.limits.minHeight} and at most ` +
+        `${b.limits.maxWidth}×${b.limits.maxHeight}.`;
+    }
+  }
+
+  async function loadBranding() {
+    try {
+      const r = await apiFetch('/admin/branding');
+      if (!r.ok) { showToast('Could not load the customization settings.', 'error'); return; }
+      _branding = await r.json();
+      renderBranding();
+    } catch (e) {
+      showToast('Could not load the customization settings: ' + e.message, 'error');
+    }
+  }
+
+  /**
+   * Mirrors lib/validate.js validateAppTitle. The two must change together
+   * (CLAUDE.md §8.8); the server re-validates and remains the authority.
+   */
+  function validateAppTitle(value) {
+    if (value === undefined || value === null || String(value).trim() === '') return null;
+    const v = String(value).trim();
+    const max = (_branding && _branding.limits && _branding.limits.titleMax) || 60;
+    if (v.length > max) return `Application title must be at most ${max} characters.`;
+    if (/\p{C}/u.test(v)) return 'Application title cannot contain control characters.';
+    if (!/[A-Za-z0-9]/.test(v)) return 'Application title must contain at least one letter or number.';
+    return null;
+  }
+
+  async function putTitle(value) {
+    $('appTitleErr').textContent = '';
+    const problem = validateAppTitle(value);
+    if (problem) { $('appTitleErr').textContent = problem; return; }
+
+    $('saveTitle').disabled = true;
+    $('resetTitle').disabled = true;
+    try {
+      const r = await apiFetch('/admin/branding', {
+        method:  'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body:    JSON.stringify({ title: value }),
+      });
+      const bd = await r.json().catch(() => ({}));
+      if (!r.ok) { $('appTitleErr').textContent = bd.error || 'Could not save the title.'; return; }
+      showToast('Title saved.', 'success');
+      await loadBranding();
+      // The header of this very page carries the title too, so show it here
+      // rather than leaving the administrator to reload to see their change.
+      await applyBranding();
+    } catch (e) {
+      $('appTitleErr').textContent = 'Could not save the title: ' + e.message;
+    } finally {
+      $('saveTitle').disabled = false;
+      $('resetTitle').disabled = false;
+    }
+  }
+
+  function saveAppTitle()  { return putTitle($('appTitle').value); }
+  function resetAppTitle() { $('appTitle').value = ''; return putTitle(''); }
+
+  async function uploadBackground() {
+    const input = $('bgFile');
+    const file  = input.files && input.files[0];
+    $('bgErr').textContent = '';
+    if (!file) return;
+
+    // Checked here for an instant answer; the server checks the bytes
+    // themselves and is the authority.
+    const max = (_branding && _branding.limits && _branding.limits.maxBytes) || 5242880;
+    if (file.size > max) {
+      $('bgErr').textContent =
+        `That image is ${(file.size / 1024 / 1024).toFixed(1)} MB. ` +
+        `The maximum is ${Math.round(max / 1024 / 1024)} MB.`;
+      input.value = '';
+      return;
+    }
+
+    $('bgChoose').disabled = true;
+    try {
+      // Raw binary, not multipart: there is no framework here to parse
+      // multipart, and base64 would inflate every upload by a third.
+      const r = await apiFetch('/admin/branding/background', {
+        method:  'POST',
+        headers: { 'Content-Type': file.type || 'application/octet-stream' },
+        body:    file,
+      });
+      const bd = await r.json().catch(() => ({}));
+      if (!r.ok) { $('bgErr').textContent = bd.error || 'Could not upload the image.'; return; }
+      showToast('Background updated.', 'success');
+      await loadBranding();
+    } catch (e) {
+      $('bgErr').textContent = 'Could not upload the image: ' + e.message;
+    } finally {
+      $('bgChoose').disabled = false;
+      input.value = '';   // so re-choosing the same file fires change again
+    }
+  }
+
+  // Two-step rather than a dialog: this page has no generic confirm helper
+  // (index.html's showConfirm is not shared — the no-build-step rule means each
+  // page carries its own), and removal affects everyone's sign-in screen, so it
+  // should not happen on a single stray click. Reverts itself if ignored.
+  let _bgRemoveArmed = null;
+
+  function disarmBgRemove() {
+    if (_bgRemoveArmed) { clearTimeout(_bgRemoveArmed); _bgRemoveArmed = null; }
+    const btn = $('bgRemove');
+    if (btn) btn.textContent = 'Remove';
+  }
+
+  async function removeBackground() {
+    const btn = $('bgRemove');
+    if (!_bgRemoveArmed) {
+      btn.textContent = 'Click again to confirm';
+      _bgRemoveArmed = setTimeout(disarmBgRemove, 4000);
+      return;
+    }
+    disarmBgRemove();
+    try {
+      const r = await apiFetch('/admin/branding/background', { method: 'DELETE' });
+      if (!r.ok) { showToast('Could not remove the image.', 'error'); return; }
+      showToast('Background removed.', 'success');
+      await loadBranding();
+    } catch (e) {
+      showToast('Could not remove the image: ' + e.message, 'error');
+    }
+  }
+
   async function reloadAll() {
-    await Promise.all([loadUsers(), loadSettings()]);
+    await Promise.all([loadUsers(), loadSettings(), loadBranding()]);
     if ($('accStorage').classList.contains('open')) await loadStorage();
   }
 
@@ -1039,6 +1366,9 @@
     // the administrator's (CLAUDE.md §8.4).
     const me = await requireAdminSession();
     if (!me) return;
+    await applyBranding();
+    // The session is the administrator's: the shell may now be shown.
+    document.documentElement.classList.remove('booting');
     initSplitter();
     await reloadAll();
   }
@@ -1063,6 +1393,10 @@
   window.closePwModal          = closePwModal;
   window.confirmPasswordReset  = confirmPasswordReset;
   window.saveDefaultLimit      = saveDefaultLimit;
+  window.saveAppTitle          = saveAppTitle;
+  window.resetAppTitle         = resetAppTitle;
+  window.uploadBackground      = uploadBackground;
+  window.removeBackground      = removeBackground;
 
   boot();
 })();

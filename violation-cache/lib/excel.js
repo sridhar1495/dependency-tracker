@@ -6,6 +6,8 @@
 
 const ExcelJS = require('exceljs');    // MIT-licensed Excel generation library
 const { cweLabel, cweReference, vulnReference } = require('./cwe');
+// Required for the fallback only; lib/branding.js does no I/O at require time.
+const { DEFAULT_TITLE: DEFAULT_APP_TITLE } = require('./branding');
 
 // ── Excel report builder ──────────────────────────────────────────────────────
 /**
@@ -30,10 +32,16 @@ async function buildExcelReport(filePath, reportData) {
     secFindings, secProjectSummary, secComponentMap, secCweMap,
     licViolations, licProjectSummary,
     opsViolations, opsProjectSummary,
+    appTitle,
   } = reportData;
 
   const wb = new ExcelJS.Workbook();
-  wb.creator  = 'Dependency-Track Risk Dashboard';
+  // The administrator's title, when one is configured. Defaulted here rather
+  // than required, so a caller that has no branding to hand still produces a
+  // sensibly-stamped workbook instead of `undefined`.
+  wb.creator  = (typeof appTitle === 'string' && appTitle.trim())
+    ? appTitle.trim()
+    : DEFAULT_APP_TITLE;
   wb.created  = new Date();
   wb.modified = new Date();
 

@@ -17,6 +17,7 @@ const dtFetch = require('./dt-fetch');
 const { makeSemaphore } = require('./async-utils');
 const { buildExcelReport } = require('./excel');
 const { cweIdsOf, cweLabel } = require('./cwe');
+const branding = require('./branding');
 const reportsDb = require('./reports-db');
 
 const REPORT_TIMEOUT_MS     = 30 * 60_000;  // 30 min hard limit per job
@@ -356,7 +357,8 @@ async function runReportJob(userId, reportId, conn, projects, riskTypes, filenam
 
     // Built in memory and written straight to the database — reports never
     // touch the filesystem any more.
-    const buffer = await buildExcelReport(null, { riskTypes, ...reportData });
+    const appTitle = await branding.getTitle();
+    const buffer = await buildExcelReport(null, { riskTypes, appTitle, ...reportData });
     await reportsDb.writeProgress(reportId, progress, { force: true });
     await reportsDb.storeFile(reportId, buffer, outName);
 
