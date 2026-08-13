@@ -21,6 +21,7 @@ const LOGIN_MIN = 3,  LOGIN_MAX = 64;
 const PASSWORD_MIN = 8, PASSWORD_MAX = 128;
 const EMAIL_MAX = 254;
 const REPORT_NAME_MAX = 120;
+const APP_TITLE_MAX   = 60;
 
 // Unicode letters, with single spaces permitted between words but never at the
 // start or end. \p{L} covers accented and non-Latin scripts.
@@ -126,6 +127,32 @@ function validateReportName(value) {
   return null;
 }
 
+/**
+ * The application title the administrator may set.
+ *
+ * Deliberately permissive about *which* characters: this is display text, not a
+ * filename or a header value, and it is escaped at every render site. What it
+ * refuses is what would break a page rather than merely look odd — control and
+ * format characters, which can hide text or reorder how it reads.
+ *
+ * Empty means "use the built-in default", so a cleared field is never an error.
+ *
+ * @returns {string|null} an error message, or null when acceptable
+ */
+function validateAppTitle(value) {
+  if (value === undefined || value === null || String(value).trim() === '') return null;
+  const v = String(value).trim();
+  if (v.length > APP_TITLE_MAX) {
+    return `Application title must be at most ${APP_TITLE_MAX} characters.`;
+  }
+  // \p{C} covers control, format and surrogate code points.
+  if (/\p{C}/u.test(v)) return 'Application title cannot contain control characters.';
+  if (!/[A-Za-z0-9]/.test(v)) {
+    return 'Application title must contain at least one letter or number.';
+  }
+  return null;
+}
+
 /** Confirmation must match exactly. Added beyond the original field list. */
 function validatePasswordConfirm(password, confirm) {
   if (typeof confirm !== 'string' || confirm.length === 0) return 'Please confirm the password.';
@@ -177,10 +204,10 @@ function validateProfileUpdate(input) {
 
 module.exports = {
   validateFirstName, validateLastName, validateLoginId, validateEmail,
-  validatePassword, validatePasswordConfirm, validateReportName,
+  validatePassword, validatePasswordConfirm, validateReportName, validateAppTitle,
   validateRegistration, validateProfileUpdate,
   reservedLoginIds, ALWAYS_RESERVED,
   NAME_MIN, NAME_MAX, LOGIN_MIN, LOGIN_MAX, PASSWORD_MIN, PASSWORD_MAX, EMAIL_MAX,
-  REPORT_NAME_MAX,
+  REPORT_NAME_MAX, APP_TITLE_MAX,
   NAME_RE, LOGIN_RE, EMAIL_RE, REPORT_NAME_RE,
 };

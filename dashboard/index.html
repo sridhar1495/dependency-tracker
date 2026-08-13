@@ -3,7 +3,30 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Dependency-Track — Risk Dashboard</title>
+  <!-- The built-in default, repeated in login.html and admin.html and matching
+       branding.DEFAULT_TITLE. A test asserts all four still agree. Replaced at
+       runtime by the administrator's title when one is configured. -->
+  <title>Software Composition Analysis - Risk Dashboard</title>
+  <script>
+    /* ── Pre-paint session gate (CLAUDE.md §8.4) ──────────────────────────
+       This runs before the body is parsed, which is the whole point. The gate
+       used to live at the END of the script block, so the browser painted the
+       entire dashboard, then waited for a round trip to /auth/me, and only
+       then redirected — every signed-out visitor saw a dashboard flash first,
+       and an interrupted network left them staring at empty chrome.
+
+       No token is decidable synchronously, so that case never paints at all.
+       A token that turns out to be expired cannot be, so the shell stays
+       hidden behind .booting until /auth/me answers. */
+    (function () {
+      var token = null;
+      try { token = localStorage.getItem('dt_session_token'); } catch (e) { token = null; }
+      document.documentElement.className += ' booting';
+      /* replace(), not href: a bounced visitor must not be able to "go back"
+         into a dashboard they were never allowed to see. */
+      if (!token) window.location.replace('login.html');
+    })();
+  </script>
   <style>
     /* ── Reset & Base ─────────────────────────────────────────────────────── */
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
@@ -86,7 +109,41 @@
       font-size: 18px; font-weight: 700;
       color: var(--text); text-decoration: none;
     }
-    .topbar-logo svg { flex-shrink: 0; }
+    /* The mark is the application title's initials, not a fixed glyph, so a
+       renamed installation does not keep wearing the old product's badge.
+       Same square as login.html's .auth-logo, so the two pages match. */
+    .topbar-mark {
+      width: 28px; height: 28px; border-radius: 7px;
+      background: var(--accent); color: #fff;
+      display: flex; align-items: center; justify-content: center;
+      font-size: 11px; font-weight: 700; letter-spacing: .3px;
+      flex-shrink: 0;
+    }
+
+    /* ── Boot gate ─────────────────────────────────────────────────────────
+       Everything except the gate is hidden while the session is being checked.
+       Hiding the shell rather than deferring its markup keeps the page a
+       single document, which the no-build-step rule requires. */
+    #bootGate { display: none; }
+    html.booting #bootGate {
+      display: flex; align-items: center; justify-content: center;
+      position: fixed; inset: 0; z-index: 9999; background: var(--bg);
+    }
+    html.booting body > *:not(#bootGate) { display: none !important; }
+    .boot-card {
+      display: flex; flex-direction: column; align-items: center; gap: 14px;
+      padding: 28px 34px; max-width: 420px; text-align: center;
+    }
+    .boot-spinner {
+      width: 26px; height: 26px; border-radius: 50%;
+      border: 3px solid var(--border); border-top-color: var(--accent);
+      animation: boot-spin .8s linear infinite;
+    }
+    @keyframes boot-spin { to { transform: rotate(360deg); } }
+    .boot-msg { color: var(--text); font-size: 14px; }
+    .boot-sub { color: var(--text-muted); font-size: 12.5px; line-height: 1.5; }
+    .boot-actions { display: flex; gap: 10px; margin-top: 4px; }
+    @media (prefers-reduced-motion: reduce) { .boot-spinner { animation: none; } }
     .topbar-subtitle { font-size: 12px; color: var(--text-muted); font-weight: 400; }
     .topbar-spacer { flex: 1; }
     .topbar-status {
@@ -782,17 +839,26 @@
   </style>
 </head>
 <body>
+
+<!-- Shown until the session is confirmed; see the head script. -->
+<div id="bootGate" aria-live="polite">
+  <div class="boot-card">
+    <div class="boot-spinner" id="bootSpinner" aria-hidden="true"></div>
+    <div class="boot-msg" id="bootMsg">Checking your session…</div>
+    <div class="boot-sub" id="bootSub"></div>
+    <div class="boot-actions" id="bootActions" style="display:none">
+      <button class="btn" onclick="window.location.reload()">Retry</button>
+      <button class="btn primary" onclick="window.location.replace('login.html')">Sign in</button>
+    </div>
+  </div>
+</div>
 <div class="app">
 
   <!-- ── Top Bar ─────────────────────────────────────────────────────────── -->
   <header class="topbar">
     <a class="topbar-logo" href="#">
-      <svg width="28" height="28" viewBox="0 0 28 28" fill="none">
-        <rect width="28" height="28" rx="7" fill="#6366f1"/>
-        <path d="M7 14C7 10.134 10.134 7 14 7V21C10.134 21 7 17.866 7 14Z" fill="white" opacity="0.9"/>
-        <path d="M14 7C17.866 7 21 10.134 21 14C21 17.866 17.866 21 14 21V7Z" fill="white" opacity="0.5"/>
-      </svg>
-      <span>Dependency-Track<span class="topbar-subtitle">  Risk Dashboard</span></span>
+      <span class="topbar-mark" id="brandMark">SCA</span>
+      <span id="brandText">Software Composition Analysis - Risk Dashboard</span>
     </a>
     <div class="topbar-spacer"></div>
     <div class="topbar-status" id="apiStatus">
@@ -900,7 +966,7 @@
   </main>
 
   <footer class="footer">
-    <div class="footer-brand">Internal Security Dashboard</div>
+    <div class="footer-brand">Software Composition Analysis - Risk Dashboard</div>
     <div>
       Powered by OWASP Dependency-Track Community Edition &nbsp;&middot;&nbsp;
       <a href="https://docs.dependencytrack.org" target="_blank" style="color:var(--accent)">docs.dependencytrack.org</a>
@@ -1342,23 +1408,96 @@ async function apiFetch(path, opts) {
  * Validate the session before anything renders.
  * An unauthenticated visitor never sees dashboard chrome (CLAUDE.md §8.4).
  */
+const SESSION_CHECK_TIMEOUT_MS = 10000;
+
+/** Report a boot failure inside the gate, with a way out of it. */
+function bootFailed(message, detail) {
+  const spinner = document.getElementById('bootSpinner');
+  const msg     = document.getElementById('bootMsg');
+  const sub     = document.getElementById('bootSub');
+  const actions = document.getElementById('bootActions');
+  if (spinner) spinner.style.display = 'none';
+  if (msg) msg.textContent = message;
+  if (sub) sub.textContent = detail || '';
+  if (actions) actions.style.display = 'flex';
+}
+
 async function requireSession() {
   const token = getToken();
   if (!token) { goToLogin(); return null; }
   try {
-    const r = await fetch('/auth/me', { headers: { Authorization: 'Bearer ' + token } });
+    // Without a deadline an unreachable backend leaves the gate spinning with
+    // no explanation and no way forward — which is the same dead end the old
+    // code produced, just prettier.
+    const ctrl  = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), SESSION_CHECK_TIMEOUT_MS);
+    let r;
+    try {
+      r = await fetch('/auth/me', {
+        headers: { Authorization: 'Bearer ' + token },
+        signal: ctrl.signal,
+      });
+    } finally { clearTimeout(timer); }
     if (!r.ok) { goToLogin('Your session has expired. Please sign in again.'); return null; }
     const data = await r.json();
     return data.user;
   } catch (e) {
     // The backend is unreachable. Signing the user out would be wrong — their
-    // session may be perfectly valid — so report it and stop.
-    document.body.innerHTML =
-      '<div style="padding:40px;font-family:sans-serif;color:#e2e8f0;background:#0f1117;min-height:100vh">' +
-      '<h2>Cannot reach the server</h2><p>' + escHtml(e.message) + '</p>' +
-      '<p>Check that the dt-violation-cache service is running, then reload.</p></div>';
+    // session may be perfectly valid — so report it inside the gate and stop.
+    // The shell stays hidden, so nobody is left looking at an empty dashboard
+    // wondering why it has no data.
+    bootFailed(
+      e.name === 'AbortError' ? 'The server is not responding' : 'Cannot reach the server',
+      'Check that the dt-violation-cache service is running, then try again.'
+    );
     return null;
   }
+}
+
+// ── Branding ─────────────────────────────────────────────────────────────────
+// Duplicated verbatim in login.html and admin.html: the no-build-step rule
+// forbids a shared asset, and a test asserts the three copies agree.
+const BRANDING_TIMEOUT_MS = 5000;
+const DEFAULT_APP_TITLE = 'Software Composition Analysis - Risk Dashboard';
+
+/** Up to three initials from the title, for the square logo mark. */
+function brandInitials(title) {
+  const words = String(title || '').split(/[^A-Za-z0-9]+/).filter(Boolean);
+  const letters = words.map(w => w[0].toUpperCase()).join('');
+  return letters.slice(0, 3) || brandInitials(DEFAULT_APP_TITLE);
+}
+
+/**
+ * Apply the administrator's title to the tab, the topbar and the footer.
+ * Public endpoint, so this uses fetch() rather than apiFetch(): it must also
+ * work on login.html where no token exists (CLAUDE.md §8.3 names /branding as
+ * the one documented exception).
+ */
+async function applyBranding() {
+  let title = DEFAULT_APP_TITLE;
+  try {
+    // Bounded like the session check: this is awaited in the boot path, so an
+    // unbounded fetch here would hold the gate open forever — the exact
+    // failure the gate exists to prevent.
+    const ctrl  = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), BRANDING_TIMEOUT_MS);
+    let r;
+    try { r = await fetch('/branding', { signal: ctrl.signal }); }
+    finally { clearTimeout(timer); }
+    if (r.ok) {
+      const b = await r.json();
+      if (b && typeof b.title === 'string' && b.title.trim()) title = b.title.trim();
+    }
+  } catch (_) {
+    // Branding is decoration. Never let it stop the dashboard loading.
+  }
+  document.title = title;
+  const mark = document.getElementById('brandMark');
+  const text = document.getElementById('brandText');
+  const foot = document.querySelector('.footer-brand');
+  if (mark) mark.textContent = brandInitials(title);
+  if (text) text.textContent = title;
+  if (foot) foot.textContent = title;
 }
 
 // ── User menu ─────────────────────────────────────────────────────────────────
@@ -4260,8 +4399,15 @@ window.scheduleReports      = scheduleReports;
 // (CLAUDE.md §8.4).
 (async function init() {
   const user = await requireSession();
-  if (!user) return;               // requireSession() has already redirected
+  if (!user) return;               // requireSession() has redirected or reported
   _currentUser = user;
+
+  // Before the shell is revealed, so the title and mark are never seen
+  // changing from the built-in default to the configured one.
+  await applyBranding();
+
+  // The session is real: the shell may now be shown.
+  document.documentElement.classList.remove('booting');
 
   initTheme();
   renderUserMenu();

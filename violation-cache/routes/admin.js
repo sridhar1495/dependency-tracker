@@ -11,12 +11,20 @@
 //   PUT /admin/settings                   change the default report limit
 //   PUT /admin/users/:loginId/settings    set or clear one account's limit
 //   POST /admin/users/:loginId/password   reset one account's password
+//   GET  /admin/branding                  title and background, with limits
+//   PUT  /admin/branding                  set or clear the application title
+//   POST /admin/branding/background       upload the sign-in background
+//   DELETE /admin/branding/background     restore the animated background
 //
-// This area WAS read-only. It is not any more, and the three writes above are
-// the whole of what it can do — deliberately a closed list rather than a
-// general-purpose account editor. Everything else about an account is still
-// only readable: there is no route here that deletes an account, edits a name,
-// disconnects a session on its own, or reads anybody's data.
+// This area WAS read-only. It is not any more, and the SIX writes above are the
+// whole of what it can do — deliberately a closed list rather than a
+// general-purpose account editor. The three branding writes were added
+// knowingly: they change how the product looks, never what an account is or
+// what it may reach, and none of them reads another principal's data.
+//
+// Everything else about an account is still only readable: there is no route
+// here that deletes an account, edits a name, disconnects a session on its own,
+// or reads anybody's data.
 //
 // S29: the password reset is the most privileged thing in the service, because
 // the administrator chooses a value that authenticates as somebody else. Three
@@ -32,7 +40,7 @@
 // another person's report, only count them.
 
 const { log } = require('../lib/log');
-const { jsonReply, readJson } = require('../lib/http-util');
+const { jsonReply, readJson, readBuffer } = require('../lib/http-util');
 const users       = require('../lib/users');
 const caches      = require('../lib/caches');
 const appSettings = require('../lib/app-settings');
@@ -41,6 +49,8 @@ const cryptoLib   = require('../lib/crypto');
 const validate    = require('../lib/validate');
 const auth        = require('../lib/auth');
 const disk        = require('../lib/disk');
+const branding    = require('../lib/branding');
+const image       = require('../lib/image');
 
 /**
  * Administrator-only guard.
@@ -191,6 +201,135 @@ async function handle({ method, path: parsedPath, req, res, principal }) {
       }
       log('error', `Settings update failed: ${err.message}`);
       jsonReply(res, 500, { error: 'Could not save the settings.', code: 'INTERNAL' });
+    }
+    return true;
+  }
+
+  // ── GET /admin/branding ─────────────────────────────────────────────────
+  // What the customisation screen renders. The public /branding route serves
+  // the same values to everybody; this one adds the detail only an
+  // administrator needs — whether the title is theirs or the built-in one, and
+  // the size and dimensions of the stored image.
+  if (method === 'GET' && parsedPath === '/admin/branding') {
+    if (!requireAdmin(principal, res)) return true;
+    try {
+      const b = await branding.get();
+      jsonReply(res, 200, {
+        title: b.title,
+        titleIsDefault: b.titleIsDefault,
+        defaultTitle: branding.DEFAULT_TITLE,
+        background: b.background
+          ? {
+              version:   b.background.etag,
+              mimeType:  b.background.mimeType,
+              width:     b.background.width,
+              height:    b.background.height,
+              byteSize:  b.background.byteSize,
+              updatedAt: b.background.updatedAt,
+            }
+          : null,
+        limits: {
+          maxBytes:  image.MAX_BYTES,
+          minWidth:  image.MIN_WIDTH,
+          minHeight: image.MIN_HEIGHT,
+          maxWidth:  image.MAX_WIDTH,
+          maxHeight: image.MAX_HEIGHT,
+          titleMax:  validate.APP_TITLE_MAX,
+          accepted:  image.ALLOWED_MIME,
+        },
+      });
+    } catch (err) {
+      log('error', `Branding read failed: ${err.message}`);
+      jsonReply(res, 500, { error: 'Could not read the customisation settings.', code: 'INTERNAL' });
+    }
+    return true;
+  }
+
+  // ── PUT /admin/branding ─────────────────────────────────────────────────
+  // Sets the application title. An empty value restores the built-in default,
+  // so there is one field rather than a field plus a "use default" switch.
+  if (method === 'PUT' && parsedPath === '/admin/branding') {
+    if (!requireAdmin(principal, res)) return true;
+    const body = await readJson(req, res);
+    if (body === null) return true;
+    try {
+      if (!('title' in body)) {
+        jsonReply(res, 400, { error: 'title is required.', code: 'VALIDATION_FAILED' });
+        return true;
+      }
+      const problem = validate.validateAppTitle(body.title);
+      if (problem) {
+        jsonReply(res, 400, { error: problem, code: 'VALIDATION_FAILED', field: 'title' });
+        return true;
+      }
+      const saved = await branding.setTitle(body.title);
+      log('info', 'Application title changed', { titleIsDefault: saved.titleIsDefault });
+      jsonReply(res, 200, { title: saved.title, titleIsDefault: saved.titleIsDefault });
+    } catch (err) {
+      log('error', `Title update failed: ${err.message}`);
+      jsonReply(res, 500, { error: 'Could not save the title.', code: 'INTERNAL' });
+    }
+    return true;
+  }
+
+  // ── POST /admin/branding/background ─────────────────────────────────────
+  // The image arrives as a raw binary body rather than multipart: there is no
+  // web framework here to parse multipart, and base64 in JSON would inflate
+  // every upload by a third for nothing.
+  if (method === 'POST' && parsedPath === '/admin/branding/background') {
+    if (!requireAdmin(principal, res)) return true;
+    let buf;
+    try {
+      // S3 override, justified: the ceiling is the image limit itself, so a
+      // body that would fail validation is refused before it is buffered.
+      buf = await readBuffer(req, image.MAX_BYTES + 1024);
+    } catch (e) {
+      jsonReply(res, 413, {
+        error: `The image is larger than ${image.humanSize(image.MAX_BYTES)}.`,
+        code: 'BODY_TOO_LARGE',
+      });
+      return true;
+    }
+    try {
+      // The declared Content-Type is ignored; inspect() decides from the bytes.
+      const meta = image.inspect(buf);
+      await branding.putBackground({ bytes: buf, ...meta });
+      const b = await branding.get();
+      log('info', 'Login background uploaded', {
+        mimeType: meta.mimeType, width: meta.width, height: meta.height, byteSize: meta.byteSize,
+      });
+      jsonReply(res, 200, {
+        background: {
+          version:  b.background.etag,
+          mimeType: b.background.mimeType,
+          width:    b.background.width,
+          height:   b.background.height,
+          byteSize: b.background.byteSize,
+        },
+      });
+    } catch (err) {
+      if (err.code === 'IMAGE_INVALID') {
+        jsonReply(res, 400, { error: err.message, code: 'IMAGE_INVALID' });
+        return true;
+      }
+      log('error', `Background upload failed: ${err.message}`);
+      jsonReply(res, 500, { error: 'Could not store the image.', code: 'INTERNAL' });
+    }
+    return true;
+  }
+
+  // ── DELETE /admin/branding/background ───────────────────────────────────
+  // Removing the upload is how the animated background comes back; it is not
+  // a separate setting, so there is no way to end up with neither.
+  if (method === 'DELETE' && parsedPath === '/admin/branding/background') {
+    if (!requireAdmin(principal, res)) return true;
+    try {
+      await branding.clearBackground();
+      log('info', 'Login background cleared');
+      jsonReply(res, 200, { background: null });
+    } catch (err) {
+      log('error', `Background clear failed: ${err.message}`);
+      jsonReply(res, 500, { error: 'Could not remove the image.', code: 'INTERNAL' });
     }
     return true;
   }

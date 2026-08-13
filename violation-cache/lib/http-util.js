@@ -86,4 +86,32 @@ function requireUser(principal, res) {
   return null;
 }
 
-module.exports = { jsonReply, readBody, readJson, requireUser };
+/**
+ * Read the full request body as a Buffer.
+ *
+ * readBody() concatenates onto a string, which decodes each chunk as UTF-8 and
+ * destroys any byte that is not valid UTF-8 — fine for JSON, silently corrupting
+ * for an image. Binary uploads must use this instead.
+ *
+ * @param {import('http').IncomingMessage} req
+ * @param {number} maxBytes  no default: a binary route states its own ceiling
+ */
+function readBuffer(req, maxBytes) {
+  return new Promise((resolve, reject) => {
+    const chunks = [];
+    let bytes = 0;
+    req.on('data', chunk => {
+      bytes += chunk.length;
+      if (bytes > maxBytes) {
+        req.destroy();
+        reject(Object.assign(new Error('Request body too large'), { code: 'BODY_TOO_LARGE' }));
+        return;
+      }
+      chunks.push(chunk);
+    });
+    req.on('end',   () => resolve(Buffer.concat(chunks)));
+    req.on('error', reject);
+  });
+}
+
+module.exports = { jsonReply, readBody, readBuffer, readJson, requireUser };

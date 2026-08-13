@@ -30,6 +30,7 @@ process.env.SECRET_ENCRYPTION_KEY = process.env.SECRET_ENCRYPTION_KEY || 'f'.rep
 // Modules under test perform no I/O at require time, so importing them directly
 // is safe and is the preferred approach for new code (CLAUDE.md §10.3).
 const { migrate, listMigrations, MIGRATIONS_DIR } = require('./db/migrate');
+const branding = require('./lib/branding');
 
 let pg = null;
 let pool = null;
@@ -1071,6 +1072,81 @@ describe('multi-tenant data access', { skip: !ENABLED && 'TEST_DATABASE_URL not 
     await assert.rejects(
       () => pool.query('INSERT INTO app_settings (id, default_max_reports) VALUES (TRUE, 5)'),
       (e) => e.code === '23505', 'a second global settings row must collide'
+    );
+  });
+
+  // ── branding ───────────────────────────────────────────────────────────
+  test('the title round-trips, and blank means the built-in default', async () => {
+    try {
+      await branding.setTitle('Acme Risk Portal');
+      const set = await branding.get();
+      assert.equal(set.title, 'Acme Risk Portal');
+      assert.equal(set.titleIsDefault, false);
+
+      // Blank is how the default is restored — it is not a stored empty string.
+      await branding.setTitle('');
+      const cleared = await branding.get();
+      assert.equal(cleared.title, branding.DEFAULT_TITLE);
+      assert.equal(cleared.titleIsDefault, true);
+      const { rows } = await pool.query('SELECT app_title FROM app_settings WHERE id = TRUE');
+      assert.equal(rows[0].app_title, null, 'cleared must be NULL, not an empty string');
+    } finally {
+      await branding.setTitle('');
+    }
+  });
+
+  test('the database refuses an over-long title even if the route is bypassed', async () => {
+    await assert.rejects(
+      () => pool.query('UPDATE app_settings SET app_title = $1 WHERE id = TRUE', ['x'.repeat(61)]),
+      (e) => e.code === '23514', 'the CHECK constraint is the backstop'
+    );
+  });
+
+  test('background bytes round-trip byte-for-byte', async () => {
+    // Every byte value, so a text-mode round trip would corrupt it visibly.
+    const bytes = Buffer.from(Array.from({ length: 256 }, (_, i) => i));
+    try {
+      await branding.putBackground({ bytes, mimeType: 'image/png', width: 1920, height: 1080 });
+      const got = await branding.getBackgroundBytes();
+      assert.ok(Buffer.isBuffer(got.bytes));
+      assert.equal(Buffer.compare(got.bytes, bytes), 0, 'the image must survive intact');
+      assert.equal(got.mimeType, 'image/png');
+      assert.equal(got.etag, require('node:crypto').createHash('sha256').update(bytes).digest('hex'));
+    } finally {
+      await branding.clearBackground();
+    }
+  });
+
+  test('uploading again replaces the image rather than adding a second row', async () => {
+    try {
+      await branding.putBackground({ bytes: Buffer.from([1, 2, 3]), mimeType: 'image/png', width: 1920, height: 1080 });
+      const first = (await branding.get()).background.etag;
+      await branding.putBackground({ bytes: Buffer.from([4, 5, 6]), mimeType: 'image/webp', width: 2560, height: 1440 });
+      const second = await branding.get();
+      assert.notEqual(second.background.etag, first, 'the version must move with the bytes');
+      assert.equal(second.background.mimeType, 'image/webp');
+      const { rows } = await pool.query('SELECT count(*)::int AS n FROM branding_assets');
+      assert.equal(rows[0].n, 1, 'one asset, replaced in place');
+    } finally {
+      await branding.clearBackground();
+    }
+  });
+
+  test('clearing removes the row so the animated background returns', async () => {
+    await branding.putBackground({ bytes: Buffer.from([9]), mimeType: 'image/png', width: 1280, height: 720 });
+    await branding.clearBackground();
+    assert.equal((await branding.get()).background, null);
+    assert.equal(await branding.getBackgroundBytes(), null);
+  });
+
+  test('the database refuses a type the image inspector would never produce', async () => {
+    await assert.rejects(
+      () => pool.query(
+        `INSERT INTO branding_assets (kind, bytes, mime_type, etag, width, height, byte_size)
+         VALUES ('login_background', $1, 'image/svg+xml', 'x', 10, 10, 1)`,
+        [Buffer.from([1])]
+      ),
+      (e) => e.code === '23514', 'SVG must be impossible to store, not merely unlikely'
     );
   });
 
