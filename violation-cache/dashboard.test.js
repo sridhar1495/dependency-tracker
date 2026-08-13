@@ -1956,7 +1956,20 @@ describe('branding is consistent across the three pages', () => {
   test('branding is fetched from the public endpoint, not through apiFetch', () => {
     // login.html runs before a token exists; that is why /branding is public.
     for (const [name, html] of PAGES) {
-      assert.match(html, /await fetch\('\/branding'\)/, `${name} must read the public endpoint`);
+      assert.match(html, /await fetch\('\/branding'[,)]/, `${name} must read the public endpoint`);
+      assert.ok(!/apiFetch\('\/branding'/.test(html),
+        `${name} must not route branding through apiFetch — login.html has no token yet`);
+    }
+  });
+
+  test('the branding fetch is bounded, so it cannot hold the gate open', () => {
+    // index.html and admin.html await this inside the boot gate. An unbounded
+    // fetch here would reintroduce the very hang the gate was built to stop.
+    for (const [name, html] of PAGES) {
+      const at = html.indexOf('async function applyBranding(');
+      const body = html.slice(at, at + 1400);
+      assert.match(body, /new AbortController\(\)/, `${name} must bound the branding fetch`);
+      assert.match(body, /BRANDING_TIMEOUT_MS/, `${name} must use the shared deadline`);
     }
   });
 

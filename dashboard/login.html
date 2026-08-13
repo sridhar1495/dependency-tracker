@@ -849,6 +849,7 @@ function toggleTheme() {
 // ── Branding ──────────────────────────────────────────────────────────────
 // Duplicated verbatim in index.html and admin.html; a test asserts the three
 // copies agree, since the no-build-step rule forbids a shared asset.
+const BRANDING_TIMEOUT_MS = 5000;
 const DEFAULT_APP_TITLE = 'Software Composition Analysis - Risk Dashboard';
 
 /** Up to three initials from the title, for the square logo mark. */
@@ -866,7 +867,13 @@ function brandInitials(title) {
 async function applyBranding() {
   let title = DEFAULT_APP_TITLE, background = null;
   try {
-    const r = await fetch('/branding');
+    // Bounded for the same reason as the other two pages, and so the three
+    // copies stay identical.
+    const ctrl  = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), BRANDING_TIMEOUT_MS);
+    let r;
+    try { r = await fetch('/branding', { signal: ctrl.signal }); }
+    finally { clearTimeout(timer); }
     if (r.ok) {
       const b = await r.json();
       if (b && typeof b.title === 'string' && b.title.trim()) title = b.title.trim();

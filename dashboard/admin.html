@@ -691,6 +691,7 @@
   // ── Branding ───────────────────────────────────────────────────────────
   // Duplicated verbatim in index.html and login.html; a test asserts the three
   // copies agree, since the no-build-step rule forbids a shared asset.
+  const BRANDING_TIMEOUT_MS = 5000;
   const DEFAULT_APP_TITLE = 'Software Composition Analysis - Risk Dashboard';
 
   /** Up to three initials from the title, for the square logo mark. */
@@ -704,7 +705,14 @@
   async function applyBranding() {
     let title = DEFAULT_APP_TITLE;
     try {
-      const r = await fetch('/branding');
+      // Bounded like the session check: this is awaited in the boot path, so an
+      // unbounded fetch here would hold the gate open forever — the exact
+      // failure the gate exists to prevent.
+      const ctrl  = new AbortController();
+      const timer = setTimeout(() => ctrl.abort(), BRANDING_TIMEOUT_MS);
+      let r;
+      try { r = await fetch('/branding', { signal: ctrl.signal }); }
+      finally { clearTimeout(timer); }
       if (r.ok) {
         const b = await r.json();
         if (b && typeof b.title === 'string' && b.title.trim()) title = b.title.trim();
