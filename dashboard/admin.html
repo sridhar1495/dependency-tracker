@@ -702,22 +702,46 @@
   }
 
   /** Title in the tab and the mark in the header. */
+  /**
+   * Read the public branding endpoint, or null when it cannot be read.
+   *
+   * Every failure path says why, on the console (CLAUDE.md §11.2). Swallowing
+   * them silently is what once made a proxy misconfiguration look like "the
+   * feature does nothing": /branding answered with index.html, JSON.parse threw,
+   * and the page quietly kept its defaults with no clue anywhere.
+   */
+  async function readBranding() {
+    let r;
+    const ctrl  = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), BRANDING_TIMEOUT_MS);
+    try {
+      r = await fetch('/branding', { signal: ctrl.signal });
+    } catch (e) {
+      console.warn('[branding] not read:', e.name === 'AbortError' ? 'timed out' : e.message);
+      return null;
+    } finally { clearTimeout(timer); }
+
+    if (!r.ok) { console.warn('[branding] not read: HTTP ' + r.status); return null; }
+
+    // The decisive check. A dashboard page here means the request never reached
+    // the backend at all.
+    const ct = r.headers.get('content-type') || '';
+    if (ct.indexOf('application/json') === -1) {
+      console.warn(
+        '[branding] expected JSON but received "' + ct + '". The /branding path is ' +
+        'not being proxied to dt-violation-cache — nginx is serving the dashboard ' +
+        'page instead. Recreate the dt-dashboard container so it picks up the ' +
+        'current nginx template: docker compose up -d --force-recreate dt-dashboard');
+      return null;
+    }
+    try { return await r.json(); }
+    catch (e) { console.warn('[branding] response was not valid JSON:', e.message); return null; }
+  }
+
   async function applyBranding() {
     let title = DEFAULT_APP_TITLE;
-    try {
-      // Bounded like the session check: this is awaited in the boot path, so an
-      // unbounded fetch here would hold the gate open forever — the exact
-      // failure the gate exists to prevent.
-      const ctrl  = new AbortController();
-      const timer = setTimeout(() => ctrl.abort(), BRANDING_TIMEOUT_MS);
-      let r;
-      try { r = await fetch('/branding', { signal: ctrl.signal }); }
-      finally { clearTimeout(timer); }
-      if (r.ok) {
-        const b = await r.json();
-        if (b && typeof b.title === 'string' && b.title.trim()) title = b.title.trim();
-      }
-    } catch (_) { /* decoration only — never block the screen */ }
+    const b = await readBranding();
+    if (b && typeof b.title === 'string' && b.title.trim()) title = b.title.trim();
     document.title = 'Administration — ' + title;
     if ($('brandMark')) $('brandMark').textContent = brandInitials(title);
     return title;
