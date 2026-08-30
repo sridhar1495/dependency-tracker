@@ -535,19 +535,81 @@ describe('session lifecycle', { skip: !ENABLED && 'TEST_DATABASE_URL not set' },
   test('an idle session does not resolve even when within its absolute lifetime', async () => {
     const th = hashOf('token-idle');
     await sessions.revokeAllForUser(user.id);
-    await sessions.create({ tokenHash: th, userId: user.id, principalType: 'user', absoluteHours: 8 });
+    // Keep the id from create(): asking a liveness query for it would be
+    // circular here, since the row is about to be deliberately idle.
+    const created = await sessions.create({ tokenHash: th, userId: user.id, principalType: 'user', absoluteHours: 8 });
     await pool.query("UPDATE user_sessions SET last_seen_at = now() - interval '3 hours' WHERE token_hash = $1", [th]);
     assert.equal(await sessions.findLiveByTokenHash(th, 2), null, 'idle window must be enforced');
 
-    await sessions.touch((await sessions.findLiveForUser(user.id)).id);
+    await sessions.touch(created.id);
     assert.ok(await sessions.findLiveByTokenHash(th, 2), 'touch() should revive it within the absolute window');
   });
 
   test('findLiveForUser describes the session for the force-disconnect prompt', async () => {
-    const live = await sessions.findLiveForUser(user.id);
+    const live = await sessions.findLiveForUser(user.id, 2);
     assert.ok(live.issuedAt instanceof Date);
     assert.ok(live.lastSeenAt instanceof Date);
     assert.equal(live.principalType, 'user');
+  });
+
+  // ── Closing the browser must not look like a second device ──────────────
+  // The bug: the token path honoured the idle window and the login conflict
+  // check did not, so a session that could no longer authenticate was still
+  // reported as "you are already signed in on another device or browser".
+  test('an idle-expired session is not reported as a live one', async () => {
+    const th = hashOf('token-idle-conflict');
+    await sessions.revokeAllForUser(user.id);
+    await sessions.create({ tokenHash: th, userId: user.id, principalType: 'user', absoluteHours: 8 });
+    await pool.query(
+      "UPDATE user_sessions SET last_seen_at = now() - interval '3 hours' WHERE token_hash = $1", [th]);
+
+    assert.equal(await sessions.findLiveByTokenHash(th, 2), null,
+      'the token is already refused, which is what sends the user back to sign in');
+    assert.equal(await sessions.findLiveForUser(user.id, 2), null,
+      'so the login check must agree it is not a live session');
+  });
+
+  test('signing in again after the idle window succeeds', async () => {
+    // retireNotLive clears the slot. Without it the insert collides with the
+    // partial unique index — the same wrong answer one step further along,
+    // because that index tests revoked_at and knows nothing about expiry.
+    const stale = hashOf('token-stale-slot');
+    await sessions.revokeAllForUser(user.id);
+    await sessions.create({ tokenHash: stale, userId: user.id, principalType: 'user', absoluteHours: 8 });
+    await pool.query(
+      "UPDATE user_sessions SET last_seen_at = now() - interval '3 hours' WHERE token_hash = $1", [stale]);
+
+    const retired = await sessions.retireNotLive({ userId: user.id, principalType: 'user', idleHours: 2 });
+    assert.equal(retired, 1, 'the dead row must give up the slot');
+
+    const fresh = await sessions.create({
+      tokenHash: hashOf('token-after-idle'), userId: user.id, principalType: 'user', absoluteHours: 8,
+    });
+    assert.ok(fresh.id, 'the new session must be issuable');
+    assert.ok(await sessions.findLiveByTokenHash(hashOf('token-after-idle'), 2));
+  });
+
+  test('retireNotLive leaves a genuinely live session alone', async () => {
+    // It must not become a silent "sign the other device out" — that is what
+    // force-disconnect is for, and the user has to be asked first.
+    await sessions.revokeAllForUser(user.id);
+    await sessions.create({ tokenHash: hashOf('token-still-live'), userId: user.id, principalType: 'user', absoluteHours: 8 });
+    const retired = await sessions.retireNotLive({ userId: user.id, principalType: 'user', idleHours: 2 });
+    assert.equal(retired, 0);
+    assert.ok(await sessions.findLiveForUser(user.id, 2), 'the live session must survive');
+  });
+
+  test('the administrator gets the same treatment', async () => {
+    await sessions.revokeAdmin();
+    await sessions.create({ tokenHash: hashOf('admin-idle'), principalType: 'admin', absoluteHours: 8 });
+    await pool.query(
+      "UPDATE user_sessions SET last_seen_at = now() - interval '3 hours' WHERE token_hash = $1",
+      [hashOf('admin-idle')]);
+    assert.equal(await sessions.findLiveAdmin(2), null, 'an idle admin session is not live either');
+    assert.equal(await sessions.retireNotLive({ principalType: 'admin', idleHours: 2 }), 1);
+    await sessions.create({ tokenHash: hashOf('admin-after-idle'), principalType: 'admin', absoluteHours: 8 });
+    assert.ok(await sessions.findLiveAdmin(2));
+    await sessions.revokeAdmin();
   });
 
   test('the administrator principal has its own single-session rule', async () => {

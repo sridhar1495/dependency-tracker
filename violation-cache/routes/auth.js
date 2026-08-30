@@ -204,6 +204,11 @@ async function handle({ method, path: parsedPath, req, res, principal }) {
       return true;
     }
 
+    // Declared outside the try so the catch below can still describe the
+    // principal when the unique index rejects a racing insert.
+    let principalType = 'user';
+    let userId = null;
+
     try {
       if (await auth.isLockedOut(loginId, ip)) {
         await audit.record({ loginIdAttempted: loginId, event: 'lockout', ipAddress: ip, userAgent: ua });
@@ -214,8 +219,6 @@ async function handle({ method, path: parsedPath, req, res, principal }) {
         return true;
       }
 
-      let principalType = 'user';
-      let userId = null;
       // Set when an administrator reset this password. The session is still
       // issued — the user has to be signed in to choose a new password — but
       // dispatch refuses every other route until they do (server.js, S30).
@@ -251,10 +254,11 @@ async function handle({ method, path: parsedPath, req, res, principal }) {
       }
 
       // Single active session: report the conflict unless the caller forces it.
+      // "Live" here must mean exactly what it means to every other request —
+      // including the idle window — or a browser that was simply closed for a
+      // while is reported as another device.
       if (!force) {
-        const live = principalType === 'admin'
-          ? await auth.sessions.findLiveAdmin()
-          : await auth.sessions.findLiveForUser(userId);
+        const live = await auth.findLiveSession({ principalType, userId });
         if (live) {
           jsonReply(res, 409, {
             error: 'You are already signed in on another device or browser.',
@@ -289,9 +293,19 @@ async function handle({ method, path: parsedPath, req, res, principal }) {
     } catch (err) {
       if (err.code === 'SESSION_EXISTS') {
         // Lost a race against a concurrent login; the partial unique index won.
+        // Look the winner up so this answer carries the same detail as the
+        // check above — otherwise the same dialog sometimes shows when and
+        // where, and sometimes says "no details available", for reasons the
+        // person signing in cannot see.
+        const live = await auth.findLiveSession({ principalType, userId }).catch(() => null);
         jsonReply(res, 409, {
           error: 'You are already signed in on another device or browser.',
           code: 'SESSION_EXISTS',
+          session: live ? {
+            issuedAt:   live.issuedAt,
+            lastSeenAt: live.lastSeenAt,
+            userAgent:  live.userAgent || null,
+          } : null,
         });
         return true;
       }

@@ -89,7 +89,27 @@ async function isLockedOut(loginId, ipAddress) {
  * @returns {Promise<{ token: string, session: object }>}
  * @throws {Error} code SESSION_EXISTS when a live session exists and force is false
  */
+/**
+ * The live session for a principal, if any — the question the login route asks
+ * before reporting a conflict.
+ *
+ * Exists so no caller has to remember to pass idleHours. The route used to call
+ * sessions.findLiveForUser() directly, which took no idle window and therefore
+ * answered a subtly different question from the one every request asks.
+ */
+async function findLiveSession({ principalType, userId = null }) {
+  return principalType === 'admin'
+    ? sessions.findLiveAdmin(cfg().session.idleHours)
+    : sessions.findLiveForUser(userId, cfg().session.idleHours);
+}
+
 async function issueSession({ userId = null, principalType, force = false, userAgent = null, ipAddress = null }) {
+  // Always, not only on force: a session that can no longer authenticate still
+  // occupies the single-session slot, because the partial unique index tests
+  // only revoked_at. Clearing it here is what lets somebody sign back in after
+  // closing their browser for longer than the idle window.
+  await sessions.retireNotLive({ userId, principalType, idleHours: cfg().session.idleHours });
+
   if (force) {
     if (principalType === 'admin') {
       await sessions.revokeAdmin();
@@ -243,7 +263,7 @@ async function sweep() {
 }
 
 module.exports = {
-  configure, issueSession, resolveToken, revokeToken, revokeUserSessions,
+  configure, issueSession, findLiveSession, resolveToken, revokeToken, revokeUserSessions,
   isLockedOut, bearerFromRequest, clientIp, userAgent, sweep,
   evict, evictUser, evictAdmin, clearCache, cacheSize,
   LOCKOUT_THRESHOLD, LOCKOUT_MINUTES, CACHE_TTL_MS, TOUCH_INTERVAL_MS,
