@@ -22,6 +22,25 @@ const SESSION_COLUMNS = `
   user_agent AS "userAgent", ip_address AS "ipAddress"
 `;
 
+/**
+ * The one definition of a live session, as a SQL fragment.
+ *
+ * Not revoked, inside its absolute expiry, AND inside the idle window. Every
+ * query that asks "is there a live session" must build its WHERE clause from
+ * this. When the token path honoured the idle window and the login conflict
+ * check did not, closing the browser and signing in again after the idle
+ * window reported the user's own dead session as "already signed in on another
+ * device" — the two questions had drifted to two different answers.
+ *
+ * @param {number} idleParam  the $n placeholder carrying idleHours
+ * @param {string} [p='']     table alias prefix, e.g. 's.'
+ */
+function liveClause(idleParam, p = '') {
+  return `${p}revoked_at IS NULL
+      AND ${p}expires_at > now()
+      AND ${p}last_seen_at > now() - make_interval(hours => $${idleParam})`;
+}
+
 /** Raised when the single-live-session index rejects a second session. */
 function asSessionExists(err) {
   if (err && err.code === '23505' &&
@@ -81,29 +100,28 @@ async function findLiveByTokenHash(tokenHash, idleHours) {
        FROM user_sessions s
        LEFT JOIN users u ON u.id = s.user_id
       WHERE s.token_hash = $1
-        AND s.revoked_at IS NULL
-        AND s.expires_at > now()
-        AND s.last_seen_at > now() - make_interval(hours => $2)`,
+        AND ${liveClause(2, 's.')}`,
     [tokenHash, idleHours]
   );
   return rows[0] || null;
 }
 
 /** The live session for a user, if any. Used to describe it before force-disconnect. */
-async function findLiveForUser(userId) {
+async function findLiveForUser(userId, idleHours) {
   const { rows } = await query(
     `SELECT ${SESSION_COLUMNS} FROM user_sessions
-      WHERE user_id = $1 AND revoked_at IS NULL AND expires_at > now()`,
-    [userId]
+      WHERE user_id = $1 AND ${liveClause(2)}`,
+    [userId, idleHours]
   );
   return rows[0] || null;
 }
 
 /** The live administrator session, if any. */
-async function findLiveAdmin() {
+async function findLiveAdmin(idleHours) {
   const { rows } = await query(
     `SELECT ${SESSION_COLUMNS} FROM user_sessions
-      WHERE principal_type = 'admin' AND revoked_at IS NULL AND expires_at > now()`
+      WHERE principal_type = 'admin' AND ${liveClause(1)}`,
+    [idleHours]
   );
   return rows[0] || null;
 }
@@ -145,6 +163,32 @@ async function revokeAdmin() {
 }
 
 /**
+ * Revoke sessions that still hold the single-session slot but can no longer
+ * authenticate — expired, or idle past the window.
+ *
+ * The partial unique index is on `revoked_at IS NULL` alone: it knows nothing
+ * about expiry, so a dead row keeps the slot until the sweeper deletes it days
+ * later. Without this, signing in after the idle window collides with the
+ * user's own corpse and the insert fails with SESSION_EXISTS — the same wrong
+ * answer, arriving one step further along.
+ *
+ * @returns {Promise<number>} rows retired
+ */
+async function retireNotLive({ userId = null, principalType, idleHours }) {
+  const dead = `(expires_at <= now() OR last_seen_at <= now() - make_interval(hours => $1))`;
+  const { rowCount } = principalType === 'admin'
+    ? await query(
+        `UPDATE user_sessions SET revoked_at = now()
+          WHERE revoked_at IS NULL AND principal_type = 'admin' AND ${dead}`,
+        [idleHours])
+    : await query(
+        `UPDATE user_sessions SET revoked_at = now()
+          WHERE revoked_at IS NULL AND user_id = $2 AND ${dead}`,
+        [idleHours, userId]);
+  return rowCount;
+}
+
+/**
  * Delete rows that can never authenticate again.
  * Without this the table grows without bound (CLAUDE.md §13).
  *
@@ -163,5 +207,6 @@ async function sweepExpired(retentionDays = 7) {
 
 module.exports = {
   create, findLiveByTokenHash, findLiveForUser, findLiveAdmin,
-  touch, revokeByTokenHash, revokeAllForUser, revokeAdmin, sweepExpired,
+  touch, revokeByTokenHash, revokeAllForUser, revokeAdmin,
+  retireNotLive, sweepExpired, liveClause,
 };

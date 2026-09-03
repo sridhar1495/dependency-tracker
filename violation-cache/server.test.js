@@ -3009,6 +3009,9 @@ describe('routes — the administration listing exposes no secrets', () => {
 
 const routeAuth = require('./routes/auth');
 const adminMod  = require('./lib/admin');
+const authMod   = require('./lib/auth');
+const cryptoMod = require('./lib/crypto');
+const auditMod  = require('./lib/login-audit');
 
 describe('routes — registration conflicts', () => {
   const body = (over = {}) => JSON.stringify({
@@ -3813,5 +3816,119 @@ describe('routes — branding writes are administrator-only', () => {
       assert.equal(res.statusCode, 400);
       assert.equal(res.json.code, 'IMAGE_INVALID');
     } finally { restore(); }
+  });
+});
+
+// ── Closing the browser is not a second device ───────────────────────────────
+// The reported bug: sign in, close the browser, come back after the idle
+// window, and the login page announced "you are already signed in on another
+// device" — about the user's own dead session. The token path honoured the
+// idle window; the login conflict check did not.
+describe('routes — the sign-in conflict check', () => {
+  const LIVE = {
+    id: 's1', issuedAt: new Date('2026-08-13T09:00:00Z'),
+    lastSeenAt: new Date('2026-08-13T09:30:00Z'), userAgent: 'Firefox/1.0',
+    principalType: 'user',
+  };
+  const post = (over = {}) => ({
+    method: 'POST', url: '/auth/login', path: '/auth/login',
+    req: Readable.from([JSON.stringify({
+      loginId: 'alice', password: 'password123', isAdmin: false, ...over,
+    })]),
+    res: makeRes(),
+  });
+  // Enough of the account and audit layers for the route to reach the
+  // conflict check and past it.
+  const signedInOk = () => {
+    const restoreUsers = stub(usersMod, {
+      verifyLookup: async () => ({
+        id: USER_A, passwordHash: 'x', mustChangePassword: false, loginId: 'alice',
+      }),
+      findById: async () => ({ id: USER_A, loginId: 'alice', firstName: 'A', lastName: 'B', email: null }),
+      touchLastLogin: async () => {},
+    });
+    const restoreAudit = stub(auditMod, {
+      record: async () => {}, clearFailures: async () => {},
+    });
+    return () => { restoreUsers(); restoreAudit(); };
+  };
+
+  test('the route asks auth for liveness, so it cannot skip the idle window', () => {
+    // Calling sessions.findLiveForUser() directly is what caused this: that
+    // function takes an idle window the route never passed.
+    const src = fs.readFileSync(path.join(__dirname, 'routes', 'auth.js'), 'utf8');
+    assert.match(src, /auth\.findLiveSession\(/,
+      'the conflict check must go through the helper that supplies idleHours');
+    assert.ok(!/sessions\.findLiveForUser\(|sessions\.findLiveAdmin\(/.test(src),
+      'the route must not query liveness directly — it would omit the idle window');
+  });
+
+  test('no live session means no conflict prompt', async () => {
+    const restoreUsers = signedInOk();
+    const restoreAuth = stub(authMod, {
+      isLockedOut: async () => false,
+      findLiveSession: async () => null,          // idle-expired: not live
+      issueSession: async () => ({ token: 'new-token' }),
+    });
+    const restoreCrypto = stub(cryptoMod, { verifyPassword: async () => true });
+    try {
+      const ctx = post();
+      await routeAuth.handle(ctx);
+      assert.equal(ctx.res.statusCode, 200, ctx.res.body);
+      assert.equal(ctx.res.json.token, 'new-token');
+    } finally { restoreUsers(); restoreAuth(); restoreCrypto(); }
+  });
+
+  test('a genuinely live session still prompts, with its details', async () => {
+    const restoreUsers = signedInOk();
+    const restoreAuth = stub(authMod, {
+      isLockedOut: async () => false,
+      findLiveSession: async () => LIVE,
+      issueSession: async () => { throw new Error('must not issue while prompting'); },
+    });
+    const restoreCrypto = stub(cryptoMod, { verifyPassword: async () => true });
+    try {
+      const ctx = post();
+      await routeAuth.handle(ctx);
+      assert.equal(ctx.res.statusCode, 409);
+      assert.equal(ctx.res.json.code, 'SESSION_EXISTS');
+      assert.ok(ctx.res.json.session, 'the dialog needs something to show');
+      assert.equal(ctx.res.json.session.userAgent, 'Firefox/1.0');
+    } finally { restoreUsers(); restoreAuth(); restoreCrypto(); }
+  });
+
+  test('losing the race reports the same detail, not an empty dialog', async () => {
+    // Two 409s used to carry different bodies, so the same dialog sometimes
+    // showed when and where and sometimes said "no details available".
+    const restoreUsers = signedInOk();
+    let asked = 0;
+    const restoreAuth = stub(authMod, {
+      isLockedOut: async () => false,
+      findLiveSession: async () => (asked++ === 0 ? null : LIVE),
+      issueSession: async () => {
+        throw Object.assign(new Error('index won'), { code: 'SESSION_EXISTS' });
+      },
+    });
+    const restoreCrypto = stub(cryptoMod, { verifyPassword: async () => true });
+    try {
+      const ctx = post();
+      await routeAuth.handle(ctx);
+      assert.equal(ctx.res.statusCode, 409);
+      assert.equal(ctx.res.json.code, 'SESSION_EXISTS');
+      assert.ok(ctx.res.json.session, 'the race path must describe the winner too');
+      assert.equal(ctx.res.json.session.userAgent, 'Firefox/1.0');
+    } finally { restoreUsers(); restoreAuth(); restoreCrypto(); }
+  });
+
+  test('issuing a session always clears the slot a dead one is holding', () => {
+    // The partial unique index tests revoked_at only, so an expired row keeps
+    // the slot until the sweeper runs days later.
+    const src = fs.readFileSync(path.join(__dirname, 'lib', 'auth.js'), 'utf8');
+    const fn = src.slice(src.indexOf('async function issueSession('), src.indexOf('// ── Session validation'));
+    assert.match(fn, /retireNotLive\(/, 'issueSession must retire dead sessions');
+    const retireAt = fn.indexOf('retireNotLive(');
+    const forceAt  = fn.indexOf('if (force)');
+    assert.ok(retireAt < forceAt,
+      'it must run for every sign-in, not only a forced one');
   });
 });

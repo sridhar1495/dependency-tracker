@@ -503,6 +503,19 @@ if (method === 'GET' && path === '/violation-cache/status') {
   (`SESSION_IDLE_HOURS`, default 2).
 - One live session per user, enforced by a **partial unique index**, not by
   application logic.
+- **"Live" has exactly one definition, and it lives in `sessions.liveClause()`:
+  not revoked, inside the absolute expiry, *and* inside the idle window.** Every
+  query that asks the question builds its `WHERE` from it. When the token path
+  honoured the idle window and the login conflict check did not, a browser that
+  had simply been closed for longer than the idle window was reported back to
+  its own owner as "you are already signed in on another device".
+- **A session that can no longer authenticate must not keep the slot.** The
+  partial index tests `revoked_at` alone and knows nothing about expiry, so a
+  dead row blocks the next sign-in until the sweeper deletes it days later.
+  `issueSession` calls `sessions.retireNotLive()` on every sign-in — not only a
+  forced one — which is what lets somebody sign back in after being away. It
+  revokes only sessions that are already dead; ending a live one is
+  force-disconnect, and the user has to be asked first.
 
 ### 7.3 Request authentication
 
