@@ -3012,6 +3012,7 @@ const adminMod  = require('./lib/admin');
 const authMod   = require('./lib/auth');
 const cryptoMod = require('./lib/crypto');
 const auditMod  = require('./lib/login-audit');
+const mailMod   = require('./lib/mail');
 
 describe('routes — registration conflicts', () => {
   const body = (over = {}) => JSON.stringify({
@@ -3930,5 +3931,124 @@ describe('routes — the sign-in conflict check', () => {
     const forceAt  = fn.indexOf('if (force)');
     assert.ok(retireAt < forceAt,
       'it must run for every sign-in, not only a forced one');
+  });
+});
+
+// ── Email delivery ───────────────────────────────────────────────────────────
+// lib/mail.js had no tests, which is how `DEFAULT_APP_TITLE is not defined`
+// reached a deployment: the constant was used in the default subject and body
+// but only imported into excel.js. Those defaults are computed on EVERY send,
+// before overrides are applied, so a caller supplying its own subject still
+// tripped it — every test email failed.
+describe('mail — sending', () => {
+  const nodemailer = require('nodemailer');
+
+  /** Capture what nodemailer would have been asked to do. */
+  function captureTransport() {
+    const seen = {};
+    const restore = stub(nodemailer, {
+      createTransport: (opts) => {
+        seen.transport = opts;
+        return { sendMail: async (msg) => { seen.msg = msg; return { messageId: 'test' }; } };
+      },
+    });
+    return { seen, restore };
+  }
+
+  const anon = () => ({
+    smtp: { host: 'mail.local', port: 25, secure: false, user: '', pass: '' },
+    from: 'from@example.com', to: ['to@example.com'], cc: [], subject: '', body: '',
+  });
+
+  test('a send with no appTitle falls back instead of throwing', async () => {
+    // The exact regression.
+    const { seen, restore } = captureTransport();
+    try {
+      await mailMod.sendEmail(anon(), null, { subject: 'Test', body: 'Body' });
+      assert.equal(seen.msg.subject, 'Test');
+    } finally { restore(); }
+  });
+
+  test('the default subject and body carry the application title', async () => {
+    const { seen, restore } = captureTransport();
+    try {
+      await mailMod.sendEmail(anon(), null, {});
+      assert.ok(seen.msg.subject.startsWith(brandingMod.DEFAULT_TITLE), seen.msg.subject);
+      assert.match(seen.msg.text, new RegExp(brandingMod.DEFAULT_TITLE.replace(/[-[\]{}()*+?.,\\^$|#]/g, '\\$&')));
+    } finally { restore(); }
+  });
+
+  test('a configured title is used in place of the default', async () => {
+    const { seen, restore } = captureTransport();
+    try {
+      await mailMod.sendEmail(anon(), null, { appTitle: 'Acme Portal' });
+      assert.ok(seen.msg.subject.startsWith('Acme Portal'), seen.msg.subject);
+    } finally { restore(); }
+  });
+
+  // ── Anonymous relays ──────────────────────────────────────────────────
+  test('no SMTP username means no authentication is attempted', async () => {
+    // An open relay on an internal network needs no credentials, and offering
+    // an empty user/pass pair would make the server refuse the connection.
+    const { seen, restore } = captureTransport();
+    try {
+      await mailMod.sendEmail(anon(), null, {});
+      assert.equal(seen.transport.auth, undefined,
+        'the auth object must be omitted entirely, not sent empty');
+      assert.equal(seen.transport.host, 'mail.local');
+    } finally { restore(); }
+  });
+
+  test('a username still produces credentials', async () => {
+    const { seen, restore } = captureTransport();
+    const cfg = anon();
+    cfg.smtp.user = 'svc'; cfg.smtp.pass = 'secret';
+    try {
+      await mailMod.sendEmail(cfg, null, {});
+      assert.deepEqual(seen.transport.auth, { user: 'svc', pass: 'secret' });
+    } finally { restore(); }
+  });
+});
+
+// A cheap guard for the whole class: a SCREAMING_SNAKE constant referenced in a
+// module but neither declared nor imported there is a ReferenceError waiting for
+// the branch that reaches it. That is exactly how the mail bug shipped.
+describe('lib — no constant is referenced without being defined', () => {
+  /**
+   * Strip everything that looks like an identifier but is not one: comments,
+   * string literals, and property accesses. Template literals keep their
+   * ${...} interpolations, because those are real code.
+   */
+  function codeOnly(src) {
+    return src
+      .replace(/\/\*[\s\S]*?\*\//g, ' ')                      // block comments
+      .replace(/(^|[^:\\])\/\/.*$/gm, '$1')                     // line comments
+      .replace(/`(?:[^`\\$]|\\.|\$(?!\{))*`/g, ' ')             // templates with no interpolation
+      .replace(/`(?:[^`\\]|\\.)*?`/g, (t) =>                     // templates: keep ${...} only
+        (t.match(/\$\{[^}]*\}/g) || []).join(' '))
+      .replace(/'(?:[^'\\]|\\.)*'/g, ' ')                       // single-quoted strings
+      .replace(/"(?:[^"\\]|\\.)*"/g, ' ')                       // double-quoted strings
+      .replace(/\.\s*[A-Za-z_$][\w$]*/g, ' ')                     // property access
+      .replace(/\b[A-Z][A-Z0-9_]*\s*:/g, ' ');                    // object-literal keys
+  }
+
+  test('every SCREAMING_SNAKE reference resolves within its module', () => {
+    const libDir = path.join(__dirname, 'lib');
+    const problems = [];
+    for (const file of fs.readdirSync(libDir).filter(f => f.endsWith('.js'))) {
+      const raw = fs.readFileSync(path.join(libDir, file), 'utf8');
+      const src = codeOnly(raw);
+      for (const name of new Set(src.match(/\b[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+\b/g) || [])) {
+        const declared =
+          new RegExp(`(?:const|let|var)\\s+${name}\\b`).test(raw) ||          // const NAME =
+          new RegExp(`,\\s*${name}\\s*=`).test(raw) ||                       // const A = 1, NAME = 2
+          new RegExp(`\\b\\w+\\s*:\\s*${name}\\b`).test(raw) ||               // { X: NAME } alias
+          new RegExp(`\\{[^}]*\\b${name}\\b[^}]*\\}\\s*=`).test(raw) ||        // { NAME } = ...
+          new RegExp(`function\\s+${name}\\b`).test(raw);
+        if (!declared) problems.push(`${file}: ${name}`);
+      }
+    }
+    assert.deepEqual(problems, [],
+      'referenced but never declared or imported in that module');
   });
 });
