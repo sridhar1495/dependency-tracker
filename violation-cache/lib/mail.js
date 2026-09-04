@@ -9,6 +9,10 @@
 
 const nodemailer = require('nodemailer'); // Q9: MIT-licensed SMTP email library (approved exception to no-new-packages rule)
 const { log } = require('./log');
+// The fallback for the default subject and body. Required here as well as in
+// excel.js: sendEmail computes its defaults before overrides are applied, so
+// this is reached on EVERY send, including one that supplies its own subject.
+const { DEFAULT_TITLE: DEFAULT_APP_TITLE } = require('./branding');
 
 // ── Email helper ──────────────────────────────────────────────────────────────
 /**

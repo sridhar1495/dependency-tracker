@@ -21,6 +21,7 @@ const { jsonReply, readJson, requireUser } = require('../lib/http-util');
 // Module references, not destructured bindings, so the offline route tests
 // can substitute them (CLAUDE.md §10.1).
 const dtFetch = require('../lib/dt-fetch');
+const branding = require('../lib/branding');
 const mail    = require('../lib/mail');
 const dtConnections = require('../lib/dt-connections');
 const userSettings  = require('../lib/user-settings');
@@ -322,9 +323,12 @@ async function handle({ method, path: parsedPath, req, res, principal }) {
         return true;
       }
 
+      // The configured title, like every other message the service sends.
+      const appTitle = await branding.getTitle();
       await mail.sendEmail(mailCfg, null, {
-        subject: 'Dependency-Track — Test Email',
-        body: `This is a test email from the Dependency-Track Risk Dashboard sent on ${new Date().toLocaleString()}. `
+        appTitle,
+        subject: `${appTitle} — test email`,
+        body: `This is a test email from ${appTitle}, sent on ${new Date().toLocaleString()}. `
             + 'Your SMTP configuration is working correctly.',
       });
       jsonReply(res, 200, { ok: true, message: 'Test email sent successfully' });
