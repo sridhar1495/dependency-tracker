@@ -2097,6 +2097,20 @@ describe('nginx routes every backend path to the service', () => {
     }
   });
 
+  test('only Docker embedded DNS resolves the upstream', () => {
+    // dt-violation-cache is a Docker service name and exists nowhere outside
+    // this network, so a public resolver can only ever answer NXDOMAIN. Listing
+    // one alongside 127.0.0.11 is not a fallback — nginx distributes queries
+    // across the addresses given, so whenever it picked the public one every
+    // API call in that window returned 502 "could not be resolved" while the
+    // backend was up and healthy.
+    const line = /^\s*resolver\s+([^;]+);/m.exec(NGINX);
+    assert.ok(line, 'a resolver is required — proxy_pass uses variables');
+    const servers = line[1].split(/\s+/).filter(w => /^[\d.]+(:\d+)?$/.test(w));
+    assert.deepEqual(servers, ['127.0.0.11'],
+      `only Docker's embedded DNS can answer here, got: ${servers.join(', ')}`);
+  });
+
   test('the background keeps its immutable caching through the proxy', () => {
     // The image URL is content-addressed; a no-store override here would make
     // every sign-in re-download it.

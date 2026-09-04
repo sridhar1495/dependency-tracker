@@ -8,8 +8,17 @@ server {
     # Resolve upstream hostnames per-request rather than at startup, so nginx
     # starts (and serves the static dashboard) even when the cache service is
     # not yet reachable.
-    # 127.0.0.11 = Docker's embedded DNS  |  8.8.8.8 = public fallback
-    resolver 127.0.0.11 8.8.8.8 valid=10s ipv6=off;
+    #
+    # 127.0.0.11 is Docker's embedded DNS and is the ONLY resolver that can
+    # answer here. A public resolver was once listed alongside it as a
+    # "fallback", which it can never be: `dt-violation-cache` is a Docker
+    # service name and exists nowhere outside this network, so a public server
+    # answers NXDOMAIN. nginx distributes queries across the addresses given,
+    # so whenever it chose the public one the lookup failed and every API call
+    # in that window returned 502 "could not be resolved (3: Host not found)"
+    # while the backend was up and healthy. Intermittent by construction, and
+    # `valid=` then cached the bad answer for its duration.
+    resolver 127.0.0.11 valid=10s ipv6=off;
 
     # Serve the dashboard SPA
     # login.html and admin.html are real files, so try_files serves them
