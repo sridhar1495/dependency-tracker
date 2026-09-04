@@ -472,6 +472,37 @@ deleted; nothing is ever deleted for you.
 
 ## 9. Email & Scheduled Reports
 
+### SMTP settings — TLS and the port
+
+The **TLS** checkbox and the port must agree. Getting this wrong is the most
+common failure, and the underlying error message is misleading:
+
+| Port | TLS checkbox | What happens |
+|---|---|---|
+| 465 | **ticked** | Implicit TLS (SMTPS) — encrypted from the first byte |
+| 25 or 587 | **clear** | Plaintext connect, then **STARTTLS** upgrade if the server offers it |
+
+Clearing the checkbox on port 25 or 587 does **not** give up encryption — the
+connection still upgrades via STARTTLS automatically. Tick it only for a port
+that expects TLS immediately.
+
+If you tick TLS against a plaintext port, the mail server answers with its
+ordinary SMTP greeting, the TLS library tries to read that text as an encrypted
+record, and reports `wrong version number`. That sounds like a TLS *version*
+mismatch; it means "this is not TLS at all". The dashboard now translates it:
+
+> mail.example.com:25 is not using TLS on this port. Clear the TLS checkbox —
+> the connection still upgrades with STARTTLS if the server offers it.
+
+Other failures are named the same way: an unresolvable host, a refused
+connection, a timeout (usually a firewall), rejected credentials, an untrusted
+internal certificate, and a rejected From/To address. The raw message is kept in
+the response's `detail` field for anyone diagnosing it further.
+
+**Authentication is optional.** Leave the username and password blank for an
+internal relay that accepts mail without them — no authentication is attempted
+at all, rather than an empty username being offered.
+
 Automatic email delivery of Excel reports on a recurring schedule.
 
 ### Setup
