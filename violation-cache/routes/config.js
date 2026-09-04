@@ -285,8 +285,11 @@ async function handle({ method, path: parsedPath, req, res, principal }) {
     const body = await readJson(req, res);
     if (body === null) return true;
 
+    // Declared outside the try so the catch can name the host and port that
+    // actually failed.
+    let mailCfg;
+
     try {
-      let mailCfg;
       if (body && body.smtp) {
         let storedPass = '';
         if (body.useStoredPass) {
@@ -337,8 +340,15 @@ async function handle({ method, path: parsedPath, req, res, principal }) {
         jsonReply(res, 503, { error: err.message, code: 'SMTP_PASS_UNREADABLE' });
         return true;
       }
-      log('error', `Test email failed: ${err.message}`, { userId });
-      jsonReply(res, 500, { error: `Email failed: ${err.message}`, code: 'MAIL_SEND_FAILED' });
+      // Translate the transport failure where we recognise it. nodemailer
+      // surfaces the raw OpenSSL or socket error, and those name the symptom
+      // rather than the setting at fault — "wrong version number" is really
+      // "TLS is ticked and this port is not TLS".
+      const friendly = mail.describeSmtpError(err, mailCfg && mailCfg.smtp);
+      log('error', `Test email failed: ${err.message}`, { userId, cause: friendly ? friendly.code : 'unrecognised' });
+      jsonReply(res, 500, friendly
+        ? { error: friendly.message, code: friendly.code, detail: err.message }
+        : { error: `Email failed: ${err.message}`, code: 'MAIL_SEND_FAILED' });
     }
     return true;
   }

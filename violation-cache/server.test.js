@@ -3999,6 +3999,20 @@ describe('mail — sending', () => {
     } finally { restore(); }
   });
 
+  test('the transport is bounded so a silent host cannot hang the request', async () => {
+    // nodemailer's defaults are minutes long. A host that accepts the TCP
+    // connection and then says nothing would hold the test-email request open,
+    // which tells the person configuring it even less than an error would.
+    const { seen, restore } = captureTransport();
+    try {
+      await mailMod.sendEmail(anon(), null, {});
+      assert.equal(seen.transport.connectionTimeout, mailMod.CONNECT_TIMEOUT_MS);
+      assert.equal(seen.transport.greetingTimeout, mailMod.GREETING_TIMEOUT_MS);
+      assert.equal(seen.transport.socketTimeout, mailMod.SOCKET_TIMEOUT_MS);
+      assert.ok(mailMod.CONNECT_TIMEOUT_MS <= 30_000, 'a connect attempt must fail fast enough to report');
+    } finally { restore(); }
+  });
+
   test('a username still produces credentials', async () => {
     const { seen, restore } = captureTransport();
     const cfg = anon();
@@ -4050,5 +4064,100 @@ describe('lib — no constant is referenced without being defined', () => {
     }
     assert.deepEqual(problems, [],
       'referenced but never declared or imported in that module');
+  });
+});
+
+// ── SMTP failures name the setting at fault ──────────────────────────────────
+// nodemailer surfaces the raw OpenSSL or socket error. "wrong version number"
+// is the commonest of all — TLS ticked against a plaintext port — and it reads
+// as a TLS version mismatch when it means "this is not TLS at all".
+describe('mail — translating SMTP failures', () => {
+  const at = { host: 'mail.example.com', port: 25, secure: true };
+  const d = (err, smtp = at) => mailMod.describeSmtpError(err, smtp);
+
+  test('TLS against a plaintext port names the checkbox', () => {
+    const r = d({ message: '...SSL routines:tls_validate_record_header:wrong version number:...' });
+    assert.equal(r.code, 'SMTP_TLS_ON_PLAINTEXT_PORT');
+    assert.match(r.message, /Clear the TLS checkbox/);
+    assert.match(r.message, /STARTTLS/, 'must say encryption is not being given up');
+    assert.match(r.message, /mail\.example\.com:25/, 'must name what it tried');
+  });
+
+  test('the mirror-image mistake is named too', () => {
+    const r = d({ message: 'Client network socket disconnected before secure TLS connection was established' });
+    assert.equal(r.code, 'SMTP_TLS_REQUIRED');
+    assert.match(r.message, /Tick the TLS checkbox/);
+    assert.match(r.message, /465/, 'port 25 here, so it should suggest the implicit-TLS port');
+  });
+
+  test('port 465 is not told to switch to port 465', () => {
+    const r = mailMod.describeSmtpError(
+      { message: 'Client network socket disconnected before secure TLS connection' },
+      { host: 'mail.example.com', port: 465, secure: false });
+    assert.ok(!/use port 465/.test(r.message), r.message);
+  });
+
+  const cases = [
+    ['connection refused', { code: 'ECONNREFUSED' },              'SMTP_CONNECTION_REFUSED', /host and port/],
+    ['unknown host',       { code: 'ENOTFOUND' },                 'SMTP_HOST_UNKNOWN',       /could not be resolved/],
+    ['timeout',            { code: 'ETIMEDOUT' },                 'SMTP_TIMEOUT',            /firewall/],
+    ['bad credentials',    { code: 'EAUTH' },                     'SMTP_AUTH_REJECTED',      /blank/],
+    ['auth required',      { message: 'Missing credentials for "PLAIN"' }, 'SMTP_AUTH_REQUIRED', /requires authentication/],
+    ['untrusted cert',     { message: 'self signed certificate in certificate chain' }, 'SMTP_UNTRUSTED_CERT', /not trusted/],
+    ['envelope rejected',  { code: 'EENVELOPE' },                 'SMTP_ENVELOPE_REJECTED',  /From or To/],
+  ];
+  for (const [name, err, code, matcher] of cases) {
+    test(`${name} is recognised`, () => {
+      const r = d(err);
+      assert.equal(r.code, code);
+      assert.match(r.message, matcher);
+    });
+  }
+
+  test('an unrecognised failure is not given an invented cause', () => {
+    // Guessing wrong is worse than saying nothing: the caller falls back to the
+    // raw message, which is at least true.
+    assert.equal(d({ message: 'something nobody has seen before', code: 'EWAT' }), null);
+  });
+});
+
+describe('routes — the test email reports why it failed', () => {
+  const post = (body) => ({
+    method: 'POST', url: '/violation-cache/config/test-email',
+    path: '/violation-cache/config/test-email',
+    req: mockReq(JSON.stringify(body)), res: makeRes(), principal: asUser(USER_A),
+  });
+  const smtp = { host: 'mail.example.com', port: 25, secure: true, user: '', pass: '' };
+
+  test('a TLS-on-plaintext failure comes back actionable, with the raw text kept', async () => {
+    const restoreMail = stub(mailMod, {
+      sendEmail: async () => {
+        throw new Error('C09C:error:0A00010B:SSL routines:tls_validate_record_header:wrong version number:');
+      },
+    });
+    const restoreBranding = stub(brandingMod, { getTitle: async () => 'Acme' });
+    try {
+      const ctx = post({ smtp, from: 'a@b.c', to: ['d@e.f'], cc: [] });
+      await routeConfig.handle(ctx);
+      assert.equal(ctx.res.statusCode, 500);
+      assert.equal(ctx.res.json.code, 'SMTP_TLS_ON_PLAINTEXT_PORT');
+      assert.match(ctx.res.json.error, /Clear the TLS checkbox/);
+      assert.match(ctx.res.json.detail, /wrong version number/,
+        'the original must survive for anybody diagnosing it');
+    } finally { restoreMail(); restoreBranding(); }
+  });
+
+  test('an unrecognised failure still reports the raw message', async () => {
+    const restoreMail = stub(mailMod, {
+      sendEmail: async () => { throw new Error('mailbox full'); },
+    });
+    const restoreBranding = stub(brandingMod, { getTitle: async () => 'Acme' });
+    try {
+      const ctx = post({ smtp, from: 'a@b.c', to: ['d@e.f'], cc: [] });
+      await routeConfig.handle(ctx);
+      assert.equal(ctx.res.statusCode, 500);
+      assert.equal(ctx.res.json.code, 'MAIL_SEND_FAILED');
+      assert.match(ctx.res.json.error, /mailbox full/);
+    } finally { restoreMail(); restoreBranding(); }
   });
 });
