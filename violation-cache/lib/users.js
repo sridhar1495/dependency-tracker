@@ -356,7 +356,7 @@ async function detailForAdmin(loginId) {
             COALESCE(array_length(m.to_addrs, 1), 0) AS "mailRecipients",
             (m.smtp_pass_ciphertext IS NOT NULL) AS "mailHasPassword",
 
-            sc.enabled AS "scheduleEnabled", sc.frequency, sc.hour,
+            sc.enabled AS "scheduleEnabled", sc.frequency, sc.hour, sc.minute,
             sc.next_run_at AS "nextRunAt", sc.last_run_at AS "lastRunAt",
             sc.last_run_status AS "lastRunStatus",
             (SELECT count(*)::int FROM schedule_projects p WHERE p.user_id = u.id) AS "scheduleProjects",

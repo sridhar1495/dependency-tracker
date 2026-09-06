@@ -1429,6 +1429,35 @@ describe('multi-tenant data access', { skip: !ENABLED && 'TEST_DATABASE_URL not 
     assert.equal(cleared.reportName, null);
   });
 
+  test('a schedule keeps a minute of its own (migration 008)', async () => {
+    // Without it a user in a half-hour zone cannot be served: 09:00 in India is
+    // 03:30 UTC, and the picker stores UTC.
+    const fresh = await schedulesDb.get(alice.id);
+    assert.equal(fresh.minute, 0, 'existing rows keep firing on the hour');
+
+    const set = await schedulesDb.save(alice.id, { hour: 3, minute: 30 });
+    assert.equal(set.hour, 3);
+    assert.equal(set.minute, 30);
+
+    // Omitting the key leaves it alone, like every other schedule field.
+    assert.equal((await schedulesDb.save(alice.id, { hour: 4 })).minute, 30);
+  });
+
+  test('an out-of-range minute is refused by both the application and the database', async () => {
+    for (const bad of [-1, 60, 1.5, 'x']) {
+      await assert.rejects(
+        () => schedulesDb.save(alice.id, { minute: bad }),
+        (e) => e.code === 'VALIDATION_FAILED' && e.field === 'minute',
+        JSON.stringify(bad)
+      );
+    }
+    // Constraints belong in the database too (CLAUDE.md §5.4).
+    await assert.rejects(
+      () => pool.query('UPDATE schedules SET minute = $2 WHERE user_id = $1', [alice.id, 60]),
+      (e) => e.code === '23514'
+    );
+  });
+
   test('a schedule name that could escape the filename is refused', async () => {
     for (const bad of ['a/b', 'a"b', '../x', 'x'.repeat(121)]) {
       await assert.rejects(

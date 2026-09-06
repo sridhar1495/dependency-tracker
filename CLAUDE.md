@@ -208,7 +208,7 @@ Inline comments use lettered prefixes to trace design decisions:
 - **O-numbers** — observability notes (`// O3: JSON log format for log aggregators`)
 - **S-numbers** — security rationale (`// S2: token hashed before storage`) — **new in revision 2**
 
-Highest numbers currently in use: **Q17, P18, O5, S32**. When adding logic with a
+Highest numbers currently in use: **Q20, P18, O5, S32**. When adding logic with a
 non-obvious trade-off, add the next number in the appropriate series. Check the
 current maximum before assigning — parallel branches can claim the same number.
 
@@ -461,11 +461,34 @@ if (method === 'GET' && path === '/violation-cache/status') {
 
 ### 6.8 Scheduler
 
-- `calcNextRun(schedule)` is a pure function and the single source of truth for
-  timing. Do not duplicate its logic.
-  - `daily`: next occurrence of `hour` (tomorrow if already past)
-  - `weekly`: scans the next 8 days for a matching `weekDays` entry
+- `calcNextRun(schedule, now)` is a pure function and the single source of truth
+  for timing. Do not duplicate its logic. `now` defaults to the current instant
+  and exists so tests can pin a weekday instead of asserting invariants.
+  - `daily`: next occurrence of `hour:minute` (tomorrow if already past)
+  - `weekly`: scans days 0–7 for a matching `weekDays` entry, skipping any
+    candidate that is not still ahead
   - `monthly`: `monthDay` capped at 28; rolls to next month if already past
+- **The schedule is stored as a UTC instant, and `calcNextRun` reads it with
+  `getUTC*` accessors only** (Q19). It used to build candidates from the
+  server's local calendar, which made the container's `TZ` an invisible input
+  to every schedule in the system — a base image that shipped one set would
+  move everybody's delivery time with nothing in the diff to show for it. The
+  Dockerfile pins `TZ=UTC` so log lines and `toLocaleString()` agree with the
+  stored values, but nothing depends on it any more.
+  **Timezones exist in exactly one place: the browser.** `index.html` shows a
+  local wall clock and converts the `(hour, minute, weekDays)` and
+  `(hour, minute, monthDay)` tuples on the way in and out — with real `Date`
+  arithmetic, never modular arithmetic on the hour, because an offset can be a
+  half hour (India is UTC+05:30, Nepal +05:45) and can move the *day*. The
+  picker re-reads what was stored after a save rather than showing what was
+  typed, so a month day clamped at the 1/28 boundary is visible instead of
+  drifting on each reload. `schedules.minute` exists for exactly this
+  (migration 008): an hour-only field cannot express 09:00 in India.
+- **Weekly fires today when today qualifies and its time has not passed** (Q20).
+  The scan used to start at tomorrow, so a Wednesday schedule saved on a
+  Wednesday morning waited a full week — the one case a user is certain to be
+  watching, because they have just set it up. Starting at day 0 is safe only
+  because of the `candidate <= now` guard; do not remove one without the other.
 - Scheduling is driven by **one poller** that ticks every 60 seconds and claims due
   rows with `FOR UPDATE SKIP LOCKED`. Never create one timer per user.
 - Per-user overlap protection is the `running_since` column, not a process variable.
@@ -879,7 +902,7 @@ The frontend never performs uniqueness checks — those are backend-only, via
 | `hashPassword` / `verifyPassword` | server | scrypt wrappers |
 | `mintToken` / `hashToken` | server | Session token helpers |
 | `encryptSecret` / `decryptSecret` | server | AES-256-GCM wrappers |
-| `calcNextRun(schedule)` | server | Pure function: next fire time |
+| `calcNextRun(schedule, now)` | server | Pure function: next fire time, in UTC |
 | `collectReportData(...)` | server | Shared collection core for manual and scheduled reports |
 | `sendEmail(mailCfg, ...)` | server | Deliver report via nodemailer |
 
@@ -1062,7 +1085,14 @@ redundant.
 - Every validation rule, including boundary lengths and rejected characters.
 - Password hashing round-trip, and rejection of a tampered hash.
 - Token minting and hashing; encryption round-trip and auth-tag failure.
-- `calcNextRun` for all three frequencies.
+- `calcNextRun` for all three frequencies, including a weekly schedule that
+  fires today and one whose time has already passed, and that the answer does
+  not move when `process.env.TZ` does.
+- The dashboard's UTC↔local schedule converters, round-tripped across whole-hour,
+  half-hour and 45-minute offsets and both extremes, plus the cross-layer check
+  that what the picker stores is the local time the scheduler fires at. They are
+  extracted from `index.html` rather than copied, so the test cannot pass against
+  a version of the code the page no longer contains.
 - **Database tier:** migrations apply and are idempotent; the single-live-session
   index rejects a second session; cascade deletion removes all owned rows;
   chunked byte round-trips are identical; `SKIP LOCKED` claims each row once.

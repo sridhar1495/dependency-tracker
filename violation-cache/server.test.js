@@ -1187,17 +1187,31 @@ describe('performance constants and parallel phase execution', () => {
 // scheduling times and must never be reimplemented at a call site.
 const { calcNextRun } = require('./lib/scheduler');
 
+// Wednesday 11 March 2026. Every assertion below reads UTC accessors, because
+// the stored fields are UTC and the answer must not depend on the machine
+// running the tests.
+const WED_1015 = new Date('2026-03-11T10:15:00Z');   // getUTCDay() === 3
+const WED_2340 = new Date('2026-03-11T23:40:00Z');
+
 describe('calcNextRun()', () => {
   test('daily: result is always in the future', () => {
     const next = calcNextRun({ frequency: 'daily', hour: 9 });
     assert.ok(next > new Date(), 'next run should be in the future');
   });
 
-  test('daily: result is at the configured hour', () => {
-    const next = calcNextRun({ frequency: 'daily', hour: 14 });
-    assert.equal(next.getHours(), 14);
-    assert.equal(next.getMinutes(), 0);
-    assert.equal(next.getSeconds(), 0);
+  test('daily: result is at the configured hour and minute', () => {
+    const next = calcNextRun({ frequency: 'daily', hour: 14, minute: 30 }, WED_1015);
+    assert.equal(next.getUTCHours(), 14);
+    assert.equal(next.getUTCMinutes(), 30);
+    assert.equal(next.getUTCSeconds(), 0);
+    assert.equal(next.getUTCDate(), 11, 'still today — 14:30 has not passed at 10:15');
+  });
+
+  test('daily: rolls to tomorrow once the minute has passed', () => {
+    // 10:00 has gone at 10:15, and so has 10:14 — the minute must be part of
+    // the comparison, not rounded away.
+    assert.equal(calcNextRun({ frequency: 'daily', hour: 10, minute: 14 }, WED_1015).getUTCDate(), 12);
+    assert.equal(calcNextRun({ frequency: 'daily', hour: 10, minute: 16 }, WED_1015).getUTCDate(), 11);
   });
 
   test('daily: no more than 25 hours in the future', () => {
@@ -1210,16 +1224,46 @@ describe('calcNextRun()', () => {
   test('weekly: result falls on one of the configured weekdays', () => {
     const targetDays = [1, 3]; // Monday, Wednesday
     const next = calcNextRun({ frequency: 'weekly', hour: 9, weekDays: targetDays });
-    assert.ok(targetDays.includes(next.getDay()),
-      `Expected day ${next.getDay()} to be in [1, 3]`);
+    assert.ok(targetDays.includes(next.getUTCDay()),
+      `Expected day ${next.getUTCDay()} to be in [1, 3]`);
   });
 
-  test('weekly: result is always at least 1 day in the future (never today)', () => {
-    const next = calcNextRun({ frequency: 'weekly', hour: 9, weekDays: [0,1,2,3,4,5,6] });
-    const todayStart = new Date();
-    todayStart.setHours(0, 0, 0, 0);
-    todayStart.setDate(todayStart.getDate() + 1);
-    assert.ok(next >= todayStart, 'weekly next run should be at least tomorrow');
+  // Q20 — the regression this fix exists for. A Wednesday schedule saved on a
+  // Wednesday morning used to skip straight to the following Wednesday, which
+  // is the one case a user is certain to be watching: they have just set it up.
+  test('weekly: fires today when today is a configured day and the time is still ahead', () => {
+    const next = calcNextRun({ frequency: 'weekly', hour: 17, minute: 0, weekDays: [3] }, WED_1015);
+    assert.equal(next.toISOString(), '2026-03-11T17:00:00.000Z');
+  });
+
+  test('weekly: today counts for a multi-day schedule too', () => {
+    const next = calcNextRun({ frequency: 'weekly', hour: 17, weekDays: [1, 3, 5] }, WED_1015);
+    assert.equal(next.getUTCDate(), 11, 'Wednesday afternoon, not Friday');
+  });
+
+  test('weekly: skips today once its time has passed', () => {
+    // 09:00 Wednesday is behind us at 10:15, so the answer is Friday.
+    const next = calcNextRun({ frequency: 'weekly', hour: 9, weekDays: [3, 5] }, WED_1015);
+    assert.equal(next.toISOString(), '2026-03-13T09:00:00.000Z');
+  });
+
+  test('weekly: a single-day schedule whose time has passed waits exactly a week', () => {
+    const next = calcNextRun({ frequency: 'weekly', hour: 9, weekDays: [3] }, WED_1015);
+    assert.equal(next.toISOString(), '2026-03-18T09:00:00.000Z');
+  });
+
+  test('weekly: a time later today survives a date rollover in the scan', () => {
+    // 23:50 on Wednesday, evaluated at 23:40 — the narrowest "still today".
+    const next = calcNextRun({ frequency: 'weekly', hour: 23, minute: 50, weekDays: [3] }, WED_2340);
+    assert.equal(next.toISOString(), '2026-03-11T23:50:00.000Z');
+  });
+
+  test('weekly: result is never in the past, for any weekday set', () => {
+    for (let day = 0; day <= 6; day++) {
+      const next = calcNextRun({ frequency: 'weekly', hour: 10, minute: 15, weekDays: [day] }, WED_1015);
+      assert.ok(next > WED_1015, `weekDays [${day}] produced ${next.toISOString()}`);
+      assert.equal(next.getUTCDay(), day);
+    }
   });
 
   test('weekly: result is no more than 8 days away', () => {
@@ -1229,6 +1273,14 @@ describe('calcNextRun()', () => {
       `Expected next run within 8 days`);
   });
 
+  test('weekly: does not mutate the caller\'s weekDays array', () => {
+    // The row read from the database is reused for the run itself, so an
+    // in-place sort here would reorder somebody else's data.
+    const weekDays = [5, 1, 3];
+    calcNextRun({ frequency: 'weekly', hour: 9, weekDays }, WED_1015);
+    assert.deepEqual(weekDays, [5, 1, 3]);
+  });
+
   test('monthly: result is always in the future', () => {
     const next = calcNextRun({ frequency: 'monthly', hour: 9, monthDay: 15 });
     assert.ok(next > new Date(), 'monthly next run should be in the future');
@@ -1236,7 +1288,16 @@ describe('calcNextRun()', () => {
 
   test('monthly: day is capped at 28', () => {
     const next = calcNextRun({ frequency: 'monthly', hour: 9, monthDay: 31 });
-    assert.ok(next.getDate() <= 28, `Expected date <= 28, got ${next.getDate()}`);
+    assert.ok(next.getUTCDate() <= 28, `Expected date <= 28, got ${next.getUTCDate()}`);
+  });
+
+  test('monthly: honours the minute and rolls to next month once past', () => {
+    assert.equal(
+      calcNextRun({ frequency: 'monthly', hour: 12, minute: 45, monthDay: 11 }, WED_1015).toISOString(),
+      '2026-03-11T12:45:00.000Z');
+    assert.equal(
+      calcNextRun({ frequency: 'monthly', hour: 8, minute: 45, monthDay: 11 }, WED_1015).toISOString(),
+      '2026-04-11T08:45:00.000Z');
   });
 
   test('unknown frequency: returns roughly 24 h from now', () => {
@@ -1245,6 +1306,44 @@ describe('calcNextRun()', () => {
     const delta  = next.getTime() - before;
     assert.ok(delta >= 23 * 3_600_000 && delta <= 25 * 3_600_000,
       `Expected ~24 h delta, got ${delta} ms`);
+  });
+
+  // The whole point of the UTC rewrite: the container's clock setting must not
+  // be able to move anybody's delivery time. Building candidates from the local
+  // calendar made TZ an invisible input to every schedule in the system.
+  test('the answer does not depend on the process timezone', () => {
+    const cases = [
+      { frequency: 'daily',   hour: 3,  minute: 30 },
+      { frequency: 'weekly',  hour: 17, minute: 0, weekDays: [3] },
+      { frequency: 'weekly',  hour: 1,  minute: 0, weekDays: [0, 4] },
+      { frequency: 'monthly', hour: 22, minute: 15, monthDay: 11 },
+    ];
+    const original = process.env.TZ;
+    try {
+      const baseline = cases.map(c => calcNextRun(c, WED_1015).toISOString());
+      for (const tz of ['UTC', 'Asia/Kolkata', 'America/Los_Angeles', 'Pacific/Kiritimati', 'Etc/GMT+12']) {
+        process.env.TZ = tz;
+        cases.forEach((c, i) => {
+          assert.equal(calcNextRun(c, WED_1015).toISOString(), baseline[i],
+            `${c.frequency} moved under TZ=${tz}`);
+        });
+      }
+    } finally {
+      if (original === undefined) delete process.env.TZ; else process.env.TZ = original;
+    }
+  });
+
+  test('out-of-range or missing fields fall back rather than producing an Invalid Date', () => {
+    for (const bad of [
+      { frequency: 'daily' },
+      { frequency: 'daily', hour: 99, minute: -4 },
+      { frequency: 'weekly', hour: null, weekDays: [] },
+      { frequency: 'monthly', hour: 'x', minute: 'y', monthDay: 0 },
+    ]) {
+      const next = calcNextRun(bad, WED_1015);
+      assert.ok(!Number.isNaN(next.getTime()), `${JSON.stringify(bad)} produced an Invalid Date`);
+      assert.ok(next > WED_1015, `${JSON.stringify(bad)} produced a past date`);
+    }
   });
 });
 

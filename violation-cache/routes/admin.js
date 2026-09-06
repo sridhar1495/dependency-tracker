@@ -480,7 +480,8 @@ async function handle({ method, path: parsedPath, req, res, principal }) {
         schedule: {
           enabled:       row.scheduleEnabled === true,
           frequency:     row.frequency,
-          hour:          row.hour,
+          hour:          row.hour,      // UTC — pair it with minute, never alone
+          minute:        row.minute ?? 0,
           projectCount:  row.scheduleProjects,
           nextRunAt:     row.nextRunAt,
           lastRunAt:     row.lastRunAt,

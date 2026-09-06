@@ -7,9 +7,9 @@
 // FOR UPDATE SKIP LOCKED. There is never one timer per user (CLAUDE.md §6.8):
 // with N users that would mean N timers, and a restart would lose all of them.
 //
-// calcNextRun is unchanged from the single-tenant version — it is a pure
-// function, the single source of truth for timing, and already well covered by
-// tests. Only its caller changed.
+// calcNextRun is a pure function and the single source of truth for timing.
+// It reads and returns UTC instants; the browser is the only place a timezone
+// is ever applied. Its clock is injectable so tests can pin a weekday.
 //
 // Per-user overlap protection is the schedules.running_since column, not a
 // process variable, so one user's long-running report never blocks another's.
@@ -36,44 +36,76 @@ let _pollTimer = null;
 let _ticking   = false;
 
 // ── Timing ────────────────────────────────────────────────────────────────────
+// Q19: hour/minute/weekDays/monthDay are UTC, and this function reads them with
+// getUTC* accessors only. It used to build candidates from the server's local
+// calendar, which made the answer depend on the container's TZ — an invisible
+// variable that changes the delivery time of every schedule in the system if a
+// base image ever ships with one set. The stored value is now an instant, not a
+// wall-clock reading whose meaning depends on where the process happens to run,
+// and the browser is the only place a timezone is applied (CLAUDE.md §6.8).
+//
+// No behaviour changed for existing installations: nothing set TZ, so the
+// server's local calendar already was UTC. This makes that explicit instead of
+// accidental, and the Dockerfile pins TZ=UTC so logs agree with it.
 /**
- * Calculate the next local-time Date when the job should fire.
- * Uses the server's local timezone (no external timezone library needed).
+ * Calculate the next UTC instant at which the job should fire.
  *
- * @param {object} schedule — frequency, hour, weekDays, monthDay
+ * @param {object} schedule — frequency, hour, minute, weekDays, monthDay (all UTC)
+ * @param {Date} [now] — injectable clock; tests pass a fixed instant
  * @returns {Date}
  */
-function calcNextRun(schedule) {
-  const now = new Date();
+function calcNextRun(schedule, now = new Date()) {
+  const hour   = clampInt(schedule.hour, 0, 23, 9);
+  const minute = clampInt(schedule.minute, 0, 59, 0);
+  const Y = now.getUTCFullYear();
+  const M = now.getUTCMonth();
+  const D = now.getUTCDate();
 
   if (schedule.frequency === 'daily') {
-    const next = new Date(now.getFullYear(), now.getMonth(), now.getDate(), schedule.hour, 0, 0, 0);
-    if (next <= now) next.setDate(next.getDate() + 1);
+    const next = new Date(Date.UTC(Y, M, D, hour, minute, 0, 0));
+    if (next <= now) next.setUTCDate(next.getUTCDate() + 1);
     return next;
   }
 
   if (schedule.frequency === 'weekly') {
-    const targetDays = (schedule.weekDays || [1]).sort((a, b) => a - b);
-    // Scan the next 8 days to find the first matching weekday that is in the future
-    for (let d = 1; d <= 8; d++) {
-      const candidate = new Date(
-        now.getFullYear(), now.getMonth(), now.getDate() + d, schedule.hour, 0, 0, 0
-      );
-      if (targetDays.includes(candidate.getDay())) return candidate;
+    // Copy before sorting: this is the caller's array, and the row read from
+    // the database is reused for the run itself.
+    const wanted = (schedule.weekDays && schedule.weekDays.length) ? schedule.weekDays : [1];
+    const targetDays = [...wanted].sort((a, b) => a - b);
+
+    // Q20: d starts at 0, so today is a candidate. It used to start at 1, which
+    // meant a Tuesday schedule armed on Tuesday morning waited a full week
+    // rather than firing that afternoon — the one case a user is most likely to
+    // be watching for, because they just set it up. The `candidate <= now`
+    // guard is what makes starting at 0 safe: today is offered only while its
+    // time is still ahead. d runs to 7 so that a today-only schedule whose time
+    // has already passed still finds the same weekday next week.
+    for (let d = 0; d <= 7; d++) {
+      const candidate = new Date(Date.UTC(Y, M, D + d, hour, minute, 0, 0));
+      if (candidate <= now) continue;
+      if (targetDays.includes(candidate.getUTCDay())) return candidate;
     }
-    // Fallback (shouldn't happen with valid config)
-    return new Date(now.getFullYear(), now.getMonth(), now.getDate() + 7, schedule.hour, 0, 0, 0);
+    // Unreachable for a valid weekDays array — every weekday appears in an
+    // 8-day window. Kept so a corrupt row cannot return undefined.
+    return new Date(Date.UTC(Y, M, D + 7, hour, minute, 0, 0));
   }
 
   if (schedule.frequency === 'monthly') {
-    const day  = Math.min(schedule.monthDay || 1, 28); // cap at 28 — always valid in any month
-    let next   = new Date(now.getFullYear(), now.getMonth(), day, schedule.hour, 0, 0, 0);
-    if (next <= now) next = new Date(now.getFullYear(), now.getMonth() + 1, day, schedule.hour, 0, 0, 0);
+    const day = Math.min(clampInt(schedule.monthDay, 1, 28, 1), 28); // always valid in any month
+    let next  = new Date(Date.UTC(Y, M, day, hour, minute, 0, 0));
+    if (next <= now) next = new Date(Date.UTC(Y, M + 1, day, hour, minute, 0, 0));
     return next;
   }
 
   // Unknown frequency — default to 24 h from now
   return new Date(now.getTime() + 24 * 3_600_000);
+}
+
+/** Coerce a stored field to an integer in range, falling back to `dflt`. */
+function clampInt(value, min, max, dflt) {
+  const n = Number(value);
+  if (!Number.isInteger(n) || n < min || n > max) return dflt;
+  return n;
 }
 
 // ── One scheduled run ─────────────────────────────────────────────────────────

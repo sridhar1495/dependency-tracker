@@ -16,8 +16,11 @@ const validate = require('./validate');
 const VALID_FREQUENCIES = new Set(['daily', 'weekly', 'monthly']);
 const VALID_RISK_TYPES  = new Set(['security', 'license', 'operational']);
 
+// hour/minute/week_days/month_day are UTC. The picker in the dashboard shows
+// browser-local time and converts on the way in and out, so the value stored
+// here means the same instant wherever the container and the user happen to be.
 const SCHEDULE_COLUMNS = `
-  user_id AS "userId", enabled, frequency, hour,
+  user_id AS "userId", enabled, frequency, hour, minute,
   week_days AS "weekDays", month_day AS "monthDay", risk_types AS "riskTypes",
   next_run_at AS "nextRunAt", running_since AS "runningSince",
   last_run_at AS "lastRunAt", last_run_status AS "lastRunStatus",
@@ -59,6 +62,13 @@ async function save(userId, input) {
         { code: 'VALIDATION_FAILED', field: 'hour' });
     }
   }
+  if (input.minute !== undefined) {
+    const m = Number(input.minute);
+    if (!Number.isInteger(m) || m < 0 || m > 59) {
+      throw Object.assign(new Error('Minute must be between 0 and 59.'),
+        { code: 'VALIDATION_FAILED', field: 'minute' });
+    }
+  }
   if (input.monthDay !== undefined) {
     const d = Number(input.monthDay);
     if (!Number.isInteger(d) || d < 1 || d > 28) {
@@ -97,7 +107,8 @@ async function save(userId, input) {
         risk_types = COALESCE($7::text[], risk_types),
         -- $8 distinguishes "not supplied" from "cleared": undefined leaves the
         -- stored name alone, an empty field clears it back to auto-generated.
-        report_name = CASE WHEN $9 THEN $8 ELSE report_name END
+        report_name = CASE WHEN $9 THEN $8 ELSE report_name END,
+        minute     = COALESCE($10, minute)
       WHERE user_id = $1`,
     [userId,
      input.enabled === undefined ? null : Boolean(input.enabled),
@@ -107,7 +118,8 @@ async function save(userId, input) {
      input.monthDay === undefined ? null : Number(input.monthDay),
      riskTypes,
      reportName ?? null,
-     input.reportName !== undefined]
+     input.reportName !== undefined,
+     input.minute === undefined ? null : Number(input.minute)]
   );
   return get(userId);
 }

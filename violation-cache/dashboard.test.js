@@ -2119,3 +2119,253 @@ describe('nginx routes every backend path to the service', () => {
     assert.doesNotMatch(brandBlock[0], /no-store/);
   });
 });
+
+// ── Schedule timezone conversion ─────────────────────────────────────────────
+// The backend stores the schedule as a UTC instant; the picker in index.html
+// shows the browser's wall clock. These converters are the only thing standing
+// between the two, and getting them wrong moves somebody's report by hours or
+// by a day without anything visibly breaking.
+//
+// The functions are EXTRACTED from index.html rather than copied here. The rest
+// of this file predates that trick and keeps verbatim copies (see the header),
+// which can silently drift from the page they claim to test; a converter whose
+// test copy has drifted is worse than no test at all, because it reports green
+// on code nobody runs.
+
+/** Pull one top-level `function name(...) {...}` out of a source string. */
+function extractFunction(src, name) {
+  const start = src.indexOf(`function ${name}(`);
+  assert.notEqual(start, -1, `index.html no longer defines ${name}()`);
+  let i = src.indexOf('{', start);
+  let depth = 0;
+  for (; i < src.length; i++) {
+    if (src[i] === '{') depth++;
+    else if (src[i] === '}' && --depth === 0) return src.slice(start, i + 1);
+  }
+  throw new Error(`unbalanced braces while extracting ${name}()`);
+}
+
+const SCHED_FN_NAMES = ['schedInt', 'schedDayShift', 'schedClampDay', 'schedUtcToLocal', 'schedLocalToUtc'];
+const sched = new Function(
+  SCHED_FN_NAMES.map(n => extractFunction(INDEX_HTML, n)).join('\n')
+  + `\nreturn { ${SCHED_FN_NAMES.join(', ')} };`
+)();
+
+/** Run `fn` with the process pretending to be in `tz`. */
+function inZone(tz, fn) {
+  const original = process.env.TZ;
+  process.env.TZ = tz;
+  try { return fn(); }
+  finally { if (original === undefined) delete process.env.TZ; else process.env.TZ = original; }
+}
+
+// A deliberate spread: whole-hour either side of UTC, both half-hour offsets
+// that an hour-only field cannot express, the 45-minute one, and the extremes.
+const ZONES = [
+  'UTC', 'Europe/London', 'Europe/Berlin', 'America/New_York', 'America/Los_Angeles',
+  'Asia/Kolkata', 'Asia/Kathmandu', 'Australia/Adelaide', 'America/St_Johns',
+  'Pacific/Kiritimati', 'Etc/GMT+12',
+];
+
+describe('schedule timezone conversion (index.html)', () => {
+  test('a half-hour zone keeps the minutes it needs', () => {
+    // 09:00 in India is 03:30 UTC. With an hour-only field this was 03:00,
+    // delivering the report at 08:30 local — the bug the minute column fixes.
+    const utc = inZone('Asia/Kolkata', () => sched.schedLocalToUtc({ hour: 9, minute: 0 }));
+    assert.equal(utc.hour, 3);
+    assert.equal(utc.minute, 30);
+  });
+
+  test('a 45-minute zone keeps the minutes it needs', () => {
+    const utc = inZone('Asia/Kathmandu', () => sched.schedLocalToUtc({ hour: 9, minute: 0 }));
+    assert.equal(utc.hour, 3);
+    assert.equal(utc.minute, 15);
+  });
+
+  test('an offset that crosses midnight moves the weekday too', () => {
+    // 06:00 UTC on Monday is Sunday evening in Los Angeles, so a schedule
+    // stored for UTC Monday must show Sunday in that browser.
+    const local = inZone('America/Los_Angeles',
+      () => sched.schedUtcToLocal({ hour: 6, minute: 0, weekDays: [1], monthDay: 10 }));
+    assert.deepEqual(local.weekDays, [0], 'Monday UTC is Sunday in Los Angeles at 06:00');
+    assert.equal(local.monthDay, 9, 'the month day steps back with it');
+  });
+
+  test('an offset that crosses midnight forwards moves the weekday forwards', () => {
+    // Kiritimati is UTC+14: 23:00 UTC on Saturday is Sunday afternoon there.
+    const local = inZone('Pacific/Kiritimati',
+      () => sched.schedUtcToLocal({ hour: 23, minute: 0, weekDays: [6], monthDay: 10 }));
+    assert.deepEqual(local.weekDays, [0]);
+    assert.equal(local.monthDay, 11);
+  });
+
+  test('local → UTC → local is the identity for the clock and the weekdays', () => {
+    for (const tz of ZONES) {
+      inZone(tz, () => {
+        for (const hour of [0, 3, 9, 12, 17, 23]) {
+          for (const minute of [0, 15, 30, 45]) {
+            const local = { hour, minute, weekDays: [0, 3, 6], monthDay: 14 };
+            const back  = sched.schedUtcToLocal(sched.schedLocalToUtc(local));
+            assert.equal(back.hour, hour,   `${tz} ${hour}:${minute} hour`);
+            assert.equal(back.minute, minute, `${tz} ${hour}:${minute} minute`);
+            assert.deepEqual(back.weekDays, [0, 3, 6], `${tz} ${hour}:${minute} weekdays`);
+          }
+        }
+      });
+    }
+  });
+
+  test('UTC → local → UTC is the identity too', () => {
+    for (const tz of ZONES) {
+      inZone(tz, () => {
+        for (const hour of [0, 6, 11, 18, 23]) {
+          for (const minute of [0, 30]) {
+            const stored = { hour, minute, weekDays: [2], monthDay: 14 };
+            const back   = sched.schedLocalToUtc(sched.schedUtcToLocal(stored));
+            assert.equal(back.hour, hour,   `${tz} ${hour}:${minute}`);
+            assert.equal(back.minute, minute, `${tz} ${hour}:${minute}`);
+            assert.deepEqual(back.weekDays, [2], `${tz} ${hour}:${minute}`);
+          }
+        }
+      });
+    }
+  });
+
+  test('in UTC nothing moves at all', () => {
+    inZone('UTC', () => {
+      const local = sched.schedUtcToLocal({ hour: 17, minute: 45, weekDays: [1, 4], monthDay: 20 });
+      assert.deepEqual(local, { hour: 17, minute: 45, weekDays: [1, 4], monthDay: 20 });
+    });
+  });
+
+  test('the month day is never pushed outside 1–28', () => {
+    // Clamping is lossy at the boundary, which is exactly why the picker
+    // re-reads what was stored after a save instead of showing what was typed.
+    for (const tz of ZONES) {
+      inZone(tz, () => {
+        for (const monthDay of [1, 2, 27, 28]) {
+          for (const hour of [0, 12, 23]) {
+            for (const fn of ['schedLocalToUtc', 'schedUtcToLocal']) {
+              const d = sched[fn]({ hour, minute: 30, weekDays: [], monthDay }).monthDay;
+              assert.ok(d >= 1 && d <= 28, `${tz} ${fn} ${monthDay}@${hour} produced ${d}`);
+            }
+          }
+        }
+      });
+    }
+  });
+
+  test('weekday shifts stay inside 0–6 and never collide', () => {
+    for (const tz of ZONES) {
+      inZone(tz, () => {
+        for (const hour of [0, 12, 23]) {
+          const out = sched.schedLocalToUtc({ hour, minute: 0, weekDays: [0, 1, 2, 3, 4, 5, 6] }).weekDays;
+          assert.deepEqual(out, [0, 1, 2, 3, 4, 5, 6], `${tz} @${hour}`);
+        }
+      });
+    }
+  });
+
+  test('the day shift folds the two wrap-around differences', () => {
+    // A local and a UTC calendar differ by at most one day, so the raw weekday
+    // difference is one of these five values and nothing else.
+    assert.equal(sched.schedDayShift(0), 0);
+    assert.equal(sched.schedDayShift(1), 1);
+    assert.equal(sched.schedDayShift(-1), -1);
+    assert.equal(sched.schedDayShift(6), -1,  'Saturday local vs Sunday UTC is a step back');
+    assert.equal(sched.schedDayShift(-6), 1,  'Sunday local vs Saturday UTC is a step forward');
+  });
+
+  test('missing or out-of-range fields fall back instead of producing NaN', () => {
+    for (const bad of [{}, { hour: 99, minute: -1 }, { hour: null, minute: 'x' }, { hour: '9', minute: '30' }]) {
+      const utc = sched.schedLocalToUtc(bad);
+      assert.ok(Number.isInteger(utc.hour) && utc.hour >= 0 && utc.hour <= 23, JSON.stringify(bad));
+      assert.ok(Number.isInteger(utc.minute) && utc.minute >= 0 && utc.minute <= 59, JSON.stringify(bad));
+    }
+  });
+});
+
+describe('schedule picker markup (index.html)', () => {
+  test('the picker takes a time, not a bare hour', () => {
+    assert.match(INDEX_HTML, /id="cfgSchedTime"[^>]*type="time"/,
+      'the hour-only number input cannot express a half-hour offset');
+    assert.doesNotMatch(INDEX_HTML, /cfgSchedHour/,
+      'the old hour-only input must be gone, not merely unused');
+  });
+
+  test('every control that feeds the UTC hint refreshes it', () => {
+    // A weekday box or the month day left on markConfigDirty() would leave the
+    // "Stored as …" line describing the previous selection.
+    for (const re of [
+      /id="cfgSchedTime"[^>]*oninput="onSchedTimeChange\(\)"/,
+      /id="cfgSchedMonthDay"[^>]*oninput="onSchedTimeChange\(\)"/,
+    ]) assert.match(INDEX_HTML, re, String(re));
+    const weekRow = /<div class="cfg-weekdays">[\s\S]*?<\/div>/.exec(INDEX_HTML);
+    assert.ok(weekRow, 'weekday row not found');
+    assert.equal((weekRow[0].match(/onchange="onSchedTimeChange\(\)"/g) || []).length, 7);
+  });
+
+  test('the handler is exported from the IIFE', () => {
+    // CLAUDE.md §8.2 — an inline onclick/onchange calls window.*, so a handler
+    // left off the export block fails silently in the browser.
+    assert.match(INDEX_HTML, /window\.onSchedTimeChange\s*=\s*onSchedTimeChange;/);
+  });
+
+  test('the resolved UTC time is shown to the user', () => {
+    assert.match(INDEX_HTML, /id="cfgSchedUtcHint"/);
+    assert.match(INDEX_HTML, /Stored as \$\{clock\}/);
+  });
+});
+
+// ── The picker and the scheduler, end to end ─────────────────────────────────
+// The converters live in index.html and calcNextRun lives in lib/scheduler.js,
+// and nothing else checks that the pair agree. They are the two halves of one
+// contract: whatever the user picks on their own clock is the clock time the
+// report actually goes out at. A sign error or a dropped minute in either half
+// is invisible until somebody's report arrives at the wrong time.
+
+const { calcNextRun: schedulerCalcNextRun } = require('./lib/scheduler');
+
+describe('what the picker stores is what the scheduler fires', () => {
+  const WED_0400_UTC = new Date('2026-03-11T04:00:00Z');   // getUTCDay() === 3
+
+  for (const tz of ['UTC', 'Asia/Kolkata', 'Asia/Kathmandu', 'America/Los_Angeles', 'Pacific/Kiritimati']) {
+    test(`daily at 09:00 local fires at 09:00 local in ${tz}`, () => {
+      inZone(tz, () => {
+        const stored = sched.schedLocalToUtc({ hour: 9, minute: 0, weekDays: [], monthDay: 1 });
+        const fire   = schedulerCalcNextRun({ frequency: 'daily', ...stored }, WED_0400_UTC);
+        assert.equal(fire.getHours(), 9, `${tz}: fired at ${fire.toString()}`);
+        assert.equal(fire.getMinutes(), 0, `${tz}: fired at ${fire.toString()}`);
+      });
+    });
+
+    test(`weekly on the local weekday the user ticked, in ${tz}`, () => {
+      inZone(tz, () => {
+        // Tick every weekday and confirm each one comes back as itself: the
+        // shift has to be applied in the right direction, and a sign error
+        // shows up as an off-by-one day rather than as an error.
+        for (let localDay = 0; localDay <= 6; localDay++) {
+          const stored = sched.schedLocalToUtc({ hour: 17, minute: 30, weekDays: [localDay], monthDay: 1 });
+          const fire   = schedulerCalcNextRun({ frequency: 'weekly', ...stored }, WED_0400_UTC);
+          assert.equal(fire.getDay(), localDay, `${tz}: day ${localDay} fired on ${fire.toString()}`);
+          assert.equal(fire.getHours(), 17, `${tz}: day ${localDay} fired at ${fire.toString()}`);
+          assert.equal(fire.getMinutes(), 30, `${tz}: day ${localDay} fired at ${fire.toString()}`);
+        }
+      });
+    });
+  }
+
+  test('a weekly schedule set this morning for this afternoon fires today', () => {
+    // The complaint that started this: item 1, checked through the real path a
+    // user takes rather than against calcNextRun alone.
+    inZone('Asia/Kolkata', () => {
+      // 04:00 UTC is 09:30 Wednesday in India; the user picks 17:00 today.
+      const localToday = new Date(WED_0400_UTC.getTime()).getDay();
+      const stored = sched.schedLocalToUtc({ hour: 17, minute: 0, weekDays: [localToday], monthDay: 1 });
+      const fire   = schedulerCalcNextRun({ frequency: 'weekly', ...stored }, WED_0400_UTC);
+      assert.ok(fire.getTime() - WED_0400_UTC.getTime() < 24 * 3_600_000,
+        `expected today, got ${fire.toString()}`);
+      assert.equal(fire.getHours(), 17);
+    });
+  });
+});

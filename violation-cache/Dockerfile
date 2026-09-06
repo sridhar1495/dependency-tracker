@@ -2,6 +2,12 @@
 # Node 22 LTS (replaces EOL Node 18)
 FROM node:22-alpine
 WORKDIR /app
+# Pin the container clock to UTC. calcNextRun no longer depends on it — it reads
+# and writes UTC instants explicitly — but log lines and the failure-alert email
+# call toLocaleString(), and a base image that ever shipped with a TZ set would
+# silently reword them. Timezones exist in exactly one place in this product:
+# the browser, which converts the schedule picker on the way in and out.
+ENV TZ=UTC
 # Install production dependencies first (layer cached unless the manifests change).
 # `npm ci` against the committed lock file, not `npm install`: the image then
 # contains exactly the dependency tree that was tested and audited, rather than

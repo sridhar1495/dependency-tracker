@@ -35,7 +35,9 @@ function scheduleForClient(row, projects) {
   return {
     enabled:             row.enabled,
     frequency:           row.frequency,
+    // UTC, both ways. The dashboard converts to and from the browser's zone.
     hour:                row.hour,
+    minute:              row.minute ?? 0,
     weekDays:            row.weekDays || [],
     monthDay:            row.monthDay,
     riskTypes:           row.riskTypes || [],

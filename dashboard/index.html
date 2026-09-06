@@ -1212,23 +1212,24 @@
                  placeholder="Leave blank to name it automatically" oninput="markConfigDirty()" />
           <div class="field-error" id="cfgSchedNameErr" style="margin-bottom:4px"></div>
 
-          <label class="cfg-label">Send at hour <span style="font-size:10px">(0–23, server local time)</span></label>
-          <input id="cfgSchedHour" type="number" min="0" max="23" class="cfg-input" style="width:80px;margin-bottom:8px" value="9" oninput="markConfigDirty()" />
+          <label class="cfg-label">Send at <span style="font-size:10px" id="cfgSchedZoneLabel">(your local time)</span></label>
+          <input id="cfgSchedTime" type="time" class="cfg-input" style="width:120px;margin-bottom:4px" value="09:00" oninput="onSchedTimeChange()" />
+          <div id="cfgSchedUtcHint" style="font-size:11px;color:var(--text-muted);margin-bottom:8px"></div>
           <div id="cfgSchedWeekRow" style="display:none;margin-bottom:8px">
             <label class="cfg-label" style="margin-top:0">Day(s) of week</label>
             <div class="cfg-weekdays">
-              <label class="cfg-weekday"><input type="checkbox" value="0" onchange="markConfigDirty()"><span>Su</span></label>
-              <label class="cfg-weekday"><input type="checkbox" value="1" onchange="markConfigDirty()"><span>Mo</span></label>
-              <label class="cfg-weekday"><input type="checkbox" value="2" onchange="markConfigDirty()"><span>Tu</span></label>
-              <label class="cfg-weekday"><input type="checkbox" value="3" onchange="markConfigDirty()"><span>We</span></label>
-              <label class="cfg-weekday"><input type="checkbox" value="4" onchange="markConfigDirty()"><span>Th</span></label>
-              <label class="cfg-weekday"><input type="checkbox" value="5" onchange="markConfigDirty()"><span>Fr</span></label>
-              <label class="cfg-weekday"><input type="checkbox" value="6" onchange="markConfigDirty()"><span>Sa</span></label>
+              <label class="cfg-weekday"><input type="checkbox" value="0" onchange="onSchedTimeChange()"><span>Su</span></label>
+              <label class="cfg-weekday"><input type="checkbox" value="1" onchange="onSchedTimeChange()"><span>Mo</span></label>
+              <label class="cfg-weekday"><input type="checkbox" value="2" onchange="onSchedTimeChange()"><span>Tu</span></label>
+              <label class="cfg-weekday"><input type="checkbox" value="3" onchange="onSchedTimeChange()"><span>We</span></label>
+              <label class="cfg-weekday"><input type="checkbox" value="4" onchange="onSchedTimeChange()"><span>Th</span></label>
+              <label class="cfg-weekday"><input type="checkbox" value="5" onchange="onSchedTimeChange()"><span>Fr</span></label>
+              <label class="cfg-weekday"><input type="checkbox" value="6" onchange="onSchedTimeChange()"><span>Sa</span></label>
             </div>
           </div>
           <div id="cfgSchedMonthRow" style="display:none;margin-bottom:8px">
             <label class="cfg-label" style="margin-top:0">Day of month <span style="font-size:10px">(1–28)</span></label>
-            <input id="cfgSchedMonthDay" type="number" min="1" max="28" class="cfg-input" style="width:80px" value="1" oninput="markConfigDirty()" />
+            <input id="cfgSchedMonthDay" type="number" min="1" max="28" class="cfg-input" style="width:80px" value="1" oninput="onSchedTimeChange()" />
           </div>
           <label class="cfg-label">Risk categories to include</label>
           <div style="display:flex;gap:14px;margin-bottom:10px;margin-top:4px">
@@ -1817,16 +1818,20 @@ async function loadConfigFromServer() {
     document.getElementById('cfgSchedEnabled').checked    = schedEnabled;
     document.getElementById('cfgSchedBody').style.display = schedEnabled ? '' : 'none';
     document.getElementById('cfgSchedFreq').value         = sched.frequency || 'daily';
-    document.getElementById('cfgSchedHour').value         = sched.hour !== undefined ? sched.hour : 9;
-    document.getElementById('cfgSchedMonthDay').value     = sched.monthDay || 1;
+    // The stored fields are UTC; the picker is the browser's wall clock.
+    const schedLocal = schedUtcToLocal(sched);
+    document.getElementById('cfgSchedTime').value =
+      `${String(schedLocal.hour).padStart(2, '0')}:${String(schedLocal.minute).padStart(2, '0')}`;
+    document.getElementById('cfgSchedMonthDay').value     = schedLocal.monthDay;
     document.getElementById('cfgSchedName').value         = sched.reportName || '';
     const schedNameErr = document.getElementById('cfgSchedNameErr');
     if (schedNameErr) schedNameErr.textContent = '';
-    onSchedFreqChange();
-    const wds = sched.weekDays || [];
+    const wds = schedLocal.weekDays;
     document.querySelectorAll('.cfg-weekday input').forEach(cb => {
       cb.checked = wds.includes(parseInt(cb.value, 10));
     });
+    // After the weekday boxes, not before: the hint reads them.
+    onSchedFreqChange();
     const rt = sched.riskTypes || [];
     document.getElementById('cfgSchedSecurity').checked    = rt.includes('security');
     document.getElementById('cfgSchedLicense').checked     = rt.includes('license');
@@ -1906,7 +1911,126 @@ function onSchedFreqChange() {
   const freq = document.getElementById('cfgSchedFreq').value;
   document.getElementById('cfgSchedWeekRow').style.display  = freq === 'weekly'  ? '' : 'none';
   document.getElementById('cfgSchedMonthRow').style.display = freq === 'monthly' ? '' : 'none';
+  renderSchedUtcHint();
   markConfigDirty();
+}
+
+/** Any edit to the time, the weekdays or the month day. */
+function onSchedTimeChange() {
+  renderSchedUtcHint();
+  markConfigDirty();
+}
+
+// ── Schedule timezone conversion ──────────────────────────────────────────────
+// The backend stores the schedule as a UTC instant (CLAUDE.md §6.8) and the
+// picker shows the browser's wall clock, so every load and save crosses a
+// timezone. Converting the hour alone would be wrong twice over: an offset can
+// carry a half hour — India is UTC+05:30, Nepal +05:45 — and it can move the
+// *day*, so 06:00 UTC on Monday is Sunday evening in Los Angeles. Both
+// directions therefore go through a real Date rather than arithmetic on the
+// hour, and the weekday set is shifted with it.
+//
+// The reference instant is today, because an offset belongs to an instant and
+// not to a zone. A schedule stored as a fixed UTC instant does shift by an hour
+// in local terms when daylight saving starts — that is inherent in storing UTC,
+// and it is why the hint line under the picker always states what is really
+// stored rather than leaving the user to assume.
+
+/** Coerce a form or stored field to an integer in range, else `dflt`. */
+function schedInt(value, min, max, dflt) {
+  const n = Number(value);
+  if (!Number.isInteger(n) || n < min || n > max) return dflt;
+  return n;
+}
+
+// A local and a UTC calendar can differ by at most one day, so the raw weekday
+// difference is one of -6, -1, 0, +1, +6. Fold the two wrap-around values back
+// onto the -1/+1 they actually mean.
+function schedDayShift(diff) { return ((diff + 8) % 7) - 1; }
+
+/** Month days are capped at 28 so the date is valid in February too. */
+function schedClampDay(n) { return Math.min(28, Math.max(1, n)); }
+
+/** Stored UTC fields → what the picker should show in the browser's zone. */
+function schedUtcToLocal(s) {
+  const now = new Date();
+  const ref = new Date(Date.UTC(
+    now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(),
+    schedInt(s.hour, 0, 23, 9), schedInt(s.minute, 0, 59, 0)
+  ));
+  const shift = schedDayShift(ref.getDay() - ref.getUTCDay());
+  return {
+    hour:     ref.getHours(),
+    minute:   ref.getMinutes(),
+    weekDays: (s.weekDays || []).map(d => (d + shift + 7) % 7).sort((a, b) => a - b),
+    monthDay: schedClampDay(schedInt(s.monthDay, 1, 28, 1) + shift),
+  };
+}
+
+/** What the picker shows → the UTC fields to store. */
+function schedLocalToUtc(l) {
+  const now = new Date();
+  const ref = new Date(
+    now.getFullYear(), now.getMonth(), now.getDate(),
+    schedInt(l.hour, 0, 23, 9), schedInt(l.minute, 0, 59, 0)
+  );
+  const shift = schedDayShift(ref.getUTCDay() - ref.getDay());
+  return {
+    hour:     ref.getUTCHours(),
+    minute:   ref.getUTCMinutes(),
+    weekDays: (l.weekDays || []).map(d => (d + shift + 7) % 7).sort((a, b) => a - b),
+    monthDay: schedClampDay(schedInt(l.monthDay, 1, 28, 1) + shift),
+  };
+}
+
+const SCHED_DAY_NAMES = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+
+/** Read the picker's local values, whatever the frequency. */
+function readSchedLocalForm() {
+  const [h, m] = String(document.getElementById('cfgSchedTime').value || '').split(':');
+  const weekDays = [];
+  document.querySelectorAll('.cfg-weekday input:checked').forEach(cb => weekDays.push(parseInt(cb.value, 10)));
+  return {
+    hour:     schedInt(h, 0, 23, 9),
+    minute:   schedInt(m, 0, 59, 0),
+    weekDays,
+    monthDay: schedInt(document.getElementById('cfgSchedMonthDay').value, 1, 28, 1),
+  };
+}
+
+/**
+ * State, under the picker, exactly what will be stored. The conversion can move
+ * the day as well as the clock, and a month day can be clamped at the 1/28
+ * boundary, so leaving the user to infer it would be leaving them to guess.
+ */
+function renderSchedUtcHint() {
+  const hintEl = document.getElementById('cfgSchedUtcHint');
+  const zoneEl = document.getElementById('cfgSchedZoneLabel');
+  if (!hintEl) return;
+
+  let zone = '';
+  try { zone = Intl.DateTimeFormat().resolvedOptions().timeZone || ''; } catch (e) { zone = ''; }
+  if (zoneEl) zoneEl.textContent = zone ? `(${zone})` : '(your local time)';
+
+  const freq  = document.getElementById('cfgSchedFreq').value;
+  const local = readSchedLocalForm();
+  const utc   = schedLocalToUtc(local);
+  const clock = `${String(utc.hour).padStart(2, '0')}:${String(utc.minute).padStart(2, '0')} UTC`;
+
+  let text = `Stored as ${clock}`;
+  if (freq === 'weekly') {
+    text += local.weekDays.length
+      ? ` on ${utc.weekDays.map(d => SCHED_DAY_NAMES[d]).join(', ')}`
+      : '';
+  } else if (freq === 'monthly') {
+    text += ` on day ${utc.monthDay} of the month`;
+    // The clamp is only visible here. Say so rather than silently moving it.
+    const wanted = schedInt(local.monthDay, 1, 28, 1);
+    if (schedUtcToLocal({ ...utc, weekDays: [] }).monthDay !== wanted) {
+      text += ' — the day was adjusted to stay within 1–28';
+    }
+  }
+  hintEl.textContent = text;
 }
 
 async function saveConfigPanel() {
@@ -1950,12 +2074,14 @@ async function saveConfigPanel() {
 
     let schedConfig;
     if (schedEnabled) {
-      const freq       = document.getElementById('cfgSchedFreq').value;
-      const hourVal    = parseInt(document.getElementById('cfgSchedHour').value, 10);
+      const freq        = document.getElementById('cfgSchedFreq').value;
+      const timeVal     = String(document.getElementById('cfgSchedTime').value || '');
       const monthDayVal = parseInt(document.getElementById('cfgSchedMonthDay').value, 10);
 
-      if (isNaN(hourVal) || hourVal < 0 || hourVal > 23) {
-        showToast('Schedule hour must be between 0 and 23.', 'error');
+      // An empty <input type="time"> reads as '', which would otherwise be
+      // silently defaulted to 09:00 by the converter.
+      if (!/^\d{2}:\d{2}$/.test(timeVal)) {
+        showToast('Please choose a time for the schedule.', 'error');
         return;
       }
       if (freq === 'monthly' && (isNaN(monthDayVal) || monthDayVal < 1 || monthDayVal > 28)) {
@@ -1963,12 +2089,16 @@ async function saveConfigPanel() {
         return;
       }
 
-      const weekDays = [];
-      document.querySelectorAll('.cfg-weekday input:checked').forEach(cb => weekDays.push(parseInt(cb.value, 10)));
-      if (freq === 'weekly' && weekDays.length === 0) {
+      const localWeekDays = [];
+      document.querySelectorAll('.cfg-weekday input:checked').forEach(cb => localWeekDays.push(parseInt(cb.value, 10)));
+      if (freq === 'weekly' && localWeekDays.length === 0) {
         showToast('Please select at least one day of the week.', 'error');
         return;
       }
+
+      // The picker is browser-local; the backend stores UTC instants.
+      const utc = schedLocalToUtc({ ...readSchedLocalForm(), weekDays: localWeekDays });
+      const { hour: hourVal, minute: minuteVal, weekDays } = utc;
 
       const riskTypes = [];
       if (document.getElementById('cfgSchedSecurity').checked)    riskTypes.push('security');
@@ -1992,8 +2122,9 @@ async function saveConfigPanel() {
         enabled:  true,
         frequency: freq,
         hour:      hourVal,
+        minute:    minuteVal,
         weekDays,
-        monthDay:  freq === 'monthly' ? monthDayVal : (existingSched.monthDay || 1),
+        monthDay:  freq === 'monthly' ? utc.monthDay : (existingSched.monthDay || 1),
         riskTypes,
         reportName: String(schedName).trim(),
       };
@@ -4407,6 +4538,7 @@ window.onMailToggle           = onMailToggle;
 window.updateSchedToggleState = updateSchedToggleState;
 window.onSchedToggle          = onSchedToggle;
 window.onSchedFreqChange      = onSchedFreqChange;
+window.onSchedTimeChange      = onSchedTimeChange;
 window.saveConfigPanel      = saveConfigPanel;
 window.cancelConfigPanel    = cancelConfigPanel;
 window.connectFromPanel     = connectFromPanel;
