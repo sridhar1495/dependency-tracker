@@ -310,6 +310,54 @@ everyone; remove it and the animated pair returns.
 Removing the background takes two clicks — the button asks for confirmation
 before it acts, because it changes what every user sees.
 
+### Administration endpoints
+
+Administrator only; every other principal gets **403**. The screen itself is
+`/admin.html`, which redirects an ordinary signed-in user back to the dashboard
+rather than showing them a page whose every request would fail.
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/admin/overview` | GET | Service-wide totals: accounts, sessions, reports, storage, caches, schedules |
+| `/admin/users` | GET | Every account with its counts and effective limits |
+| `/admin/users/:loginId` | GET | One account's detail |
+| `/admin/storage` | GET | Filesystem headroom and database size |
+| `/admin/settings` | GET | The service-wide defaults |
+| `/admin/settings` | PUT | Set the default report and/or schedule limits |
+| `/admin/users/:loginId/settings` | PUT | One account's limits; `null` returns either to the default |
+| `/admin/users/:loginId/password` | POST | Reset one account's password |
+| `/admin/branding` | GET/PUT | Read or set the application title; empty restores the default |
+| `/admin/branding/background` | POST/DELETE | Upload or remove the sign-in background |
+
+**Those six writes are the complete list**, and deliberately so: a test asserts
+exactly they are handled and that every other method/path combination is not, so
+adding a seventh means editing an allow-list in a diff somebody reads
+(CLAUDE.md §7.6).
+
+Reading is bounded too. No administration route returns anybody's
+DependencyTrack API key, SMTP password or report contents — presence is
+reported, values never are.
+
+**A password reset is the most privileged action in the service**, because the
+administrator chooses a value that authenticates as somebody else. Three things
+bound it: the account's sessions are revoked so the person is signed out rather
+than silently followed; `must_change_password` is set, and dispatch then refuses
+every route except `/auth/set-password`, `/auth/logout` and `/auth/me`, so the
+typed password can only ever be spent replacing itself; and the reset is written
+to `login_audit` in the same transaction as the password change.
+
+### Public branding endpoints
+
+| Endpoint | Method | Description |
+|----------|--------|-------------|
+| `/branding` | GET | The application title and whether a background is set |
+| `/branding/background` | GET | The background image bytes |
+
+These two are **unauthenticated by design** — the sign-in page reads them before
+a token exists, and branding on a sign-in screen is public by construction:
+anyone who can reach the page can already see it. They return the title and the
+image and nothing else: no account, no setting, no count.
+
 ---
 
 ## 6. Data Mapping Reference
@@ -503,54 +551,141 @@ the response's `detail` field for anyone diagnosing it further.
 internal relay that accepts mail without them — no authentication is attempted
 at all, rather than an empty username being offered.
 
-Automatic email delivery of Excel reports on a recurring schedule.
+Automatic email delivery of Excel reports on a recurring schedule. **An account
+may have several**, each with its own projects, timing, risk categories and
+recipients — a weekly operational report to one team and a monthly licence
+report to another.
 
-### Setup
+### Account-level mail settings
+
+These describe the one mail server your account signs in to, and are shared by
+every schedule you own:
 
 1. Open **⚙ Settings**
-2. Enable **Email & Scheduled Reports** (toggle at the top of that section)
-3. Fill in SMTP credentials:
+2. Enable **Email & Scheduled Reports**
+3. Fill in the SMTP connection:
    - **Host** — your SMTP server (e.g. `smtp.gmail.com`)
-   - **Port** — typically `587` (STARTTLS) or `465` (TLS)
-   - **TLS** — check for port 465 connections
-   - **Username / Password** — SMTP credentials (password is stored server-side, never returned to the browser)
-4. Fill in **From**, **To**, and optionally **CC**, **Subject**, **Body**
-5. Click **Send Test Email** to verify connectivity
-6. Configure the **Schedule**:
-   - Enable the schedule toggle
-   - Choose **Daily**, **Weekly**, or **Monthly**
-   - Set the **hour** (0–23, server local time)
-   - For weekly: select which day(s) of the week
-   - For monthly: choose a day (1–28)
-   - Select which **risk categories** to include in scheduled reports
-7. Click **Save**
-8. Back in the main dashboard, select the projects to schedule (checkbox or all visible), then click **📅 Schedule Reports** in the toolbar
+   - **Port** — typically `587` (STARTTLS) or `465` (implicit TLS)
+   - **TLS** — tick only for an implicit-TLS port, usually 465. On 587 leave it
+     clear; the connection still upgrades with STARTTLS if the server offers it
+   - **Username / Password** — optional. Leave both blank for an unauthenticated
+     relay. The password is stored server-side and never returned to a browser
+4. Fill in **From**, and the default **To**, **CC** and **Subject**
+5. Click **Send Test Email** to verify the connection
 
-### Schedule status
+### Creating a schedule
 
-While the config panel is open with the schedule section enabled, the **Last run** and **Next run** times are displayed:
+1. In the dashboard, select the projects you want (checkboxes, or leave none
+   selected to take everything currently visible)
+2. Click **📅 Schedule Reports** in the toolbar
+3. The settings panel opens on the schedule editor. Set:
+   - **Name** — how it appears in your list (optional)
+   - **Frequency** — Daily, Weekly or Monthly
+   - **Send at** — a time in **your own browser's timezone**. The line beneath
+     shows what will be stored, e.g. `Stored as 03:30 UTC`
+   - Days of the week, or a day of the month (1–28)
+   - **Risk categories** to include
+   - **Report file name** — optional; blank keeps the generated
+     `scheduled_report_<timestamp>.xlsx` form
+   - **Delivery** — To, CC and Subject for *this* schedule. Leave blank to use
+     the account defaults; the placeholder shows what blank will actually use
+4. **Save schedule**
 
-- **Last run** — timestamp and success/failure status of the most recent scheduled run
-- **Next run** — the upcoming fire time (computed from the server's local clock)
+### Timezones
+
+The time you pick is **your browser's local time**, converted on the way in and
+out. The container's clock is not an input: schedules are stored as UTC instants
+and the scheduler reads them with UTC accessors only.
+
+An offset can move the **day** as well as the clock — 06:00 UTC on Monday is
+Sunday evening in Los Angeles — so the weekday set is converted with it. Offsets
+are not always whole hours either (India is UTC+05:30, Nepal +05:45), which is
+why the stored time carries minutes.
+
+> A schedule is stored as a fixed UTC instant, so it shifts by an hour in local
+> terms when daylight saving starts or ends. Regions without DST are unaffected.
+> The hint under the picker always states what is really stored.
+
+### Managing schedules
+
+The Settings panel lists every schedule with its timing, project count,
+recipients, next run and last result. From the list:
+
+- **The toggle** pauses or resumes one immediately, with no save step. Pausing
+  keeps everything and simply stops it firing.
+- **Clicking a row** opens it for editing. One is open at a time; Back, Discard
+  and closing the panel all ask before dropping unsaved changes.
+- **Cancel All** removes every schedule you own.
+
+Inside a schedule:
+
+- **Send now** builds and sends immediately. It does **not** move the timetable
+  — a Monday 09:00 schedule stays Monday 09:00 — and it waits if another of your
+  reports is already running rather than starting a second one. It works on a
+  paused schedule, which is most of the point of pausing rather than cancelling.
+- **Runs** shows the totals and the last five runs, over the 90-day retention
+  window. An unqualified total would shrink every month as old rows are swept,
+  so the window is stated.
+- **Cancel this schedule** deletes it. Its project selection goes with it; its
+  run history does not, and reports it already delivered are untouched.
+
+### How many run at once
+
+One account's schedules **always run one at a time**, however many are due
+together — five schedules at 09:00 never become five crawls against your one
+DependencyTrack connection. Across accounts, `SCHEDULER_CONCURRENCY` (default 5)
+reports build simultaneously.
+
+### Quota
+
+The number of schedules per account is set by the administrator, globally or per
+account. Creating one past the limit is refused with `429 QUOTA_REACHED`; being
+over a lowered limit blocks new ones but never deletes existing ones.
 
 ### Failure notifications
 
-If a scheduled run fails (SMTP error, DT API unreachable, etc.), an error message is stored server-side. On your next page load, a toast notification shows the failure. Acknowledgement is sent automatically so the toast appears only once.
-
-### Cancelling a schedule
-
-Open **⚙ Settings**, scroll to the Schedule section, and click **Cancel Schedule**. This stops future scheduled runs but does not delete previously delivered reports.
+If a scheduled run fails (SMTP error, DependencyTrack unreachable), the message
+is stored server-side. On your next page load a toast shows it, once per
+schedule, and is acknowledged automatically. The failure also appears in that
+schedule's run history, and an alert email goes to the From address.
 
 ### Scheduled report endpoints
 
 | Endpoint | Method | Description |
 |----------|--------|-------------|
-| `GET /violation-cache/config` | GET | Returns sanitised config (SMTP password masked) |
-| `POST /violation-cache/config` | POST | Save `{ config: {...} }` or `{ apiKey: "..." }` |
-| `POST /violation-cache/config/test-email` | POST | Send a test email using current SMTP config |
-| `GET /violation-cache/schedule/status` | GET | Current schedule state including last/next run |
-| `DELETE /violation-cache/schedule` | DELETE | Cancel the active schedule |
-| `POST /violation-cache/schedule/ack-notification` | POST | Clear pending failure notification |
+| `/violation-cache/config` | GET | Sanitised config: connection, settings, mail (password masked) and the schedule list |
+| `/violation-cache/config` | POST | Save the connection, settings or mail. **Not** schedules — they have their own routes |
+| `/violation-cache/config/test-email` | POST | Send a test email with the current SMTP settings |
+| `/violation-cache/schedules` | GET | Every schedule you own, plus your quota |
+| `/violation-cache/schedules` | POST | Create one. `429 QUOTA_REACHED` past the limit |
+| `/violation-cache/schedules` | DELETE | Cancel all of them |
+| `/violation-cache/schedules/:id` | GET | One schedule, with its project UUIDs |
+| `/violation-cache/schedules/:id` | PUT | Edit one |
+| `/violation-cache/schedules/:id` | DELETE | Cancel one |
+| `/violation-cache/schedules/:id/arm` | POST | Arm or resume it; returns the next run time |
+| `/violation-cache/schedules/:id/disable` | POST | Pause it, keeping the definition |
+| `/violation-cache/schedules/:id/run-now` | POST | Send immediately. `409 ALREADY_RUNNING` if another of yours is building |
+| `/violation-cache/schedules/:id/runs` | GET | Run totals and the most recent few |
+| `/violation-cache/schedules/:id/ack-notification` | POST | Clear a displayed failure notice |
+
+A schedule that is not yours returns **404, never 403** — a 403 would confirm it
+exists.
+
+### Recipients: what is per account and what is per schedule
+
+| Account (`mail_settings`) | Schedule (`schedules`) |
+|---|---|
+| SMTP host, port, TLS | To |
+| SMTP username, password | CC |
+| From address | Subject |
+| Default To, CC, Subject | |
+
+Only the addressing is per schedule: duplicating the SMTP connection would mean
+re-entering a password to change a recipient. A schedule field left blank is
+`null`, meaning "use the account's" — which is **not** the same as an empty list,
+and the database refuses an empty To because that would be a schedule addressed
+to nobody. Overriding To also drops the account's CC, rather than copying people
+who have nothing to do with that report.
 
 ### Security notes
 

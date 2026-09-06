@@ -19,9 +19,15 @@
 //   GET    /admin/users/:loginId                — one account's detail
 //   GET    /admin/storage                       — disk and database usage
 //   GET    /admin/settings                      — service-wide settings
-//   PUT    /admin/settings                      — default report limit
-//   PUT    /admin/users/:loginId/settings       — one account's report limit
+//   PUT    /admin/settings                      — default report and schedule limits
+//   PUT    /admin/users/:loginId/settings       — one account's limits
 //   POST   /admin/users/:loginId/password       — reset one account's password (administrator)
+//   GET    /admin/branding                      — application title
+//   PUT    /admin/branding                      — set it; empty restores the default
+//   POST   /admin/branding/background           — upload the sign-in background
+//   DELETE /admin/branding/background           — restore the animated background
+//   GET    /branding  /branding/background      — public: the sign-in page reads
+//                                                 these before a token exists
 //   GET    /violation-cache/status              — build state for this user's connection
 //   GET    /violation-cache/data                — the cached map (gzipped)
 //   POST   /violation-cache/refresh             — trigger a background rebuild
@@ -43,6 +49,9 @@
 //   DELETE /violation-cache/schedules/:id       — cancel one
 //   POST   /violation-cache/schedules/:id/arm   — arm one
 //   POST   /violation-cache/schedules/:id/disable — stop one, keep it
+//   POST   /violation-cache/schedules/:id/run-now — send it now, without moving
+//                                                   its next scheduled run
+//   GET    /violation-cache/schedules/:id/runs  — run totals and the last few
 //   POST   /violation-cache/schedules/:id/ack-notification — clear a failure notice
 //
 // Environment variables are documented in lib/config.js and .env.example.
