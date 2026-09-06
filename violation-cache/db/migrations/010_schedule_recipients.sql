@@ -51,6 +51,22 @@ BEGIN
   END IF;
 END $$;
 
+-- ── The claim's guard needs an index of its own ──────────────────────────────
+-- P19: migration 009 gave claimOne a `NOT EXISTS (… WHERE r.user_id = s.user_id
+-- AND r.running_since IS NOT NULL)` clause, which is what keeps one account's
+-- schedules from all running at once. EXPLAIN showed it executing as a
+-- sequential scan of the whole schedules table on every claim — 1,503 rows
+-- scanned to find the nothing that was running. The poller claims up to five
+-- times a minute, so that is five full scans a minute, growing with every
+-- schedule anybody adds.
+--
+-- Partial, on the same reasoning as ix_sched_due: it indexes only the rows that
+-- are running right now, which is at most a handful at any instant, so the
+-- index stays tiny however many schedules exist. It also serves
+-- releaseStaleClaims(), which asks the same question at boot.
+CREATE INDEX IF NOT EXISTS ix_sched_running
+  ON schedules (user_id) WHERE running_since IS NOT NULL;
+
 -- ── Phantom schedules from registration ──────────────────────────────────────
 -- Until migration 009, `users.create` inserted a schedules row for every new
 -- account, because the schema required exactly one per user. Registration does
