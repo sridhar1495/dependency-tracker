@@ -2084,7 +2084,7 @@ describe('routes — the administrator has no per-user data', () => {
     ['reports list',    routeReports,  { method: 'GET',  path: '/violation-cache/report/list' }],
     ['cache status',    routeCache,    { method: 'GET',  path: '/violation-cache/status' }],
     ['config read',     routeConfig,   { method: 'GET',  path: '/violation-cache/config' }],
-    ['schedule status', routeSchedule, { method: 'GET',  path: '/violation-cache/schedule/status' }],
+    ['schedule list',   routeSchedule, { method: 'GET',  path: '/violation-cache/schedules' }],
   ];
 
   for (const [name, mod, req] of cases) {
@@ -2462,28 +2462,140 @@ describe('routes — the shared violation cache is keyed by connection', () => {
   });
 });
 
-describe('routes — arming a schedule', () => {
-  test('a disabled schedule cannot be armed', async () => {
-    const restore = stub(schedulesMod, { get: async () => ({ enabled: false, projectCount: 5 }) });
+describe('routes — schedules are a per-user collection', () => {
+  const SCHED_A = '44444444-4444-4444-8444-444444444444';
+  const reqWithBody = (obj) => Readable.from([JSON.stringify(obj)]);
+
+  const call = (method, path, { principal = asUser(USER_A), body = null } = {}) => {
+    const res = makeRes();
+    return routeSchedule.handle({
+      method, url: path, path, res, principal,
+      req: body === null ? Readable.from(['']) : reqWithBody(body),
+    }).then(handled => ({ res, handled }));
+  };
+
+  test('the list is scoped to the caller and carries their own quota', async () => {
+    const asked = [];
+    const restore = stub(schedulesMod, {
+      list: async (userId) => { asked.push(userId); return [{ id: SCHED_A, name: 'Weekly', enabled: true, hour: 9, projectCount: 2 }]; },
+    });
+    const restoreSettings = stub(userSettingsMod, { getMaxSchedules: async () => 5 });
     try {
-      const res = makeRes();
-      await routeSchedule.handle({
-        method: 'POST', url: '/violation-cache/schedule/arm', path: '/violation-cache/schedule/arm',
-        res, principal: asUser(USER_A),
-      });
+      const { res } = await call('GET', '/violation-cache/schedules', { principal: asUser(USER_B) });
+      assert.equal(res.statusCode, 200);
+      assert.deepEqual(asked, [USER_B], 'the list must be read for the caller, nobody else');
+      assert.equal(res.json.maxSchedules, 5);
+      assert.equal(res.json.schedules.length, 1);
+    } finally { restore(); restoreSettings(); }
+  });
+
+  test('creating past the quota is refused with 429, and nothing is written', async () => {
+    let created = 0;
+    const restore = stub(schedulesMod, {
+      countForUser: async () => 5,
+      create: async () => { created++; return { id: SCHED_A }; },
+    });
+    const restoreSettings = stub(userSettingsMod, { getMaxSchedules: async () => 5 });
+    try {
+      const { res } = await call('POST', '/violation-cache/schedules', { body: { name: 'One more' } });
+      assert.equal(res.statusCode, 429);
+      assert.equal(res.json.code, 'QUOTA_REACHED');
+      assert.equal(created, 0, 'the quota must be checked before the write, not after');
+    } finally { restore(); restoreSettings(); }
+  });
+
+  test('the quota is the caller\'s own, never a global count', async () => {
+    const counted = [];
+    const restore = stub(schedulesMod, {
+      countForUser: async (userId) => { counted.push(userId); return 0; },
+      create: async (userId, input) => ({ id: SCHED_A, userId, ...input }),
+      get: async () => ({ id: SCHED_A, hour: 9, projectCount: 0 }),
+      setProjects: async () => [],
+    });
+    const restoreSettings = stub(userSettingsMod, { getMaxSchedules: async () => 5 });
+    try {
+      const { res } = await call('POST', '/violation-cache/schedules',
+        { principal: asUser(USER_B), body: { name: 'Mine' } });
+      assert.equal(res.statusCode, 201);
+      assert.deepEqual(counted, [USER_B]);
+    } finally { restore(); restoreSettings(); }
+  });
+
+  test('a validation failure is 400 with the field named, not a 500', async () => {
+    const restore = stub(schedulesMod, {
+      countForUser: async () => 0,
+      create: async () => {
+        throw Object.assign(new Error('Hour must be between 0 and 23.'),
+          { code: 'VALIDATION_FAILED', field: 'hour' });
+      },
+    });
+    const restoreSettings = stub(userSettingsMod, { getMaxSchedules: async () => 5 });
+    try {
+      const { res } = await call('POST', '/violation-cache/schedules', { body: { hour: 99 } });
       assert.equal(res.statusCode, 400);
-      assert.equal(res.json.code, 'SCHEDULE_DISABLED');
+      assert.equal(res.json.code, 'VALIDATION_FAILED');
+      assert.equal(res.json.field, 'hour');
+    } finally { restore(); restoreSettings(); }
+  });
+
+  // CLAUDE.md §7.5 — another user's resource is NOT FOUND, never FORBIDDEN.
+  // A 403 would confirm the schedule exists, which is the leak the rule exists
+  // to prevent. Every id-addressed route has to answer the same way.
+  for (const [label, method, suffix] of [
+    ['read',    'GET',    ''],
+    ['edit',    'PUT',    ''],
+    ['cancel',  'DELETE', ''],
+    ['arm',     'POST',   '/arm'],
+    ['disable', 'POST',   '/disable'],
+    ['ack',     'POST',   '/ack-notification'],
+  ]) {
+    test(`${label} of somebody else's schedule is 404, not 403`, async () => {
+      const restore = stub(schedulesMod, {
+        get:      async () => null,
+        update:   async () => null,
+        remove:   async () => false,
+        disable:  async () => null,
+        arm:      async () => null,
+        ackNotification: async () => false,
+      });
+      try {
+        const { res } = await call(method, `/violation-cache/schedules/${SCHED_A}${suffix}`,
+          { body: { name: 'x' } });
+        assert.equal(res.statusCode, 404, `${label} leaked a different status`);
+        assert.equal(res.json.code, 'NOT_FOUND');
+        assert.doesNotMatch(res.body, /403|forbidden/i);
+      } finally { restore(); }
+    });
+  }
+
+  test('every write names the caller, so one user cannot address another', async () => {
+    const seen = [];
+    const restore = stub(schedulesMod, {
+      get:      async (u) => { seen.push(['get', u]); return { id: SCHED_A, hour: 9, projectCount: 1 }; },
+      update:   async (u) => { seen.push(['update', u]); return { id: SCHED_A, hour: 9 }; },
+      remove:   async (u) => { seen.push(['remove', u]); return true; },
+      disable:  async (u) => { seen.push(['disable', u]); return { id: SCHED_A, hour: 9 }; },
+      arm:      async (u) => { seen.push(['arm', u]); return { id: SCHED_A, hour: 9, nextRunAt: new Date() }; },
+      removeAll: async (u) => { seen.push(['removeAll', u]); return 2; },
+      setProjects: async () => [],
+    });
+    try {
+      await call('PUT',    `/violation-cache/schedules/${SCHED_A}`, { principal: asUser(USER_B), body: {} });
+      await call('DELETE', `/violation-cache/schedules/${SCHED_A}`, { principal: asUser(USER_B) });
+      await call('POST',   `/violation-cache/schedules/${SCHED_A}/arm`, { principal: asUser(USER_B) });
+      await call('POST',   `/violation-cache/schedules/${SCHED_A}/disable`, { principal: asUser(USER_B) });
+      await call('DELETE', '/violation-cache/schedules', { principal: asUser(USER_B) });
+      assert.ok(seen.length >= 5);
+      for (const [what, who] of seen) {
+        assert.equal(who, USER_B, `${what} was called for the wrong principal`);
+      }
     } finally { restore(); }
   });
 
-  test('an enabled schedule with no projects cannot be armed', async () => {
-    const restore = stub(schedulesMod, { get: async () => ({ enabled: true, projectCount: 0 }) });
+  test('a schedule with no projects cannot be armed', async () => {
+    const restore = stub(schedulesMod, { get: async () => ({ id: SCHED_A, projectCount: 0, hour: 9 }) });
     try {
-      const res = makeRes();
-      await routeSchedule.handle({
-        method: 'POST', url: '/violation-cache/schedule/arm', path: '/violation-cache/schedule/arm',
-        res, principal: asUser(USER_A),
-      });
+      const { res } = await call('POST', `/violation-cache/schedules/${SCHED_A}/arm`);
       assert.equal(res.statusCode, 400);
       assert.equal(res.json.code, 'NO_PROJECTS');
     } finally { restore(); }
@@ -2492,35 +2604,47 @@ describe('routes — arming a schedule', () => {
   test('arming writes a future next_run_at for the caller only', async () => {
     const armed = [];
     const restore = stub(schedulesMod, {
-      get: async () => ({ enabled: true, projectCount: 3, frequency: 'daily', hour: 9 }),
-      arm: async (userId, nextRunAt) => { armed.push([userId, nextRunAt]); return { nextRunAt }; },
+      get: async () => ({ id: SCHED_A, projectCount: 3, frequency: 'daily', hour: 9, minute: 0 }),
+      arm: async (userId, id, nextRunAt) => { armed.push([userId, id, nextRunAt]); return { id, hour: 9, nextRunAt }; },
     });
     try {
-      const res = makeRes();
-      await routeSchedule.handle({
-        method: 'POST', url: '/violation-cache/schedule/arm', path: '/violation-cache/schedule/arm',
-        res, principal: asUser(USER_B),
-      });
+      const { res } = await call('POST', `/violation-cache/schedules/${SCHED_A}/arm`,
+        { principal: asUser(USER_B) });
       assert.equal(res.statusCode, 200);
       assert.equal(armed.length, 1);
       assert.equal(armed[0][0], USER_B);
-      assert.ok(armed[0][1] > new Date(), 'the armed time must be in the future');
+      assert.equal(armed[0][1], SCHED_A);
+      assert.ok(armed[0][2] > new Date(), 'the armed time must be in the future');
+    } finally { restore(); }
+  });
+
+  test('cancel-all only ever reaches the caller\'s rows', async () => {
+    const asked = [];
+    const restore = stub(schedulesMod, {
+      removeAll: async (userId) => { asked.push(userId); return 3; },
+    });
+    try {
+      const { res } = await call('DELETE', '/violation-cache/schedules', { principal: asUser(USER_A) });
+      assert.equal(res.statusCode, 200);
+      assert.equal(res.json.removed, 3);
+      assert.deepEqual(asked, [USER_A]);
     } finally { restore(); }
   });
 
   test('isRunning comes from running_since, not from a process variable', async () => {
-    const since = new Date();
     const restore = stub(schedulesMod, {
-      get: async () => ({ enabled: true, projectCount: 1, runningSince: since }),
+      list: async () => [{ id: SCHED_A, hour: 9, runningSince: new Date(), projectCount: 1 }],
     });
+    const restoreSettings = stub(userSettingsMod, { getMaxSchedules: async () => 5 });
     try {
-      const res = makeRes();
-      await routeSchedule.handle({
-        method: 'GET', url: '/violation-cache/schedule/status', path: '/violation-cache/schedule/status',
-        res, principal: asUser(USER_A),
-      });
-      assert.equal(res.json.isRunning, true);
-    } finally { restore(); }
+      const { res } = await call('GET', '/violation-cache/schedules');
+      assert.equal(res.json.schedules[0].isRunning, true);
+    } finally { restore(); restoreSettings(); }
+  });
+
+  test('an unknown sub-path is not handled rather than mis-routed', async () => {
+    const { handled } = await call('POST', `/violation-cache/schedules/${SCHED_A}/detonate`);
+    assert.equal(handled, false);
   });
 });
 
@@ -3005,13 +3129,13 @@ describe('routes — the administration listing exposes no secrets', () => {
       id: USER_A, loginId: 'alice', email: 'a@x.com', firstName: 'Alice', lastName: 'Ant',
       createdAt: new Date('2026-01-01'), lastLoginAt: new Date('2026-02-01'),
       sessionActive: true, lastSeenAt: new Date('2026-02-01'),
-      reportCount: 3, storageBytes: '4096', dtConfigured: true, scheduleEnabled: false,
+      reportCount: 3, storageBytes: '4096', dtConfigured: true, scheduleCount: 0, schedulesActive: 0,
     },
     {
       id: USER_B, loginId: 'bob', email: null, firstName: 'Bob', lastName: 'Bee',
       createdAt: new Date('2026-01-02'), lastLoginAt: null,
       sessionActive: false, lastSeenAt: null,
-      reportCount: 0, storageBytes: '0', dtConfigured: false, scheduleEnabled: true,
+      reportCount: 0, storageBytes: '0', dtConfigured: false, scheduleCount: 2, schedulesActive: 1,
     },
   ]);
 
@@ -3051,7 +3175,9 @@ describe('routes — the administration listing exposes no secrets', () => {
       assert.equal(res.statusCode, 200);
       assert.deepEqual(res.json, {
         userCount: 2, activeSessions: 1, reportCount: 3, storageBytes: 4096,
-        dtConfigured: 1, schedulesActive: 1, cacheCount: 1,
+        // Schedules, not accounts holding one: an account may own several, so
+        // counting accounts would under-report the recurring work being carried.
+        dtConfigured: 1, schedulesActive: 1, scheduleCount: 2, cacheCount: 1,
       });
     } finally { restore(); restore2(); }
   });
@@ -3273,7 +3399,8 @@ describe('routes — administration user detail', () => {
     maxReports: 10,
     mailEnabled: true, mailHost: 'smtp.example.com', mailPort: 587,
     mailFrom: 'alice@example.com', mailRecipients: 2, mailHasPassword: true,
-    scheduleEnabled: true, frequency: 'daily', hour: 9, scheduleProjects: 4,
+    scheduleCount: 2, schedulesActive: 1, scheduleProjects: 4,
+    maxSchedules: 5, maxSchedulesOverridden: false,
     nextRunAt: new Date('2026-02-02'), lastRunAt: new Date('2026-02-01'),
     lastRunStatus: 'success',
     reportCount: 5, reportsCompleted: 4, reportsRunning: 0, reportsFailed: 1,
@@ -3310,7 +3437,11 @@ describe('routes — administration user detail', () => {
       assert.equal(d.dependencyTrack.hasApiKey, true);
       assert.equal(d.settings.maxReports, 10);
       assert.equal(d.mail.recipients, 2);
-      assert.equal(d.schedule.projectCount, 4);
+      assert.equal(d.schedules.total, 2);
+      assert.equal(d.schedules.active, 1);
+      assert.equal(d.schedules.projectCount, 4);
+      assert.equal(d.schedules.maxSchedules, 5);
+      assert.equal(d.schedules.overridden, false);
       assert.equal(d.reports.completed, 4);
       assert.equal(d.reports.storageBytes, 8192, 'bigint storage is a number');
     } finally { restore(); }
@@ -3334,7 +3465,7 @@ describe('routes — administration user detail', () => {
   test('an account with no session or configuration renders as empty, not missing', async () => {
     const bare = { ...sampleDetail(), sessionIssuedAt: null, dtConfigured: false,
                    dtApiUrl: null, dtHasApiKey: false, mailEnabled: false, mailHost: null,
-                   scheduleEnabled: false, frequency: null };
+                   scheduleCount: 0, schedulesActive: 0 };
     const restore = stub(usersMod, { detailForAdmin: async () => bare });
     try {
       const ctx = get('bob', asAdmin());
@@ -3451,7 +3582,7 @@ describe('routes — the administrator uses the ordinary per-user routes', () =>
     });
     const r2 = stub(userSettingsMod, { get: async () => ({ maxReports: 10 }) });
     const r3 = stub(require('./lib/mail-settings'), { getForClient: async () => ({ enabled: false }) });
-    const r4 = stub(schedulesMod, { get: async () => null, getProjects: async () => [] });
+    const r4 = stub(schedulesMod, { list: async () => [] });
     try {
       const res = makeRes();
       await routeConfig.handle({

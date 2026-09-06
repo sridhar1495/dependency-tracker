@@ -106,7 +106,8 @@ async function handle({ method, path: parsedPath, req, res, principal }) {
           reportCount:     u.reportCount,
           storageBytes:    Number(u.storageBytes),
           dtConfigured:    u.dtConfigured,
-          scheduleEnabled: u.scheduleEnabled,
+          scheduleCount:   u.scheduleCount,
+          schedulesActive: u.schedulesActive,
           maxReports:      u.maxReports,
           // The list shows the number AND where it came from: a limit with no
           // indication of its origin cannot be acted on, because the
@@ -132,7 +133,11 @@ async function handle({ method, path: parsedPath, req, res, principal }) {
         reportCount:     rows.reduce((n, u) => n + u.reportCount, 0),
         storageBytes:    rows.reduce((n, u) => n + Number(u.storageBytes), 0),
         dtConfigured:    rows.filter(u => u.dtConfigured).length,
-        schedulesActive: rows.filter(u => u.scheduleEnabled).length,
+        // Schedules, not accounts with a schedule: an account may own several
+        // now, so counting accounts would under-report the recurring work the
+        // service is actually carrying.
+        schedulesActive: rows.reduce((n, u) => n + u.schedulesActive, 0),
+        scheduleCount:   rows.reduce((n, u) => n + u.scheduleCount, 0),
         // How many distinct DependencyTrack connections are actually being
         // crawled. Fewer caches than configured users is the shared-cache
         // design working, and is the number worth watching as users are added.
@@ -163,9 +168,13 @@ async function handle({ method, path: parsedPath, req, res, principal }) {
     try {
       const s = await appSettings.get();
       jsonReply(res, 200, {
-        defaultMaxReports: s.defaultMaxReports,
-        updatedAt:         s.updatedAt,
-        limits: { min: appSettings.MIN_MAX_REPORTS, max: appSettings.MAX_MAX_REPORTS },
+        defaultMaxReports:   s.defaultMaxReports,
+        defaultMaxSchedules: s.defaultMaxSchedules,
+        updatedAt:           s.updatedAt,
+        limits: {
+          min: appSettings.MIN_MAX_REPORTS, max: appSettings.MAX_MAX_REPORTS,
+          scheduleMin: appSettings.MIN_MAX_SCHEDULES, scheduleMax: appSettings.MAX_MAX_SCHEDULES,
+        },
       });
     } catch (err) {
       log('error', `Settings read failed: ${err.message}`);
@@ -184,16 +193,40 @@ async function handle({ method, path: parsedPath, req, res, principal }) {
     const body = await readJson(req, res);
     if (body === null) return true;
     try {
-      if (body.defaultMaxReports === undefined) {
-        jsonReply(res, 400, { error: 'defaultMaxReports is required.', code: 'VALIDATION_FAILED' });
+      // Both defaults live on this one route rather than on a seventh: they are
+      // the same kind of decision about the same singleton row, and the
+      // administration allow-list is a contract worth not growing (§7.6).
+      // Either may be sent alone; sending neither is the mistake.
+      const wantsReports   = body.defaultMaxReports !== undefined;
+      const wantsSchedules = body.defaultMaxSchedules !== undefined;
+      if (!wantsReports && !wantsSchedules) {
+        jsonReply(res, 400, {
+          error: 'defaultMaxReports or defaultMaxSchedules is required.',
+          code: 'VALIDATION_FAILED',
+        });
         return true;
       }
-      const saved = await appSettings.setDefaultMaxReports(body.defaultMaxReports);
-      const affected = await appSettings.accountsOverDefault(saved.defaultMaxReports);
-      log('info', 'Default report limit changed', {
-        defaultMaxReports: saved.defaultMaxReports, accountsNowOverLimit: affected,
-      });
-      jsonReply(res, 200, { defaultMaxReports: saved.defaultMaxReports, affectedAccounts: affected });
+
+      const reply = {};
+      if (wantsReports) {
+        const saved = await appSettings.setDefaultMaxReports(body.defaultMaxReports);
+        reply.defaultMaxReports = saved.defaultMaxReports;
+        reply.affectedAccounts  = await appSettings.accountsOverDefault(saved.defaultMaxReports);
+        log('info', 'Default report limit changed', {
+          defaultMaxReports: saved.defaultMaxReports, accountsNowOverLimit: reply.affectedAccounts,
+        });
+      }
+      if (wantsSchedules) {
+        const saved = await appSettings.setDefaultMaxSchedules(body.defaultMaxSchedules);
+        reply.defaultMaxSchedules = saved.defaultMaxSchedules;
+        reply.affectedScheduleAccounts =
+          await appSettings.accountsOverScheduleDefault(saved.defaultMaxSchedules);
+        log('info', 'Default schedule limit changed', {
+          defaultMaxSchedules: saved.defaultMaxSchedules,
+          accountsNowOverLimit: reply.affectedScheduleAccounts,
+        });
+      }
+      jsonReply(res, 200, reply);
     } catch (err) {
       if (err.code === 'VALIDATION_FAILED') {
         jsonReply(res, 400, { error: err.message, code: 'VALIDATION_FAILED', field: err.field });
@@ -347,27 +380,49 @@ async function handle({ method, path: parsedPath, req, res, principal }) {
       const row = await targetAccount(loginId, res);
       if (!row) return true;
 
-      if (!Object.prototype.hasOwnProperty.call(body, 'maxReports')) {
-        jsonReply(res, 400, { error: 'maxReports is required.', code: 'VALIDATION_FAILED' });
+      // null returns the account to the global default; a number pins it there.
+      // Either limit may be sent alone, for the same reason the global route
+      // takes them together — one account setting, not two routes.
+      const hasReports   = Object.prototype.hasOwnProperty.call(body, 'maxReports');
+      const hasSchedules = Object.prototype.hasOwnProperty.call(body, 'maxSchedules');
+      if (!hasReports && !hasSchedules) {
+        jsonReply(res, 400, {
+          error: 'maxReports or maxSchedules is required.', code: 'VALIDATION_FAILED',
+        });
         return true;
       }
 
-      const settings = body.maxReports === null
-        ? await userSettings.clearMaxReportsOverride(row.id)
-        : await userSettings.setMaxReportsOverride(row.id, body.maxReports);
-
-      if (!settings) {
-        jsonReply(res, 404, { error: 'No such account.', code: 'NOT_FOUND' });
-        return true;
+      let settings = null;
+      if (hasReports) {
+        settings = body.maxReports === null
+          ? await userSettings.clearMaxReportsOverride(row.id)
+          : await userSettings.setMaxReportsOverride(row.id, body.maxReports);
+        if (!settings) {
+          jsonReply(res, 404, { error: 'No such account.', code: 'NOT_FOUND' });
+          return true;
+        }
       }
-      log('info', 'Account report limit changed', {
+      if (hasSchedules) {
+        settings = body.maxSchedules === null
+          ? await userSettings.clearMaxSchedulesOverride(row.id)
+          : await userSettings.setMaxSchedulesOverride(row.id, body.maxSchedules);
+        if (!settings) {
+          jsonReply(res, 404, { error: 'No such account.', code: 'NOT_FOUND' });
+          return true;
+        }
+      }
+      log('info', 'Account limits changed', {
         userId: row.id,
-        maxReports: settings.maxReports,
-        overridden: settings.maxReportsOverride !== null,
+        maxReports:   settings.maxReports,
+        maxSchedules: settings.maxSchedules,
+        reportsOverridden:   settings.maxReportsOverride !== null,
+        schedulesOverridden: settings.maxSchedulesOverride !== null,
       });
       jsonReply(res, 200, {
-        maxReports: settings.maxReports,
-        overridden: settings.maxReportsOverride !== null,
+        maxReports:   settings.maxReports,
+        maxSchedules: settings.maxSchedules,
+        overridden:   settings.maxReportsOverride !== null,
+        schedulesOverridden: settings.maxSchedulesOverride !== null,
       });
     } catch (err) {
       if (err.code === 'VALIDATION_FAILED') {
@@ -477,15 +532,15 @@ async function handle({ method, path: parsedPath, req, res, principal }) {
           recipients:  row.mailRecipients || 0,
           hasPassword: row.mailHasPassword === true,
         },
-        schedule: {
-          enabled:       row.scheduleEnabled === true,
-          frequency:     row.frequency,
-          hour:          row.hour,      // UTC — pair it with minute, never alone
-          minute:        row.minute ?? 0,
+        schedules: {
+          total:         row.scheduleCount,
+          active:        row.schedulesActive,
           projectCount:  row.scheduleProjects,
           nextRunAt:     row.nextRunAt,
           lastRunAt:     row.lastRunAt,
           lastRunStatus: row.lastRunStatus,
+          maxSchedules:  row.maxSchedules,
+          overridden:    row.maxSchedulesOverridden === true,
         },
         reports: {
           total:        row.reportCount,

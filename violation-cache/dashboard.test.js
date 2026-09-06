@@ -1486,7 +1486,9 @@ describe('admin.html write actions', () => {
   test('the global default warns about accounts it puts over the line', () => {
     const fn = /async function saveDefaultLimit[\s\S]*?\n  \}/.exec(ADMIN_HTML)[0];
     assert.match(fn, /affectedAccounts/);
-    assert.match(fn, /cannot create new reports/,
+    assert.match(fn, /affectedScheduleAccounts/,
+      'the schedule default has the same consequence and must be reported too');
+    assert.match(fn, /cannot create more until back under/,
       'the administrator must be told what it does to people, not just that it saved');
   });
 
@@ -1663,10 +1665,11 @@ describe('index.html report naming', () => {
     assert.match(fn, /JSON\.stringify\(\{ projects, riskTypes, reportName \}\)/);
   });
 
-  test('a blank schedule name is sent, so it can be cleared', () => {
+  test('a blank schedule report name is sent, so it can be cleared', () => {
     // Omitting the key means "leave it alone"; sending '' means "go back to
-    // automatic". The form must send the field for the second to be reachable.
-    assert.match(INDEX_HTML, /reportName: String\(schedName\)\.trim\(\)/);
+    // automatic". The editor must send the field for the second to be reachable.
+    const fn = /function readScheduleEditor\(\)[\s\S]*?\n\}/.exec(INDEX_HTML)[0];
+    assert.match(fn, /reportName: String\(reportName\)\.trim\(\)/);
   });
 });
 
@@ -2429,5 +2432,127 @@ describe('schedule conversion edge cases (index.html)', () => {
       'expected the one declaration plus its three uses');
     assert.doesNotMatch(INDEX_HTML, /\/\^\\d\{2\}:\\d\{2\}\$\//,
       'the inline time pattern must be gone, not duplicated alongside SCHED_TIME_RE');
+  });
+});
+
+// ── The schedule list and editor (index.html) ────────────────────────────────
+describe('index.html schedule list and editor', () => {
+  test('user-supplied text in the list goes through escHtml', () => {
+    // The schedule name and the failure text are the two fields whose whole
+    // content a user (or a mail server) chose. CLAUDE.md §12 — escape before
+    // innerHTML, every time.
+    const fn = extractFunction(INDEX_HTML, 'renderScheduleList');
+    assert.match(fn, /escHtml\(sc\.name\)/, 'the schedule name must be escaped');
+    assert.match(fn, /escHtml\(sc\.lastRunError/, 'the failure text must be escaped');
+    // Nothing interpolates a raw name into the markup.
+    assert.doesNotMatch(fn, /\$\{sc\.name\}/);
+    assert.doesNotMatch(fn, /\$\{sc\.lastRunError\}/);
+  });
+
+  test('the list is rendered from state, never from a second fetch shape', () => {
+    // renderScheduleList reads _schedules only. A second source would let the
+    // panel and the collection disagree about what exists.
+    const fn = extractFunction(INDEX_HTML, 'renderScheduleList');
+    assert.match(fn, /_schedules/);
+    assert.doesNotMatch(fn, /apiFetch/, 'rendering must not fetch');
+  });
+
+  test('every schedule action is window-exported from the IIFE', () => {
+    // CLAUDE.md §8.2 — an inline handler calls window.*, so one left off the
+    // export block fails silently in the browser. These are generated into
+    // innerHTML, which is exactly where a silent failure is hardest to notice.
+    for (const fn of ['openScheduleEditor', 'saveScheduleEditor', 'cancelSchedule',
+                      'cancelAllSchedules', 'scheduleReports']) {
+      assert.match(INDEX_HTML, new RegExp(`window\\.${fn}\\s*=\\s*${fn};`), fn);
+    }
+  });
+
+  test('a new schedule defaults to 09:00 in the reader\'s own day', () => {
+    // Defaulting the stored UTC fields would prefill 14:30 for a user in India
+    // — correct as 09:00 UTC, and not what anybody means by "nine in the
+    // morning".
+    const fn = extractFunction(INDEX_HTML, 'openScheduleEditor');
+    assert.match(fn, /schedLocalToUtc\(\{ hour: 9, minute: 0/,
+      'the default must be converted from local, not stored as UTC 9');
+  });
+
+  test('the editor is one form serving both create and edit', () => {
+    // Two forms would be two chances for the create path and the edit path to
+    // disagree about what a schedule is.
+    const save = extractFunction(INDEX_HTML, 'saveScheduleEditor');
+    assert.match(save, /editing \? 'PUT' : 'POST'/);
+    assert.match(save, /_schedEditingId/);
+    assert.equal((INDEX_HTML.match(/function readScheduleEditor\(/g) || []).length, 1);
+  });
+
+  test('cancelling asks first, and says what survives', () => {
+    for (const name of ['cancelSchedule', 'cancelAllSchedules']) {
+      const fn = extractFunction(INDEX_HTML, name);
+      assert.match(fn, /await showConfirm\(/, `${name} must confirm before deleting`);
+      assert.match(fn, /already sent are unaffected/,
+        `${name} must say that delivered reports are untouched`);
+    }
+  });
+
+  test('the toolbar checks the quota before making the user fill in a form', () => {
+    const fn = extractFunction(INDEX_HTML, 'scheduleReports');
+    assert.match(fn, /_maxSchedules/);
+    assert.match(fn, /Schedule limit reached/);
+    // And it is still enforced server-side — the client check is a courtesy.
+    const routeSrc = fs.readFileSync(path.join(__dirname, 'routes', 'schedule.js'), 'utf8');
+    assert.match(routeSrc, /QUOTA_REACHED/);
+    assert.match(routeSrc, /jsonReply\(res, 429/);
+  });
+
+  test('the settings panel no longer writes schedules through /config', () => {
+    // Two writers for one row is how the panel and the collection drift apart.
+    const fn = extractFunction(INDEX_HTML, 'saveConfigPanel');
+    assert.doesNotMatch(fn, /schedule:/, 'the config save must not carry a schedule');
+    assert.match(fn, /const config = \{ mail: mailConfig \};/);
+    const configRoute = fs.readFileSync(path.join(__dirname, 'routes', 'config.js'), 'utf8');
+    assert.doesNotMatch(configRoute, /schedulesDb\.save|cfg\.schedule/,
+      'the config route must not write schedules either');
+  });
+
+  test('the old single-schedule controls are gone, not merely hidden', () => {
+    // A dead second implementation is one that gets rendered by accident.
+    for (const stale of ['cfgSchedEnabled', 'cfgSchedBody', 'onSchedToggle',
+                         'renderScheduleStatus', 'cfgCancelSchedBtn']) {
+      assert.doesNotMatch(INDEX_HTML, new RegExp(stale), `${stale} should have been removed`);
+    }
+  });
+
+  test('the singular schedule routes are gone from the backend too', () => {
+    const server = fs.readFileSync(path.join(__dirname, 'server.js'), 'utf8');
+    const routeSrc = fs.readFileSync(path.join(__dirname, 'routes', 'schedule.js'), 'utf8');
+    for (const src of [server, routeSrc, INDEX_HTML]) {
+      assert.doesNotMatch(src, /violation-cache\/schedule\/(arm|status|ack-notification)\b/);
+      assert.doesNotMatch(src, /'\/violation-cache\/schedule'/);
+    }
+  });
+});
+
+describe('admin.html schedule limit', () => {
+  test('the second default is present, bounded, and has its own error slot', () => {
+    assert.match(ADMIN_HTML, /id="defaultMaxSchedules"[^>]*type="number"[^>]*min="1"[^>]*max="100"/);
+    assert.match(ADMIN_HTML, /id="defaultMaxSchedulesErr"/);
+    assert.match(ADMIN_HTML, /id="defaultMaxSchedulesHint"/);
+  });
+
+  test('both defaults are saved in one request', () => {
+    // Two requests would mean one could succeed and the other fail, leaving the
+    // screen showing a state nobody chose.
+    const fn = /async function saveDefaultLimit[\s\S]*?\n  \}/.exec(ADMIN_HTML)[0];
+    assert.match(fn, /defaultMaxReports: reports, defaultMaxSchedules: schedules/);
+    assert.equal((fn.match(/apiFetch\('\/admin\/settings'/g) || []).length, 1);
+  });
+
+  test('the administration allow-list is still exactly six method/path pairs', () => {
+    // CLAUDE.md §7.6 — the list is the contract. The schedule limit rides on
+    // the two settings routes that already existed rather than adding a
+    // seventh, which is the bar a new one has to clear.
+    const adminRoute = fs.readFileSync(path.join(__dirname, 'routes', 'admin.js'), 'utf8');
+    const writes = [...adminRoute.matchAll(/method === '(PUT|POST|DELETE)'/g)].length;
+    assert.equal(writes, 6, `expected six write handlers, found ${writes}`);
   });
 });

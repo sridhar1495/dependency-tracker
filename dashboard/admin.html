@@ -426,15 +426,23 @@
           </button>
           <div class="acc-body" id="accReportsBody">
             <div class="note">
-              The default applies to every account that has no limit of its own.
-              Changing it never deletes a report — an account over the new limit
-              simply cannot create more until it is back under.
+              These defaults apply to every account that has no limit of its own.
+              Changing one never deletes a report or a schedule — an account over
+              the new limit simply cannot create more until it is back under.
+              Each schedule crawls DependencyTrack on its own timetable, so the
+              schedule limit bounds recurring upstream work rather than disk.
             </div>
             <div class="field">
               <label class="label" for="defaultMaxReports">Default maximum reports per account</label>
               <input class="input" id="defaultMaxReports" type="number" min="1" max="1000" step="1">
               <div class="err" id="defaultMaxReportsErr"></div>
               <div class="hint" id="defaultMaxReportsHint"></div>
+            </div>
+            <div class="field">
+              <label class="label" for="defaultMaxSchedules">Default maximum schedules per account</label>
+              <input class="input" id="defaultMaxSchedules" type="number" min="1" max="100" step="1">
+              <div class="err" id="defaultMaxSchedulesErr"></div>
+              <div class="hint" id="defaultMaxSchedulesHint"></div>
             </div>
             <button class="btn primary" id="saveDefaults" onclick="saveDefaultLimit()">Save</button>
           </div>
@@ -822,7 +830,7 @@
         ['Accounts',         overview.userCount],
         ['Active sessions',  overview.activeSessions],
         ['DT configured',    overview.dtConfigured],
-        ['Schedules on',     overview.schedulesActive],
+        ['Schedules active', overview.schedulesActive],
         ['Reports stored',   overview.reportCount],
         ['Report storage',   formatBytes(overview.storageBytes)],
         // Fewer caches than configured accounts means users are sharing a
@@ -906,8 +914,8 @@
     // was safe — the whole string went through txt() — but "no bare ${d.…} in
     // the markup" is a rule a reader and a test can both check at a glance,
     // and one exception is enough to make it unusable.
-    const lastRun = d.schedule.lastRunStatus
-      ? `${fmtDate(d.schedule.lastRunAt)} — ${d.schedule.lastRunStatus}`
+    const lastRun = d.schedules.lastRunStatus
+      ? `${fmtDate(d.schedules.lastRunAt)} — ${d.schedules.lastRunStatus}`
       : null;
 
     const limitLine = d.settings.overridden
@@ -964,11 +972,14 @@
       </div>
 
       <div class="card">
-        <h3>Schedule</h3>
-        ${kv('Enabled', yes(d.schedule.enabled))}
-        ${kv('Frequency', txt(d.schedule.frequency))}
-        ${kv('Projects', txt(d.schedule.projectCount))}
-        ${kv('Next run', txt(fmtDate(d.schedule.nextRunAt)))}
+        <h3>Schedules</h3>
+        ${kv('Schedules', txt(d.schedules.total))}
+        ${kv('Active', txt(d.schedules.active))}
+        ${kv('Limit', d.schedules.overridden
+            ? `${escHtml(String(d.schedules.maxSchedules))}<span class="pill-set">Set</span>`
+            : `${escHtml(String(d.schedules.maxSchedules))}<span class="pill-inherit">default</span>`)}
+        ${kv('Projects', txt(d.schedules.projectCount))}
+        ${kv('Next run', txt(fmtDate(d.schedules.nextRunAt)))}
         ${kv('Last run', txt(lastRun))}
       </div>
 
@@ -1115,9 +1126,14 @@
       if (!r.ok) { showToast('Could not load the settings.', 'error'); return; }
       _settings = await r.json();
       $('defaultMaxReports').value = String(_settings.defaultMaxReports);
-      $('defaultLimitBadge').textContent = `default ${_settings.defaultMaxReports}`;
+      $('defaultMaxSchedules').value = String(_settings.defaultMaxSchedules);
+      $('defaultLimitBadge').textContent =
+        `${_settings.defaultMaxReports} reports · ${_settings.defaultMaxSchedules} schedules`;
       $('defaultMaxReportsHint').textContent =
         `Between ${_settings.limits.min} and ${_settings.limits.max}. ` +
+        `Accounts with a limit of their own are unaffected.`;
+      $('defaultMaxSchedulesHint').textContent =
+        `Between ${_settings.limits.scheduleMin} and ${_settings.limits.scheduleMax}. ` +
         `Accounts with a limit of their own are unaffected.`;
     } catch (e) {
       showToast('Could not load the settings: ' + e.message, 'error');
@@ -1125,34 +1141,48 @@
   }
 
   async function saveDefaultLimit() {
-    const raw = $('defaultMaxReports').value.trim();
-    const n = Number(raw);
-    $('defaultMaxReportsErr').textContent = '';
-    if (!Number.isInteger(n) || n < 1 || n > 1000) {
+    const reports   = Number($('defaultMaxReports').value.trim());
+    const schedules = Number($('defaultMaxSchedules').value.trim());
+    $('defaultMaxReportsErr').textContent   = '';
+    $('defaultMaxSchedulesErr').textContent = '';
+    let bad = false;
+    if (!Number.isInteger(reports) || reports < 1 || reports > 1000) {
       $('defaultMaxReportsErr').textContent = 'Enter a whole number between 1 and 1000.';
-      return;
+      bad = true;
     }
+    if (!Number.isInteger(schedules) || schedules < 1 || schedules > 100) {
+      $('defaultMaxSchedulesErr').textContent = 'Enter a whole number between 1 and 100.';
+      bad = true;
+    }
+    if (bad) return;
 
     $('saveDefaults').disabled = true;
     try {
+      // Both defaults go in one request. Two would mean one could succeed and
+      // the other fail, leaving the screen showing a state nobody chose.
       const r = await apiFetch('/admin/settings', {
         method:  'PUT',
         headers: { 'Content-Type': 'application/json' },
-        body:    JSON.stringify({ defaultMaxReports: n }),
+        body:    JSON.stringify({ defaultMaxReports: reports, defaultMaxSchedules: schedules }),
       });
       const bd = await r.json().catch(() => ({}));
       if (!r.ok) {
-        $('defaultMaxReportsErr').textContent = bd.error || 'Could not save the default.';
+        $('defaultMaxReportsErr').textContent = bd.error || 'Could not save the defaults.';
         return;
       }
       // Say what it did to people, not just that it saved. Nothing was deleted;
       // these accounts simply cannot create more until they are back under.
-      const over = bd.affectedAccounts || 0;
+      const over      = bd.affectedAccounts || 0;
+      const overSched = bd.affectedScheduleAccounts || 0;
+      const notes = [];
+      if (over > 0)      notes.push(`${over} account${over === 1 ? ' is' : 's are'} over the report limit`);
+      if (overSched > 0) notes.push(`${overSched} over the schedule limit`);
       showToast(
-        over > 0
-          ? `Default is now ${bd.defaultMaxReports}. ${over} account${over === 1 ? ' is' : 's are'} over it and cannot create new reports until under.`
-          : `Default is now ${bd.defaultMaxReports}.`,
-        over > 0 ? 'warn' : 'success'
+        notes.length
+          ? `Defaults saved: ${bd.defaultMaxReports} reports, ${bd.defaultMaxSchedules} schedules. `
+            + `${notes.join(' and ')} — they cannot create more until back under.`
+          : `Defaults saved: ${bd.defaultMaxReports} reports, ${bd.defaultMaxSchedules} schedules.`,
+        notes.length ? 'warn' : 'success'
       );
       await loadSettings();
       await loadUsers();

@@ -286,9 +286,9 @@ await tx(async (client) => {
 | `login_audit` | Authentication event trail |
 | `dt_connections` | Per-user DT URL and encrypted API key |
 | `app_settings` | Service-wide settings the administrator owns (singleton row) |
-| `user_settings` | Per-user report limit — `NULL` means "follow the global default" |
+| `user_settings` | Per-user report and schedule limits — `NULL` means "follow the global default" |
 | `mail_settings` | Per-user SMTP configuration |
-| `schedules`, `schedule_projects`, `schedule_runs` | Scheduled reports; `report_name` `NULL` means "generate one" |
+| `schedules`, `schedule_projects`, `schedule_runs` | Scheduled reports, **any number per user** (migration 009). `report_name` `NULL` means "generate one"; `name` is the label in the settings list and a different field. `schedule_runs.schedule_id` is `ON DELETE SET NULL` so cancelling never erases the record that it ran |
 | `reports`, `report_file_chunks` | Report metadata and file bytes |
 | `violation_caches` | Shared violation cache, keyed by connection fingerprint |
 | `branding_assets` | The administrator's sign-in background. Bytes live here, **not** on `app_settings`, because the administration listing cross-joins that table |
@@ -491,7 +491,26 @@ if (method === 'GET' && path === '/violation-cache/status') {
   because of the `candidate <= now` guard; do not remove one without the other.
 - Scheduling is driven by **one poller** that ticks every 60 seconds and claims due
   rows with `FOR UPDATE SKIP LOCKED`. Never create one timer per user.
-- Per-user overlap protection is the `running_since` column, not a process variable.
+- Per-schedule overlap protection is the `running_since` column, not a process
+  variable.
+- **A user owns any number of schedules, and at most one of them runs at a
+  time.** That guarantee used to be free — `running_since` sat on a row that was
+  itself unique per user — and is not free since migration 009. `claimOne()`
+  keeps it with a `NOT EXISTS` clause over the same user's rows; without it an
+  account with five schedules due at 09:00 would open five parallel crawls
+  against its single DependencyTrack connection, which is the N-times-per-user
+  upstream work §13 forbids. `claimDue(limit)` therefore issues **one statement
+  per claim**: each has to commit before the next runs, or two schedules of one
+  user would both pass that check in the same snapshot.
+- **Cancelling a schedule deletes it.** The settings list holds what is live,
+  not disabled husks; `schedule_projects` cascades with it and `schedule_runs`
+  does not. `POST /schedules/:id/disable` still exists for stopping one without
+  discarding the definition.
+- **The number of schedules is a quota, shaped exactly like the report limit**
+  (§7.5): `app_settings.default_max_schedules` with a nullable
+  `user_settings.max_schedules` override, resolved in `userSettings.get()` and
+  nowhere else, enforced on create with 429 `QUOTA_REACHED`. Being over it
+  blocks; it never deletes a schedule.
 - Scheduled reports are built in memory and emailed; they are never written to disk.
 
 ### 6.9 Email (`nodemailer`)
@@ -589,8 +608,8 @@ is a correctness bug, not a style issue.
   administrator paths.
 - **Cross-user access returns 404, not 403.** Never confirm that another user's
   resource exists.
-- **Quotas are enforced per user** (report limits, storage), never as a global
-  counter. Who *chooses* the number changed in migration 005 — the administrator
+- **Quotas are enforced per user** (report limits, schedule counts, storage),
+  never as a global counter. Who *chooses* the number changed in migration 005 — the administrator
   sets it, globally or for one account — but it is still counted and applied per
   user, and one account can never consume another's allowance.
   `user_settings.max_reports IS NULL` means "follow `app_settings`"; a value is
@@ -613,8 +632,8 @@ a **closed list of three**, not a general-purpose account editor:
 
 | Route | Effect |
 |---|---|
-| `PUT /admin/settings` | The default report limit every non-overridden account follows |
-| `PUT /admin/users/:loginId/settings` | One account's limit; `null` returns it to the default |
+| `PUT /admin/settings` | The default report and schedule limits every non-overridden account follows |
+| `PUT /admin/users/:loginId/settings` | One account's limits; `null` returns either to the default |
 | `POST /admin/users/:loginId/password` | Reset one account's password |
 | `PUT /admin/branding` | The application title; empty restores the built-in default |
 | `POST /admin/branding/background` | Upload the sign-in background |
@@ -625,6 +644,11 @@ these **six** are handled and every other method/path combination is not — a
 blanket ban that had to be deleted would have stopped protecting anything, so
 the allow-list is the contract and adding a seventh means editing it in a
 diff somebody reads.
+
+The schedule limit rides on the two settings routes that already existed rather
+than adding a seventh — it is the same kind of decision about the same rows,
+made by the same principal. That is what the allow-list is for: a new capability
+has to justify a new entry, and this one did not need one.
 
 The list went from three to six when customisation landed, and the three
 additions were weighed rather than waved through: they change how the product
@@ -1093,9 +1117,13 @@ redundant.
   that what the picker stores is the local time the scheduler fires at. They are
   extracted from `index.html` rather than copied, so the test cannot pass against
   a version of the code the page no longer contains.
-- **Database tier:** migrations apply and are idempotent; the single-live-session
-  index rejects a second session; cascade deletion removes all owned rows;
-  chunked byte round-trips are identical; `SKIP LOCKED` claims each row once.
+- **Database tier:** migrations apply to an **empty** schema and are idempotent;
+  the single-live-session index rejects a second session; cascade deletion
+  removes all owned rows; chunked byte round-trips are identical; `SKIP LOCKED`
+  claims each row once, and one user's several schedules claim one at a time.
+  `resetSchema()` drops the schema rather than the ledger — dropping only the
+  ledger made the suite replay the shipped directory over its own output, which
+  is a stronger promise than §5.3's and one no deployment needs.
 - **Authorisation:** every route rejects a missing or invalid token with 401;
   cross-user access returns 404; the profile endpoint ignores login ID and email.
 - Do **not** write tests that require a live DT API.
@@ -1205,7 +1233,7 @@ aspirations, and each is verifiable.
 | `LOG_FORMAT` | server | `text` (default) or `json` |
 | `TEST_DATABASE_URL` | tests | Enables the database integration tier |
 
-The report limit is **not** an environment variable. It is service configuration
+Neither the report limit nor the schedule limit is an environment variable. It is service configuration
 the administrator owns at runtime, held in `app_settings` and edited from the
 administration screen — an operator should not have to restart a container to
 change a quota.

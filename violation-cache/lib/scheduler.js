@@ -13,6 +13,9 @@
 //
 // Per-user overlap protection is the schedules.running_since column, not a
 // process variable, so one user's long-running report never blocks another's.
+// A user may own several schedules (migration 009); claimDue keeps at most one
+// of them running at a time, so five schedules due at 09:00 do not become five
+// parallel crawls against that user's single DependencyTrack connection.
 
 const { log } = require('./log');
 const { dtGetWithRetry } = require('./dt-fetch');
@@ -117,9 +120,10 @@ function clampInt(value, min, max, dflt) {
  * scheduled reports are never written to disk (CLAUDE.md §6.8).
  */
 async function runScheduledJob(schedule) {
-  const userId = schedule.userId;
-  const runId  = await schedulesDb.startRun(userId);
-  let fileSize = null;
+  const userId     = schedule.userId;
+  const scheduleId = schedule.id;
+  const runId      = await schedulesDb.startRun(userId, scheduleId);
+  let fileSize     = null;
 
   try {
     const conn = await dtConnections.getResolved(userId);
@@ -127,7 +131,7 @@ async function runScheduledJob(schedule) {
       throw new Error('No DependencyTrack connection is configured for this account.');
     }
 
-    const selected = await schedulesDb.getProjects(userId);
+    const selected = await schedulesDb.getProjects(userId, scheduleId);
     if (selected.length === 0) throw new Error('No projects are selected for this schedule.');
 
     // Resolve stored UUIDs against live DT data — a project may have been
@@ -150,7 +154,7 @@ async function runScheduledJob(schedule) {
       throw new Error('None of the selected projects were found in DependencyTrack.');
     }
     log('info', 'Scheduled report starting', {
-      userId, selected: selected.length, resolved: projects.length,
+      userId, scheduleId, selected: selected.length, resolved: projects.length,
     });
 
     const riskTypes  = (schedule.riskTypes && schedule.riskTypes.length)
@@ -170,21 +174,22 @@ async function runScheduledJob(schedule) {
       // it verbatim on every run; without one it keeps the timestamped form.
       const filename = reports.reportFilename(schedule.reportName, 'scheduled_report');
       await sendEmail(mail, { filename, content: buffer }, { appTitle });
-      log('info', 'Scheduled report emailed', { userId, bytes: buffer.length });
+      log('info', 'Scheduled report emailed', { userId, scheduleId, bytes: buffer.length });
     } else {
-      log('warn', 'Scheduled report built but email is disabled — nothing was sent', { userId });
+      log('warn', 'Scheduled report built but email is disabled — nothing was sent',
+        { userId, scheduleId });
     }
 
     await schedulesDb.completeRun(runId, { status: 'success', fileSizeBytes: fileSize });
-    await schedulesDb.finishRun(userId, {
+    await schedulesDb.finishRun(scheduleId, {
       status: 'success', nextRunAt: calcNextRun(schedule),
     });
     return { ok: true };
 
   } catch (err) {
-    log('error', `Scheduled report failed: ${err.message}`, { userId });
+    log('error', `Scheduled report failed: ${err.message}`, { userId, scheduleId });
     await schedulesDb.completeRun(runId, { status: 'failed', error: err.message, fileSizeBytes: fileSize });
-    await schedulesDb.finishRun(userId, {
+    await schedulesDb.finishRun(scheduleId, {
       status: 'failed', error: err.message, nextRunAt: calcNextRun(schedule),
     });
 
@@ -205,7 +210,8 @@ async function runScheduledJob(schedule) {
         });
       }
     } catch (alertErr) {
-      log('error', `Failure alert email could not be sent: ${alertErr.message}`, { userId });
+      log('error', `Failure alert email could not be sent: ${alertErr.message}`,
+        { userId, scheduleId });
     }
     return { ok: false, error: err.message };
   }

@@ -25,7 +25,7 @@
 //   GET    /violation-cache/status              — build state for this user's connection
 //   GET    /violation-cache/data                — the cached map (gzipped)
 //   POST   /violation-cache/refresh             — trigger a background rebuild
-//   GET    /violation-cache/config              — connection + settings + mail + schedule
+//   GET    /violation-cache/config              — connection + settings + mail + schedules
 //   POST   /violation-cache/config              — save any subset of the above
 //   DELETE /violation-cache/config/dt-key       — forget the stored DT API key
 //   POST   /violation-cache/config/test-connection — probe DT before saving
@@ -36,10 +36,14 @@
 //   DELETE /violation-cache/report/:id          — delete a report and its bytes
 //   GET    /violation-cache/report/:id/download — stream the workbook
 //   POST   /violation-cache/report/:id/cancel   — cancel a running job
-//   POST   /violation-cache/schedule/arm        — arm this user's schedule
-//   GET    /violation-cache/schedule/status     — schedule state
-//   DELETE /violation-cache/schedule            — disable the schedule
-//   POST   /violation-cache/schedule/ack-notification — clear a failure notice
+//   GET    /violation-cache/schedules           — this user's schedules
+//   POST   /violation-cache/schedules           — create one (quota enforced)
+//   DELETE /violation-cache/schedules           — cancel all of them
+//   PUT    /violation-cache/schedules/:id       — edit one
+//   DELETE /violation-cache/schedules/:id       — cancel one
+//   POST   /violation-cache/schedules/:id/arm   — arm one
+//   POST   /violation-cache/schedules/:id/disable — stop one, keep it
+//   POST   /violation-cache/schedules/:id/ack-notification — clear a failure notice
 //
 // Environment variables are documented in lib/config.js and .env.example.
 
