@@ -2044,6 +2044,7 @@ const dtConnectionsMod = require('./lib/dt-connections');
 const cachesMod        = require('./lib/caches');
 const violationCacheMod = require('./lib/violation-cache');
 const schedulesMod     = require('./lib/schedules');
+const schedulerMod     = require('./lib/scheduler');
 const dtFetchMod       = require('./lib/dt-fetch');
 const cweMod           = require('./lib/cwe');
 const imageMod         = require('./lib/image');
@@ -4432,5 +4433,207 @@ describe('routes — the test email reports why it failed', () => {
       assert.equal(ctx.res.json.code, 'MAIL_SEND_FAILED');
       assert.match(ctx.res.json.error, /mailbox full/);
     } finally { restoreMail(); restoreBranding(); }
+  });
+});
+
+// ── Per-schedule recipients ──────────────────────────────────────────────────
+// The SMTP connection belongs to the account and the addressing belongs to the
+// schedule. Getting the merge wrong sends somebody's licence report to the
+// operations list, which no test above would notice.
+describe('applyScheduleRecipients()', () => {
+  const account = {
+    enabled: true,
+    smtp: { host: 'smtp.co', port: 587, secure: false, user: 'u', pass: 'p' },
+    from: 'reports@co.com', to: ['everyone@co.com'], cc: ['boss@co.com'],
+    subject: 'Account subject', body: 'Body',
+  };
+
+  test('a schedule with no override inherits the account entirely', () => {
+    const merged = schedulerMod.applyScheduleRecipients(account, { toAddrs: null, ccAddrs: null, subject: null });
+    assert.deepEqual(merged.to, ['everyone@co.com']);
+    assert.deepEqual(merged.cc, ['boss@co.com']);
+    assert.equal(merged.subject, 'Account subject');
+  });
+
+  test('an override replaces the recipients but never the SMTP connection', () => {
+    const merged = schedulerMod.applyScheduleRecipients(account, {
+      toAddrs: ['ops@co.com'], ccAddrs: ['lead@co.com'], subject: 'Weekly ops',
+    });
+    assert.deepEqual(merged.to, ['ops@co.com']);
+    assert.deepEqual(merged.cc, ['lead@co.com']);
+    assert.equal(merged.subject, 'Weekly ops');
+    // Changing who receives a report must not mean re-entering a password.
+    assert.deepEqual(merged.smtp, account.smtp);
+    assert.equal(merged.from, account.from);
+  });
+
+  test('overriding To drops the account CC rather than copying strangers', () => {
+    // A schedule addressed to the legal team should not also copy whoever the
+    // account happens to CC on everything else.
+    const merged = schedulerMod.applyScheduleRecipients(account, { toAddrs: ['legal@co.com'], ccAddrs: null });
+    assert.deepEqual(merged.to, ['legal@co.com']);
+    assert.deepEqual(merged.cc, []);
+  });
+
+  test('an empty override array is treated as "inherit", never as "send to nobody"', () => {
+    // The database refuses an empty To, but a corrupt or hand-edited row must
+    // not silently stop delivering.
+    const merged = schedulerMod.applyScheduleRecipients(account, { toAddrs: [], ccAddrs: [] });
+    assert.deepEqual(merged.to, ['everyone@co.com']);
+  });
+
+  test('a missing account or schedule is passed through unchanged', () => {
+    assert.equal(schedulerMod.applyScheduleRecipients(null, { toAddrs: ['x@y.z'] }), null);
+    assert.deepEqual(schedulerMod.applyScheduleRecipients(account, null), account);
+  });
+});
+
+// ── A manual run must not move the timetable ─────────────────────────────────
+describe('nextRunAfter()', () => {
+  const sched = { frequency: 'daily', hour: 9, minute: 0, nextRunAt: new Date('2026-03-16T09:00:00Z') };
+
+  test('a scheduled run advances to the next occurrence', () => {
+    const next = schedulerMod.nextRunAfter(sched, false);
+    assert.ok(next > new Date(), 'a scheduled run must arm the next one');
+  });
+
+  test('a manual run leaves the stored time exactly where it was', () => {
+    // Pressing Send now on a Monday-09:00 schedule sends a report and leaves
+    // Monday 09:00 alone. Recomputing would push it whenever somebody tested it.
+    assert.equal(schedulerMod.nextRunAfter(sched, true).toISOString(),
+      '2026-03-16T09:00:00.000Z');
+  });
+
+  test('a paused schedule stays unscheduled after a manual run', () => {
+    assert.equal(schedulerMod.nextRunAfter({ ...sched, nextRunAt: null }, true), null);
+  });
+});
+
+const SCHED_A2 = '66666666-6666-4666-8666-666666666666';
+
+describe('routes — send now and run history', () => {
+  const SCHED_B = '55555555-5555-4555-8555-555555555555';
+  const call = (method, path, principal = asUser(USER_A)) => {
+    const res = makeRes();
+    return routeSchedule.handle({
+      method, url: path, path, res, principal, req: Readable.from(['']),
+    }).then(() => res);
+  };
+  const mailReady = () => stub(require('./lib/mail-settings'), {
+    getResolved: async () => ({
+      enabled: true, smtp: { host: 'smtp.co', port: 587, secure: false, user: '', pass: '' },
+      from: 'r@co.com', to: ['a@co.com'], cc: [], subject: '', body: '',
+    }),
+  });
+
+  test('the history is scoped to the caller and labelled with its window', async () => {
+    const asked = [];
+    const restore = stub(schedulesMod, {
+      get: async () => ({ id: SCHED_B, hour: 9, projectCount: 1 }),
+      runStats: async (userId, id) => {
+        asked.push([userId, id]);
+        return { total: 7, succeeded: 6, failed: 1, running: 0, recent: [], retentionDays: 90 };
+      },
+    });
+    try {
+      const res = await call('GET', `/violation-cache/schedules/${SCHED_B}/runs`, asUser(USER_B));
+      assert.equal(res.statusCode, 200);
+      assert.deepEqual(asked, [[USER_B, SCHED_B]], 'history must be read for the caller');
+      assert.equal(res.json.total, 7);
+      // A bare "total" would quietly shrink as the 90-day sweep runs, so the
+      // window travels with the number.
+      assert.equal(res.json.retentionDays, 90);
+    } finally { restore(); }
+  });
+
+  test("another user's history is 404, not 403", async () => {
+    const restore = stub(schedulesMod, { get: async () => null });
+    try {
+      const res = await call('GET', `/violation-cache/schedules/${SCHED_B}/runs`);
+      assert.equal(res.statusCode, 404);
+      assert.equal(res.json.code, 'NOT_FOUND');
+    } finally { restore(); }
+  });
+
+  test('send now refuses a schedule with no projects', async () => {
+    const restore = stub(schedulesMod, { get: async () => ({ id: SCHED_B, hour: 9, projectCount: 0 }) });
+    try {
+      const res = await call('POST', `/violation-cache/schedules/${SCHED_B}/run-now`);
+      assert.equal(res.statusCode, 400);
+      assert.equal(res.json.code, 'NO_PROJECTS');
+    } finally { restore(); }
+  });
+
+  test('send now refuses when there is nowhere to send it', async () => {
+    const restore = stub(schedulesMod, { get: async () => ({ id: SCHED_B, hour: 9, projectCount: 2 }) });
+    const restoreMail = stub(require('./lib/mail-settings'), { getResolved: async () => null });
+    try {
+      const res = await call('POST', `/violation-cache/schedules/${SCHED_B}/run-now`);
+      assert.equal(res.statusCode, 400);
+      assert.equal(res.json.code, 'MAIL_NOT_CONFIGURED');
+    } finally { restore(); restoreMail(); }
+  });
+
+  test('send now refuses rather than queueing while something else runs', async () => {
+    // The user is watching. A silent wait looks like nothing happened.
+    let started = 0;
+    const restore = stub(schedulesMod, {
+      get: async () => ({ id: SCHED_B, hour: 9, projectCount: 2 }),
+      claimForManualRun: async () => null,
+    });
+    const restoreMail = mailReady();
+    const restoreRun = stub(schedulerMod, { runScheduledJob: async () => { started++; } });
+    try {
+      const res = await call('POST', `/violation-cache/schedules/${SCHED_B}/run-now`);
+      assert.equal(res.statusCode, 409);
+      assert.equal(res.json.code, 'ALREADY_RUNNING');
+      assert.equal(started, 0, 'nothing may start when the claim was refused');
+    } finally { restore(); restoreMail(); restoreRun(); }
+  });
+
+  test('send now returns immediately and runs in the background', async () => {
+    // Building a report takes minutes; a route may not block the event loop.
+    let ranWith = null;
+    const restore = stub(schedulesMod, {
+      get: async () => ({ id: SCHED_B, hour: 9, projectCount: 2 }),
+      claimForManualRun: async (u, id) => ({ id, userId: u, hour: 9, projectCount: 2 }),
+    });
+    const restoreMail = mailReady();
+    const restoreRun = stub(schedulerMod, {
+      runScheduledJob: async (row, opts) => { ranWith = opts; },
+    });
+    try {
+      const res = await call('POST', `/violation-cache/schedules/${SCHED_B}/run-now`);
+      assert.equal(res.statusCode, 202, 'accepted, not completed');
+      assert.equal(res.json.started, true);
+      await new Promise(r => setImmediate(r));
+      assert.deepEqual(ranWith, { manual: true }, 'the run must be flagged manual');
+    } finally { restore(); restoreMail(); restoreRun(); }
+  });
+
+  test('send now on somebody else\'s schedule is 404', async () => {
+    const restore = stub(schedulesMod, { get: async () => null });
+    try {
+      const res = await call('POST', `/violation-cache/schedules/${SCHED_B}/run-now`);
+      assert.equal(res.statusCode, 404);
+    } finally { restore(); }
+  });
+
+  test('recipients are exposed as null when inherited, never as an empty list', async () => {
+    // The browser has to tell "use the account default" from "nobody" to show
+    // the right placeholder, so the distinction survives the route.
+    const restore = stub(schedulesMod, {
+      list: async () => [
+        { id: SCHED_B, hour: 9, projectCount: 1, toAddrs: null, ccAddrs: null, subject: null },
+        { id: SCHED_A2, hour: 9, projectCount: 1, toAddrs: ['ops@co.com'], ccAddrs: [], subject: 'X' },
+      ],
+    });
+    const restoreSettings = stub(userSettingsMod, { getMaxSchedules: async () => 5 });
+    try {
+      const res = await call('GET', '/violation-cache/schedules');
+      assert.equal(res.json.schedules[0].to, null, 'inherited stays null');
+      assert.deepEqual(res.json.schedules[1].to, ['ops@co.com']);
+      assert.equal(res.json.schedules[1].subject, 'X');
+    } finally { restore(); restoreSettings(); }
   });
 });

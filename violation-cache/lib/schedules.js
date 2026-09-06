@@ -19,6 +19,16 @@
 const { query, tx } = require('../db/pool');
 const validate = require('./validate');
 
+/** Comma-separated string or array → trimmed, de-duplicated address list. */
+function toAddressList(value) {
+  const raw = Array.isArray(value) ? value : String(value ?? '').split(',');
+  return [...new Set(raw.map(v => String(v).trim()).filter(Boolean))];
+}
+
+// The same shape mail-settings accepts. Deliberately permissive — an address
+// this rejects could not be typed into the account-level field either.
+const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
 const VALID_FREQUENCIES = new Set(['daily', 'weekly', 'monthly']);
 const VALID_RISK_TYPES  = new Set(['security', 'license', 'operational']);
 const MAX_NAME_LENGTH   = 120;
@@ -37,7 +47,8 @@ const SCHEDULE_COLUMNS = `
   next_run_at AS "nextRunAt", running_since AS "runningSince",
   last_run_at AS "lastRunAt", last_run_status AS "lastRunStatus",
   last_run_error AS "lastRunError", failure_notification AS "failureNotification",
-  report_name AS "reportName", created_at AS "createdAt"
+  report_name AS "reportName", created_at AS "createdAt",
+  to_addrs AS "toAddrs", cc_addrs AS "ccAddrs", subject
 `;
 
 const PROJECT_COUNT = `
@@ -160,6 +171,40 @@ function normalise(input) {
     out.name = trimmed === '' ? null : trimmed;
   }
 
+  // ── Recipient overrides ─────────────────────────────────────────────────
+  // NULL means "use the account's list" and an empty array would mean "send to
+  // nobody", so the two must not be conflated. A blank field from the form is
+  // therefore stored as NULL — the user clearing an override is asking to go
+  // back to the account default, not asking to stop delivering.
+  if (input.to !== undefined) {
+    const list = toAddressList(input.to);
+    if (list.length === 0) out.toAddrs = null;
+    else {
+      const bad = list.find(a => !EMAIL_RE.test(a));
+      if (bad) throw fail(`"${bad}" is not a valid email address.`, 'to');
+      out.toAddrs = list;
+    }
+  }
+  if (input.cc !== undefined) {
+    const list = toAddressList(input.cc);
+    // An empty CC is meaningful only when To is also overridden; on its own it
+    // reads as "inherit", which is what NULL says.
+    if (list.length === 0) out.ccAddrs = null;
+    else {
+      const bad = list.find(a => !EMAIL_RE.test(a));
+      if (bad) throw fail(`"${bad}" is not a valid email address.`, 'cc');
+      out.ccAddrs = list;
+    }
+  }
+  if (input.subject !== undefined) {
+    const trimmed = typeof input.subject === 'string' ? input.subject.trim() : '';
+    if (trimmed.length > 200) throw fail('A subject may be at most 200 characters.', 'subject');
+    if (/[\u0000-\u001f\u007f]/.test(trimmed)) {
+      throw fail('A subject may not contain control characters.', 'subject');
+    }
+    out.subject = trimmed === '' ? null : trimmed;
+  }
+
   // An optional delivery name. NULL means "generate one", so an empty string
   // from the form is stored as NULL rather than as a name nobody typed.
   if (input.reportName !== undefined) {
@@ -184,11 +229,15 @@ const WRITABLE = [
   ['enabled', 'enabled'], ['frequency', 'frequency'], ['hour', 'hour'], ['minute', 'minute'],
   ['weekDays', 'week_days'], ['monthDay', 'month_day'], ['riskTypes', 'risk_types'],
   ['name', 'name'], ['reportName', 'report_name'],
+  ['toAddrs', 'to_addrs'], ['ccAddrs', 'cc_addrs'], ['subject', 'subject'],
 ];
 
 // Arrays need their type stated: an empty JS array reaches PostgreSQL with no
 // element type to infer from.
-const CASTS = { week_days: '::smallint[]', risk_types: '::text[]' };
+const CASTS = {
+  week_days: '::smallint[]', risk_types: '::text[]',
+  to_addrs: '::text[]', cc_addrs: '::text[]',
+};
 
 /**
  * Create a schedule for this account.
@@ -350,6 +399,36 @@ async function claimDue(limit = 5) {
   return claimed;
 }
 
+/**
+ * Claim one schedule for a run the user asked for by hand.
+ *
+ * Same guarantee as the poller's claim and for the same reason: at most one of
+ * an account's schedules runs at a time, so pressing Send now while a scheduled
+ * run is in flight waits rather than opening a second crawl. Returns null when
+ * the schedule is not this user's, is already running, or another of theirs is.
+ *
+ * Unlike claimOne it ignores enabled and next_run_at — a paused schedule can
+ * still be sent by hand, which is most of the point of pausing one.
+ */
+async function claimForManualRun(userId, scheduleId) {
+  if (!UUID_RE.test(String(scheduleId || ''))) return null;
+  const { rows } = await query(
+    `UPDATE schedules SET running_since = now()
+      WHERE id = (
+        SELECT s.id FROM schedules s
+         WHERE s.id = $2 AND s.user_id = $1 AND s.running_since IS NULL
+           AND NOT EXISTS (
+             SELECT 1 FROM schedules r
+              WHERE r.user_id = s.user_id AND r.running_since IS NOT NULL
+           )
+         FOR UPDATE SKIP LOCKED
+      )
+      RETURNING ${SCHEDULE_COLUMNS}`,
+    [userId, scheduleId]
+  );
+  return rows[0] || null;
+}
+
 /** Release a claim and record the outcome. */
 async function finishRun(scheduleId, { status, error, nextRunAt }) {
   const failureNotification = status === 'failed'
@@ -429,6 +508,30 @@ async function recentRuns(userId, { scheduleId = null, limit = 20 } = {}) {
   return rows;
 }
 
+/**
+ * Run counts plus the most recent few, for one schedule.
+ *
+ * The totals are over the retention window, not all time: schedule_runs is
+ * swept at 90 days (CLAUDE.md §13), so a lifetime counter here would quietly
+ * shrink. The caller labels it as such rather than showing a number that means
+ * something different every month.
+ */
+async function runStats(userId, scheduleId, { limit = 5, retentionDays = 90 } = {}) {
+  if (!UUID_RE.test(String(scheduleId || ''))) {
+    return { total: 0, succeeded: 0, failed: 0, running: 0, recent: [], retentionDays };
+  }
+  const { rows } = await query(
+    `SELECT count(*)::int                                        AS "total",
+            count(*) FILTER (WHERE status = 'success')::int      AS "succeeded",
+            count(*) FILTER (WHERE status = 'failed')::int       AS "failed",
+            count(*) FILTER (WHERE status = 'running')::int      AS "running"
+       FROM schedule_runs WHERE user_id = $1 AND schedule_id = $2`,
+    [userId, scheduleId]
+  );
+  const recent = await recentRuns(userId, { scheduleId, limit });
+  return { ...rows[0], recent, retentionDays };
+}
+
 /** Drop history beyond the retention window (CLAUDE.md §13). */
 async function purgeRunsOlderThan(days = 90) {
   const { rowCount } = await query(
@@ -439,7 +542,8 @@ async function purgeRunsOlderThan(days = 90) {
 
 module.exports = {
   list, get, countForUser, getProjects, create, update, remove, removeAll,
-  setProjects, arm, disable, claimDue, claimOne, finishRun, releaseStaleClaims,
-  ackNotification, startRun, completeRun, recentRuns, purgeRunsOlderThan,
+  setProjects, arm, disable, claimDue, claimOne, claimForManualRun,
+  finishRun, releaseStaleClaims,
+  ackNotification, startRun, completeRun, recentRuns, runStats, purgeRunsOlderThan,
   normalise, VALID_FREQUENCIES, VALID_RISK_TYPES, MAX_NAME_LENGTH,
 };

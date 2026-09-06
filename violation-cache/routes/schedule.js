@@ -10,6 +10,8 @@
 //   DELETE /violation-cache/schedules                  cancel every one of them
 //   POST   /violation-cache/schedules/:id/arm          arm it
 //   POST   /violation-cache/schedules/:id/disable      stop it, keep the definition
+//   POST   /violation-cache/schedules/:id/run-now      send this one immediately
+//   GET    /violation-cache/schedules/:id/runs         run counts and the last few
 //   POST   /violation-cache/schedules/:id/ack-notification  clear a displayed failure
 //
 // Arming writes next_run_at; the poller does the rest. There is no per-user
@@ -24,6 +26,7 @@ const { jsonReply, requireUser, readBody } = require('../lib/http-util');
 const schedulesDb  = require('../lib/schedules');
 const scheduler    = require('../lib/scheduler');
 const userSettings = require('../lib/user-settings');
+const mailSettings = require('../lib/mail-settings');
 
 const PREFIX = '/violation-cache/schedules';
 
@@ -41,6 +44,12 @@ function forClient(row, projects) {
     monthDay:            row.monthDay,
     riskTypes:           row.riskTypes || [],
     reportName:          row.reportName || '',
+    // NULL means "use the account's list", which is not the same as an empty
+    // one. The browser needs to tell those apart to show "using account
+    // default" rather than "nobody", so null is passed through as null.
+    to:                  row.toAddrs || null,
+    cc:                  row.ccAddrs || null,
+    subject:             row.subject || null,
     nextRun:             row.nextRunAt,
     lastRun:             row.lastRunAt,
     lastRunStatus:       row.lastRunStatus,
@@ -236,6 +245,71 @@ async function handle({ method, path: parsedPath, req, res, principal }) {
     } catch (err) {
       log('error', `Disabling the schedule failed: ${err.message}`, { userId });
       jsonReply(res, 500, { error: 'Could not stop the schedule.', code: 'INTERNAL' });
+    }
+    return true;
+  }
+
+  // ── GET /violation-cache/schedules/:id/runs ─────────────────────────────
+  if (method === 'GET' && action === 'runs') {
+    try {
+      const row = await schedulesDb.get(userId, id);
+      if (!row) { notFound(res); return true; }
+      // Scoped by user_id inside runStats as well, so the id alone is never
+      // enough to read somebody else's history.
+      jsonReply(res, 200, await schedulesDb.runStats(userId, id, { limit: 5 }));
+    } catch (err) {
+      log('error', `Reading run history failed: ${err.message}`, { userId });
+      jsonReply(res, 500, { error: 'Could not load the run history.', code: 'INTERNAL' });
+    }
+    return true;
+  }
+
+  // ── POST /violation-cache/schedules/:id/run-now ─────────────────────────
+  // Sends this schedule immediately. Deliberately does NOT move next_run_at:
+  // testing a Monday-09:00 schedule must not push it to next week.
+  if (method === 'POST' && action === 'run-now') {
+    try {
+      const row = await schedulesDb.get(userId, id);
+      if (!row) { notFound(res); return true; }
+      if (!row.projectCount) {
+        jsonReply(res, 400, {
+          error: 'No projects are selected for this schedule.', code: 'NO_PROJECTS',
+        });
+        return true;
+      }
+      const account = await mailSettings.getResolved(userId).catch(() => null);
+      const mail = scheduler.applyScheduleRecipients(account, row);
+      if (!mail || !mail.enabled || !mail.smtp.host || !(mail.to || []).length) {
+        jsonReply(res, 400, {
+          error: 'Email is not configured — set the SMTP server and a recipient in Settings first.',
+          code: 'MAIL_NOT_CONFIGURED',
+        });
+        return true;
+      }
+
+      // The claim is what enforces one run at a time per account, the same as
+      // the poller's. Refuse rather than queue: the user is watching, and a
+      // silent wait looks like nothing happened.
+      const claimed = await schedulesDb.claimForManualRun(userId, id);
+      if (!claimed) {
+        jsonReply(res, 409, {
+          error: 'A report is already running for your account. Try again when it finishes.',
+          code: 'ALREADY_RUNNING',
+        });
+        return true;
+      }
+
+      // Fire and forget: building a report takes minutes and a route must not
+      // block the event loop (CLAUDE.md §6.6). runScheduledJob owns its own
+      // error handling and always releases the claim.
+      scheduler.runScheduledJob(claimed, { manual: true })
+        .catch(err => log('error', `Manual run crashed: ${err.message}`, { userId, scheduleId: id }));
+
+      log('info', 'Manual schedule run started', { userId, scheduleId: id });
+      jsonReply(res, 202, { ok: true, started: true });
+    } catch (err) {
+      log('error', `Starting a manual run failed: ${err.message}`, { userId });
+      jsonReply(res, 500, { error: 'Could not start the run.', code: 'INTERNAL' });
     }
     return true;
   }

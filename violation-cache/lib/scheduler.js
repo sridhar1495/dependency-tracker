@@ -111,6 +111,49 @@ function clampInt(value, min, max, dflt) {
   return n;
 }
 
+/**
+ * Merge a schedule's own recipients over the account's mail settings.
+ *
+ * The SMTP connection stays on the account — one mail server it authenticates
+ * to — and only the addressing is per schedule, so changing who receives a
+ * report never means re-entering a password.
+ *
+ * NULL means "inherit"; it is not the same as an empty list, which would be a
+ * schedule addressed to nobody. Only a non-null override replaces the account
+ * value, which is why an untouched schedule keeps delivering exactly where it
+ * always did.
+ */
+function applyScheduleRecipients(account, schedule) {
+  if (!account) return account;
+  if (!schedule) return account;
+  const to = schedule.toAddrs && schedule.toAddrs.length ? schedule.toAddrs : account.to;
+  // CC is taken from the schedule whenever it overrode To as well: a schedule
+  // that names its own recipients but inherits the account's CC list would copy
+  // people who have nothing to do with it.
+  const cc = schedule.toAddrs && schedule.toAddrs.length
+    ? (schedule.ccAddrs || [])
+    : account.cc;
+  return {
+    ...account,
+    to,
+    cc,
+    subject: schedule.subject || account.subject,
+  };
+}
+
+/**
+ * What next_run_at should be once this run finishes.
+ *
+ * A run the user asked for by hand must not move the timetable: pressing Send
+ * now on a Monday-09:00 schedule sends a report now and leaves Monday 09:00
+ * alone. Recomputing would silently push it a week whenever somebody tested it.
+ * A paused schedule keeps its NULL either way.
+ */
+function nextRunAfter(schedule, manual) {
+  if (manual) return schedule.nextRunAt || null;
+  return calcNextRun(schedule);
+}
+
 // ── One scheduled run ─────────────────────────────────────────────────────────
 /**
  * Build and email one user's scheduled report.
@@ -119,7 +162,7 @@ function clampInt(value, min, max, dflt) {
  * selection, their mail settings. The workbook is built in memory and emailed;
  * scheduled reports are never written to disk (CLAUDE.md §6.8).
  */
-async function runScheduledJob(schedule) {
+async function runScheduledJob(schedule, { manual = false } = {}) {
   const userId     = schedule.userId;
   const scheduleId = schedule.id;
   const runId      = await schedulesDb.startRun(userId, scheduleId);
@@ -168,13 +211,20 @@ async function runScheduledJob(schedule) {
     const buffer = await buildExcelReport(null, { riskTypes, appTitle, ...reportData });
     fileSize = buffer.length;
 
-    const mail = await mailSettings.getResolved(userId);
+    const account = await mailSettings.getResolved(userId);
+    const mail = applyScheduleRecipients(account, schedule);
     if (mail && mail.enabled) {
       // The same naming rule manual reports use. A schedule with a name sends
       // it verbatim on every run; without one it keeps the timestamped form.
       const filename = reports.reportFilename(schedule.reportName, 'scheduled_report');
       await sendEmail(mail, { filename, content: buffer }, { appTitle });
-      log('info', 'Scheduled report emailed', { userId, scheduleId, bytes: buffer.length });
+      log('info', 'Scheduled report emailed', {
+        userId, scheduleId, bytes: buffer.length,
+        // Recipient counts, never addresses — a log line is not the place for
+        // somebody's mailing list (CLAUDE.md §6.5).
+        recipients: mail.to.length, ccRecipients: mail.cc.length,
+        addressing: schedule.toAddrs ? 'schedule' : 'account',
+      });
     } else {
       log('warn', 'Scheduled report built but email is disabled — nothing was sent',
         { userId, scheduleId });
@@ -182,7 +232,7 @@ async function runScheduledJob(schedule) {
 
     await schedulesDb.completeRun(runId, { status: 'success', fileSizeBytes: fileSize });
     await schedulesDb.finishRun(scheduleId, {
-      status: 'success', nextRunAt: calcNextRun(schedule),
+      status: 'success', nextRunAt: nextRunAfter(schedule, manual),
     });
     return { ok: true };
 
@@ -190,7 +240,7 @@ async function runScheduledJob(schedule) {
     log('error', `Scheduled report failed: ${err.message}`, { userId, scheduleId });
     await schedulesDb.completeRun(runId, { status: 'failed', error: err.message, fileSizeBytes: fileSize });
     await schedulesDb.finishRun(scheduleId, {
-      status: 'failed', error: err.message, nextRunAt: calcNextRun(schedule),
+      status: 'failed', error: err.message, nextRunAt: nextRunAfter(schedule, manual),
     });
 
     // Best-effort alert to the From address, so a failure is noticed without
@@ -263,6 +313,7 @@ function stop() {
 function isRunning() { return _ticking; }
 
 module.exports = {
-  calcNextRun, runScheduledJob, tick, start, stop, isRunning,
+  calcNextRun, nextRunAfter, applyScheduleRecipients, runScheduledJob,
+  tick, start, stop, isRunning,
   POLL_INTERVAL_MS, MAX_CONCURRENT, STALE_CLAIM_MINS,
 };

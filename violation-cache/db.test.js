@@ -1670,6 +1670,135 @@ describe('multi-tenant data access', { skip: !ENABLED && 'TEST_DATABASE_URL not 
     await schedulesDb.removeAll(alice.id);
   });
 
+  test('recipients are per schedule, and NULL means "use the account list"', async () => {
+    const s = await mkSched(alice.id, { name: 'delivery' });
+    try {
+      assert.equal(s.toAddrs, null, 'a new schedule inherits');
+      assert.equal(s.ccAddrs, null);
+      assert.equal(s.subject, null);
+
+      const set = await schedulesDb.update(alice.id, s.id, {
+        to: 'ops@co.com, lead@co.com', cc: 'boss@co.com', subject: 'Weekly ops',
+      });
+      assert.deepEqual(set.toAddrs, ['ops@co.com', 'lead@co.com']);
+      assert.deepEqual(set.ccAddrs, ['boss@co.com']);
+      assert.equal(set.subject, 'Weekly ops');
+
+      // Blank is how the form says "go back to the account default", and it has
+      // to be distinguishable from "not supplied" — which is why it is NULL and
+      // not an empty array (an empty To would mean "send to nobody").
+      const cleared = await schedulesDb.update(alice.id, s.id, { to: '', cc: '', subject: '  ' });
+      assert.equal(cleared.toAddrs, null);
+      assert.equal(cleared.ccAddrs, null);
+      assert.equal(cleared.subject, null);
+
+      // Omitting the keys leaves whatever is stored alone.
+      await schedulesDb.update(alice.id, s.id, { to: 'x@y.co' });
+      assert.deepEqual((await schedulesDb.update(alice.id, s.id, { hour: 5 })).toAddrs, ['x@y.co']);
+
+      // Duplicates collapse rather than mailing somebody twice.
+      const dedup = await schedulesDb.update(alice.id, s.id, { to: 'a@b.co, a@b.co , a@b.co' });
+      assert.deepEqual(dedup.toAddrs, ['a@b.co']);
+    } finally { await schedulesDb.remove(alice.id, s.id); }
+  });
+
+  test('a malformed recipient is refused by the application and the database', async () => {
+    for (const [input, field] of [
+      [{ to: 'not-an-email' }, 'to'],
+      [{ to: 'ok@co.com, broken' }, 'to'],
+      [{ cc: 'also broken' }, 'cc'],
+      [{ subject: 'x'.repeat(201) }, 'subject'],
+    ]) {
+      await assert.rejects(
+        () => schedulesDb.create(alice.id, input),
+        (e) => e.code === 'VALIDATION_FAILED' && e.field === field,
+        JSON.stringify(input)
+      );
+    }
+
+    const s = await mkSched(alice.id);
+    try {
+      // Constraints belong in the database too (CLAUDE.md §5.4). An empty To
+      // array is the one that matters: it would be a schedule addressed to
+      // nobody, and array_length() returns NULL for it — which a CHECK treats
+      // as satisfied, so the constraint has to use cardinality().
+      await assert.rejects(
+        () => pool.query('UPDATE schedules SET to_addrs = $2 WHERE id = $1', [s.id, []]),
+        (e) => e.code === '23514', 'an empty To override must be refused'
+      );
+      await assert.rejects(
+        () => pool.query('UPDATE schedules SET subject = $2 WHERE id = $1', [s.id, 'x'.repeat(201)]),
+        (e) => e.code === '23514'
+      );
+      // An empty CC is legitimate — "copy nobody" is a real choice.
+      await pool.query('UPDATE schedules SET cc_addrs = $2 WHERE id = $1', [s.id, []]);
+      assert.deepEqual((await schedulesDb.get(alice.id, s.id)).ccAddrs, []);
+    } finally { await schedulesDb.remove(alice.id, s.id); }
+  });
+
+  test('a manual claim serialises with the poller, and ignores paused', async () => {
+    const paused = await mkSched(alice.id, { name: 'paused', enabled: false });
+    const active = await mkSched(alice.id, { name: 'active' });
+    try {
+      // Send now works on a paused schedule — that is most of the point of
+      // pausing one rather than cancelling it.
+      const claimed = await schedulesDb.claimForManualRun(alice.id, paused.id);
+      assert.ok(claimed, 'a paused schedule can still be sent by hand');
+      assert.equal(claimed.id, paused.id);
+
+      // While it runs, nothing else of this user's may be claimed — by hand or
+      // by the poller.
+      assert.equal(await schedulesDb.claimForManualRun(alice.id, active.id), null);
+      await pool.query("UPDATE schedules SET enabled = true, next_run_at = now() - interval '1 minute' WHERE id = $1", [active.id]);
+      assert.equal((await schedulesDb.claimDue(5)).filter(r => r.userId === alice.id).length, 0);
+
+      // Another user is unaffected.
+      const bobs = await mkSched(bob.id, { name: 'bob' });
+      assert.ok(await schedulesDb.claimForManualRun(bob.id, bobs.id));
+      await schedulesDb.finishRun(bobs.id, { status: 'success', nextRunAt: null });
+      await schedulesDb.remove(bob.id, bobs.id);
+
+      // Cross-user, and already-running, both refuse.
+      assert.equal(await schedulesDb.claimForManualRun(bob.id, paused.id), null);
+      await schedulesDb.finishRun(paused.id, { status: 'success', nextRunAt: null });
+      assert.ok(await schedulesDb.claimForManualRun(alice.id, active.id));
+      await schedulesDb.finishRun(active.id, { status: 'success', nextRunAt: null });
+    } finally { await schedulesDb.removeAll(alice.id); await schedulesDb.removeAll(bob.id); }
+  });
+
+  test('run statistics count only this schedule, for this user', async () => {
+    const mine = await mkSched(alice.id, { name: 'counted' });
+    const other = await mkSched(alice.id, { name: 'not counted' });
+    try {
+      for (const st of ['success', 'success', 'failed']) {
+        const id = await schedulesDb.startRun(alice.id, mine.id);
+        await schedulesDb.completeRun(id, { status: st, error: st === 'failed' ? 'SMTP refused' : null });
+      }
+      const otherRun = await schedulesDb.startRun(alice.id, other.id);
+      await schedulesDb.completeRun(otherRun, { status: 'success' });
+
+      const stats = await schedulesDb.runStats(alice.id, mine.id, { limit: 5 });
+      assert.equal(stats.total, 3, 'the other schedule must not be counted');
+      assert.equal(stats.succeeded, 2);
+      assert.equal(stats.failed, 1);
+      assert.equal(stats.recent.length, 3);
+      assert.equal(stats.recent[0].status, 'failed', 'newest first');
+      assert.equal(stats.retentionDays, 90);
+
+      // The last five, not everything.
+      for (let i = 0; i < 6; i++) {
+        const id = await schedulesDb.startRun(alice.id, mine.id);
+        await schedulesDb.completeRun(id, { status: 'success' });
+      }
+      const more = await schedulesDb.runStats(alice.id, mine.id, { limit: 5 });
+      assert.equal(more.total, 9);
+      assert.equal(more.recent.length, 5);
+
+      // Another user reading the same id gets nothing.
+      assert.equal((await schedulesDb.runStats(bob.id, mine.id)).total, 0);
+    } finally { await schedulesDb.removeAll(alice.id); }
+  });
+
   test('run history is recorded, attributed to its schedule, and purged by age', async () => {
     const s = await mkSched(alice.id, { name: 'history' });
     const runId = await schedulesDb.startRun(alice.id, s.id);
@@ -2263,8 +2392,6 @@ describe('administrator principal', { skip: !ENABLED && 'TEST_DATABASE_URL not s
     dtConnections.configure(dtCrypto.parseEncryptionKey(process.env.SECRET_ENCRYPTION_KEY));
   });
 
-  after(async () => { if (pool && pool.isReady()) await pool.close(); });
-
   const ADMIN = () => users.ADMIN_PRINCIPAL_ID;
 
   // A throwaway account for the password-reset tests. Created here rather than
@@ -2276,7 +2403,15 @@ describe('administrator principal', { skip: !ENABLED && 'TEST_DATABASE_URL not s
       passwordHash: await dtCrypto.hashPassword('originalpass1'),
     });
   });
-  after(async () => { if (alice) await users.deleteById(alice.id); });
+  // One teardown, not two. Node runs after() hooks in registration order, so a
+  // separate hook that closed the pool first left this one querying a pool that
+  // was already gone — the suite's own cleanup failing on the way out.
+  after(async () => {
+    if (pool && pool.isReady()) {
+      if (alice) await users.deleteById(alice.id);
+      await pool.close();
+    }
+  });
 
   test('the migration seeded the principal and its per-user rows', async () => {
     const { rows } = await pool.query(

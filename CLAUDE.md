@@ -287,8 +287,8 @@ await tx(async (client) => {
 | `dt_connections` | Per-user DT URL and encrypted API key |
 | `app_settings` | Service-wide settings the administrator owns (singleton row) |
 | `user_settings` | Per-user report and schedule limits — `NULL` means "follow the global default" |
-| `mail_settings` | Per-user SMTP configuration |
-| `schedules`, `schedule_projects`, `schedule_runs` | Scheduled reports, **any number per user** (migration 009). `report_name` `NULL` means "generate one"; `name` is the label in the settings list and a different field. `schedule_runs.schedule_id` is `ON DELETE SET NULL` so cancelling never erases the record that it ran |
+| `mail_settings` | Per-user SMTP connection **and default recipients** |
+| `schedules`, `schedule_projects`, `schedule_runs` | Scheduled reports, **any number per user** (migration 009). `report_name` `NULL` means "generate one"; `name` is the label in the settings list and a different field. `schedule_runs.schedule_id` is `ON DELETE SET NULL` so cancelling never erases the record that it ran. `to_addrs`/`cc_addrs`/`subject` are recipient overrides — `NULL` means "use the account's" (migration 010) |
 | `reports`, `report_file_chunks` | Report metadata and file bytes |
 | `violation_caches` | Shared violation cache, keyed by connection fingerprint |
 | `branding_assets` | The administrator's sign-in background. Bytes live here, **not** on `app_settings`, because the administration listing cross-joins that table |
@@ -511,6 +511,27 @@ if (method === 'GET' && path === '/violation-cache/status') {
   `user_settings.max_schedules` override, resolved in `userSettings.get()` and
   nowhere else, enforced on create with 429 `QUOTA_REACHED`. Being over it
   blocks; it never deletes a schedule.
+- **Only the addressing is per schedule.** `mail_settings` keeps the SMTP host,
+  port, TLS, credentials and From address, because they describe one mail server
+  the account authenticates to — duplicating them per schedule would mean
+  re-entering a password to change a recipient. `schedules.to_addrs`,
+  `cc_addrs` and `subject` override the account defaults, merged in
+  `scheduler.applyScheduleRecipients()` and nowhere else. `NULL` means
+  "inherit"; an empty `to_addrs` would mean "send to nobody" and the database
+  refuses it — with `cardinality()`, not `array_length()`, which returns `NULL`
+  for an empty array and so passes a `CHECK` that meant to reject it.
+  **Overriding `To` drops the account's `CC`** rather than copying people who
+  have nothing to do with that report.
+- **A manual run does not move the timetable.** `POST /schedules/:id/run-now`
+  takes the same claim the poller takes — so Send now waits its turn rather
+  than opening a second crawl — and `nextRunAfter()` preserves `next_run_at`.
+  Recomputing it would push a Monday 09:00 schedule a week every time somebody
+  tested it. A paused schedule can still be sent by hand; that is most of the
+  point of pausing rather than cancelling.
+- **Run totals are over the retention window, not all time.** `schedule_runs` is
+  swept at 90 days, so `runStats()` returns `retentionDays` alongside the counts
+  and the screen says "in the last 90 days". An unqualified total would shrink
+  every month with nothing to explain it.
 - Scheduled reports are built in memory and emailed; they are never written to disk.
 
 ### 6.9 Email (`nodemailer`)
@@ -693,6 +714,16 @@ minute.
 The dashboard is `index.html`, the login/registration/set-password page is
 `login.html`, and administration is `admin.html`. Each is a self-contained HTML
 file with inline `<style>` and a single `<script>`.
+
+**The schedule editor is a drill-down inside the settings panel, not a dialog.**
+Clicking a schedule replaces the panel's body and the header grows a Back
+button. One schedule is open at a time by construction — a list of expandable
+rows lets somebody edit three at once and lose two of them — and Back, Discard
+and closing the whole panel all pass through `confirmDiscardSchedule()`, so
+there is no way out that silently drops what was typed. `_schedDirty` is
+cleared *after* the fields are populated, never before: every write above fires
+an `oninput` handler, so resetting it first leaves a freshly opened editor
+claiming unsaved changes.
 
 Administration was a slide-in panel while it did one read-only thing. It became a
 page when it grew a master/detail split and service configuration: a panel that
@@ -1124,6 +1155,10 @@ redundant.
   `resetSchema()` drops the schema rather than the ledger — dropping only the
   ledger made the suite replay the shipped directory over its own output, which
   is a stronger promise than §5.3's and one no deployment needs.
+- Per-schedule recipients: an override replaces the account list, a blank field
+  clears back to it, an empty `to_addrs` is refused by the database, and the
+  merge is checked against a real SMTP conversation so the assertion is about
+  which addresses reach `RCPT TO` rather than which object was built.
 - **Authorisation:** every route rejects a missing or invalid token with 401;
   cross-user access returns 404; the profile endpoint ignores login ID and email.
 - Do **not** write tests that require a live DT API.

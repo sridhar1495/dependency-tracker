@@ -2556,3 +2556,153 @@ describe('admin.html schedule limit', () => {
     assert.equal(writes, 6, `expected six write handlers, found ${writes}`);
   });
 });
+
+// ── The drill-down schedule editor (index.html) ──────────────────────────────
+describe('index.html schedule drill-down', () => {
+  test('the editor is a panel view, not a dialog', () => {
+    // A dialog covers the list it was opened from; a drill-down keeps the
+    // panel's context and makes "one open at a time" structural rather than
+    // something the code has to remember.
+    assert.match(INDEX_HTML, /id="cfgSchedView"/);
+    assert.match(INDEX_HTML, /id="cfgMainView"/);
+    assert.doesNotMatch(INDEX_HTML, /schedEditModal/,
+      'the modal it replaced must be gone, not merely unused');
+  });
+
+  test('opening one schedule asks before abandoning another', () => {
+    // The whole point of one-at-a-time: switching must not silently drop what
+    // was typed into the previous one.
+    const fn = extractFunction(INDEX_HTML, 'openScheduleEditor');
+    assert.match(fn, /_schedEditorOpen && !\(await confirmDiscardSchedule\(\)\)/);
+  });
+
+  test('every way out of the editor goes through the same guard', () => {
+    // Back, Discard and closing the whole panel are three ways to lose work.
+    const close = extractFunction(INDEX_HTML, 'closeScheduleEditor');
+    assert.match(close, /confirmDiscardSchedule/);
+    const panel = extractFunction(INDEX_HTML, 'closeConfigPanel');
+    assert.match(panel, /_schedEditorOpen && !\(await confirmDiscardSchedule\(\)\)/,
+      'closing the panel must respect the drill-down\'s unsaved changes too');
+    assert.match(INDEX_HTML, /onclick="closeScheduleEditor\(true\)"/,
+      'Discard must skip the prompt rather than ask twice');
+  });
+
+  test('the dirty flag is cleared after the fields are populated, never before', () => {
+    // Every field write above fires an oninput handler, so clearing the flag
+    // first would leave a freshly opened editor claiming unsaved changes.
+    const fn = extractFunction(INDEX_HTML, 'openScheduleEditor');
+    const setDirtyFalse = fn.lastIndexOf('_schedDirty = false');
+    const lastFieldWrite = fn.lastIndexOf('.checked =');
+    assert.ok(setDirtyFalse > lastFieldWrite,
+      'the flag must be reset after the last field is written');
+  });
+
+  test('the panel always opens on the list, never on a stale schedule', () => {
+    const fn = extractFunction(INDEX_HTML, 'openConfigPanel');
+    assert.match(fn, /closeScheduleEditor\(true\)/);
+  });
+});
+
+describe('index.html per-schedule delivery', () => {
+  test('blank fields are sent, so an override can be cleared', () => {
+    // Omitting the key means "leave it alone"; sending an empty list means "go
+    // back to the account default". Only the second is reachable from a form
+    // the user cleared.
+    const fn = extractFunction(INDEX_HTML, 'readScheduleEditor');
+    assert.match(fn, /to, cc, subject,/);
+    assert.match(fn, /const addrs = \(id\) =>/);
+  });
+
+  test('a malformed address is caught in the editor, not by the server', () => {
+    const fn = extractFunction(INDEX_HTML, 'readScheduleEditor');
+    assert.match(fn, /SCHED_EMAIL_RE\.test\(a\)/);
+    assert.match(fn, /is not a valid email address/);
+  });
+
+  test('the placeholder says what a blank field will actually use', () => {
+    // "Leave it blank" is only safe advice if the user can see what blank means.
+    const fn = extractFunction(INDEX_HTML, 'applySchedDeliveryPlaceholders');
+    assert.match(fn, /Account default/);
+    assert.match(fn, /_appConfig/);
+  });
+
+  test('the list says where each schedule actually sends', () => {
+    const fn = extractFunction(INDEX_HTML, 'renderScheduleList');
+    assert.match(fn, /account default recipients/);
+    assert.match(fn, /escHtml\(sc\.to\.join/, 'recipient addresses are user text');
+  });
+
+  test('only the addressing is per schedule — the SMTP fields stay on the account', () => {
+    // Changing who receives a report must never mean re-entering a password.
+    const view = /<div id="cfgSchedView"[\s\S]*?<!-- end cfgSchedView -->/.exec(INDEX_HTML)[0];
+    for (const smtpField of ['cfgSmtpHost', 'cfgSmtpPort', 'cfgSmtpUser', 'cfgSmtpPass', 'cfgMailFrom']) {
+      assert.doesNotMatch(view, new RegExp(smtpField), `${smtpField} must not be per schedule`);
+    }
+    for (const own of ['cfgSchedTo', 'cfgSchedCc', 'cfgSchedSubject']) {
+      assert.match(view, new RegExp(own));
+    }
+  });
+});
+
+describe('index.html pause, send now and history', () => {
+  test('the pause toggle acts immediately and does not open the editor', () => {
+    const fn = extractFunction(INDEX_HTML, 'renderScheduleList');
+    assert.match(fn, /toggleSchedule\('\$\{sc\.id\}', this\.checked\)/);
+    assert.match(fn, /onclick="event\.stopPropagation\(\)"/,
+      'clicking the toggle must not also drill into the schedule');
+    // A schedule with no projects cannot be armed, so offering to resume it
+    // would be offering something that fails.
+    assert.match(fn, /sc\.projectCount \? '' : 'disabled'/);
+  });
+
+  test('a failed toggle puts the switch back where the server says it is', () => {
+    const fn = extractFunction(INDEX_HTML, 'toggleSchedule');
+    const failureBranch = fn.slice(fn.indexOf('if (!r.ok)'));
+    assert.match(failureBranch, /reloadSchedules/,
+      'a refused pause must not leave the UI claiming it worked');
+  });
+
+  test('send now is disabled until the schedule exists', () => {
+    const fn = extractFunction(INDEX_HTML, 'openScheduleEditor');
+    assert.match(fn, /cfgSchedRunNowBtn'\)\.disabled = !sc/);
+  });
+
+  test('the history states the window it counts over', () => {
+    // An unqualified total would quietly shrink as the 90-day sweep runs.
+    const fn = extractFunction(INDEX_HTML, 'renderRunHistory');
+    assert.match(fn, /stats\.retentionDays/);
+    assert.match(fn, /in the last /);
+    assert.match(fn, /succeeded/);
+    assert.match(fn, /failed/);
+    assert.match(fn, /escHtml\(r\.error/, 'a failure message is text from a mail server');
+  });
+
+  test('every new handler is window-exported', () => {
+    for (const fn of ['closeScheduleEditor', 'cancelScheduleFromEditor',
+                      'toggleSchedule', 'runScheduleNow', 'markSchedDirty']) {
+      assert.match(INDEX_HTML, new RegExp(`window\\.${fn}\\s*=\\s*${fn};`), fn);
+    }
+  });
+
+  test('the backend routes the screen calls all exist', () => {
+    // A screen calling a route nobody implemented fails silently, which is how
+    // the schedule/status poller survived Phase 2 unnoticed.
+    const routeSrc = fs.readFileSync(path.join(__dirname, 'routes', 'schedule.js'), 'utf8');
+    for (const [action, method] of [['arm', 'POST'], ['disable', 'POST'],
+                                    ['run-now', 'POST'], ['runs', 'GET'],
+                                    ['ack-notification', 'POST']]) {
+      assert.match(routeSrc, new RegExp(`method === '${method}' && action === '${action}'`),
+        `${method} .../${action} is called by the page but not handled`);
+    }
+  });
+
+  test('every schedule path the page calls is one the route parses', () => {
+    const calls = [...INDEX_HTML.matchAll(/\/violation-cache\/schedules(\/[a-z$${}()\w.-]*)?/g)]
+      .map(m => (m[1] || '').replace(/\$\{[^}]*\}/g, ':id'));
+    const allowed = new Set(['', '/', '/:id', '/:id/arm', '/:id/disable',
+                             '/:id/run-now', '/:id/runs', '/:id/ack-notification']);
+    for (const c of new Set(calls)) {
+      assert.ok(allowed.has(c), `the page calls an unexpected schedule path: "${c}"`);
+    }
+  });
+});
