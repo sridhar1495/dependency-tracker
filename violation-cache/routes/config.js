@@ -27,28 +27,16 @@ const dtConnections = require('../lib/dt-connections');
 const userSettings  = require('../lib/user-settings');
 const mailSettings  = require('../lib/mail-settings');
 const schedulesDb   = require('../lib/schedules');
-const scheduler     = require('../lib/scheduler');
+// The one place a schedule is shaped for the browser lives with the routes that
+// write them. Importing it is what keeps this listing and that collection from
+// describing the same row two different ways.
+const scheduleRoute = require('./schedule');
 
-/** Shape the schedule row the way the dashboard's config panel expects it. */
-function scheduleForClient(row, projects) {
-  if (!row) return { enabled: false };
-  return {
-    enabled:             row.enabled,
-    frequency:           row.frequency,
-    hour:                row.hour,
-    weekDays:            row.weekDays || [],
-    monthDay:            row.monthDay,
-    riskTypes:           row.riskTypes || [],
-    reportName:          row.reportName || '',
-    nextRun:             row.nextRunAt,
-    lastRun:             row.lastRunAt,
-    lastRunStatus:       row.lastRunStatus,
-    lastRunError:        row.lastRunError,
-    failureNotification: row.failureNotification,
-    projectUuids:        projects.map(p => p.uuid),
-    projectCount:        projects.length,
-  };
-}
+// Schedules are shaped by routes/schedule.js and nothing else. A user owns any
+// number of them now (migration 009), so they are a collection with their own
+// endpoints rather than a field on the config object — but GET /config still
+// carries the list, because the settings panel renders mail and schedules on
+// one screen and two round trips to paint it would be two chances to disagree.
 
 async function handle({ method, path: parsedPath, req, res, principal }) {
 
@@ -58,12 +46,11 @@ async function handle({ method, path: parsedPath, req, res, principal }) {
     if (!userId) return true;
 
     try {
-      const [conn, settings, mailCfg, sched, projects] = await Promise.all([
+      const [conn, settings, mailCfg, schedules] = await Promise.all([
         dtConnections.getForClient(userId),
         userSettings.get(userId),
         mailSettings.getForClient(userId),
-        schedulesDb.get(userId),
-        schedulesDb.getProjects(userId),
+        schedulesDb.list(userId),
       ]);
 
       jsonReply(res, 200, {
@@ -74,9 +61,10 @@ async function handle({ method, path: parsedPath, req, res, principal }) {
           hasApiKey:    conn ? conn.hasApiKey : false,
         },
         config: {
-          maxReports: settings.maxReports,
-          mail:       mailCfg || { enabled: false },
-          schedule:   scheduleForClient(sched, projects),
+          maxReports:   settings.maxReports,
+          maxSchedules: settings.maxSchedules,
+          mail:         mailCfg || { enabled: false },
+          schedules:    schedules.map(s => scheduleRoute.forClient(s)),
         },
       });
     } catch (err) {
@@ -130,27 +118,13 @@ async function handle({ method, path: parsedPath, req, res, principal }) {
           await mailSettings.save(userId, cfg.mail);
         }
 
-        // ── Schedule ────────────────────────────────────────────────
-        if (cfg.schedule !== undefined) {
-          if (typeof cfg.schedule !== 'object' || cfg.schedule === null) {
-            jsonReply(res, 400, { error: 'schedule must be an object.', code: 'VALIDATION_FAILED' });
-            return true;
-          }
-          await schedulesDb.save(userId, cfg.schedule);
-          if (Array.isArray(cfg.schedule.projects)) {
-            await schedulesDb.setProjects(userId, cfg.schedule.projects);
-          }
-
-          // Keep next_run_at consistent with the definition that was just
-          // saved. calcNextRun is the single source of truth for timing, so
-          // the value is never computed anywhere else (CLAUDE.md §6.8).
-          const saved = await schedulesDb.get(userId);
-          if (saved && saved.enabled && saved.projectCount > 0) {
-            await schedulesDb.arm(userId, scheduler.calcNextRun(saved));
-          } else if (saved && !saved.enabled) {
-            await schedulesDb.disable(userId);
-          }
-        }
+        // ── Schedules ───────────────────────────────────────────────
+        // Deliberately NOT read from this body. There is no longer a single
+        // schedule to save alongside the mail settings, and accepting a `schedule`
+        // key here would be a second way to write one — silently editing
+        // whichever row happened to come back first. /violation-cache/schedules
+        // is the only writer, the same way the administration screen is the only
+        // writer of the report ceiling above.
       }
 
       const connection = await dtConnections.getForClient(userId);

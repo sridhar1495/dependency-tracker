@@ -20,8 +20,10 @@
 const { query } = require('../db/pool');
 const appSettings = require('./app-settings');
 
-const MIN_MAX_REPORTS = appSettings.MIN_MAX_REPORTS;
-const MAX_MAX_REPORTS = appSettings.MAX_MAX_REPORTS;
+const MIN_MAX_REPORTS   = appSettings.MIN_MAX_REPORTS;
+const MAX_MAX_REPORTS   = appSettings.MAX_MAX_REPORTS;
+const MIN_MAX_SCHEDULES = appSettings.MIN_MAX_SCHEDULES;
+const MAX_MAX_SCHEDULES = appSettings.MAX_MAX_SCHEDULES;
 
 /**
  * This account's settings, with the quota already resolved.
@@ -33,17 +35,24 @@ const MAX_MAX_REPORTS = appSettings.MAX_MAX_REPORTS;
  */
 async function get(userId) {
   const { rows } = await query(
-    `SELECT s.max_reports                                  AS "maxReportsOverride",
-            COALESCE(s.max_reports, a.default_max_reports) AS "maxReports"
+    `SELECT s.max_reports                                      AS "maxReportsOverride",
+            COALESCE(s.max_reports, a.default_max_reports)     AS "maxReports",
+            s.max_schedules                                    AS "maxSchedulesOverride",
+            COALESCE(s.max_schedules, a.default_max_schedules) AS "maxSchedules"
        FROM user_settings s
        CROSS JOIN app_settings a
       WHERE s.user_id = $1 AND a.id = TRUE`,
     [userId]
   );
   if (rows[0]) return rows[0];
-  // No settings row at all: fall back to the global default rather than a
-  // constant, so a repaired account still sees the administrator's choice.
-  return { maxReports: await appSettings.getDefaultMaxReports(), maxReportsOverride: null };
+  // No settings row at all: fall back to the global defaults rather than
+  // constants, so a repaired account still sees the administrator's choices.
+  return {
+    maxReports:           await appSettings.getDefaultMaxReports(),
+    maxReportsOverride:   null,
+    maxSchedules:         await appSettings.getDefaultMaxSchedules(),
+    maxSchedulesOverride: null,
+  };
 }
 
 /** The report ceiling enforced for this account. */
@@ -80,6 +89,47 @@ async function setMaxReportsOverride(userId, value) {
   return get(userId);
 }
 
+/** The schedule ceiling enforced for this account. */
+async function getMaxSchedules(userId) {
+  const { maxSchedules } = await get(userId);
+  return (Number.isInteger(maxSchedules) && maxSchedules > 0)
+    ? maxSchedules
+    : appSettings.FALLBACK_MAX_SCHEDULES;
+}
+
+/**
+ * Give one account a schedule limit of its own.
+ *
+ * Administrator-only, exactly like the report limit, and for the same reason:
+ * it is a capacity decision about the server's recurring work, not a user
+ * preference. Being over it blocks new schedules; it never deletes one.
+ *
+ * @throws {Error} code VALIDATION_FAILED when out of range
+ */
+async function setMaxSchedulesOverride(userId, value) {
+  const n = Number(value);
+  if (!Number.isInteger(n) || n < MIN_MAX_SCHEDULES || n > MAX_MAX_SCHEDULES) {
+    throw Object.assign(
+      new Error(`Maximum schedules must be a whole number between ${MIN_MAX_SCHEDULES} and ${MAX_MAX_SCHEDULES}.`),
+      { code: 'VALIDATION_FAILED', field: 'maxSchedules' }
+    );
+  }
+  const { rowCount } = await query(
+    'UPDATE user_settings SET max_schedules = $2 WHERE user_id = $1', [userId, n]
+  );
+  if (!rowCount) return null;
+  return get(userId);
+}
+
+/** Return an account to the global schedule default. */
+async function clearMaxSchedulesOverride(userId) {
+  const { rowCount } = await query(
+    'UPDATE user_settings SET max_schedules = NULL WHERE user_id = $1', [userId]
+  );
+  if (!rowCount) return null;
+  return get(userId);
+}
+
 /** Return an account to the global default. */
 async function clearMaxReportsOverride(userId) {
   const { rowCount } = await query(
@@ -90,6 +140,8 @@ async function clearMaxReportsOverride(userId) {
 }
 
 module.exports = {
-  get, getMaxReports, setMaxReportsOverride, clearMaxReportsOverride,
-  MIN_MAX_REPORTS, MAX_MAX_REPORTS,
+  get,
+  getMaxReports, setMaxReportsOverride, clearMaxReportsOverride,
+  getMaxSchedules, setMaxSchedulesOverride, clearMaxSchedulesOverride,
+  MIN_MAX_REPORTS, MAX_MAX_REPORTS, MIN_MAX_SCHEDULES, MAX_MAX_SCHEDULES,
 };

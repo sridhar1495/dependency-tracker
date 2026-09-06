@@ -208,7 +208,7 @@ Inline comments use lettered prefixes to trace design decisions:
 - **O-numbers** — observability notes (`// O3: JSON log format for log aggregators`)
 - **S-numbers** — security rationale (`// S2: token hashed before storage`) — **new in revision 2**
 
-Highest numbers currently in use: **Q17, P18, O5, S32**. When adding logic with a
+Highest numbers currently in use: **Q20, P19, O5, S32**. When adding logic with a
 non-obvious trade-off, add the next number in the appropriate series. Check the
 current maximum before assigning — parallel branches can claim the same number.
 
@@ -286,9 +286,9 @@ await tx(async (client) => {
 | `login_audit` | Authentication event trail |
 | `dt_connections` | Per-user DT URL and encrypted API key |
 | `app_settings` | Service-wide settings the administrator owns (singleton row) |
-| `user_settings` | Per-user report limit — `NULL` means "follow the global default" |
-| `mail_settings` | Per-user SMTP configuration |
-| `schedules`, `schedule_projects`, `schedule_runs` | Scheduled reports; `report_name` `NULL` means "generate one" |
+| `user_settings` | Per-user report and schedule limits — `NULL` means "follow the global default" |
+| `mail_settings` | Per-user SMTP connection **and default recipients** |
+| `schedules`, `schedule_projects`, `schedule_runs` | Scheduled reports, **any number per user** (migration 009). `report_name` `NULL` means "generate one"; `name` is the label in the settings list and a different field. `schedule_runs.schedule_id` is `ON DELETE SET NULL` so cancelling never erases the record that it ran. `to_addrs`/`cc_addrs`/`subject` are recipient overrides — `NULL` means "use the account's" (migration 010) |
 | `reports`, `report_file_chunks` | Report metadata and file bytes |
 | `violation_caches` | Shared violation cache, keyed by connection fingerprint |
 | `branding_assets` | The administrator's sign-in background. Bytes live here, **not** on `app_settings`, because the administration listing cross-joins that table |
@@ -461,14 +461,77 @@ if (method === 'GET' && path === '/violation-cache/status') {
 
 ### 6.8 Scheduler
 
-- `calcNextRun(schedule)` is a pure function and the single source of truth for
-  timing. Do not duplicate its logic.
-  - `daily`: next occurrence of `hour` (tomorrow if already past)
-  - `weekly`: scans the next 8 days for a matching `weekDays` entry
+- `calcNextRun(schedule, now)` is a pure function and the single source of truth
+  for timing. Do not duplicate its logic. `now` defaults to the current instant
+  and exists so tests can pin a weekday instead of asserting invariants.
+  - `daily`: next occurrence of `hour:minute` (tomorrow if already past)
+  - `weekly`: scans days 0–7 for a matching `weekDays` entry, skipping any
+    candidate that is not still ahead
   - `monthly`: `monthDay` capped at 28; rolls to next month if already past
+- **The schedule is stored as a UTC instant, and `calcNextRun` reads it with
+  `getUTC*` accessors only** (Q19). It used to build candidates from the
+  server's local calendar, which made the container's `TZ` an invisible input
+  to every schedule in the system — a base image that shipped one set would
+  move everybody's delivery time with nothing in the diff to show for it. The
+  Dockerfile pins `TZ=UTC` so log lines and `toLocaleString()` agree with the
+  stored values, but nothing depends on it any more.
+  **Timezones exist in exactly one place: the browser.** `index.html` shows a
+  local wall clock and converts the `(hour, minute, weekDays)` and
+  `(hour, minute, monthDay)` tuples on the way in and out — with real `Date`
+  arithmetic, never modular arithmetic on the hour, because an offset can be a
+  half hour (India is UTC+05:30, Nepal +05:45) and can move the *day*. The
+  picker re-reads what was stored after a save rather than showing what was
+  typed, so a month day clamped at the 1/28 boundary is visible instead of
+  drifting on each reload. `schedules.minute` exists for exactly this
+  (migration 008): an hour-only field cannot express 09:00 in India.
+- **Weekly fires today when today qualifies and its time has not passed** (Q20).
+  The scan used to start at tomorrow, so a Wednesday schedule saved on a
+  Wednesday morning waited a full week — the one case a user is certain to be
+  watching, because they have just set it up. Starting at day 0 is safe only
+  because of the `candidate <= now` guard; do not remove one without the other.
 - Scheduling is driven by **one poller** that ticks every 60 seconds and claims due
   rows with `FOR UPDATE SKIP LOCKED`. Never create one timer per user.
-- Per-user overlap protection is the `running_since` column, not a process variable.
+- Per-schedule overlap protection is the `running_since` column, not a process
+  variable.
+- **A user owns any number of schedules, and at most one of them runs at a
+  time.** That guarantee used to be free — `running_since` sat on a row that was
+  itself unique per user — and is not free since migration 009. `claimOne()`
+  keeps it with a `NOT EXISTS` clause over the same user's rows; without it an
+  account with five schedules due at 09:00 would open five parallel crawls
+  against its single DependencyTrack connection, which is the N-times-per-user
+  upstream work §13 forbids. `claimDue(limit)` therefore issues **one statement
+  per claim**: each has to commit before the next runs, or two schedules of one
+  user would both pass that check in the same snapshot.
+- **Cancelling a schedule deletes it.** The settings list holds what is live,
+  not disabled husks; `schedule_projects` cascades with it and `schedule_runs`
+  does not. `POST /schedules/:id/disable` still exists for stopping one without
+  discarding the definition.
+- **The number of schedules is a quota, shaped exactly like the report limit**
+  (§7.5): `app_settings.default_max_schedules` with a nullable
+  `user_settings.max_schedules` override, resolved in `userSettings.get()` and
+  nowhere else, enforced on create with 429 `QUOTA_REACHED`. Being over it
+  blocks; it never deletes a schedule.
+- **Only the addressing is per schedule.** `mail_settings` keeps the SMTP host,
+  port, TLS, credentials and From address, because they describe one mail server
+  the account authenticates to — duplicating them per schedule would mean
+  re-entering a password to change a recipient. `schedules.to_addrs`,
+  `cc_addrs` and `subject` override the account defaults, merged in
+  `scheduler.applyScheduleRecipients()` and nowhere else. `NULL` means
+  "inherit"; an empty `to_addrs` would mean "send to nobody" and the database
+  refuses it — with `cardinality()`, not `array_length()`, which returns `NULL`
+  for an empty array and so passes a `CHECK` that meant to reject it.
+  **Overriding `To` drops the account's `CC`** rather than copying people who
+  have nothing to do with that report.
+- **A manual run does not move the timetable.** `POST /schedules/:id/run-now`
+  takes the same claim the poller takes — so Send now waits its turn rather
+  than opening a second crawl — and `nextRunAfter()` preserves `next_run_at`.
+  Recomputing it would push a Monday 09:00 schedule a week every time somebody
+  tested it. A paused schedule can still be sent by hand; that is most of the
+  point of pausing rather than cancelling.
+- **Run totals are over the retention window, not all time.** `schedule_runs` is
+  swept at 90 days, so `runStats()` returns `retentionDays` alongside the counts
+  and the screen says "in the last 90 days". An unqualified total would shrink
+  every month with nothing to explain it.
 - Scheduled reports are built in memory and emailed; they are never written to disk.
 
 ### 6.9 Email (`nodemailer`)
@@ -566,8 +629,8 @@ is a correctness bug, not a style issue.
   administrator paths.
 - **Cross-user access returns 404, not 403.** Never confirm that another user's
   resource exists.
-- **Quotas are enforced per user** (report limits, storage), never as a global
-  counter. Who *chooses* the number changed in migration 005 — the administrator
+- **Quotas are enforced per user** (report limits, schedule counts, storage),
+  never as a global counter. Who *chooses* the number changed in migration 005 — the administrator
   sets it, globally or for one account — but it is still counted and applied per
   user, and one account can never consume another's allowance.
   `user_settings.max_reports IS NULL` means "follow `app_settings`"; a value is
@@ -590,8 +653,8 @@ a **closed list of three**, not a general-purpose account editor:
 
 | Route | Effect |
 |---|---|
-| `PUT /admin/settings` | The default report limit every non-overridden account follows |
-| `PUT /admin/users/:loginId/settings` | One account's limit; `null` returns it to the default |
+| `PUT /admin/settings` | The default report and schedule limits every non-overridden account follows |
+| `PUT /admin/users/:loginId/settings` | One account's limits; `null` returns either to the default |
 | `POST /admin/users/:loginId/password` | Reset one account's password |
 | `PUT /admin/branding` | The application title; empty restores the built-in default |
 | `POST /admin/branding/background` | Upload the sign-in background |
@@ -602,6 +665,11 @@ these **six** are handled and every other method/path combination is not — a
 blanket ban that had to be deleted would have stopped protecting anything, so
 the allow-list is the contract and adding a seventh means editing it in a
 diff somebody reads.
+
+The schedule limit rides on the two settings routes that already existed rather
+than adding a seventh — it is the same kind of decision about the same rows,
+made by the same principal. That is what the allow-list is for: a new capability
+has to justify a new entry, and this one did not need one.
 
 The list went from three to six when customisation landed, and the three
 additions were weighed rather than waved through: they change how the product
@@ -646,6 +714,16 @@ minute.
 The dashboard is `index.html`, the login/registration/set-password page is
 `login.html`, and administration is `admin.html`. Each is a self-contained HTML
 file with inline `<style>` and a single `<script>`.
+
+**The schedule editor is a drill-down inside the settings panel, not a dialog.**
+Clicking a schedule replaces the panel's body and the header grows a Back
+button. One schedule is open at a time by construction — a list of expandable
+rows lets somebody edit three at once and lose two of them — and Back, Discard
+and closing the whole panel all pass through `confirmDiscardSchedule()`, so
+there is no way out that silently drops what was typed. `_schedDirty` is
+cleared *after* the fields are populated, never before: every write above fires
+an `oninput` handler, so resetting it first leaves a freshly opened editor
+claiming unsaved changes.
 
 Administration was a slide-in panel while it did one read-only thing. It became a
 page when it grew a master/detail split and service configuration: a panel that
@@ -879,7 +957,7 @@ The frontend never performs uniqueness checks — those are backend-only, via
 | `hashPassword` / `verifyPassword` | server | scrypt wrappers |
 | `mintToken` / `hashToken` | server | Session token helpers |
 | `encryptSecret` / `decryptSecret` | server | AES-256-GCM wrappers |
-| `calcNextRun(schedule)` | server | Pure function: next fire time |
+| `calcNextRun(schedule, now)` | server | Pure function: next fire time, in UTC |
 | `collectReportData(...)` | server | Shared collection core for manual and scheduled reports |
 | `sendEmail(mailCfg, ...)` | server | Deliver report via nodemailer |
 
@@ -1062,10 +1140,25 @@ redundant.
 - Every validation rule, including boundary lengths and rejected characters.
 - Password hashing round-trip, and rejection of a tampered hash.
 - Token minting and hashing; encryption round-trip and auth-tag failure.
-- `calcNextRun` for all three frequencies.
-- **Database tier:** migrations apply and are idempotent; the single-live-session
-  index rejects a second session; cascade deletion removes all owned rows;
-  chunked byte round-trips are identical; `SKIP LOCKED` claims each row once.
+- `calcNextRun` for all three frequencies, including a weekly schedule that
+  fires today and one whose time has already passed, and that the answer does
+  not move when `process.env.TZ` does.
+- The dashboard's UTC↔local schedule converters, round-tripped across whole-hour,
+  half-hour and 45-minute offsets and both extremes, plus the cross-layer check
+  that what the picker stores is the local time the scheduler fires at. They are
+  extracted from `index.html` rather than copied, so the test cannot pass against
+  a version of the code the page no longer contains.
+- **Database tier:** migrations apply to an **empty** schema and are idempotent;
+  the single-live-session index rejects a second session; cascade deletion
+  removes all owned rows; chunked byte round-trips are identical; `SKIP LOCKED`
+  claims each row once, and one user's several schedules claim one at a time.
+  `resetSchema()` drops the schema rather than the ledger — dropping only the
+  ledger made the suite replay the shipped directory over its own output, which
+  is a stronger promise than §5.3's and one no deployment needs.
+- Per-schedule recipients: an override replaces the account list, a blank field
+  clears back to it, an empty `to_addrs` is refused by the database, and the
+  merge is checked against a real SMTP conversation so the assertion is about
+  which addresses reach `RCPT TO` rather than which object was built.
 - **Authorisation:** every route rejects a missing or invalid token with 401;
   cross-user access returns 404; the profile endpoint ignores login ID and email.
 - Do **not** write tests that require a live DT API.
@@ -1175,7 +1268,7 @@ aspirations, and each is verifiable.
 | `LOG_FORMAT` | server | `text` (default) or `json` |
 | `TEST_DATABASE_URL` | tests | Enables the database integration tier |
 
-The report limit is **not** an environment variable. It is service configuration
+Neither the report limit nor the schedule limit is an environment variable. It is service configuration
 the administrator owns at runtime, held in `app_settings` and edited from the
 administration screen — an operator should not have to restart a container to
 change a quota.

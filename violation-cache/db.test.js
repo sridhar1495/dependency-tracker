@@ -51,11 +51,25 @@ function cleanupDir(dir) {
 }
 
 /** Drop everything this suite may have created, so runs are repeatable. */
+/**
+ * Drop everything, not just the ledger.
+ *
+ * CLAUDE.md §10.4 says integration tests create their own schema and drop it
+ * afterwards; dropping only schema_migrations did not do that, and left the
+ * suite replaying the shipped directory over an already-migrated schema. That
+ * silently required every migration to be re-runnable over its own OUTPUT,
+ * which is a stronger promise than §5.3's (re-runnable after a PARTIAL failure)
+ * and one no deployment needs — the runner records what it has applied.
+ *
+ * Migration 009 is where the difference stopped being academic: it removes the
+ * unique constraint on schedules(user_id), so replaying 004's
+ * `ON CONFLICT (user_id)` afterwards cannot work by construction. Resetting
+ * properly tests what production actually does, and makes the suite hermetic
+ * rather than dependent on what a previous run left behind.
+ */
 async function resetSchema() {
-  await pool.query('DROP TABLE IF EXISTS schema_migrations');
-  await pool.query('DROP TABLE IF EXISTS _mig_probe_a');
-  await pool.query('DROP TABLE IF EXISTS _mig_probe_b');
-  await pool.query('DROP TABLE IF EXISTS _lock_probe');
+  await pool.query('DROP SCHEMA IF EXISTS public CASCADE');
+  await pool.query('CREATE SCHEMA public');
 }
 
 // ── Pure tests — these run even without a database ───────────────────────────
@@ -210,9 +224,18 @@ describe('migration runner against PostgreSQL', { skip: !ENABLED && 'TEST_DATABA
     } finally { cleanupDir(dir); }
   });
 
-  test('the shipped 001_init.sql installs the citext extension', async () => {
-    await pool.query('DROP TABLE IF EXISTS schema_migrations');
-    await migrate({ pool, dir: MIGRATIONS_DIR });
+  test('the shipped migrations apply to an empty database', async () => {
+    // resetSchema(), not just dropping the ledger. The claim under test is that
+    // the shipped directory works FROM SCRATCH, and replaying it over an
+    // already-migrated schema tests something else entirely — 009 removes the
+    // unique constraint that 004's ON CONFLICT (user_id) needs, so a replay of
+    // 004 fails by construction. That is a consequence of letting a user own
+    // more than one schedule, documented in 009's header, and no deployment
+    // replays a migration it has already recorded.
+    await resetSchema();
+    const result = await migrate({ pool, dir: MIGRATIONS_DIR });
+    assert.ok(result.applied.includes('001_init.sql'), 'a reset schema must apply everything');
+    assert.ok(result.applied.includes('009_multiple_schedules.sql'));
     const ext = await pool.query("SELECT 1 FROM pg_extension WHERE extname = 'citext'");
     assert.equal(ext.rowCount, 1, 'citext must be installed');
 
@@ -326,10 +349,15 @@ describe('schema and data access', { skip: !ENABLED && 'TEST_DATABASE_URL not se
     assert.equal(u.firstName, 'Ada');
     assert.equal(u.passwordHash, undefined, 'password hash must not be returned');
 
-    for (const t of ['dt_connections', 'user_settings', 'mail_settings', 'schedules']) {
+    for (const t of ['dt_connections', 'user_settings', 'mail_settings']) {
       const { rows } = await pool.query(`SELECT 1 FROM ${t} WHERE user_id = $1`, [u.id]);
       assert.equal(rows.length, 1, `${t} row should have been seeded`);
     }
+    // Not schedules: an account owns any number of them and starts with none
+    // (migration 009). One used to be seeded only because the old schema
+    // required exactly one per user.
+    const sched = await pool.query('SELECT count(*)::int AS n FROM schedules WHERE user_id = $1', [u.id]);
+    assert.equal(sched.rows[0].n, 0, 'a new account starts with no schedules');
 
     const cfg = await pool.query(
       'SELECT is_configured AS c FROM dt_connections WHERE user_id = $1', [u.id]
@@ -1005,12 +1033,15 @@ describe('multi-tenant data access', { skip: !ENABLED && 'TEST_DATABASE_URL not 
 
   // ── dt_connections ─────────────────────────────────────────────────────
   test('registration seeds exactly one row in each per-user table', async () => {
-    for (const table of ['dt_connections', 'user_settings', 'mail_settings', 'schedules']) {
+    for (const table of ['dt_connections', 'user_settings', 'mail_settings']) {
       const { rows } = await pool.query(
         `SELECT count(*)::int AS n FROM ${table} WHERE user_id = $1`, [alice.id]
       );
       assert.equal(rows[0].n, 1, `${table} should have been seeded at registration`);
     }
+    const sched = await pool.query(
+      'SELECT count(*)::int AS n FROM schedules WHERE user_id = $1', [alice.id]);
+    assert.equal(sched.rows[0].n, 0, 'schedules are created on demand, not seeded');
   });
 
   test('a new account starts unconfigured, so the dashboard shows demo data', async () => {
@@ -1355,120 +1386,435 @@ describe('multi-tenant data access', { skip: !ENABLED && 'TEST_DATABASE_URL not 
   });
 
   // ── schedules ──────────────────────────────────────────────────────────
+  // A user owns any number of schedules (migration 009). `mkSched` keeps the
+  // arrangement out of every assertion below.
+  const mkSched = (userId, over = {}) => schedulesDb.create(userId, {
+    enabled: true, frequency: 'daily', hour: 9, riskTypes: ['security'], ...over,
+  });
+  const makeDue = (id) => pool.query(
+    "UPDATE schedules SET next_run_at = now() - interval '1 minute', running_since = NULL WHERE id = $1",
+    [id]
+  );
+
   test('a due schedule is claimed exactly once, even by concurrent pollers', async () => {
-    await schedulesDb.save(alice.id, {
-      enabled: true, frequency: 'daily', hour: 9, riskTypes: ['security'],
-    });
-    await schedulesDb.setProjects(alice.id, [{ uuid: PROJ_1, name: 'svc', version: '1.0' }]);
-    // Backdate the due time so the row is claimable right now.
-    await pool.query("UPDATE schedules SET next_run_at = now() - interval '1 minute', running_since = NULL WHERE user_id = $1", [alice.id]);
+    const s = await mkSched(alice.id, { name: 'claim-once' });
+    await schedulesDb.setProjects(alice.id, s.id, [{ uuid: PROJ_1, name: 'svc', version: '1.0' }]);
+    await makeDue(s.id);
 
     const [first, second] = await Promise.all([schedulesDb.claimDue(5), schedulesDb.claimDue(5)]);
-    const claimed = [...first, ...second].filter(r => r.userId === alice.id);
+    const claimed = [...first, ...second].filter(r => r.id === s.id);
     assert.equal(claimed.length, 1, 'FOR UPDATE SKIP LOCKED must hand the row to one poller only');
 
-    await schedulesDb.finishRun(alice.id, { status: 'success', nextRunAt: new Date(Date.now() + 86_400_000) });
-    const after = await schedulesDb.get(alice.id);
-    assert.equal(after.runningSince, null, 'the claim is released when the run finishes');
+    await schedulesDb.finishRun(s.id, { status: 'success', nextRunAt: null });
+    const after = await schedulesDb.get(alice.id, s.id);
+    assert.equal(after.runningSince, null, 'the claim must be released when the run finishes');
     assert.equal(after.lastRunStatus, 'success');
+    await schedulesDb.remove(alice.id, s.id);
+  });
+
+  // The guarantee that used to be free: running_since sat on a row that was
+  // itself unique per user. It is not free any more, and without the NOT EXISTS
+  // clause in claimOne an account with five schedules due at once would open
+  // five parallel crawls against its single DT connection (CLAUDE.md §13).
+  test('only one of a user\'s schedules runs at a time', async () => {
+    const mine = [];
+    for (let i = 0; i < 3; i++) {
+      const s = await mkSched(alice.id, { name: `serial-${i}` });
+      await schedulesDb.setProjects(alice.id, s.id, [{ uuid: PROJ_1, name: 'svc', version: '1' }]);
+      await makeDue(s.id);
+      mine.push(s.id);
+    }
+    const other = await mkSched(bob.id, { name: 'bob-due' });
+    await makeDue(other.id);
+
+    try {
+      const first = await schedulesDb.claimDue(5);
+      const forAlice = first.filter(r => r.userId === alice.id);
+      assert.equal(forAlice.length, 1, 'three due schedules, one claim');
+      assert.ok(first.some(r => r.userId === bob.id), 'another user is not blocked by it');
+
+      assert.equal((await schedulesDb.claimDue(5)).length, 0,
+        'nothing more is claimable while those runs are in flight');
+
+      // Finishing one frees that user, and only that user.
+      await schedulesDb.finishRun(forAlice[0].id, { status: 'success', nextRunAt: null });
+      const next = await schedulesDb.claimDue(5);
+      assert.equal(next.length, 1);
+      assert.equal(next[0].userId, alice.id);
+      assert.notEqual(next[0].id, forAlice[0].id);
+    } finally {
+      await schedulesDb.removeAll(alice.id);
+      await schedulesDb.removeAll(bob.id);
+    }
   });
 
   test('a disabled schedule is never claimed', async () => {
-    await schedulesDb.disable(alice.id);
-    await pool.query("UPDATE schedules SET next_run_at = now() - interval '1 minute' WHERE user_id = $1", [alice.id]);
+    const s = await mkSched(alice.id, { name: 'off' });
+    await schedulesDb.setProjects(alice.id, s.id, [{ uuid: PROJ_1, name: 'svc', version: '1' }]);
+    await schedulesDb.disable(alice.id, s.id);
+    await pool.query("UPDATE schedules SET next_run_at = now() - interval '1 minute' WHERE id = $1", [s.id]);
     const due = await schedulesDb.claimDue(5);
-    assert.equal(due.filter(r => r.userId === alice.id).length, 0);
+    assert.equal(due.filter(r => r.id === s.id).length, 0, 'a disabled schedule must not fire');
+    await schedulesDb.remove(alice.id, s.id);
   });
 
   test('a claim orphaned by a crash is released after the stale window', async () => {
-    await schedulesDb.save(alice.id, { enabled: true, frequency: 'daily', hour: 9 });
-    await pool.query("UPDATE schedules SET running_since = now() - interval '2 hours' WHERE user_id = $1", [alice.id]);
+    const s = await mkSched(alice.id, { name: 'orphan' });
+    await pool.query("UPDATE schedules SET running_since = now() - interval '2 hours' WHERE id = $1", [s.id]);
     const released = await schedulesDb.releaseStaleClaims(45);
     assert.ok(released >= 1);
-    assert.equal((await schedulesDb.get(alice.id)).runningSince, null);
+    assert.equal((await schedulesDb.get(alice.id, s.id)).runningSince, null);
+    await schedulesDb.remove(alice.id, s.id);
   });
 
   test('a failed run leaves a notice the dashboard can acknowledge', async () => {
-    await schedulesDb.finishRun(alice.id, { status: 'failed', error: 'SMTP refused', nextRunAt: new Date(Date.now() + 3600_000) });
-    let sched = await schedulesDb.get(alice.id);
-    assert.match(sched.failureNotification, /SMTP refused/);
-    await schedulesDb.ackNotification(alice.id);
-    sched = await schedulesDb.get(alice.id);
-    assert.equal(sched.failureNotification, null);
+    const s = await mkSched(alice.id, { name: 'fails' });
+    await schedulesDb.finishRun(s.id, {
+      status: 'failed', error: 'SMTP refused', nextRunAt: new Date(Date.now() + 3600_000),
+    });
+    let row = await schedulesDb.get(alice.id, s.id);
+    assert.match(row.failureNotification, /SMTP refused/);
+    assert.equal(await schedulesDb.ackNotification(alice.id, s.id), true);
+    row = await schedulesDb.get(alice.id, s.id);
+    assert.equal(row.failureNotification, null);
+    // Acknowledging somebody else's notice must not be possible.
+    assert.equal(await schedulesDb.ackNotification(bob.id, s.id), false);
+    await schedulesDb.remove(alice.id, s.id);
   });
 
-  test('schedule projects are replaced wholesale and scoped by user', async () => {
-    await schedulesDb.setProjects(alice.id, [
-      { uuid: PROJ_1, name: 'a', version: '1' }, { uuid: PROJ_2, name: 'b', version: '2' },
-    ]);
-    await schedulesDb.setProjects(bob.id, [{ uuid: PROJ_3, name: 'z', version: '9' }]);
+  test('schedule projects belong to the schedule, not to the user', async () => {
+    const one = await mkSched(alice.id, { name: 'one' });
+    const two = await mkSched(alice.id, { name: 'two' });
+    try {
+      await schedulesDb.setProjects(alice.id, one.id, [
+        { uuid: PROJ_1, name: 'a', version: '1' },
+        { uuid: PROJ_2, name: 'b', version: '2' },
+      ]);
+      await schedulesDb.setProjects(alice.id, two.id, [{ uuid: PROJ_3, name: 'c', version: '3' }]);
+      assert.equal((await schedulesDb.getProjects(alice.id, one.id)).length, 2);
+      assert.deepEqual((await schedulesDb.getProjects(alice.id, two.id)).map(p => p.uuid), [PROJ_3],
+        'one schedule of the same user must not overwrite another');
 
-    await schedulesDb.setProjects(alice.id, [{ uuid: PROJ_2, name: 'c', version: '3' }]);
-    assert.deepEqual((await schedulesDb.getProjects(alice.id)).map(p => p.uuid), [PROJ_2]);
-    assert.deepEqual((await schedulesDb.getProjects(bob.id)).map(p => p.uuid), [PROJ_3],
-      "replacing Alice's selection must not touch Bob's");
+      // Replacement is wholesale, and only within one schedule.
+      await schedulesDb.setProjects(alice.id, one.id, [{ uuid: PROJ_2, name: 'b', version: '2' }]);
+      assert.deepEqual((await schedulesDb.getProjects(alice.id, one.id)).map(p => p.uuid), [PROJ_2]);
+      assert.deepEqual((await schedulesDb.getProjects(alice.id, two.id)).map(p => p.uuid), [PROJ_3]);
+
+      // A crafted schedule id from another user must not empty the list, which
+      // is why the DELETE is scoped by user_id as well as by schedule_id.
+      await schedulesDb.setProjects(bob.id, one.id, [{ uuid: PROJ_3, name: 'x', version: '1' }]);
+      assert.deepEqual((await schedulesDb.getProjects(alice.id, one.id)).map(p => p.uuid), [PROJ_2],
+        'a cross-user write must neither add nor remove');
+    } finally {
+      await schedulesDb.removeAll(alice.id);
+    }
+  });
+
+  test('cancelling a schedule takes its projects and keeps its run history', async () => {
+    const s = await mkSched(alice.id, { name: 'doomed' });
+    await schedulesDb.setProjects(alice.id, s.id, [{ uuid: PROJ_1, name: 'a', version: '1' }]);
+    const runId = await schedulesDb.startRun(alice.id, s.id);
+    await schedulesDb.completeRun(runId, { status: 'success', fileSizeBytes: 512 });
+
+    assert.equal(await schedulesDb.remove(alice.id, s.id), true);
+    const left = await pool.query('SELECT count(*)::int AS n FROM schedule_projects WHERE schedule_id = $1', [s.id]);
+    assert.equal(left.rows[0].n, 0, 'projects cascade with the schedule');
+    // ON DELETE SET NULL, not CASCADE: the record that it ran must survive.
+    const runs = await schedulesDb.recentRuns(alice.id, { limit: 20 });
+    const kept = runs.find(r => String(r.id) === String(runId));
+    assert.ok(kept, 'the run must outlive the schedule that produced it');
+    assert.equal(kept.scheduleId, null);
+  });
+
+  test('cancel-all reaches every one of the caller\'s schedules and no others', async () => {
+    for (let i = 0; i < 3; i++) await mkSched(alice.id, { name: `bulk-${i}` });
+    const bobs = await mkSched(bob.id, { name: 'bob keeps this' });
+    try {
+      assert.equal(await schedulesDb.removeAll(alice.id), 3);
+      assert.equal((await schedulesDb.list(alice.id)).length, 0);
+      assert.equal((await schedulesDb.list(bob.id)).length, 1);
+    } finally { await schedulesDb.remove(bob.id, bobs.id); }
   });
 
   test('a schedule remembers the name its reports go out under', async () => {
-    // NULL means "generate one", which is what every schedule did before the
-    // column existed (migration 006).
-    const fresh = await schedulesDb.get(alice.id);
-    assert.equal(fresh.reportName, null, 'a new schedule inherits the generated form');
+    const s = await mkSched(alice.id);
+    try {
+      // NULL means "generate one", which is what every schedule did before the
+      // column existed (migration 006).
+      assert.equal(s.reportName, null, 'a new schedule inherits the generated form');
 
-    const named = await schedulesDb.save(alice.id, { reportName: 'Nightly Risk' });
-    assert.equal(named.reportName, 'Nightly Risk');
+      const named = await schedulesDb.update(alice.id, s.id, { reportName: 'Nightly Risk' });
+      assert.equal(named.reportName, 'Nightly Risk');
 
-    // Omitting the key must leave it alone, or every unrelated save would wipe it.
-    const untouched = await schedulesDb.save(alice.id, { hour: 7 });
-    assert.equal(untouched.reportName, 'Nightly Risk');
-    assert.equal(untouched.hour, 7);
+      // Omitting the key must leave it alone, or every unrelated save would wipe it.
+      const untouched = await schedulesDb.update(alice.id, s.id, { hour: 7 });
+      assert.equal(untouched.reportName, 'Nightly Risk');
+      assert.equal(untouched.hour, 7);
 
-    // An empty string is how the form says "go back to automatic". It has to be
-    // distinguishable from "not supplied", which is why it is stored as NULL.
-    const cleared = await schedulesDb.save(alice.id, { reportName: '   ' });
-    assert.equal(cleared.reportName, null);
+      // An empty string is how the form says "go back to automatic". It has to be
+      // distinguishable from "not supplied", which is why it is stored as NULL.
+      assert.equal((await schedulesDb.update(alice.id, s.id, { reportName: '   ' })).reportName, null);
+    } finally { await schedulesDb.remove(alice.id, s.id); }
+  });
+
+  test('the schedule name is its own field, separate from the report name', async () => {
+    // Renaming a row in the settings list must not rename the attachment
+    // somebody's inbox rules already match on.
+    const s = await mkSched(alice.id, { name: 'Weekly ops', reportName: 'ops.xlsx' });
+    try {
+      assert.equal(s.name, 'Weekly ops');
+      assert.equal(s.reportName, 'ops.xlsx');
+      const renamed = await schedulesDb.update(alice.id, s.id, { name: 'Weekly operations' });
+      assert.equal(renamed.name, 'Weekly operations');
+      assert.equal(renamed.reportName, 'ops.xlsx', 'the file name must be untouched');
+      // Blank clears it back to unnamed.
+      assert.equal((await schedulesDb.update(alice.id, s.id, { name: '  ' })).name, null);
+    } finally { await schedulesDb.remove(alice.id, s.id); }
+  });
+
+  test('a schedule keeps a minute of its own (migration 008)', async () => {
+    // Without it a user in a half-hour zone cannot be served: 09:00 in India is
+    // 03:30 UTC, and the picker stores UTC.
+    const s = await mkSched(alice.id);
+    try {
+      assert.equal(s.minute, 0, 'a new schedule fires on the hour');
+      const set = await schedulesDb.update(alice.id, s.id, { hour: 3, minute: 30 });
+      assert.equal(set.hour, 3);
+      assert.equal(set.minute, 30);
+      // Omitting the key leaves it alone, like every other schedule field.
+      assert.equal((await schedulesDb.update(alice.id, s.id, { hour: 4 })).minute, 30);
+    } finally { await schedulesDb.remove(alice.id, s.id); }
+  });
+
+  test('out-of-range fields are refused by the application and by the database', async () => {
+    for (const [input, field] of [
+      [{ minute: -1 }, 'minute'], [{ minute: 60 }, 'minute'],
+      [{ hour: 24 }, 'hour'], [{ monthDay: 29 }, 'monthDay'],
+      [{ frequency: 'hourly' }, 'frequency'], [{ riskTypes: [] }, 'riskTypes'],
+      [{ name: 'x'.repeat(121) }, 'name'],
+    ]) {
+      await assert.rejects(
+        () => schedulesDb.create(alice.id, input),
+        (e) => e.code === 'VALIDATION_FAILED' && e.field === field,
+        JSON.stringify(input)
+      );
+    }
+    assert.equal((await schedulesDb.list(alice.id)).length, 0, 'a refused create writes nothing');
+
+    // Constraints belong in the database too (CLAUDE.md §5.4).
+    const s = await mkSched(alice.id);
+    try {
+      for (const [sql, value] of [
+        ['UPDATE schedules SET minute = $2 WHERE id = $1', 60],
+        ['UPDATE schedules SET hour = $2 WHERE id = $1', 24],
+        ['UPDATE schedules SET report_name = $2 WHERE id = $1', 'x'.repeat(121)],
+        ['UPDATE schedules SET name = $2 WHERE id = $1', 'x'.repeat(121)],
+      ]) {
+        await assert.rejects(() => pool.query(sql, [s.id, value]), (e) => e.code === '23514', sql);
+      }
+    } finally { await schedulesDb.remove(alice.id, s.id); }
   });
 
   test('a schedule name that could escape the filename is refused', async () => {
     for (const bad of ['a/b', 'a"b', '../x', 'x'.repeat(121)]) {
       await assert.rejects(
-        () => schedulesDb.save(alice.id, { reportName: bad }),
+        () => schedulesDb.create(alice.id, { reportName: bad }),
         (e) => e.code === 'VALIDATION_FAILED' && e.field === 'reportName',
         JSON.stringify(bad).slice(0, 40)
       );
     }
   });
 
-  test('the database enforces the length ceiling as well as the application', async () => {
-    // Constraints belong in the database, not only in application code
-    // (CLAUDE.md §5.4).
-    await assert.rejects(
-      () => pool.query('UPDATE schedules SET report_name = $2 WHERE user_id = $1',
-                       [alice.id, 'x'.repeat(121)]),
-      (e) => e.code === '23514'
-    );
-  });
-
   test('a malformed project uuid is dropped instead of failing the whole save', async () => {
     // The list comes from the browser; one bad entry must not cost the user
     // their entire selection.
-    const kept = await schedulesDb.setProjects(alice.id, [
-      { uuid: PROJ_1, name: 'good', version: '1' },
-      { uuid: 'not-a-uuid', name: 'bad', version: '1' },
-      { name: 'missing uuid' },
-    ]);
-    assert.deepEqual(kept.map(p => p.uuid), [PROJ_1]);
+    const s = await mkSched(alice.id);
+    try {
+      const kept = await schedulesDb.setProjects(alice.id, s.id, [
+        { uuid: PROJ_1, name: 'good', version: '1' },
+        { uuid: 'not-a-uuid', name: 'bad', version: '1' },
+        { name: 'missing uuid' },
+      ]);
+      assert.deepEqual(kept.map(p => p.uuid), [PROJ_1]);
+    } finally { await schedulesDb.remove(alice.id, s.id); }
   });
 
-  test('run history is recorded and purged by age', async () => {
-    const runId = await schedulesDb.startRun(alice.id);
+  test('the schedule quota resolves like the report quota', async () => {
+    // NULL means "follow the global default"; a number is an administrator's
+    // override. The distinction cannot be a value (CLAUDE.md §7.5).
+    const before = await userSettings.get(alice.id);
+    assert.equal(before.maxSchedulesOverride, null);
+    assert.equal(before.maxSchedules, 5, 'the seeded global default');
+
+    await userSettings.setMaxSchedulesOverride(alice.id, 2);
+    const overridden = await userSettings.get(alice.id);
+    assert.equal(overridden.maxSchedules, 2);
+    assert.equal(overridden.maxSchedulesOverride, 2);
+    assert.equal(overridden.maxReports, before.maxReports, 'the report quota is untouched');
+
+    await appSettings.setDefaultMaxSchedules(9);
+    assert.equal((await userSettings.get(alice.id)).maxSchedules, 2,
+      'an override does not follow the default');
+    await userSettings.clearMaxSchedulesOverride(alice.id);
+    assert.equal((await userSettings.get(alice.id)).maxSchedules, 9,
+      'clearing it returns the account to the default');
+
+    // Being over the limit blocks; it never deletes (CLAUDE.md §7.5).
+    for (let i = 0; i < 3; i++) await mkSched(alice.id, { name: `q-${i}` });
+    await appSettings.setDefaultMaxSchedules(1);
+    assert.equal(await schedulesDb.countForUser(alice.id), 3,
+      'lowering the default must not remove anybody\'s schedules');
+    assert.equal(await appSettings.accountsOverScheduleDefault(1), 1);
+
+    await appSettings.setDefaultMaxSchedules(5);
+    await schedulesDb.removeAll(alice.id);
+  });
+
+  test('recipients are per schedule, and NULL means "use the account list"', async () => {
+    const s = await mkSched(alice.id, { name: 'delivery' });
+    try {
+      assert.equal(s.toAddrs, null, 'a new schedule inherits');
+      assert.equal(s.ccAddrs, null);
+      assert.equal(s.subject, null);
+
+      const set = await schedulesDb.update(alice.id, s.id, {
+        to: 'ops@co.com, lead@co.com', cc: 'boss@co.com', subject: 'Weekly ops',
+      });
+      assert.deepEqual(set.toAddrs, ['ops@co.com', 'lead@co.com']);
+      assert.deepEqual(set.ccAddrs, ['boss@co.com']);
+      assert.equal(set.subject, 'Weekly ops');
+
+      // Blank is how the form says "go back to the account default", and it has
+      // to be distinguishable from "not supplied" — which is why it is NULL and
+      // not an empty array (an empty To would mean "send to nobody").
+      const cleared = await schedulesDb.update(alice.id, s.id, { to: '', cc: '', subject: '  ' });
+      assert.equal(cleared.toAddrs, null);
+      assert.equal(cleared.ccAddrs, null);
+      assert.equal(cleared.subject, null);
+
+      // Omitting the keys leaves whatever is stored alone.
+      await schedulesDb.update(alice.id, s.id, { to: 'x@y.co' });
+      assert.deepEqual((await schedulesDb.update(alice.id, s.id, { hour: 5 })).toAddrs, ['x@y.co']);
+
+      // Duplicates collapse rather than mailing somebody twice.
+      const dedup = await schedulesDb.update(alice.id, s.id, { to: 'a@b.co, a@b.co , a@b.co' });
+      assert.deepEqual(dedup.toAddrs, ['a@b.co']);
+    } finally { await schedulesDb.remove(alice.id, s.id); }
+  });
+
+  test('a malformed recipient is refused by the application and the database', async () => {
+    for (const [input, field] of [
+      [{ to: 'not-an-email' }, 'to'],
+      [{ to: 'ok@co.com, broken' }, 'to'],
+      [{ cc: 'also broken' }, 'cc'],
+      [{ subject: 'x'.repeat(201) }, 'subject'],
+    ]) {
+      await assert.rejects(
+        () => schedulesDb.create(alice.id, input),
+        (e) => e.code === 'VALIDATION_FAILED' && e.field === field,
+        JSON.stringify(input)
+      );
+    }
+
+    const s = await mkSched(alice.id);
+    try {
+      // Constraints belong in the database too (CLAUDE.md §5.4). An empty To
+      // array is the one that matters: it would be a schedule addressed to
+      // nobody, and array_length() returns NULL for it — which a CHECK treats
+      // as satisfied, so the constraint has to use cardinality().
+      await assert.rejects(
+        () => pool.query('UPDATE schedules SET to_addrs = $2 WHERE id = $1', [s.id, []]),
+        (e) => e.code === '23514', 'an empty To override must be refused'
+      );
+      await assert.rejects(
+        () => pool.query('UPDATE schedules SET subject = $2 WHERE id = $1', [s.id, 'x'.repeat(201)]),
+        (e) => e.code === '23514'
+      );
+      // An empty CC is legitimate — "copy nobody" is a real choice.
+      await pool.query('UPDATE schedules SET cc_addrs = $2 WHERE id = $1', [s.id, []]);
+      assert.deepEqual((await schedulesDb.get(alice.id, s.id)).ccAddrs, []);
+    } finally { await schedulesDb.remove(alice.id, s.id); }
+  });
+
+  test('a manual claim serialises with the poller, and ignores paused', async () => {
+    const paused = await mkSched(alice.id, { name: 'paused', enabled: false });
+    const active = await mkSched(alice.id, { name: 'active' });
+    try {
+      // Send now works on a paused schedule — that is most of the point of
+      // pausing one rather than cancelling it.
+      const claimed = await schedulesDb.claimForManualRun(alice.id, paused.id);
+      assert.ok(claimed, 'a paused schedule can still be sent by hand');
+      assert.equal(claimed.id, paused.id);
+
+      // While it runs, nothing else of this user's may be claimed — by hand or
+      // by the poller.
+      assert.equal(await schedulesDb.claimForManualRun(alice.id, active.id), null);
+      await pool.query("UPDATE schedules SET enabled = true, next_run_at = now() - interval '1 minute' WHERE id = $1", [active.id]);
+      assert.equal((await schedulesDb.claimDue(5)).filter(r => r.userId === alice.id).length, 0);
+
+      // Another user is unaffected.
+      const bobs = await mkSched(bob.id, { name: 'bob' });
+      assert.ok(await schedulesDb.claimForManualRun(bob.id, bobs.id));
+      await schedulesDb.finishRun(bobs.id, { status: 'success', nextRunAt: null });
+      await schedulesDb.remove(bob.id, bobs.id);
+
+      // Cross-user, and already-running, both refuse.
+      assert.equal(await schedulesDb.claimForManualRun(bob.id, paused.id), null);
+      await schedulesDb.finishRun(paused.id, { status: 'success', nextRunAt: null });
+      assert.ok(await schedulesDb.claimForManualRun(alice.id, active.id));
+      await schedulesDb.finishRun(active.id, { status: 'success', nextRunAt: null });
+    } finally { await schedulesDb.removeAll(alice.id); await schedulesDb.removeAll(bob.id); }
+  });
+
+  test('run statistics count only this schedule, for this user', async () => {
+    const mine = await mkSched(alice.id, { name: 'counted' });
+    const other = await mkSched(alice.id, { name: 'not counted' });
+    try {
+      for (const st of ['success', 'success', 'failed']) {
+        const id = await schedulesDb.startRun(alice.id, mine.id);
+        await schedulesDb.completeRun(id, { status: st, error: st === 'failed' ? 'SMTP refused' : null });
+      }
+      const otherRun = await schedulesDb.startRun(alice.id, other.id);
+      await schedulesDb.completeRun(otherRun, { status: 'success' });
+
+      const stats = await schedulesDb.runStats(alice.id, mine.id, { limit: 5 });
+      assert.equal(stats.total, 3, 'the other schedule must not be counted');
+      assert.equal(stats.succeeded, 2);
+      assert.equal(stats.failed, 1);
+      assert.equal(stats.recent.length, 3);
+      assert.equal(stats.recent[0].status, 'failed', 'newest first');
+      assert.equal(stats.retentionDays, 90);
+
+      // The last five, not everything.
+      for (let i = 0; i < 6; i++) {
+        const id = await schedulesDb.startRun(alice.id, mine.id);
+        await schedulesDb.completeRun(id, { status: 'success' });
+      }
+      const more = await schedulesDb.runStats(alice.id, mine.id, { limit: 5 });
+      assert.equal(more.total, 9);
+      assert.equal(more.recent.length, 5);
+
+      // Another user reading the same id gets nothing.
+      assert.equal((await schedulesDb.runStats(bob.id, mine.id)).total, 0);
+    } finally { await schedulesDb.removeAll(alice.id); }
+  });
+
+  test('run history is recorded, attributed to its schedule, and purged by age', async () => {
+    const s = await mkSched(alice.id, { name: 'history' });
+    const runId = await schedulesDb.startRun(alice.id, s.id);
     await schedulesDb.completeRun(runId, { status: 'success', fileSizeBytes: 4096 });
-    const recent = await schedulesDb.recentRuns(alice.id, 5);
-    assert.equal(recent[0].status, 'success');
-    assert.equal(Number(recent[0].fileSizeBytes), 4096);
+
+    const forSchedule = await schedulesDb.recentRuns(alice.id, { scheduleId: s.id, limit: 5 });
+    assert.equal(forSchedule[0].status, 'success');
+    assert.equal(Number(forSchedule[0].fileSizeBytes), 4096);
+    assert.equal(forSchedule[0].scheduleId, s.id);
+
+    // Another user must not be able to read it through the same call.
+    assert.equal((await schedulesDb.recentRuns(bob.id, { scheduleId: s.id })).length, 0);
 
     await pool.query("UPDATE schedule_runs SET started_at = now() - interval '200 days' WHERE id = $1", [runId]);
     assert.ok(await schedulesDb.purgeRunsOlderThan(90) >= 1);
+    await schedulesDb.remove(alice.id, s.id);
   });
 
   // ── violation_caches ───────────────────────────────────────────────────
@@ -1715,7 +2061,8 @@ describe('administration listing', { skip: !ENABLED && 'TEST_DATABASE_URL not se
     assert.equal(Number(dave_.storageBytes), 0);
     assert.equal(dave_.sessionActive, false);
     assert.equal(dave_.dtConfigured, false);
-    assert.equal(dave_.scheduleEnabled, false);
+    assert.equal(dave_.scheduleCount, 0);
+    assert.equal(dave_.schedulesActive, 0);
   });
 
   test('report count and storage are attributed to the right account', async () => {
@@ -1763,14 +2110,24 @@ describe('administration listing', { skip: !ENABLED && 'TEST_DATABASE_URL not se
     }
   });
 
-  test('connection and schedule flags track the per-user rows', async () => {
+  test('connection and schedule counts track the per-user rows', async () => {
     await dtConnections.save(carol.id, { apiUrl: 'https://dt.example.com', apiKey: 'carol_key' });
-    await schedulesDb.save(carol.id, { enabled: true, frequency: 'daily', hour: 8 });
-    const rows = await users.listWithStats();
-    assert.equal(forUser(rows, 'zz_carol').dtConfigured, true);
-    assert.equal(forUser(rows, 'zz_carol').scheduleEnabled, true);
-    assert.equal(forUser(rows, 'zz_dave').dtConfigured, false,
-      "one account's connection must not light up another's row");
+    await schedulesDb.create(carol.id, { enabled: true, frequency: 'daily', hour: 8 });
+    await schedulesDb.create(carol.id, { enabled: false, frequency: 'weekly', hour: 8 });
+    try {
+      const rows = await users.listWithStats();
+      const c = forUser(rows, 'zz_carol');
+      assert.equal(c.dtConfigured, true);
+      // Aggregated, not joined: a plain LEFT JOIN on schedules would repeat the
+      // whole user row once per schedule and inflate every count on the screen.
+      assert.equal(c.scheduleCount, 2);
+      assert.equal(c.schedulesActive, 1);
+      assert.equal(rows.filter(r => r.loginId === 'zz_carol').length, 1,
+        'two schedules must not become two rows');
+      assert.equal(forUser(rows, 'zz_dave').dtConfigured, false,
+        "one account's connection must not light up another's row");
+      assert.equal(forUser(rows, 'zz_dave').scheduleCount, 0);
+    } finally { await schedulesDb.removeAll(carol.id); }
   });
 
   test('the listing returns no credential material at all', async () => {
@@ -1848,7 +2205,8 @@ describe('administration user detail', { skip: !ENABLED && 'TEST_DATABASE_URL no
     assert.equal(d.dtConfigured, false);
     assert.equal(d.dtHasApiKey, false);
     assert.equal(d.mailEnabled, false);
-    assert.equal(d.scheduleEnabled, false);
+    assert.equal(d.scheduleCount, 0);
+    assert.equal(d.schedulesActive, 0);
     assert.equal(d.reportCount, 0);
     assert.equal(Number(d.storageBytes), 0);
     assert.equal(d.sessionIssuedAt, null);
@@ -1862,7 +2220,8 @@ describe('administration user detail', { skip: !ENABLED && 'TEST_DATABASE_URL no
       smtp: { host: 'smtp.example.com', port: 587, user: 'erin', pass: 'erin_smtp_pw' },
       from: 'erin@example.com', to: 'a@x.com, b@x.com',
     });
-    await schedulesDb.save(erin.id, { enabled: true, frequency: 'weekly', hour: 7 });
+    await schedulesDb.create(erin.id, { enabled: true, frequency: 'weekly', hour: 7 });
+    await schedulesDb.create(erin.id, { enabled: false, frequency: 'daily', hour: 7 });
 
     const d = await users.detailForAdmin('zz_erin');
     assert.equal(d.dtConfigured, true);
@@ -1871,8 +2230,10 @@ describe('administration user detail', { skip: !ENABLED && 'TEST_DATABASE_URL no
     assert.equal(d.mailEnabled, true);
     assert.equal(d.mailRecipients, 2, 'the recipient count, not the addresses');
     assert.equal(d.mailHasPassword, true);
-    assert.equal(d.scheduleEnabled, true);
-    assert.equal(d.frequency, 'weekly');
+    assert.equal(d.scheduleCount, 2);
+    assert.equal(d.schedulesActive, 1);
+    assert.equal(d.maxSchedules, 5, 'the seeded default is visible');
+    assert.equal(d.maxSchedulesOverridden, false);
 
     // Neither secret may appear anywhere in the projection.
     const serialised = JSON.stringify(d);
@@ -2031,8 +2392,6 @@ describe('administrator principal', { skip: !ENABLED && 'TEST_DATABASE_URL not s
     dtConnections.configure(dtCrypto.parseEncryptionKey(process.env.SECRET_ENCRYPTION_KEY));
   });
 
-  after(async () => { if (pool && pool.isReady()) await pool.close(); });
-
   const ADMIN = () => users.ADMIN_PRINCIPAL_ID;
 
   // A throwaway account for the password-reset tests. Created here rather than
@@ -2044,25 +2403,45 @@ describe('administrator principal', { skip: !ENABLED && 'TEST_DATABASE_URL not s
       passwordHash: await dtCrypto.hashPassword('originalpass1'),
     });
   });
-  after(async () => { if (alice) await users.deleteById(alice.id); });
+  // One teardown, not two. Node runs after() hooks in registration order, so a
+  // separate hook that closed the pool first left this one querying a pool that
+  // was already gone — the suite's own cleanup failing on the way out.
+  after(async () => {
+    if (pool && pool.isReady()) {
+      if (alice) await users.deleteById(alice.id);
+      await pool.close();
+    }
+  });
 
-  test('the migration seeded the principal and all four per-user rows', async () => {
+  test('the migration seeded the principal and its per-user rows', async () => {
     const { rows } = await pool.query(
       'SELECT login_id AS "loginId", first_name AS "firstName" FROM users WHERE id = $1', [ADMIN()]);
     assert.equal(rows.length, 1, 'the reserved row must exist');
     assert.equal(rows[0].loginId, '__administrator__');
 
-    for (const t of ['dt_connections', 'user_settings', 'mail_settings', 'schedules']) {
+    for (const t of ['dt_connections', 'user_settings', 'mail_settings']) {
       const { rows: r } = await pool.query(
         `SELECT count(*)::int AS n FROM ${t} WHERE user_id = $1`, [ADMIN()]);
       assert.equal(r[0].n, 1, `${t} must have a row for the administrator`);
     }
+
+    // 004 seeded a schedule too, because the schema required exactly one per
+    // user. 009 removes that rule and deletes the seeded row if it was never
+    // touched — otherwise the administrator's own settings would show an
+    // unnamed schedule with no projects that can never fire.
+    const { rows: sc } = await pool.query(
+      'SELECT count(*)::int AS n FROM schedules WHERE user_id = $1', [ADMIN()]);
+    assert.equal(sc[0].n, 0, 'the phantom seeded schedule must be gone');
   });
 
-  test('re-running the migration changes nothing', async () => {
-    // Migrations must be idempotent at the file level (CLAUDE.md §5.3).
-    const sql = fs.readFileSync(
-      path.join(MIGRATIONS_DIR, '004_admin_principal.sql'), 'utf8');
+  test('re-applying the principal seed changes nothing', async () => {
+    // 004 itself is no longer replayable — its ON CONFLICT (user_id) on
+    // schedules needs the unique constraint 009 removes, which is a documented
+    // consequence of letting a user own several. What still has to hold is the
+    // property the test was written for: seeding the principal twice must not
+    // duplicate it.
+    const sql = fs.readFileSync(path.join(MIGRATIONS_DIR, '004_admin_principal.sql'), 'utf8')
+      .split(/^INSERT INTO schedules/m)[0];
     await pool.query(sql);
     const { rows } = await pool.query('SELECT count(*)::int AS n FROM users WHERE id = $1', [ADMIN()]);
     assert.equal(rows[0].n, 1, 'a second application must not duplicate anything');

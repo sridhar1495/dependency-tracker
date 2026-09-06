@@ -1486,7 +1486,9 @@ describe('admin.html write actions', () => {
   test('the global default warns about accounts it puts over the line', () => {
     const fn = /async function saveDefaultLimit[\s\S]*?\n  \}/.exec(ADMIN_HTML)[0];
     assert.match(fn, /affectedAccounts/);
-    assert.match(fn, /cannot create new reports/,
+    assert.match(fn, /affectedScheduleAccounts/,
+      'the schedule default has the same consequence and must be reported too');
+    assert.match(fn, /cannot create more until back under/,
       'the administrator must be told what it does to people, not just that it saved');
   });
 
@@ -1663,10 +1665,11 @@ describe('index.html report naming', () => {
     assert.match(fn, /JSON\.stringify\(\{ projects, riskTypes, reportName \}\)/);
   });
 
-  test('a blank schedule name is sent, so it can be cleared', () => {
+  test('a blank schedule report name is sent, so it can be cleared', () => {
     // Omitting the key means "leave it alone"; sending '' means "go back to
-    // automatic". The form must send the field for the second to be reachable.
-    assert.match(INDEX_HTML, /reportName: String\(schedName\)\.trim\(\)/);
+    // automatic". The editor must send the field for the second to be reachable.
+    const fn = /function readScheduleEditor\(\)[\s\S]*?\n\}/.exec(INDEX_HTML)[0];
+    assert.match(fn, /reportName: String\(reportName\)\.trim\(\)/);
   });
 });
 
@@ -2117,5 +2120,589 @@ describe('nginx routes every backend path to the service', () => {
     const brandBlock = /location \/branding \{[\s\S]*?\n    \}/.exec(NGINX);
     assert.ok(brandBlock);
     assert.doesNotMatch(brandBlock[0], /no-store/);
+  });
+});
+
+// ── Schedule timezone conversion ─────────────────────────────────────────────
+// The backend stores the schedule as a UTC instant; the picker in index.html
+// shows the browser's wall clock. These converters are the only thing standing
+// between the two, and getting them wrong moves somebody's report by hours or
+// by a day without anything visibly breaking.
+//
+// The functions are EXTRACTED from index.html rather than copied here. The rest
+// of this file predates that trick and keeps verbatim copies (see the header),
+// which can silently drift from the page they claim to test; a converter whose
+// test copy has drifted is worse than no test at all, because it reports green
+// on code nobody runs.
+
+/** Pull one top-level `function name(...) {...}` out of a source string. */
+function extractFunction(src, name) {
+  const start = src.indexOf(`function ${name}(`);
+  assert.notEqual(start, -1, `index.html no longer defines ${name}()`);
+  let i = src.indexOf('{', start);
+  let depth = 0;
+  for (; i < src.length; i++) {
+    if (src[i] === '{') depth++;
+    else if (src[i] === '}' && --depth === 0) return src.slice(start, i + 1);
+  }
+  throw new Error(`unbalanced braces while extracting ${name}()`);
+}
+
+const SCHED_FN_NAMES = ['schedInt', 'schedDayShift', 'schedClampDay', 'schedUtcToLocal', 'schedLocalToUtc'];
+const sched = new Function(
+  SCHED_FN_NAMES.map(n => extractFunction(INDEX_HTML, n)).join('\n')
+  + `\nreturn { ${SCHED_FN_NAMES.join(', ')} };`
+)();
+
+/** Run `fn` with the process pretending to be in `tz`. */
+function inZone(tz, fn) {
+  const original = process.env.TZ;
+  process.env.TZ = tz;
+  try { return fn(); }
+  finally { if (original === undefined) delete process.env.TZ; else process.env.TZ = original; }
+}
+
+// A deliberate spread: whole-hour either side of UTC, both half-hour offsets
+// that an hour-only field cannot express, the 45-minute one, and the extremes.
+const ZONES = [
+  'UTC', 'Europe/London', 'Europe/Berlin', 'America/New_York', 'America/Los_Angeles',
+  'Asia/Kolkata', 'Asia/Kathmandu', 'Australia/Adelaide', 'America/St_Johns',
+  'Pacific/Kiritimati', 'Etc/GMT+12',
+];
+
+describe('schedule timezone conversion (index.html)', () => {
+  test('a half-hour zone keeps the minutes it needs', () => {
+    // 09:00 in India is 03:30 UTC. With an hour-only field this was 03:00,
+    // delivering the report at 08:30 local — the bug the minute column fixes.
+    const utc = inZone('Asia/Kolkata', () => sched.schedLocalToUtc({ hour: 9, minute: 0 }));
+    assert.equal(utc.hour, 3);
+    assert.equal(utc.minute, 30);
+  });
+
+  test('a 45-minute zone keeps the minutes it needs', () => {
+    const utc = inZone('Asia/Kathmandu', () => sched.schedLocalToUtc({ hour: 9, minute: 0 }));
+    assert.equal(utc.hour, 3);
+    assert.equal(utc.minute, 15);
+  });
+
+  test('an offset that crosses midnight moves the weekday too', () => {
+    // 06:00 UTC on Monday is Sunday evening in Los Angeles, so a schedule
+    // stored for UTC Monday must show Sunday in that browser.
+    const local = inZone('America/Los_Angeles',
+      () => sched.schedUtcToLocal({ hour: 6, minute: 0, weekDays: [1], monthDay: 10 }));
+    assert.deepEqual(local.weekDays, [0], 'Monday UTC is Sunday in Los Angeles at 06:00');
+    assert.equal(local.monthDay, 9, 'the month day steps back with it');
+  });
+
+  test('an offset that crosses midnight forwards moves the weekday forwards', () => {
+    // Kiritimati is UTC+14: 23:00 UTC on Saturday is Sunday afternoon there.
+    const local = inZone('Pacific/Kiritimati',
+      () => sched.schedUtcToLocal({ hour: 23, minute: 0, weekDays: [6], monthDay: 10 }));
+    assert.deepEqual(local.weekDays, [0]);
+    assert.equal(local.monthDay, 11);
+  });
+
+  test('local → UTC → local is the identity for the clock and the weekdays', () => {
+    for (const tz of ZONES) {
+      inZone(tz, () => {
+        for (const hour of [0, 3, 9, 12, 17, 23]) {
+          for (const minute of [0, 15, 30, 45]) {
+            const local = { hour, minute, weekDays: [0, 3, 6], monthDay: 14 };
+            const back  = sched.schedUtcToLocal(sched.schedLocalToUtc(local));
+            assert.equal(back.hour, hour,   `${tz} ${hour}:${minute} hour`);
+            assert.equal(back.minute, minute, `${tz} ${hour}:${minute} minute`);
+            assert.deepEqual(back.weekDays, [0, 3, 6], `${tz} ${hour}:${minute} weekdays`);
+          }
+        }
+      });
+    }
+  });
+
+  test('UTC → local → UTC is the identity too', () => {
+    for (const tz of ZONES) {
+      inZone(tz, () => {
+        for (const hour of [0, 6, 11, 18, 23]) {
+          for (const minute of [0, 30]) {
+            const stored = { hour, minute, weekDays: [2], monthDay: 14 };
+            const back   = sched.schedLocalToUtc(sched.schedUtcToLocal(stored));
+            assert.equal(back.hour, hour,   `${tz} ${hour}:${minute}`);
+            assert.equal(back.minute, minute, `${tz} ${hour}:${minute}`);
+            assert.deepEqual(back.weekDays, [2], `${tz} ${hour}:${minute}`);
+          }
+        }
+      });
+    }
+  });
+
+  test('in UTC nothing moves at all', () => {
+    inZone('UTC', () => {
+      const local = sched.schedUtcToLocal({ hour: 17, minute: 45, weekDays: [1, 4], monthDay: 20 });
+      assert.deepEqual(local, { hour: 17, minute: 45, weekDays: [1, 4], monthDay: 20 });
+    });
+  });
+
+  test('the month day is never pushed outside 1–28', () => {
+    // Clamping is lossy at the boundary, which is exactly why the picker
+    // re-reads what was stored after a save instead of showing what was typed.
+    for (const tz of ZONES) {
+      inZone(tz, () => {
+        for (const monthDay of [1, 2, 27, 28]) {
+          for (const hour of [0, 12, 23]) {
+            for (const fn of ['schedLocalToUtc', 'schedUtcToLocal']) {
+              const d = sched[fn]({ hour, minute: 30, weekDays: [], monthDay }).monthDay;
+              assert.ok(d >= 1 && d <= 28, `${tz} ${fn} ${monthDay}@${hour} produced ${d}`);
+            }
+          }
+        }
+      });
+    }
+  });
+
+  test('weekday shifts stay inside 0–6 and never collide', () => {
+    for (const tz of ZONES) {
+      inZone(tz, () => {
+        for (const hour of [0, 12, 23]) {
+          const out = sched.schedLocalToUtc({ hour, minute: 0, weekDays: [0, 1, 2, 3, 4, 5, 6] }).weekDays;
+          assert.deepEqual(out, [0, 1, 2, 3, 4, 5, 6], `${tz} @${hour}`);
+        }
+      });
+    }
+  });
+
+  test('the day shift folds the two wrap-around differences', () => {
+    // A local and a UTC calendar differ by at most one day, so the raw weekday
+    // difference is one of these five values and nothing else.
+    assert.equal(sched.schedDayShift(0), 0);
+    assert.equal(sched.schedDayShift(1), 1);
+    assert.equal(sched.schedDayShift(-1), -1);
+    assert.equal(sched.schedDayShift(6), -1,  'Saturday local vs Sunday UTC is a step back');
+    assert.equal(sched.schedDayShift(-6), 1,  'Sunday local vs Saturday UTC is a step forward');
+  });
+
+  test('missing or out-of-range fields fall back instead of producing NaN', () => {
+    for (const bad of [{}, { hour: 99, minute: -1 }, { hour: null, minute: 'x' }, { hour: '9', minute: '30' }]) {
+      const utc = sched.schedLocalToUtc(bad);
+      assert.ok(Number.isInteger(utc.hour) && utc.hour >= 0 && utc.hour <= 23, JSON.stringify(bad));
+      assert.ok(Number.isInteger(utc.minute) && utc.minute >= 0 && utc.minute <= 59, JSON.stringify(bad));
+    }
+  });
+});
+
+describe('schedule picker markup (index.html)', () => {
+  test('the picker takes a time, not a bare hour', () => {
+    assert.match(INDEX_HTML, /id="cfgSchedTime"[^>]*type="time"/,
+      'the hour-only number input cannot express a half-hour offset');
+    assert.doesNotMatch(INDEX_HTML, /cfgSchedHour/,
+      'the old hour-only input must be gone, not merely unused');
+  });
+
+  test('every control that feeds the UTC hint refreshes it', () => {
+    // A weekday box or the month day left on markConfigDirty() would leave the
+    // "Stored as …" line describing the previous selection.
+    for (const re of [
+      /id="cfgSchedTime"[^>]*oninput="onSchedTimeChange\(\)"/,
+      /id="cfgSchedMonthDay"[^>]*oninput="onSchedTimeChange\(\)"/,
+    ]) assert.match(INDEX_HTML, re, String(re));
+    const weekRow = /<div class="cfg-weekdays">[\s\S]*?<\/div>/.exec(INDEX_HTML);
+    assert.ok(weekRow, 'weekday row not found');
+    assert.equal((weekRow[0].match(/onchange="onSchedTimeChange\(\)"/g) || []).length, 7);
+  });
+
+  test('the handler is exported from the IIFE', () => {
+    // CLAUDE.md §8.2 — an inline onclick/onchange calls window.*, so a handler
+    // left off the export block fails silently in the browser.
+    assert.match(INDEX_HTML, /window\.onSchedTimeChange\s*=\s*onSchedTimeChange;/);
+  });
+
+  test('the resolved UTC time is shown to the user', () => {
+    assert.match(INDEX_HTML, /id="cfgSchedUtcHint"/);
+    assert.match(INDEX_HTML, /Stored as \$\{clock\}/);
+  });
+});
+
+// ── The picker and the scheduler, end to end ─────────────────────────────────
+// The converters live in index.html and calcNextRun lives in lib/scheduler.js,
+// and nothing else checks that the pair agree. They are the two halves of one
+// contract: whatever the user picks on their own clock is the clock time the
+// report actually goes out at. A sign error or a dropped minute in either half
+// is invisible until somebody's report arrives at the wrong time.
+
+const { calcNextRun: schedulerCalcNextRun } = require('./lib/scheduler');
+
+describe('what the picker stores is what the scheduler fires', () => {
+  const WED_0400_UTC = new Date('2026-03-11T04:00:00Z');   // getUTCDay() === 3
+
+  for (const tz of ['UTC', 'Asia/Kolkata', 'Asia/Kathmandu', 'America/Los_Angeles', 'Pacific/Kiritimati']) {
+    test(`daily at 09:00 local fires at 09:00 local in ${tz}`, () => {
+      inZone(tz, () => {
+        const stored = sched.schedLocalToUtc({ hour: 9, minute: 0, weekDays: [], monthDay: 1 });
+        const fire   = schedulerCalcNextRun({ frequency: 'daily', ...stored }, WED_0400_UTC);
+        assert.equal(fire.getHours(), 9, `${tz}: fired at ${fire.toString()}`);
+        assert.equal(fire.getMinutes(), 0, `${tz}: fired at ${fire.toString()}`);
+      });
+    });
+
+    test(`weekly on the local weekday the user ticked, in ${tz}`, () => {
+      inZone(tz, () => {
+        // Tick every weekday and confirm each one comes back as itself: the
+        // shift has to be applied in the right direction, and a sign error
+        // shows up as an off-by-one day rather than as an error.
+        for (let localDay = 0; localDay <= 6; localDay++) {
+          const stored = sched.schedLocalToUtc({ hour: 17, minute: 30, weekDays: [localDay], monthDay: 1 });
+          const fire   = schedulerCalcNextRun({ frequency: 'weekly', ...stored }, WED_0400_UTC);
+          assert.equal(fire.getDay(), localDay, `${tz}: day ${localDay} fired on ${fire.toString()}`);
+          assert.equal(fire.getHours(), 17, `${tz}: day ${localDay} fired at ${fire.toString()}`);
+          assert.equal(fire.getMinutes(), 30, `${tz}: day ${localDay} fired at ${fire.toString()}`);
+        }
+      });
+    });
+  }
+
+  test('a weekly schedule set this morning for this afternoon fires today', () => {
+    // The complaint that started this: item 1, checked through the real path a
+    // user takes rather than against calcNextRun alone.
+    inZone('Asia/Kolkata', () => {
+      // 04:00 UTC is 09:30 Wednesday in India; the user picks 17:00 today.
+      const localToday = new Date(WED_0400_UTC.getTime()).getDay();
+      const stored = sched.schedLocalToUtc({ hour: 17, minute: 0, weekDays: [localToday], monthDay: 1 });
+      const fire   = schedulerCalcNextRun({ frequency: 'weekly', ...stored }, WED_0400_UTC);
+      assert.ok(fire.getTime() - WED_0400_UTC.getTime() < 24 * 3_600_000,
+        `expected today, got ${fire.toString()}`);
+      assert.equal(fire.getHours(), 17);
+    });
+  });
+});
+
+// ── Edge cases the converters have to survive ────────────────────────────────
+describe('schedule conversion edge cases (index.html)', () => {
+  test('an existing UTC row is shown in local time and re-saves unchanged', () => {
+    // Migration 008 defaults minute to 0, so every schedule that existed before
+    // this feature reads as `hour` UTC. A user in India now correctly sees that
+    // their "9" fires at 14:30 their time — the number in the box changes, the
+    // delivery does not. Saving without touching it must not move it.
+    for (const tz of ZONES) {
+      inZone(tz, () => {
+        const stored = { hour: 9, minute: 0, weekDays: [3], monthDay: 10 };
+        const shown  = sched.schedUtcToLocal(stored);
+        const resaved = sched.schedLocalToUtc(shown);
+        assert.equal(resaved.hour, 9, `${tz} drifted the hour`);
+        assert.equal(resaved.minute, 0, `${tz} drifted the minute`);
+        assert.deepEqual(resaved.weekDays, [3], `${tz} drifted the weekday`);
+      });
+    }
+  });
+
+  test('a local time inside a spring-forward gap still converts to a real instant', () => {
+    // 02:30 on 8 March 2026 does not exist in New York — the clock jumps from
+    // 02:00 to 03:00. Date normalises it rather than failing, and the result
+    // must be a usable pair of integers, not NaN.
+    inZone('America/New_York', () => {
+      const utc = sched.schedLocalToUtc({ hour: 2, minute: 30, weekDays: [0], monthDay: 8 });
+      assert.ok(Number.isInteger(utc.hour) && utc.hour >= 0 && utc.hour <= 23, JSON.stringify(utc));
+      assert.ok(Number.isInteger(utc.minute) && utc.minute >= 0 && utc.minute <= 59, JSON.stringify(utc));
+      assert.ok(Number.isInteger(utc.monthDay), JSON.stringify(utc));
+    });
+  });
+
+  test('the shared time pattern accepts what the picker can actually emit', () => {
+    const re = new RegExp(
+      /const SCHED_TIME_RE = (\/.*?\/);/.exec(INDEX_HTML)[1].slice(1, -1)
+    );
+    for (const good of ['09:00', '9:00', '23:59', '00:00', '09:00:30', '09:00:30.500']) {
+      assert.ok(re.test(good), `${good} should be accepted`);
+    }
+    // An empty or half-typed field must be rejected, or the hint would describe
+    // a 09:00 default the user never chose as the value that will be stored.
+    for (const bad of ['', '9', '09:', ':30', 'abc', '09-00']) {
+      assert.ok(!re.test(bad), `${bad} should be rejected`);
+    }
+  });
+
+  test('the hint refuses to describe an empty time field', () => {
+    const fn = extractFunction(INDEX_HTML, 'renderSchedUtcHint');
+    assert.match(fn, /SCHED_TIME_RE\.test/,
+      'renderSchedUtcHint must gate on the same pattern the save does');
+    assert.match(fn, /Choose a time/);
+  });
+
+  test('the save and the hint agree on what a usable time is', () => {
+    // Two patterns would drift, and the failure is a user being told to choose
+    // a time they have already chosen.
+    assert.equal((INDEX_HTML.match(/SCHED_TIME_RE/g) || []).length, 4,
+      'expected the one declaration plus its three uses');
+    assert.doesNotMatch(INDEX_HTML, /\/\^\\d\{2\}:\\d\{2\}\$\//,
+      'the inline time pattern must be gone, not duplicated alongside SCHED_TIME_RE');
+  });
+});
+
+// ── The schedule list and editor (index.html) ────────────────────────────────
+describe('index.html schedule list and editor', () => {
+  test('user-supplied text in the list goes through escHtml', () => {
+    // The schedule name and the failure text are the two fields whose whole
+    // content a user (or a mail server) chose. CLAUDE.md §12 — escape before
+    // innerHTML, every time.
+    const fn = extractFunction(INDEX_HTML, 'renderScheduleList');
+    assert.match(fn, /escHtml\(sc\.name\)/, 'the schedule name must be escaped');
+    assert.match(fn, /escHtml\(sc\.lastRunError/, 'the failure text must be escaped');
+    // Nothing interpolates a raw name into the markup.
+    assert.doesNotMatch(fn, /\$\{sc\.name\}/);
+    assert.doesNotMatch(fn, /\$\{sc\.lastRunError\}/);
+  });
+
+  test('the list is rendered from state, never from a second fetch shape', () => {
+    // renderScheduleList reads _schedules only. A second source would let the
+    // panel and the collection disagree about what exists.
+    const fn = extractFunction(INDEX_HTML, 'renderScheduleList');
+    assert.match(fn, /_schedules/);
+    assert.doesNotMatch(fn, /apiFetch/, 'rendering must not fetch');
+  });
+
+  test('every schedule action is window-exported from the IIFE', () => {
+    // CLAUDE.md §8.2 — an inline handler calls window.*, so one left off the
+    // export block fails silently in the browser. These are generated into
+    // innerHTML, which is exactly where a silent failure is hardest to notice.
+    for (const fn of ['openScheduleEditor', 'saveScheduleEditor', 'cancelSchedule',
+                      'cancelAllSchedules', 'scheduleReports']) {
+      assert.match(INDEX_HTML, new RegExp(`window\\.${fn}\\s*=\\s*${fn};`), fn);
+    }
+  });
+
+  test('a new schedule defaults to 09:00 in the reader\'s own day', () => {
+    // Defaulting the stored UTC fields would prefill 14:30 for a user in India
+    // — correct as 09:00 UTC, and not what anybody means by "nine in the
+    // morning".
+    const fn = extractFunction(INDEX_HTML, 'openScheduleEditor');
+    assert.match(fn, /schedLocalToUtc\(\{ hour: 9, minute: 0/,
+      'the default must be converted from local, not stored as UTC 9');
+  });
+
+  test('the editor is one form serving both create and edit', () => {
+    // Two forms would be two chances for the create path and the edit path to
+    // disagree about what a schedule is.
+    const save = extractFunction(INDEX_HTML, 'saveScheduleEditor');
+    assert.match(save, /editing \? 'PUT' : 'POST'/);
+    assert.match(save, /_schedEditingId/);
+    assert.equal((INDEX_HTML.match(/function readScheduleEditor\(/g) || []).length, 1);
+  });
+
+  test('cancelling asks first, and says what survives', () => {
+    for (const name of ['cancelSchedule', 'cancelAllSchedules']) {
+      const fn = extractFunction(INDEX_HTML, name);
+      assert.match(fn, /await showConfirm\(/, `${name} must confirm before deleting`);
+      assert.match(fn, /already sent are unaffected/,
+        `${name} must say that delivered reports are untouched`);
+    }
+  });
+
+  test('the toolbar checks the quota before making the user fill in a form', () => {
+    const fn = extractFunction(INDEX_HTML, 'scheduleReports');
+    assert.match(fn, /_maxSchedules/);
+    assert.match(fn, /Schedule limit reached/);
+    // And it is still enforced server-side — the client check is a courtesy.
+    const routeSrc = fs.readFileSync(path.join(__dirname, 'routes', 'schedule.js'), 'utf8');
+    assert.match(routeSrc, /QUOTA_REACHED/);
+    assert.match(routeSrc, /jsonReply\(res, 429/);
+  });
+
+  test('the settings panel no longer writes schedules through /config', () => {
+    // Two writers for one row is how the panel and the collection drift apart.
+    const fn = extractFunction(INDEX_HTML, 'saveConfigPanel');
+    assert.doesNotMatch(fn, /schedule:/, 'the config save must not carry a schedule');
+    assert.match(fn, /const config = \{ mail: mailConfig \};/);
+    const configRoute = fs.readFileSync(path.join(__dirname, 'routes', 'config.js'), 'utf8');
+    assert.doesNotMatch(configRoute, /schedulesDb\.save|cfg\.schedule/,
+      'the config route must not write schedules either');
+  });
+
+  test('the old single-schedule controls are gone, not merely hidden', () => {
+    // A dead second implementation is one that gets rendered by accident.
+    for (const stale of ['cfgSchedEnabled', 'cfgSchedBody', 'onSchedToggle',
+                         'renderScheduleStatus', 'cfgCancelSchedBtn']) {
+      assert.doesNotMatch(INDEX_HTML, new RegExp(stale), `${stale} should have been removed`);
+    }
+  });
+
+  test('the singular schedule routes are gone from the backend too', () => {
+    const server = fs.readFileSync(path.join(__dirname, 'server.js'), 'utf8');
+    const routeSrc = fs.readFileSync(path.join(__dirname, 'routes', 'schedule.js'), 'utf8');
+    for (const src of [server, routeSrc, INDEX_HTML]) {
+      assert.doesNotMatch(src, /violation-cache\/schedule\/(arm|status|ack-notification)\b/);
+      assert.doesNotMatch(src, /'\/violation-cache\/schedule'/);
+    }
+  });
+});
+
+describe('admin.html schedule limit', () => {
+  test('the second default is present, bounded, and has its own error slot', () => {
+    assert.match(ADMIN_HTML, /id="defaultMaxSchedules"[^>]*type="number"[^>]*min="1"[^>]*max="100"/);
+    assert.match(ADMIN_HTML, /id="defaultMaxSchedulesErr"/);
+    assert.match(ADMIN_HTML, /id="defaultMaxSchedulesHint"/);
+  });
+
+  test('both defaults are saved in one request', () => {
+    // Two requests would mean one could succeed and the other fail, leaving the
+    // screen showing a state nobody chose.
+    const fn = /async function saveDefaultLimit[\s\S]*?\n  \}/.exec(ADMIN_HTML)[0];
+    assert.match(fn, /defaultMaxReports: reports, defaultMaxSchedules: schedules/);
+    assert.equal((fn.match(/apiFetch\('\/admin\/settings'/g) || []).length, 1);
+  });
+
+  test('the administration allow-list is still exactly six method/path pairs', () => {
+    // CLAUDE.md §7.6 — the list is the contract. The schedule limit rides on
+    // the two settings routes that already existed rather than adding a
+    // seventh, which is the bar a new one has to clear.
+    const adminRoute = fs.readFileSync(path.join(__dirname, 'routes', 'admin.js'), 'utf8');
+    const writes = [...adminRoute.matchAll(/method === '(PUT|POST|DELETE)'/g)].length;
+    assert.equal(writes, 6, `expected six write handlers, found ${writes}`);
+  });
+});
+
+// ── The drill-down schedule editor (index.html) ──────────────────────────────
+describe('index.html schedule drill-down', () => {
+  test('the editor is a panel view, not a dialog', () => {
+    // A dialog covers the list it was opened from; a drill-down keeps the
+    // panel's context and makes "one open at a time" structural rather than
+    // something the code has to remember.
+    assert.match(INDEX_HTML, /id="cfgSchedView"/);
+    assert.match(INDEX_HTML, /id="cfgMainView"/);
+    assert.doesNotMatch(INDEX_HTML, /schedEditModal/,
+      'the modal it replaced must be gone, not merely unused');
+  });
+
+  test('opening one schedule asks before abandoning another', () => {
+    // The whole point of one-at-a-time: switching must not silently drop what
+    // was typed into the previous one.
+    const fn = extractFunction(INDEX_HTML, 'openScheduleEditor');
+    assert.match(fn, /_schedEditorOpen && !\(await confirmDiscardSchedule\(\)\)/);
+  });
+
+  test('every way out of the editor goes through the same guard', () => {
+    // Back, Discard and closing the whole panel are three ways to lose work.
+    const close = extractFunction(INDEX_HTML, 'closeScheduleEditor');
+    assert.match(close, /confirmDiscardSchedule/);
+    const panel = extractFunction(INDEX_HTML, 'closeConfigPanel');
+    assert.match(panel, /_schedEditorOpen && !\(await confirmDiscardSchedule\(\)\)/,
+      'closing the panel must respect the drill-down\'s unsaved changes too');
+    assert.match(INDEX_HTML, /onclick="closeScheduleEditor\(true\)"/,
+      'Discard must skip the prompt rather than ask twice');
+  });
+
+  test('the dirty flag is cleared after the fields are populated, never before', () => {
+    // Every field write above fires an oninput handler, so clearing the flag
+    // first would leave a freshly opened editor claiming unsaved changes.
+    const fn = extractFunction(INDEX_HTML, 'openScheduleEditor');
+    const setDirtyFalse = fn.lastIndexOf('_schedDirty = false');
+    const lastFieldWrite = fn.lastIndexOf('.checked =');
+    assert.ok(setDirtyFalse > lastFieldWrite,
+      'the flag must be reset after the last field is written');
+  });
+
+  test('the panel always opens on the list, never on a stale schedule', () => {
+    const fn = extractFunction(INDEX_HTML, 'openConfigPanel');
+    assert.match(fn, /closeScheduleEditor\(true\)/);
+  });
+});
+
+describe('index.html per-schedule delivery', () => {
+  test('blank fields are sent, so an override can be cleared', () => {
+    // Omitting the key means "leave it alone"; sending an empty list means "go
+    // back to the account default". Only the second is reachable from a form
+    // the user cleared.
+    const fn = extractFunction(INDEX_HTML, 'readScheduleEditor');
+    assert.match(fn, /to, cc, subject,/);
+    assert.match(fn, /const addrs = \(id\) =>/);
+  });
+
+  test('a malformed address is caught in the editor, not by the server', () => {
+    const fn = extractFunction(INDEX_HTML, 'readScheduleEditor');
+    assert.match(fn, /SCHED_EMAIL_RE\.test\(a\)/);
+    assert.match(fn, /is not a valid email address/);
+  });
+
+  test('the placeholder says what a blank field will actually use', () => {
+    // "Leave it blank" is only safe advice if the user can see what blank means.
+    const fn = extractFunction(INDEX_HTML, 'applySchedDeliveryPlaceholders');
+    assert.match(fn, /Account default/);
+    assert.match(fn, /_appConfig/);
+  });
+
+  test('the list says where each schedule actually sends', () => {
+    const fn = extractFunction(INDEX_HTML, 'renderScheduleList');
+    assert.match(fn, /account default recipients/);
+    assert.match(fn, /escHtml\(sc\.to\.join/, 'recipient addresses are user text');
+  });
+
+  test('only the addressing is per schedule — the SMTP fields stay on the account', () => {
+    // Changing who receives a report must never mean re-entering a password.
+    const view = /<div id="cfgSchedView"[\s\S]*?<!-- end cfgSchedView -->/.exec(INDEX_HTML)[0];
+    for (const smtpField of ['cfgSmtpHost', 'cfgSmtpPort', 'cfgSmtpUser', 'cfgSmtpPass', 'cfgMailFrom']) {
+      assert.doesNotMatch(view, new RegExp(smtpField), `${smtpField} must not be per schedule`);
+    }
+    for (const own of ['cfgSchedTo', 'cfgSchedCc', 'cfgSchedSubject']) {
+      assert.match(view, new RegExp(own));
+    }
+  });
+});
+
+describe('index.html pause, send now and history', () => {
+  test('the pause toggle acts immediately and does not open the editor', () => {
+    const fn = extractFunction(INDEX_HTML, 'renderScheduleList');
+    assert.match(fn, /toggleSchedule\('\$\{sc\.id\}', this\.checked\)/);
+    assert.match(fn, /onclick="event\.stopPropagation\(\)"/,
+      'clicking the toggle must not also drill into the schedule');
+    // A schedule with no projects cannot be armed, so offering to resume it
+    // would be offering something that fails.
+    assert.match(fn, /sc\.projectCount \? '' : 'disabled'/);
+  });
+
+  test('a failed toggle puts the switch back where the server says it is', () => {
+    const fn = extractFunction(INDEX_HTML, 'toggleSchedule');
+    const failureBranch = fn.slice(fn.indexOf('if (!r.ok)'));
+    assert.match(failureBranch, /reloadSchedules/,
+      'a refused pause must not leave the UI claiming it worked');
+  });
+
+  test('send now is disabled until the schedule exists', () => {
+    const fn = extractFunction(INDEX_HTML, 'openScheduleEditor');
+    assert.match(fn, /cfgSchedRunNowBtn'\)\.disabled = !sc/);
+  });
+
+  test('the history states the window it counts over', () => {
+    // An unqualified total would quietly shrink as the 90-day sweep runs.
+    const fn = extractFunction(INDEX_HTML, 'renderRunHistory');
+    assert.match(fn, /stats\.retentionDays/);
+    assert.match(fn, /in the last /);
+    assert.match(fn, /succeeded/);
+    assert.match(fn, /failed/);
+    assert.match(fn, /escHtml\(r\.error/, 'a failure message is text from a mail server');
+  });
+
+  test('every new handler is window-exported', () => {
+    for (const fn of ['closeScheduleEditor', 'cancelScheduleFromEditor',
+                      'toggleSchedule', 'runScheduleNow', 'markSchedDirty']) {
+      assert.match(INDEX_HTML, new RegExp(`window\\.${fn}\\s*=\\s*${fn};`), fn);
+    }
+  });
+
+  test('the backend routes the screen calls all exist', () => {
+    // A screen calling a route nobody implemented fails silently, which is how
+    // the schedule/status poller survived Phase 2 unnoticed.
+    const routeSrc = fs.readFileSync(path.join(__dirname, 'routes', 'schedule.js'), 'utf8');
+    for (const [action, method] of [['arm', 'POST'], ['disable', 'POST'],
+                                    ['run-now', 'POST'], ['runs', 'GET'],
+                                    ['ack-notification', 'POST']]) {
+      assert.match(routeSrc, new RegExp(`method === '${method}' && action === '${action}'`),
+        `${method} .../${action} is called by the page but not handled`);
+    }
+  });
+
+  test('every schedule path the page calls is one the route parses', () => {
+    const calls = [...INDEX_HTML.matchAll(/\/violation-cache\/schedules(\/[a-z$${}()\w.-]*)?/g)]
+      .map(m => (m[1] || '').replace(/\$\{[^}]*\}/g, ':id'));
+    const allowed = new Set(['', '/', '/:id', '/:id/arm', '/:id/disable',
+                             '/:id/run-now', '/:id/runs', '/:id/ack-notification']);
+    for (const c of new Set(calls)) {
+      assert.ok(allowed.has(c), `the page calls an unexpected schedule path: "${c}"`);
+    }
   });
 });

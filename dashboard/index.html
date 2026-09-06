@@ -768,6 +768,12 @@
       color: var(--text-muted); cursor: pointer; line-height: 1; padding: 4px;
     }
     .cfg-close:hover { color: var(--text); }
+    .cfg-back {
+      background: none; border: none; font-size: 24px; line-height: 1;
+      color: var(--text-muted); cursor: pointer; padding: 0 8px 0 0;
+      margin-right: 2px;
+    }
+    .cfg-back:hover { color: var(--accent); }
     .cfg-panel-body {
       flex: 1; overflow-y: auto; padding: 20px 24px;
       display: flex; flex-direction: column; gap: 16px;
@@ -1101,10 +1107,13 @@
 <div class="cfg-backdrop" id="cfgBackdrop" onclick="closeConfigPanel(false)"></div>
 <div class="cfg-panel" id="configPanel">
   <div class="cfg-panel-header">
-    <h2>⚙ Settings</h2>
+    <button class="cfg-back" id="cfgBackBtn" hidden onclick="closeScheduleEditor()"
+            title="Back to Settings">&#8249;</button>
+    <h2 id="cfgPanelTitle">&#9881; Settings</h2>
     <button class="cfg-close" onclick="closeConfigPanel(false)">&times;</button>
   </div>
   <div class="cfg-panel-body">
+  <div id="cfgMainView">
 
     <!-- Connection section -->
     <div class="cfg-section">
@@ -1189,73 +1198,122 @@
         <button class="btn" style="margin-bottom:4px" onclick="testEmailFromPanel()"
           title="Tests with the values currently on screen — click Save to apply them to the schedule">Send Test Email</button>
 
-        <div class="cfg-sub-title">Schedule</div>
-        <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:6px">
-          <span style="font-size:13px;color:var(--text)">Enable automatic reports</span>
-          <label class="cfg-toggle">
-            <input type="checkbox" id="cfgSchedEnabled" onchange="onSchedToggle()">
-            <span class="cfg-toggle-slider"></span>
-          </label>
-        </div>
+        <div class="cfg-sub-title">Scheduled Reports</div>
         <div id="cfgSchedHint" style="display:none;font-size:11px;color:var(--text-muted);margin-bottom:10px">
-          ⚠ Configure SMTP host, From address, and To address above first.
+          &#9888; Configure SMTP host, From address, and To address above first.
         </div>
-        <div id="cfgSchedBody" style="display:none">
-          <label class="cfg-label" style="margin-top:0">Frequency</label>
-          <select id="cfgSchedFreq" class="cfg-input" style="margin-bottom:8px;cursor:pointer" onchange="onSchedFreqChange()">
-            <option value="daily">Daily</option>
-            <option value="weekly">Weekly</option>
-            <option value="monthly">Monthly</option>
-          </select>
-          <label class="cfg-label">Report name <span style="font-size:10px">(optional)</span></label>
-          <input id="cfgSchedName" class="cfg-input" maxlength="120" style="margin-bottom:4px"
-                 placeholder="Leave blank to name it automatically" oninput="markConfigDirty()" />
-          <div class="field-error" id="cfgSchedNameErr" style="margin-bottom:4px"></div>
-
-          <label class="cfg-label">Send at hour <span style="font-size:10px">(0–23, server local time)</span></label>
-          <input id="cfgSchedHour" type="number" min="0" max="23" class="cfg-input" style="width:80px;margin-bottom:8px" value="9" oninput="markConfigDirty()" />
-          <div id="cfgSchedWeekRow" style="display:none;margin-bottom:8px">
-            <label class="cfg-label" style="margin-top:0">Day(s) of week</label>
-            <div class="cfg-weekdays">
-              <label class="cfg-weekday"><input type="checkbox" value="0" onchange="markConfigDirty()"><span>Su</span></label>
-              <label class="cfg-weekday"><input type="checkbox" value="1" onchange="markConfigDirty()"><span>Mo</span></label>
-              <label class="cfg-weekday"><input type="checkbox" value="2" onchange="markConfigDirty()"><span>Tu</span></label>
-              <label class="cfg-weekday"><input type="checkbox" value="3" onchange="markConfigDirty()"><span>We</span></label>
-              <label class="cfg-weekday"><input type="checkbox" value="4" onchange="markConfigDirty()"><span>Th</span></label>
-              <label class="cfg-weekday"><input type="checkbox" value="5" onchange="markConfigDirty()"><span>Fr</span></label>
-              <label class="cfg-weekday"><input type="checkbox" value="6" onchange="markConfigDirty()"><span>Sa</span></label>
-            </div>
-          </div>
-          <div id="cfgSchedMonthRow" style="display:none;margin-bottom:8px">
-            <label class="cfg-label" style="margin-top:0">Day of month <span style="font-size:10px">(1–28)</span></label>
-            <input id="cfgSchedMonthDay" type="number" min="1" max="28" class="cfg-input" style="width:80px" value="1" oninput="markConfigDirty()" />
-          </div>
-          <label class="cfg-label">Risk categories to include</label>
-          <div style="display:flex;gap:14px;margin-bottom:10px;margin-top:4px">
-            <label style="display:flex;align-items:center;gap:5px;font-size:13px;cursor:pointer">
-              <input type="checkbox" id="cfgSchedSecurity" onchange="markConfigDirty()" style="accent-color:var(--accent);cursor:pointer"> Security
-            </label>
-            <label style="display:flex;align-items:center;gap:5px;font-size:13px;cursor:pointer">
-              <input type="checkbox" id="cfgSchedLicense" onchange="markConfigDirty()" style="accent-color:var(--accent);cursor:pointer"> License
-            </label>
-            <label style="display:flex;align-items:center;gap:5px;font-size:13px;cursor:pointer">
-              <input type="checkbox" id="cfgSchedOperational" onchange="markConfigDirty()" style="accent-color:var(--accent);cursor:pointer"> Operational
-            </label>
-          </div>
-          <div id="cfgSchedStatus" style="font-size:12px;background:var(--surface);border:1px solid var(--border);border-radius:6px;padding:10px 12px;margin-bottom:10px;display:none">
-            <div id="cfgSchedLastRun"></div>
-            <div id="cfgSchedNextRun" style="margin-top:4px"></div>
-          </div>
-          <button class="btn" id="cfgCancelSchedBtn" style="display:none;border-color:var(--critical);color:var(--critical)" onclick="cancelSchedule()">Cancel Schedule</button>
+        <!-- The list is the whole section. A schedule is created from the
+             toolbar's Schedule Reports, because that is where the project
+             selection lives; here they are reviewed, edited and cancelled. -->
+        <div id="cfgSchedList" style="margin-bottom:8px"></div>
+        <div style="display:flex;align-items:center;justify-content:space-between;gap:8px">
+          <button class="btn" id="cfgCancelAllSchedBtn" style="display:none;border-color:var(--critical);color:var(--critical)"
+                  onclick="cancelAllSchedules()">Cancel All</button>
+          <span id="cfgSchedQuota" style="font-size:11px;color:var(--text-muted);margin-left:auto"></span>
         </div>
 
       </div><!-- end cfgMailBody -->
     </div><!-- end Email section -->
 
+  </div><!-- end cfgMainView -->
+
+  <!-- ── Schedule editor ────────────────────────────────────────────────────
+       A drill-down, not a dialog: the panel slides to this view and the header
+       grows a Back button. One schedule is open at a time by construction,
+       which is the whole reason for the shape — a list of expandable rows lets
+       somebody edit three at once and lose two of them. -->
+  <div id="cfgSchedView" hidden>
+    <div class="cfg-section">
+      <div class="cfg-sub-title">Schedule</div>
+      <label class="cfg-label" for="cfgSchedLabel">Name <span style="font-size:10px">(optional)</span></label>
+      <input id="cfgSchedLabel" class="cfg-input" maxlength="120" style="margin-bottom:4px"
+             placeholder="e.g. Weekly operational risk" oninput="markSchedDirty()" />
+      <div class="field-error" id="cfgSchedLabelErr" style="margin-bottom:4px"></div>
+
+      <label class="cfg-label">Frequency</label>
+      <select id="cfgSchedFreq" class="cfg-input" style="margin-bottom:8px;cursor:pointer" onchange="onSchedFreqChange()">
+        <option value="daily">Daily</option>
+        <option value="weekly">Weekly</option>
+        <option value="monthly">Monthly</option>
+      </select>
+
+      <label class="cfg-label">Send at <span style="font-size:10px" id="cfgSchedZoneLabel">(your local time)</span></label>
+      <input id="cfgSchedTime" type="time" class="cfg-input" style="width:120px;margin-bottom:4px" value="09:00" oninput="onSchedTimeChange()" />
+      <div id="cfgSchedUtcHint" style="font-size:11px;color:var(--text-muted);margin-bottom:8px"></div>
+
+      <div id="cfgSchedWeekRow" style="display:none;margin-bottom:8px">
+        <label class="cfg-label" style="margin-top:0">Day(s) of week</label>
+        <div class="cfg-weekdays">
+          <label class="cfg-weekday"><input type="checkbox" value="0" onchange="onSchedTimeChange()"><span>Su</span></label>
+          <label class="cfg-weekday"><input type="checkbox" value="1" onchange="onSchedTimeChange()"><span>Mo</span></label>
+          <label class="cfg-weekday"><input type="checkbox" value="2" onchange="onSchedTimeChange()"><span>Tu</span></label>
+          <label class="cfg-weekday"><input type="checkbox" value="3" onchange="onSchedTimeChange()"><span>We</span></label>
+          <label class="cfg-weekday"><input type="checkbox" value="4" onchange="onSchedTimeChange()"><span>Th</span></label>
+          <label class="cfg-weekday"><input type="checkbox" value="5" onchange="onSchedTimeChange()"><span>Fr</span></label>
+          <label class="cfg-weekday"><input type="checkbox" value="6" onchange="onSchedTimeChange()"><span>Sa</span></label>
+        </div>
+      </div>
+      <div id="cfgSchedMonthRow" style="display:none;margin-bottom:8px">
+        <label class="cfg-label" style="margin-top:0">Day of month <span style="font-size:10px">(1&ndash;28)</span></label>
+        <input id="cfgSchedMonthDay" type="number" min="1" max="28" class="cfg-input" style="width:80px" value="1" oninput="onSchedTimeChange()" />
+      </div>
+
+      <label class="cfg-label">Risk categories to include</label>
+      <div style="display:flex;gap:14px;margin-bottom:10px;margin-top:4px">
+        <label style="display:flex;align-items:center;gap:5px;font-size:13px;cursor:pointer">
+          <input type="checkbox" id="cfgSchedSecurity" onchange="markSchedDirty()" style="accent-color:var(--accent);cursor:pointer"> Security
+        </label>
+        <label style="display:flex;align-items:center;gap:5px;font-size:13px;cursor:pointer">
+          <input type="checkbox" id="cfgSchedLicense" onchange="markSchedDirty()" style="accent-color:var(--accent);cursor:pointer"> License
+        </label>
+        <label style="display:flex;align-items:center;gap:5px;font-size:13px;cursor:pointer">
+          <input type="checkbox" id="cfgSchedOperational" onchange="markSchedDirty()" style="accent-color:var(--accent);cursor:pointer"> Operational
+        </label>
+      </div>
+
+      <label class="cfg-label" for="cfgSchedName">Report file name <span style="font-size:10px">(optional)</span></label>
+      <input id="cfgSchedName" class="cfg-input" maxlength="120" style="margin-bottom:4px"
+             placeholder="Leave blank to name it automatically" oninput="markSchedDirty()" />
+      <div class="field-error" id="cfgSchedNameErr"></div>
+      <div id="cfgSchedProjects" style="font-size:11px;color:var(--text-muted);margin-top:8px"></div>
+    </div>
+
+    <!-- Only the addressing is per schedule. The SMTP server, sign-in and From
+         address stay on the account above: changing who receives a report must
+         not mean re-entering a password. -->
+    <div class="cfg-section">
+      <div class="cfg-sub-title">Delivery</div>
+      <div style="font-size:11px;color:var(--text-muted);margin-bottom:8px">
+        Leave a field blank to use the account defaults set under <strong>Email</strong>.
+      </div>
+      <label class="cfg-label" style="margin-top:0">To</label>
+      <input id="cfgSchedTo" class="cfg-input" style="margin-bottom:4px" oninput="markSchedDirty()" />
+      <div class="field-error" id="cfgSchedToErr" style="margin-bottom:4px"></div>
+      <label class="cfg-label">CC</label>
+      <input id="cfgSchedCc" class="cfg-input" style="margin-bottom:4px" oninput="markSchedDirty()" />
+      <div class="field-error" id="cfgSchedCcErr" style="margin-bottom:4px"></div>
+      <label class="cfg-label">Subject</label>
+      <input id="cfgSchedSubject" class="cfg-input" maxlength="200" oninput="markSchedDirty()" />
+      <div class="field-error" id="cfgSchedSubjectErr"></div>
+    </div>
+
+    <div class="cfg-section">
+      <div class="cfg-sub-title">Runs</div>
+      <div id="cfgSchedRuns" style="font-size:12px"></div>
+      <button class="btn" id="cfgSchedRunNowBtn" style="margin-top:10px" onclick="runScheduleNow()">Send now</button>
+    </div>
+
+    <button class="btn" id="cfgSchedDeleteBtn" style="border-color:var(--critical);color:var(--critical)"
+            onclick="cancelScheduleFromEditor()">Cancel this schedule</button>
+  </div><!-- end cfgSchedView -->
   </div><!-- end cfg-panel-body -->
-  <div class="cfg-panel-footer">
+  <div class="cfg-panel-footer" id="cfgMainFooter">
     <button class="btn primary" id="cfgSaveBtn" onclick="saveConfigPanel()">Save</button>
     <button class="btn" onclick="cancelConfigPanel()">Cancel</button>
+  </div>
+  <div class="cfg-panel-footer" id="cfgSchedFooter" hidden>
+    <button class="btn primary" id="cfgSchedSaveBtn" onclick="saveScheduleEditor()">Save schedule</button>
+    <button class="btn" onclick="closeScheduleEditor(true)">Discard</button>
   </div>
 </div>
 
@@ -1335,6 +1393,8 @@ let selectedProjectUuids = new Set(); // UUIDs of leaf projects manually checked
 
 // ── Config panel state ─────────────────────────────────────────────────────
 let _configPanelDirty = false;   // true when any config panel field has changed
+let _schedules    = [];          // this user's schedules, as the settings list shows them
+let _maxSchedules = 0;           // the ceiling the administrator set for this account
 let _appConfig        = null;    // last fetched config from /violation-cache/config
 let _currentUser      = null;    // authenticated principal from /auth/me
 
@@ -1732,16 +1792,27 @@ function openConfigPanel() {
   document.getElementById('cfgBackdrop').classList.add('open');
   document.getElementById('configPanel').classList.add('open');
   _configPanelDirty = false;
+  // Always land on the list, never on whatever schedule was open last time.
+  closeScheduleEditor(true);
   loadConfigFromServer();
 }
 
-function closeConfigPanel(force = false) {
+async function closeConfigPanel(force = false) {
+  // The drill-down has its own unsaved work, and closing the whole panel is
+  // just as much a way to lose it as pressing Back.
+  if (!force && _schedEditorOpen && !(await confirmDiscardSchedule())) return;
   if (!force && _configPanelDirty) {
-    if (!confirm('You have unsaved changes. Discard them?')) return;
+    const discard = await showConfirm(
+      'Unsaved changes',
+      'Settings have changes that have not been saved. Discard them?',
+      'Discard', 'Keep editing'
+    );
+    if (!discard) return;
   }
   document.getElementById('cfgBackdrop').classList.remove('open');
   document.getElementById('configPanel').classList.remove('open');
   _configPanelDirty = false;
+  await closeScheduleEditor(true);
 }
 
 function markConfigDirty() { _configPanelDirty = true; }
@@ -1811,27 +1882,11 @@ async function loadConfigFromServer() {
       document.getElementById('cfgMailBodyTa').value  = m.body || '';
     }
 
-    // Schedule
-    const sched = cfg.schedule || {};
-    const schedEnabled = !!sched.enabled;
-    document.getElementById('cfgSchedEnabled').checked    = schedEnabled;
-    document.getElementById('cfgSchedBody').style.display = schedEnabled ? '' : 'none';
-    document.getElementById('cfgSchedFreq').value         = sched.frequency || 'daily';
-    document.getElementById('cfgSchedHour').value         = sched.hour !== undefined ? sched.hour : 9;
-    document.getElementById('cfgSchedMonthDay').value     = sched.monthDay || 1;
-    document.getElementById('cfgSchedName').value         = sched.reportName || '';
-    const schedNameErr = document.getElementById('cfgSchedNameErr');
-    if (schedNameErr) schedNameErr.textContent = '';
-    onSchedFreqChange();
-    const wds = sched.weekDays || [];
-    document.querySelectorAll('.cfg-weekday input').forEach(cb => {
-      cb.checked = wds.includes(parseInt(cb.value, 10));
-    });
-    const rt = sched.riskTypes || [];
-    document.getElementById('cfgSchedSecurity').checked    = rt.includes('security');
-    document.getElementById('cfgSchedLicense').checked     = rt.includes('license');
-    document.getElementById('cfgSchedOperational').checked = rt.includes('operational');
-    renderScheduleStatus(sched);
+    // Schedules. A user owns any number of them, so the panel renders a list
+    // and the editor modal is opened per row rather than being the section.
+    _schedules   = Array.isArray(cfg.schedules) ? cfg.schedules : [];
+    _maxSchedules = cfg.maxSchedules || 0;
+    renderScheduleList();
     updateSchedToggleState();
     _configPanelDirty = false;
   } catch (e) {
@@ -1839,31 +1894,97 @@ async function loadConfigFromServer() {
   }
 }
 
-function renderScheduleStatus(sched) {
-  const box       = document.getElementById('cfgSchedStatus');
-  const lastEl    = document.getElementById('cfgSchedLastRun');
-  const nextEl    = document.getElementById('cfgSchedNextRun');
-  const cancelBtn = document.getElementById('cfgCancelSchedBtn');
-  if (!sched || !sched.enabled) {
-    box.style.display       = 'none';
-    cancelBtn.style.display = 'none';
+/** Human summary of when one schedule fires, in the reader's own timezone. */
+function describeSchedule(sched) {
+  const local = schedUtcToLocal(sched);
+  const at = `${String(local.hour).padStart(2, '0')}:${String(local.minute).padStart(2, '0')}`;
+  if (sched.frequency === 'weekly') {
+    const days = local.weekDays.length
+      ? local.weekDays.map(d => SCHED_DAY_SHORT[d]).join(', ')
+      : 'no days chosen';
+    return `Weekly · ${days} at ${at}`;
+  }
+  if (sched.frequency === 'monthly') {
+    return `Monthly · day ${local.monthDay} at ${at}`;
+  }
+  return `Daily · ${at}`;
+}
+
+/**
+ * The schedule list in Settings.
+ *
+ * Every value the user typed goes through escHtml() before it reaches
+ * innerHTML (CLAUDE.md §12) — the schedule name is the one field here that a
+ * user chose the whole content of.
+ */
+function renderScheduleList() {
+  const listEl   = document.getElementById('cfgSchedList');
+  const allBtn   = document.getElementById('cfgCancelAllSchedBtn');
+  const quotaEl  = document.getElementById('cfgSchedQuota');
+  if (!listEl) return;
+
+  quotaEl.textContent = _maxSchedules
+    ? `${_schedules.length} of ${_maxSchedules} schedules used`
+    : '';
+  allBtn.style.display = _schedules.length > 1 ? '' : 'none';
+
+  if (_schedules.length === 0) {
+    listEl.innerHTML = '<div style="font-size:12px;color:var(--text-muted);'
+      + 'border:1px dashed var(--border);border-radius:6px;padding:12px;text-align:center">'
+      + 'No scheduled reports yet. Select projects, then use '
+      + '<strong>&#128197; Schedule Reports</strong> from the toolbar.</div>';
     return;
   }
-  box.style.display       = '';
-  cancelBtn.style.display = '';
-  const lr = sched.lastRun; const ls = sched.lastRunStatus; const nr = sched.nextRun;
-  if (lr) {
-    let s = `<strong>Last run:</strong> ${new Date(lr).toLocaleString()} — `;
-    if (ls === 'success') s += `<span style="color:var(--ok)">&#10003; Success</span>`;
-    else if (ls === 'failed') s += `<span style="color:var(--critical)">&#10007; Failed${sched.lastRunError ? ': ' + sched.lastRunError : ''}</span>`;
-    else s += ls || '—';
-    lastEl.innerHTML = s;
-  } else {
-    lastEl.innerHTML = '<strong>Last run:</strong> Never';
-  }
-  nextEl.innerHTML = nr
-    ? `<strong>Next run:</strong> ${new Date(nr).toLocaleString()}`
-    : '<strong>Next run:</strong> —';
+
+  listEl.innerHTML = _schedules.map((sc) => {
+    const title = sc.name ? escHtml(sc.name) : '<em>Unnamed schedule</em>';
+    const state = sc.isRunning
+      ? '<span style="color:var(--accent)">&#9679; Running now</span>'
+      : (sc.enabled ? '<span style="color:var(--ok)">&#9679; Active</span>'
+                    : '<span style="color:var(--text-muted)">&#9679; Paused</span>');
+    let last = 'Never run';
+    if (sc.lastRun) {
+      const when = new Date(sc.lastRun).toLocaleString();
+      if (sc.lastRunStatus === 'success') last = `Last run ${when} — <span style="color:var(--ok)">&#10003;</span>`;
+      else if (sc.lastRunStatus === 'failed') {
+        last = `Last run ${when} — <span style="color:var(--critical)">&#10007; `
+             + `${escHtml(sc.lastRunError || 'failed')}</span>`;
+      } else last = `Last run ${when}`;
+    }
+    const next = sc.enabled && sc.nextRun
+      ? `Next ${new Date(sc.nextRun).toLocaleString()}`
+      : 'Not scheduled';
+    // A schedule with no projects cannot be armed, so say what to do about it
+    // rather than leaving a row that silently never fires.
+    const projects = sc.projectCount
+      ? `${sc.projectCount} project${sc.projectCount === 1 ? '' : 's'}`
+      : '<span style="color:var(--high)">No projects — re-select from the toolbar</span>';
+    // Where the report goes, so the list answers the question the per-schedule
+    // recipients exist for without opening each one.
+    const goesTo = (sc.to && sc.to.length)
+      ? escHtml(sc.to.join(', '))
+      : '<span style="color:var(--text-muted)">account default recipients</span>';
+    // Pausing needs no save step, so the toggle acts immediately and must not
+    // also open the editor — hence stopPropagation on the row click.
+    const toggle = `<label class="cfg-toggle" style="transform:scale(0.8)" title="${sc.enabled ? 'Pause' : 'Resume'}"
+             onclick="event.stopPropagation()">
+        <input type="checkbox" ${sc.enabled ? 'checked' : ''} ${sc.projectCount ? '' : 'disabled'}
+               onchange="toggleSchedule('${sc.id}', this.checked)">
+        <span class="cfg-toggle-slider"></span>
+      </label>`;
+
+    return `<div class="sched-row" onclick="openScheduleEditor('${sc.id}')"
+      style="border:1px solid var(--border);border-radius:6px;padding:10px 12px;margin-bottom:8px;background:var(--surface);cursor:pointer">
+      <div style="display:flex;align-items:center;gap:8px;margin-bottom:4px">
+        <strong style="font-size:13px;flex:1;min-width:0;overflow:hidden;text-overflow:ellipsis;white-space:nowrap">${title}</strong>
+        ${toggle}
+        <span style="color:var(--text-muted);font-size:16px;line-height:1">&#8250;</span>
+      </div>
+      <div style="font-size:12px;color:var(--text-muted)">${escHtml(describeSchedule(sc))} · ${projects}</div>
+      <div style="font-size:11px;color:var(--text-muted);margin-top:2px">To: ${goesTo}</div>
+      <div style="font-size:11px;color:var(--text-muted);margin-top:2px">${state} · ${next} · ${last}</div>
+    </div>`;
+  }).join('');
 }
 
 function onMailToggle() {
@@ -1873,53 +1994,175 @@ function onMailToggle() {
   updateSchedToggleState();
 }
 
-/** Disable the schedule toggle when required email fields are not yet filled. */
+/**
+ * Scheduling needs somewhere to send the report, so the hint appears until the
+ * mail fields are filled. There is no longer a master on/off switch: each
+ * schedule carries its own enabled flag, and one global toggle that silently
+ * stopped all of them would be a second, invisible way to cancel.
+ */
 function updateSchedToggleState() {
   const mailEnabled = document.getElementById('cfgMailEnabled').checked;
   const host        = document.getElementById('cfgSmtpHost').value.trim();
   const from        = document.getElementById('cfgMailFrom').value.trim();
   const to          = document.getElementById('cfgMailTo').value.trim();
-  const emailReady  = mailEnabled && host && from && to;
-
-  const toggle = document.getElementById('cfgSchedEnabled');
-  const hint   = document.getElementById('cfgSchedHint');
-  if (!emailReady) {
-    toggle.disabled = true;
-    if (toggle.checked) {
-      toggle.checked = false;
-      document.getElementById('cfgSchedBody').style.display = 'none';
-    }
-    if (hint) hint.style.display = '';
-  } else {
-    toggle.disabled = false;
-    if (hint) hint.style.display = 'none';
-  }
-}
-
-function onSchedToggle() {
-  document.getElementById('cfgSchedBody').style.display =
-    document.getElementById('cfgSchedEnabled').checked ? '' : 'none';
-  markConfigDirty();
+  const hint        = document.getElementById('cfgSchedHint');
+  if (hint) hint.style.display = (mailEnabled && host && from && to) ? 'none' : '';
 }
 
 function onSchedFreqChange() {
   const freq = document.getElementById('cfgSchedFreq').value;
   document.getElementById('cfgSchedWeekRow').style.display  = freq === 'weekly'  ? '' : 'none';
   document.getElementById('cfgSchedMonthRow').style.display = freq === 'monthly' ? '' : 'none';
+  renderSchedUtcHint();
   markConfigDirty();
+}
+
+/** Any edit to the time, the weekdays or the month day. */
+function onSchedTimeChange() {
+  renderSchedUtcHint();
+  markConfigDirty();
+}
+
+// ── Schedule timezone conversion ──────────────────────────────────────────────
+// The backend stores the schedule as a UTC instant (CLAUDE.md §6.8) and the
+// picker shows the browser's wall clock, so every load and save crosses a
+// timezone. Converting the hour alone would be wrong twice over: an offset can
+// carry a half hour — India is UTC+05:30, Nepal +05:45 — and it can move the
+// *day*, so 06:00 UTC on Monday is Sunday evening in Los Angeles. Both
+// directions therefore go through a real Date rather than arithmetic on the
+// hour, and the weekday set is shifted with it.
+//
+// The reference instant is today, because an offset belongs to an instant and
+// not to a zone. A schedule stored as a fixed UTC instant does shift by an hour
+// in local terms when daylight saving starts — that is inherent in storing UTC,
+// and it is why the hint line under the picker always states what is really
+// stored rather than leaving the user to assume.
+
+/** Coerce a form or stored field to an integer in range, else `dflt`. */
+function schedInt(value, min, max, dflt) {
+  const n = Number(value);
+  if (!Number.isInteger(n) || n < min || n > max) return dflt;
+  return n;
+}
+
+// A local and a UTC calendar can differ by at most one day, so the raw weekday
+// difference is one of -6, -1, 0, +1, +6. Fold the two wrap-around values back
+// onto the -1/+1 they actually mean.
+function schedDayShift(diff) { return ((diff + 8) % 7) - 1; }
+
+/** Month days are capped at 28 so the date is valid in February too. */
+function schedClampDay(n) { return Math.min(28, Math.max(1, n)); }
+
+/** Stored UTC fields → what the picker should show in the browser's zone. */
+function schedUtcToLocal(s) {
+  const now = new Date();
+  const ref = new Date(Date.UTC(
+    now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate(),
+    schedInt(s.hour, 0, 23, 9), schedInt(s.minute, 0, 59, 0)
+  ));
+  const shift = schedDayShift(ref.getDay() - ref.getUTCDay());
+  return {
+    hour:     ref.getHours(),
+    minute:   ref.getMinutes(),
+    weekDays: (s.weekDays || []).map(d => (d + shift + 7) % 7).sort((a, b) => a - b),
+    monthDay: schedClampDay(schedInt(s.monthDay, 1, 28, 1) + shift),
+  };
+}
+
+/** What the picker shows → the UTC fields to store. */
+function schedLocalToUtc(l) {
+  const now = new Date();
+  const ref = new Date(
+    now.getFullYear(), now.getMonth(), now.getDate(),
+    schedInt(l.hour, 0, 23, 9), schedInt(l.minute, 0, 59, 0)
+  );
+  const shift = schedDayShift(ref.getUTCDay() - ref.getDay());
+  return {
+    hour:     ref.getUTCHours(),
+    minute:   ref.getUTCMinutes(),
+    weekDays: (l.weekDays || []).map(d => (d + shift + 7) % 7).sort((a, b) => a - b),
+    monthDay: schedClampDay(schedInt(l.monthDay, 1, 28, 1) + shift),
+  };
+}
+
+const SCHED_DAY_NAMES = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
+
+// One rule for what the time field holds, shared by the hint and the save so
+// they cannot disagree about whether a value is usable. Seconds are tolerated
+// and ignored: `<input type="time">` emits `HH:MM:SS` whenever `step` is under
+// a minute, and a stricter pattern would reject a time the user really did
+// pick — a trap for whoever sets `step` next rather than a defect today.
+// Deliberately permissive, and the same shape the backend accepts: an address
+// this rejects could not be typed into the account-level field either.
+const SCHED_EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+const SCHED_TIME_RE = /^(\d{1,2}):(\d{2})(?::\d{2}(?:\.\d+)?)?$/;
+
+/** Read the picker's local values, whatever the frequency. */
+function readSchedLocalForm() {
+  const [, h, m] = SCHED_TIME_RE.exec(String(document.getElementById('cfgSchedTime').value || '')) || [];
+  const weekDays = [];
+  document.querySelectorAll('.cfg-weekday input:checked').forEach(cb => weekDays.push(parseInt(cb.value, 10)));
+  return {
+    hour:     schedInt(h, 0, 23, 9),
+    minute:   schedInt(m, 0, 59, 0),
+    weekDays,
+    monthDay: schedInt(document.getElementById('cfgSchedMonthDay').value, 1, 28, 1),
+  };
+}
+
+/**
+ * State, under the picker, exactly what will be stored. The conversion can move
+ * the day as well as the clock, and a month day can be clamped at the 1/28
+ * boundary, so leaving the user to infer it would be leaving them to guess.
+ */
+function renderSchedUtcHint() {
+  const hintEl = document.getElementById('cfgSchedUtcHint');
+  const zoneEl = document.getElementById('cfgSchedZoneLabel');
+  if (!hintEl) return;
+
+  let zone = '';
+  try { zone = Intl.DateTimeFormat().resolvedOptions().timeZone || ''; } catch (e) { zone = ''; }
+  if (zoneEl) zoneEl.textContent = zone ? `(${zone})` : '(your local time)';
+
+  // An empty field must not be described. readSchedLocalForm() falls back to
+  // 09:00 so the converters always have something to work with, but stating a
+  // time the user has not chosen as the one that will be stored is a lie the
+  // rest of this line exists to prevent.
+  if (!SCHED_TIME_RE.test(String(document.getElementById('cfgSchedTime').value || ''))) {
+    hintEl.textContent = 'Choose a time to see when it will be stored.';
+    return;
+  }
+
+  const freq  = document.getElementById('cfgSchedFreq').value;
+  const local = readSchedLocalForm();
+  const utc   = schedLocalToUtc(local);
+  const clock = `${String(utc.hour).padStart(2, '0')}:${String(utc.minute).padStart(2, '0')} UTC`;
+
+  let text = `Stored as ${clock}`;
+  if (freq === 'weekly') {
+    text += local.weekDays.length
+      ? ` on ${utc.weekDays.map(d => SCHED_DAY_NAMES[d]).join(', ')}`
+      : '';
+  } else if (freq === 'monthly') {
+    text += ` on day ${utc.monthDay} of the month`;
+    // The clamp is only visible here. Say so rather than silently moving it.
+    const wanted = schedInt(local.monthDay, 1, 28, 1);
+    if (schedUtcToLocal({ ...utc, weekDays: [] }).monthDay !== wanted) {
+      text += ' — the day was adjusted to stay within 1–28';
+    }
+  }
+  hintEl.textContent = text;
 }
 
 async function saveConfigPanel() {
   const saveBtn = document.getElementById('cfgSaveBtn');
   if (saveBtn) { saveBtn.disabled = true; saveBtn.textContent = 'Saving…'; }
   try {
-    const mailEnabled  = document.getElementById('cfgMailEnabled').checked;
-    const schedEnabled = document.getElementById('cfgSchedEnabled').checked;
+    const mailEnabled = document.getElementById('cfgMailEnabled').checked;
 
     // When a section is hidden (disabled) its form fields are blank — preserve the
     // existing stored values so saving with email disabled doesn't wipe SMTP config.
-    const existingMail  = (_appConfig && _appConfig.mail)     || {};
-    const existingSched = (_appConfig && _appConfig.schedule) || {};
+    const existingMail = (_appConfig && _appConfig.mail) || {};
 
     let mailConfig;
     if (mailEnabled) {
@@ -1927,7 +2170,7 @@ async function saveConfigPanel() {
       // Only send placeholder when password field is blank AND a password is stored.
       // If no password was ever stored (relay mode), send empty so it stays empty.
       const hasStoredPass = !!(existingMail.smtp && existingMail.smtp.pass);
-      const pass = smtpPass || (hasStoredPass ? '••••••••' : '');
+      const pass = smtpPass || (hasStoredPass ? '\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022' : '');
       mailConfig = {
         enabled: true,
         smtp: {
@@ -1948,65 +2191,14 @@ async function saveConfigPanel() {
       mailConfig = { ...existingMail, enabled: false };
     }
 
-    let schedConfig;
-    if (schedEnabled) {
-      const freq       = document.getElementById('cfgSchedFreq').value;
-      const hourVal    = parseInt(document.getElementById('cfgSchedHour').value, 10);
-      const monthDayVal = parseInt(document.getElementById('cfgSchedMonthDay').value, 10);
-
-      if (isNaN(hourVal) || hourVal < 0 || hourVal > 23) {
-        showToast('Schedule hour must be between 0 and 23.', 'error');
-        return;
-      }
-      if (freq === 'monthly' && (isNaN(monthDayVal) || monthDayVal < 1 || monthDayVal > 28)) {
-        showToast('Day of month must be between 1 and 28.', 'error');
-        return;
-      }
-
-      const weekDays = [];
-      document.querySelectorAll('.cfg-weekday input:checked').forEach(cb => weekDays.push(parseInt(cb.value, 10)));
-      if (freq === 'weekly' && weekDays.length === 0) {
-        showToast('Please select at least one day of the week.', 'error');
-        return;
-      }
-
-      const riskTypes = [];
-      if (document.getElementById('cfgSchedSecurity').checked)    riskTypes.push('security');
-      if (document.getElementById('cfgSchedLicense').checked)     riskTypes.push('license');
-      if (document.getElementById('cfgSchedOperational').checked) riskTypes.push('operational');
-      if (riskTypes.length === 0) {
-        showToast('Please select at least one risk type for the schedule.', 'error');
-        return;
-      }
-
-      // Optional, and blank is meaningful: it clears any stored name so the
-      // schedule goes back to naming its reports automatically.
-      const schedName    = document.getElementById('cfgSchedName').value;
-      const schedNameErr = document.getElementById('cfgSchedNameErr');
-      const nameProblem  = validateReportName(schedName);
-      if (schedNameErr) schedNameErr.textContent = nameProblem || '';
-      if (nameProblem) return;
-
-      schedConfig = {
-        ...existingSched,
-        enabled:  true,
-        frequency: freq,
-        hour:      hourVal,
-        weekDays,
-        monthDay:  freq === 'monthly' ? monthDayVal : (existingSched.monthDay || 1),
-        riskTypes,
-        reportName: String(schedName).trim(),
-      };
-    } else {
-      // Preserve all schedule fields; only flip the enabled flag off.
-      schedConfig = { ...existingSched, enabled: false };
-    }
-
+    // Schedules are deliberately absent too: they are a collection with their
+    // own endpoints, edited from the list above. Sending one here would be a
+    // second writer for the same row.
     // maxReports is deliberately absent: it is the administrator's to set, and
     // the backend ignores it in this body anyway. The delete-confirmation that
     // used to live here went with it — nothing deletes reports on a limit
     // change any more, so there is nothing to warn about.
-    const config = { mail: mailConfig, schedule: schedConfig };
+    const config = { mail: mailConfig };
 
     // The connection and every setting are saved in one request, so a partial
     // failure cannot leave the account half-configured.
@@ -2135,22 +2327,453 @@ async function testEmailFromPanel() {
   }
 }
 
-async function cancelSchedule() {
-  if (!confirm('Cancel the current schedule? Scheduled reports will stop sending.')) return;
+// ── Schedules ─────────────────────────────────────────────────────────────────
+// _schedEditingId is null while the editor is creating and holds an id while it
+// is editing. It is the only thing that distinguishes the two paths, so the
+// same form, the same validation and the same conversion serve both.
+let _schedEditingId = null;
+let _schedPendingProjects = null;   // projects the toolbar is about to attach
+let _schedEditorOpen = false;       // the panel is showing the drill-down view
+let _schedDirty      = false;       // that view has changes nobody has saved
+
+const SCHED_DAY_SHORT = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
+
+/** Re-read the list from the server and repaint. */
+async function reloadSchedules() {
   try {
-    const r = await apiFetch('/violation-cache/schedule', { method: 'DELETE' });
-    if (!r.ok) {
-      const bd = await r.json().catch(() => ({}));
-      showToast(`Failed to cancel schedule: ${bd.error || r.statusText}`, 'error');
-      return;
-    }
-    showToast('Schedule cancelled.', 'success');
-    await loadConfigFromServer();
+    const r = await apiFetch('/violation-cache/schedules');
+    if (!r.ok) return false;
+    const d = await r.json();
+    _schedules    = d.schedules || [];
+    _maxSchedules = d.maxSchedules || 0;
+    if (_appConfig) { _appConfig.schedules = _schedules; _appConfig.maxSchedules = _maxSchedules; }
+    renderScheduleList();
+    return true;
   } catch (e) {
-    showToast(`Error cancelling schedule: ${e.message}`, 'error');
+    showToast(`Could not refresh schedules: ${e.message}`, 'error');
+    return false;
   }
 }
 
+/**
+ * Open the schedule editor as a drill-down over the settings panel.
+ *
+ * One is open at a time by construction: there is a single view, so there is no
+ * way to have three half-edited schedules on screen and lose two of them.
+ *
+ * @param {string|null} id       an existing schedule to edit, or null to create
+ * @param {Array|null}  projects projects to attach on save (creation only)
+ */
+async function openScheduleEditor(id = null, projects = null) {
+  // Switching away from a half-edited schedule asks first, exactly like closing.
+  if (_schedEditorOpen && !(await confirmDiscardSchedule())) return;
+
+  _schedEditingId       = id;
+  _schedPendingProjects = projects;
+  _schedEditorOpen      = true;
+  const sc = id ? _schedules.find(s => s.id === id) : null;
+
+  document.getElementById('cfgPanelTitle').textContent = sc
+    ? (sc.name || 'Schedule')
+    : 'New Schedule';
+  document.getElementById('cfgBackBtn').hidden      = false;
+  document.getElementById('cfgMainView').hidden     = true;
+  document.getElementById('cfgSchedView').hidden    = false;
+  document.getElementById('cfgMainFooter').hidden   = true;
+  document.getElementById('cfgSchedFooter').hidden  = false;
+  // A new schedule has nothing to run or delete yet.
+  document.getElementById('cfgSchedDeleteBtn').hidden = !sc;
+  document.getElementById('cfgSchedRunNowBtn').disabled = !sc;
+
+  const projEl = document.getElementById('cfgSchedProjects');
+  if (projects) {
+    projEl.textContent = `${projects.length} project${projects.length === 1 ? '' : 's'} will be included.`;
+  } else if (sc) {
+    projEl.textContent = sc.projectCount
+      ? `${sc.projectCount} project${sc.projectCount === 1 ? '' : 's'} included.`
+      : 'No projects yet — re-select them from the toolbar.';
+  } else {
+    projEl.textContent = '';
+  }
+
+  // A new schedule defaults to 09:00 in the READER's day, so the field opens on
+  // a sensible local time. Defaulting the stored UTC fields instead would
+  // prefill 14:30 for a user in India — technically 09:00 UTC, and not what
+  // anybody means by "the default is nine in the morning".
+  const base = sc || { frequency: 'daily', weekDays: [], monthDay: 1,
+                       riskTypes: ['security', 'license', 'operational'], name: '', reportName: '',
+                       to: null, cc: null, subject: null,
+                       ...schedLocalToUtc({ hour: 9, minute: 0, weekDays: [1], monthDay: 1 }) };
+  document.getElementById('cfgSchedLabel').value = base.name || '';
+  document.getElementById('cfgSchedName').value  = base.reportName || '';
+  document.getElementById('cfgSchedFreq').value  = base.frequency || 'daily';
+  // null means "use the account default", so the field stays empty and the
+  // placeholder says what will actually be used.
+  document.getElementById('cfgSchedTo').value      = (base.to || []).join(', ');
+  document.getElementById('cfgSchedCc').value      = (base.cc || []).join(', ');
+  document.getElementById('cfgSchedSubject').value = base.subject || '';
+  applySchedDeliveryPlaceholders();
+  for (const id2 of ['cfgSchedLabelErr', 'cfgSchedNameErr', 'cfgSchedToErr',
+                     'cfgSchedCcErr', 'cfgSchedSubjectErr']) {
+    document.getElementById(id2).textContent = '';
+  }
+
+  // The stored fields are UTC; the picker is the browser's wall clock.
+  const local = schedUtcToLocal(base);
+  document.getElementById('cfgSchedTime').value =
+    `${String(local.hour).padStart(2, '0')}:${String(local.minute).padStart(2, '0')}`;
+  document.getElementById('cfgSchedMonthDay').value = local.monthDay;
+  document.querySelectorAll('.cfg-weekday input').forEach(cb => {
+    cb.checked = local.weekDays.includes(parseInt(cb.value, 10));
+  });
+  const rt = base.riskTypes || [];
+  document.getElementById('cfgSchedSecurity').checked    = rt.includes('security');
+  document.getElementById('cfgSchedLicense').checked     = rt.includes('license');
+  document.getElementById('cfgSchedOperational').checked = rt.includes('operational');
+
+  // After the weekday boxes, not before: the hint reads them.
+  onSchedFreqChange();
+  renderRunHistory(null);
+  if (sc) loadRunHistory(sc.id);
+  // Last, because every field write above went through an oninput handler.
+  _schedDirty = false;
+}
+
+/** Show what each blank delivery field will fall back to. */
+function applySchedDeliveryPlaceholders() {
+  const m = (_appConfig && _appConfig.mail) || {};
+  const show = (id, value, empty) => {
+    document.getElementById(id).placeholder = value && value.length
+      ? `Account default: ${Array.isArray(value) ? value.join(', ') : value}`
+      : empty;
+  };
+  show('cfgSchedTo', m.to, 'Set a recipient under Email, or type one here');
+  show('cfgSchedCc', m.cc, 'No copy recipients');
+  show('cfgSchedSubject', m.subject, 'Account default subject');
+}
+
+/** Leave the editor. Asks about unsaved work unless `discard` is true. */
+async function closeScheduleEditor(discard = false) {
+  if (!discard && !(await confirmDiscardSchedule())) return;
+  _schedEditorOpen      = false;
+  _schedDirty           = false;
+  _schedEditingId       = null;
+  _schedPendingProjects = null;
+  document.getElementById('cfgPanelTitle').textContent = '⚙ Settings';
+  document.getElementById('cfgBackBtn').hidden     = true;
+  document.getElementById('cfgMainView').hidden    = false;
+  document.getElementById('cfgSchedView').hidden   = true;
+  document.getElementById('cfgMainFooter').hidden  = false;
+  document.getElementById('cfgSchedFooter').hidden = true;
+}
+
+/** True when it is safe to leave: nothing changed, or the user said discard. */
+async function confirmDiscardSchedule() {
+  if (!_schedDirty) return true;
+  return showConfirm(
+    'Unsaved changes',
+    'This schedule has changes that have not been saved. Discard them?',
+    'Discard', 'Keep editing'
+  );
+}
+
+function markSchedDirty() { _schedDirty = true; }
+
+// ── Run history ───────────────────────────────────────────────────────────────
+function renderRunHistory(stats) {
+  const el = document.getElementById('cfgSchedRuns');
+  if (!el) return;
+  if (!stats) { el.textContent = 'Loading…'; return; }
+  if (!stats.total) {
+    el.innerHTML = '<span style="color:var(--text-muted)">Never run.</span>';
+    return;
+  }
+  // "Total" is over the retention window, not all time — schedule_runs is swept
+  // at 90 days, so an unqualified total would quietly shrink every month.
+  const head = `<strong>${stats.total}</strong> run${stats.total === 1 ? '' : 's'} in the last `
+    + `${stats.retentionDays} days — <span style="color:var(--ok)">${stats.succeeded} succeeded</span>`
+    + (stats.failed ? ` · <span style="color:var(--critical)">${stats.failed} failed</span>` : '');
+  const rows = (stats.recent || []).map(r => {
+    const when = new Date(r.startedAt).toLocaleString();
+    let mark = r.status;
+    if (r.status === 'success') mark = '<span style="color:var(--ok)">&#10003; Success</span>';
+    else if (r.status === 'failed') {
+      mark = `<span style="color:var(--critical)">&#10007; ${escHtml(r.error || 'Failed')}</span>`;
+    } else if (r.status === 'running') mark = '<span style="color:var(--accent)">&#9679; Running</span>';
+    const size = r.fileSizeBytes ? ` · ${(Number(r.fileSizeBytes) / 1048576).toFixed(1)} MB` : '';
+    return `<div style="display:flex;gap:8px;padding:3px 0;border-top:1px solid var(--border)">
+      <span style="color:var(--text-muted);white-space:nowrap">${escHtml(when)}</span>
+      <span style="flex:1;min-width:0">${mark}${size}</span>
+    </div>`;
+  }).join('');
+  el.innerHTML = `<div style="margin-bottom:6px">${head}</div>${rows}`;
+}
+
+async function loadRunHistory(id) {
+  try {
+    const r = await apiFetch(`/violation-cache/schedules/${encodeURIComponent(id)}/runs`);
+    if (!r.ok) { renderRunHistory({ total: 0, retentionDays: 90 }); return; }
+    renderRunHistory(await r.json());
+  } catch (e) {
+    document.getElementById('cfgSchedRuns').textContent = `Could not load the history: ${e.message}`;
+  }
+}
+
+/** Send this schedule's report immediately, without moving its next run. */
+async function runScheduleNow() {
+  const id = _schedEditingId;
+  if (!id) return;
+  const btn = document.getElementById('cfgSchedRunNowBtn');
+  if (btn) { btn.disabled = true; btn.textContent = 'Starting…'; }
+  try {
+    const r = await apiFetch(`/violation-cache/schedules/${encodeURIComponent(id)}/run-now`,
+      { method: 'POST' });
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok) {
+      showToast(d.error || `Could not start the run (${r.status}).`, 'error');
+      return;
+    }
+    showToast('Report started — it will be emailed when it finishes.', 'success');
+    // The run takes minutes; refresh the history so the "Running" row appears.
+    setTimeout(() => { if (_schedEditingId === id) loadRunHistory(id); }, 1500);
+  } catch (e) {
+    showToast(`Could not start the run: ${e.message}`, 'error');
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = 'Send now'; }
+  }
+}
+
+/** Pause or resume one schedule straight from the list, without a save step. */
+async function toggleSchedule(id, enable) {
+  try {
+    const r = await apiFetch(
+      `/violation-cache/schedules/${encodeURIComponent(id)}/${enable ? 'arm' : 'disable'}`,
+      { method: 'POST' }
+    );
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok) {
+      showToast(d.error || `Could not ${enable ? 'resume' : 'pause'} the schedule.`, 'error');
+      await reloadSchedules();   // put the toggle back where the server says it is
+      return;
+    }
+    await reloadSchedules();
+    showToast(enable
+      ? (d.nextRun ? `Resumed. Next run: ${new Date(d.nextRun).toLocaleString()}` : 'Resumed.')
+      : 'Paused. It will not send until you resume it.', 'success');
+  } catch (e) {
+    showToast(`Could not change the schedule: ${e.message}`, 'error');
+    await reloadSchedules();
+  }
+}
+
+/** Cancel the schedule currently open in the editor, then go back to the list. */
+async function cancelScheduleFromEditor() {
+  const id = _schedEditingId;
+  if (!id) return;
+  const removed = await cancelSchedule(id);
+  if (removed) await closeScheduleEditor(true);
+}
+
+/** Read and validate the editor. Returns null (having shown why) if unusable. */
+function readScheduleEditor() {
+  const freq        = document.getElementById('cfgSchedFreq').value;
+  const timeVal     = String(document.getElementById('cfgSchedTime').value || '');
+  const monthDayVal = parseInt(document.getElementById('cfgSchedMonthDay').value, 10);
+
+  // An empty <input type="time"> reads as '', which the converter would
+  // otherwise silently default to 09:00.
+  if (!SCHED_TIME_RE.test(timeVal)) {
+    showToast('Please choose a time for the schedule.', 'error');
+    return null;
+  }
+  if (freq === 'monthly' && (isNaN(monthDayVal) || monthDayVal < 1 || monthDayVal > 28)) {
+    showToast('Day of month must be between 1 and 28.', 'error');
+    return null;
+  }
+
+  const localWeekDays = [];
+  document.querySelectorAll('.cfg-weekday input:checked').forEach(cb => localWeekDays.push(parseInt(cb.value, 10)));
+  if (freq === 'weekly' && localWeekDays.length === 0) {
+    showToast('Please select at least one day of the week.', 'error');
+    return null;
+  }
+
+  const riskTypes = [];
+  if (document.getElementById('cfgSchedSecurity').checked)    riskTypes.push('security');
+  if (document.getElementById('cfgSchedLicense').checked)     riskTypes.push('license');
+  if (document.getElementById('cfgSchedOperational').checked) riskTypes.push('operational');
+  if (riskTypes.length === 0) {
+    showToast('Please select at least one risk type for the schedule.', 'error');
+    return null;
+  }
+
+  // Optional, and blank is meaningful: it clears any stored name so the
+  // schedule goes back to naming its reports automatically.
+  const reportName = document.getElementById('cfgSchedName').value;
+  const nameErr    = document.getElementById('cfgSchedNameErr');
+  const problem    = validateReportName(reportName);
+  nameErr.textContent = problem || '';
+  if (problem) return null;
+
+  const label    = document.getElementById('cfgSchedLabel').value.trim();
+  const labelErr = document.getElementById('cfgSchedLabelErr');
+  labelErr.textContent = '';
+  if (label.length > 120) {
+    labelErr.textContent = 'A schedule name may be at most 120 characters.';
+    return null;
+  }
+
+  // ── Delivery ────────────────────────────────────────────────────────────
+  // Blank means "use the account default", which is why an empty field is sent
+  // as an empty list rather than omitted: omitting it would leave whatever
+  // override is stored, so clearing one could never be expressed.
+  const addrs = (id) => document.getElementById(id).value.split(',').map(v => v.trim()).filter(Boolean);
+  const to = addrs('cfgSchedTo');
+  const cc = addrs('cfgSchedCc');
+  for (const [list, errId] of [[to, 'cfgSchedToErr'], [cc, 'cfgSchedCcErr']]) {
+    const err = document.getElementById(errId);
+    err.textContent = '';
+    const bad = list.find(a => !SCHED_EMAIL_RE.test(a));
+    if (bad) { err.textContent = `"${bad}" is not a valid email address.`; return null; }
+  }
+  const subject    = document.getElementById('cfgSchedSubject').value.trim();
+  const subjectErr = document.getElementById('cfgSchedSubjectErr');
+  subjectErr.textContent = '';
+  if (subject.length > 200) {
+    subjectErr.textContent = 'A subject may be at most 200 characters.';
+    return null;
+  }
+
+  // The picker is browser-local; the backend stores UTC instants.
+  const utc = schedLocalToUtc({ ...readSchedLocalForm(), weekDays: localWeekDays });
+  return {
+    name:       label,
+    frequency:  freq,
+    hour:       utc.hour,
+    minute:     utc.minute,
+    weekDays:   utc.weekDays,
+    monthDay:   utc.monthDay,
+    riskTypes,
+    reportName: String(reportName).trim(),
+    to, cc, subject,
+    enabled:    true,
+  };
+}
+
+async function saveScheduleEditor() {
+  const body = readScheduleEditor();
+  if (!body) return;
+  const btn = document.getElementById('cfgSchedSaveBtn');
+  if (btn) { btn.disabled = true; btn.textContent = 'Saving…'; }
+  try {
+    if (_schedPendingProjects) body.projects = _schedPendingProjects;
+    const editing = _schedEditingId;
+    const r = await apiFetch(
+      editing ? `/violation-cache/schedules/${encodeURIComponent(editing)}` : '/violation-cache/schedules',
+      {
+        method: editing ? 'PUT' : 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      }
+    );
+    const d = await r.json().catch(() => ({}));
+    if (!r.ok) {
+      showToast(d.error || `Could not save the schedule (${r.status}).`, 'error');
+      return;
+    }
+
+    // Arming is what writes next_run_at, and a schedule with no projects
+    // cannot be armed — the list says so rather than the save failing.
+    const id = (d.schedule && d.schedule.id) || editing;
+    let armed = null;
+    if (id && d.schedule && d.schedule.projectCount) {
+      const ar = await apiFetch(`/violation-cache/schedules/${encodeURIComponent(id)}/arm`, { method: 'POST' });
+      const ad = await ar.json().catch(() => ({}));
+      if (ar.ok) armed = ad.nextRun;
+      else showToast(`Saved, but not started: ${ad.error || ar.statusText}`, 'warn');
+    }
+
+    _schedDirty = false;
+    await reloadSchedules();
+    // Editing continues from what the server stored, so a clamped month day or
+    // an inherited recipient shows its real value rather than what was typed.
+    if (id) {
+      _schedEditingId = id;
+      _schedPendingProjects = null;
+      const fresh = _schedules.find(x => x.id === id);
+      if (fresh) document.getElementById('cfgPanelTitle').textContent = fresh.name || 'Schedule';
+      document.getElementById('cfgSchedDeleteBtn').hidden = false;
+      document.getElementById('cfgSchedRunNowBtn').disabled = false;
+      loadRunHistory(id);
+    }
+    showToast(
+      armed ? `Schedule saved. Next run: ${new Date(armed).toLocaleString()}` : 'Schedule saved.',
+      'success'
+    );
+  } catch (e) {
+    showToast(`Could not save the schedule: ${e.message}`, 'error');
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = 'Save schedule'; }
+  }
+}
+
+/** Cancel one schedule. Deletes it — the list holds what is live, not husks. */
+async function cancelSchedule(id) {
+  const sc = _schedules.find(s => s.id === id);
+  const ok = await showConfirm(
+    'Cancel Schedule',
+    `Cancel ${sc && sc.name ? `"${sc.name}"` : 'this schedule'}? It will stop sending reports. `
+    + 'Reports it has already sent are unaffected.',
+    'Cancel Schedule', 'Keep'
+  );
+  if (!ok) return false;
+  try {
+    const r = await apiFetch(`/violation-cache/schedules/${encodeURIComponent(id)}`, { method: 'DELETE' });
+    if (!r.ok) {
+      const bd = await r.json().catch(() => ({}));
+      showToast(`Failed to cancel schedule: ${bd.error || r.statusText}`, 'error');
+      return false;
+    }
+    await reloadSchedules();
+    showToast('Schedule cancelled.', 'success');
+    return true;
+  } catch (e) {
+    showToast(`Error cancelling schedule: ${e.message}`, 'error');
+    return false;
+  }
+}
+
+/** Cancel every schedule at once. */
+async function cancelAllSchedules() {
+  const n = _schedules.length;
+  const ok = await showConfirm(
+    'Cancel All Schedules',
+    `Cancel all ${n} schedule${n === 1 ? '' : 's'}? They will all stop sending reports. `
+    + 'Reports they have already sent are unaffected.',
+    'Cancel All', 'Keep'
+  );
+  if (!ok) return;
+  try {
+    const r = await apiFetch('/violation-cache/schedules', { method: 'DELETE' });
+    if (!r.ok) {
+      const bd = await r.json().catch(() => ({}));
+      showToast(`Failed to cancel schedules: ${bd.error || r.statusText}`, 'error');
+      return;
+    }
+    const d = await r.json().catch(() => ({}));
+    await reloadSchedules();
+    showToast(`${d.removed ?? n} schedule${(d.removed ?? n) === 1 ? '' : 's'} cancelled.`, 'success');
+  } catch (e) {
+    showToast(`Error cancelling schedules: ${e.message}`, 'error');
+  }
+}
+
+/**
+ * Toolbar entry point: create a schedule from the current project selection.
+ *
+ * Creation lives here rather than in Settings because this is where the
+ * projects are. Settings reviews, edits and cancels what this produced.
+ */
 async function scheduleReports() {
   const leafUuids = selectedProjectUuids.size > 0
     ? [...selectedProjectUuids]
@@ -2162,22 +2785,26 @@ async function scheduleReports() {
   // Always refresh config so validation is against the current saved state.
   try {
     const r = await apiFetch('/violation-cache/config');
-    if (r.ok) { const d = await r.json(); _appConfig = d.config || {}; }
+    if (r.ok) {
+      const d = await r.json();
+      _appConfig    = d.config || {};
+      _schedules    = _appConfig.schedules || [];
+      _maxSchedules = _appConfig.maxSchedules || 0;
+    }
   } catch (_) {}
 
   const cfg = _appConfig || {};
 
-  // ── Validation: email and schedule must be configured ─────────────────────
-  const mailOk  = !!(cfg.mail && cfg.mail.enabled && cfg.mail.smtp && cfg.mail.smtp.host && (cfg.mail.to || []).length > 0);
-  const schedOk = !!(cfg.schedule && cfg.schedule.enabled);
-  if (!mailOk || !schedOk) {
+  // ── Validation: a schedule needs somewhere to send the report ─────────────
+  const mailOk = !!(cfg.mail && cfg.mail.enabled && cfg.mail.smtp && cfg.mail.smtp.host
+                    && (cfg.mail.to || []).length > 0);
+  if (!mailOk) {
     const missing = [];
     if (!cfg.mail || !cfg.mail.enabled)  missing.push('• Email is not enabled');
     if (cfg.mail && cfg.mail.enabled && !(cfg.mail.smtp && cfg.mail.smtp.host)) missing.push('• SMTP host is not configured');
     if (cfg.mail && cfg.mail.enabled && !(cfg.mail.to || []).length) missing.push('• No recipients (To) configured');
-    if (!cfg.schedule || !cfg.schedule.enabled) missing.push('• Schedule is not enabled');
     const openSettings = await showConfirm(
-      'Email & Schedule Not Configured',
+      'Email Not Configured',
       `Before scheduling reports, complete the following in ⚙ Settings:\n\n${missing.join('\n')}\n\nOpen Settings now?`,
       'Open Settings', 'Close'
     );
@@ -2185,59 +2812,25 @@ async function scheduleReports() {
     return;
   }
 
-  const alreadyScheduled = !!(cfg.schedule && cfg.schedule.enabled && (cfg.schedule.projectUuids || []).length > 0);
-  if (alreadyScheduled) {
-    const ok = await showConfirm(
-      'Replace Existing Schedule?',
-      'A schedule is already active. This will replace it with the current project selection. Continue?',
-      'Replace', 'Cancel'
-    );
-    if (!ok) return;
-  }
-  const ok = await showConfirm(
-    'Schedule Reports',
-    `Schedule recurring reports for ${leafUuids.length} project${leafUuids.length !== 1 ? 's' : ''}? Frequency and email settings are configured in Settings (⚙).`,
-    'Schedule', 'Cancel'
-  );
-  if (!ok) return;
-  try {
-    // Names and versions travel with the UUIDs so the schedule list stays
-    // readable even if a project is later removed from DependencyTrack.
-    const byUuid = new Map(allProjects.map(p => [p.uuid, p]));
-    const projects = leafUuids.map(uuid => {
-      const p = byUuid.get(uuid);
-      return { uuid, name: p ? p.name : '', version: p ? p.version : '' };
-    });
-
-    const r = await apiFetch('/violation-cache/config', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ config: { schedule: { ...(cfg.schedule || {}), projects } } }),
-    });
-    if (!r.ok) {
-      const bd = await r.json().catch(() => ({}));
-      showToast(`Failed to schedule: ${bd.error || r.statusText}`, 'error');
-      return;
-    }
-
-    // Explicitly arm the scheduler now that project UUIDs are saved.
-    // Config saves alone no longer start the timer.
-    const armR = await apiFetch('/violation-cache/schedule/arm', { method: 'POST' });
-    const armBd = await armR.json().catch(() => ({}));
-    if (!armR.ok) {
-      showToast(`Projects saved but scheduler not started: ${armBd.error || armR.statusText}`, 'warn');
-      return;
-    }
-    const nextRunStr = armBd.nextRun
-      ? `Next run: ${new Date(armBd.nextRun).toLocaleString()}`
-      : '';
+  // The quota is checked server-side on create; this is the friendlier version
+  // of the same answer, so the user is not made to fill in a form first.
+  if (_maxSchedules && _schedules.length >= _maxSchedules) {
     showToast(
-      `Scheduled — ${leafUuids.length} project${leafUuids.length !== 1 ? 's' : ''} queued.${nextRunStr ? ' ' + nextRunStr : ''}`,
-      'success'
+      `Schedule limit reached (${_schedules.length} / ${_maxSchedules}). `
+      + 'Cancel one in Settings, or ask your administrator to raise the limit.',
+      'error'
     );
-  } catch (e) {
-    showToast(`Error scheduling: ${e.message}`, 'error');
+    return;
   }
+
+  // Names and versions travel with the UUIDs so the schedule list stays
+  // readable even if a project is later removed from DependencyTrack.
+  const byUuid = new Map(allProjects.map(p => [p.uuid, p]));
+  const projects = leafUuids.map(uuid => {
+    const p = byUuid.get(uuid);
+    return { uuid, name: p ? p.name : '', version: p ? p.version : '' };
+  });
+  openScheduleEditor(null, projects);
 }
 
 // ── Mock Data ─────────────────────────────────────────────────────────────
@@ -4405,8 +4998,16 @@ window.closeConfigPanel     = closeConfigPanel;
 window.markConfigDirty      = markConfigDirty;
 window.onMailToggle           = onMailToggle;
 window.updateSchedToggleState = updateSchedToggleState;
-window.onSchedToggle          = onSchedToggle;
 window.onSchedFreqChange      = onSchedFreqChange;
+window.onSchedTimeChange      = onSchedTimeChange;
+window.openScheduleEditor     = openScheduleEditor;
+window.closeScheduleEditor    = closeScheduleEditor;
+window.saveScheduleEditor     = saveScheduleEditor;
+window.cancelScheduleFromEditor = cancelScheduleFromEditor;
+window.cancelAllSchedules     = cancelAllSchedules;
+window.toggleSchedule         = toggleSchedule;
+window.runScheduleNow         = runScheduleNow;
+window.markSchedDirty         = markSchedDirty;
 window.saveConfigPanel      = saveConfigPanel;
 window.cancelConfigPanel    = cancelConfigPanel;
 window.connectFromPanel     = connectFromPanel;
@@ -4459,13 +5060,19 @@ window.scheduleReports      = scheduleReports;
     }
   });
 
-  // Check for schedule failure notifications from the server
-  apiFetch('/violation-cache/schedule/status').then(async r => {
+  // Surface any scheduled-report failure the server recorded while nobody was
+  // watching. Every schedule is checked, not just one: a user owns several, and
+  // reporting only the first would leave the rest failing in silence. Each
+  // notice is acknowledged as it is shown, so it appears once.
+  apiFetch('/violation-cache/schedules').then(async r => {
     if (!r.ok) return;
-    const s = await r.json();
-    if (s.failureNotification) {
-      showToast(`Scheduled report failed: ${s.failureNotification}`, 'error');
-      apiFetch('/violation-cache/schedule/ack-notification', { method: 'POST' }).catch(() => {});
+    const d = await r.json();
+    for (const sc of d.schedules || []) {
+      if (!sc.failureNotification) continue;
+      const label = sc.name ? `"${sc.name}"` : 'A scheduled report';
+      showToast(`${label} failed: ${sc.failureNotification}`, 'error');
+      apiFetch(`/violation-cache/schedules/${encodeURIComponent(sc.id)}/ack-notification`,
+        { method: 'POST' }).catch(() => {});
     }
   }).catch(() => {});
 })();

@@ -7,12 +7,15 @@
 // FOR UPDATE SKIP LOCKED. There is never one timer per user (CLAUDE.md §6.8):
 // with N users that would mean N timers, and a restart would lose all of them.
 //
-// calcNextRun is unchanged from the single-tenant version — it is a pure
-// function, the single source of truth for timing, and already well covered by
-// tests. Only its caller changed.
+// calcNextRun is a pure function and the single source of truth for timing.
+// It reads and returns UTC instants; the browser is the only place a timezone
+// is ever applied. Its clock is injectable so tests can pin a weekday.
 //
 // Per-user overlap protection is the schedules.running_since column, not a
 // process variable, so one user's long-running report never blocks another's.
+// A user may own several schedules (migration 009); claimDue keeps at most one
+// of them running at a time, so five schedules due at 09:00 do not become five
+// parallel crawls against that user's single DependencyTrack connection.
 
 const { log } = require('./log');
 const { dtGetWithRetry } = require('./dt-fetch');
@@ -36,44 +39,119 @@ let _pollTimer = null;
 let _ticking   = false;
 
 // ── Timing ────────────────────────────────────────────────────────────────────
+// Q19: hour/minute/weekDays/monthDay are UTC, and this function reads them with
+// getUTC* accessors only. It used to build candidates from the server's local
+// calendar, which made the answer depend on the container's TZ — an invisible
+// variable that changes the delivery time of every schedule in the system if a
+// base image ever ships with one set. The stored value is now an instant, not a
+// wall-clock reading whose meaning depends on where the process happens to run,
+// and the browser is the only place a timezone is applied (CLAUDE.md §6.8).
+//
+// No behaviour changed for existing installations: nothing set TZ, so the
+// server's local calendar already was UTC. This makes that explicit instead of
+// accidental, and the Dockerfile pins TZ=UTC so logs agree with it.
 /**
- * Calculate the next local-time Date when the job should fire.
- * Uses the server's local timezone (no external timezone library needed).
+ * Calculate the next UTC instant at which the job should fire.
  *
- * @param {object} schedule — frequency, hour, weekDays, monthDay
+ * @param {object} schedule — frequency, hour, minute, weekDays, monthDay (all UTC)
+ * @param {Date} [now] — injectable clock; tests pass a fixed instant
  * @returns {Date}
  */
-function calcNextRun(schedule) {
-  const now = new Date();
+function calcNextRun(schedule, now = new Date()) {
+  const hour   = clampInt(schedule.hour, 0, 23, 9);
+  const minute = clampInt(schedule.minute, 0, 59, 0);
+  const Y = now.getUTCFullYear();
+  const M = now.getUTCMonth();
+  const D = now.getUTCDate();
 
   if (schedule.frequency === 'daily') {
-    const next = new Date(now.getFullYear(), now.getMonth(), now.getDate(), schedule.hour, 0, 0, 0);
-    if (next <= now) next.setDate(next.getDate() + 1);
+    const next = new Date(Date.UTC(Y, M, D, hour, minute, 0, 0));
+    if (next <= now) next.setUTCDate(next.getUTCDate() + 1);
     return next;
   }
 
   if (schedule.frequency === 'weekly') {
-    const targetDays = (schedule.weekDays || [1]).sort((a, b) => a - b);
-    // Scan the next 8 days to find the first matching weekday that is in the future
-    for (let d = 1; d <= 8; d++) {
-      const candidate = new Date(
-        now.getFullYear(), now.getMonth(), now.getDate() + d, schedule.hour, 0, 0, 0
-      );
-      if (targetDays.includes(candidate.getDay())) return candidate;
+    // Copy before sorting: this is the caller's array, and the row read from
+    // the database is reused for the run itself.
+    const wanted = (schedule.weekDays && schedule.weekDays.length) ? schedule.weekDays : [1];
+    const targetDays = [...wanted].sort((a, b) => a - b);
+
+    // Q20: d starts at 0, so today is a candidate. It used to start at 1, which
+    // meant a Tuesday schedule armed on Tuesday morning waited a full week
+    // rather than firing that afternoon — the one case a user is most likely to
+    // be watching for, because they just set it up. The `candidate <= now`
+    // guard is what makes starting at 0 safe: today is offered only while its
+    // time is still ahead. d runs to 7 so that a today-only schedule whose time
+    // has already passed still finds the same weekday next week.
+    for (let d = 0; d <= 7; d++) {
+      const candidate = new Date(Date.UTC(Y, M, D + d, hour, minute, 0, 0));
+      if (candidate <= now) continue;
+      if (targetDays.includes(candidate.getUTCDay())) return candidate;
     }
-    // Fallback (shouldn't happen with valid config)
-    return new Date(now.getFullYear(), now.getMonth(), now.getDate() + 7, schedule.hour, 0, 0, 0);
+    // Unreachable for a valid weekDays array — every weekday appears in an
+    // 8-day window. Kept so a corrupt row cannot return undefined.
+    return new Date(Date.UTC(Y, M, D + 7, hour, minute, 0, 0));
   }
 
   if (schedule.frequency === 'monthly') {
-    const day  = Math.min(schedule.monthDay || 1, 28); // cap at 28 — always valid in any month
-    let next   = new Date(now.getFullYear(), now.getMonth(), day, schedule.hour, 0, 0, 0);
-    if (next <= now) next = new Date(now.getFullYear(), now.getMonth() + 1, day, schedule.hour, 0, 0, 0);
+    const day = Math.min(clampInt(schedule.monthDay, 1, 28, 1), 28); // always valid in any month
+    let next  = new Date(Date.UTC(Y, M, day, hour, minute, 0, 0));
+    if (next <= now) next = new Date(Date.UTC(Y, M + 1, day, hour, minute, 0, 0));
     return next;
   }
 
   // Unknown frequency — default to 24 h from now
   return new Date(now.getTime() + 24 * 3_600_000);
+}
+
+/** Coerce a stored field to an integer in range, falling back to `dflt`. */
+function clampInt(value, min, max, dflt) {
+  const n = Number(value);
+  if (!Number.isInteger(n) || n < min || n > max) return dflt;
+  return n;
+}
+
+/**
+ * Merge a schedule's own recipients over the account's mail settings.
+ *
+ * The SMTP connection stays on the account — one mail server it authenticates
+ * to — and only the addressing is per schedule, so changing who receives a
+ * report never means re-entering a password.
+ *
+ * NULL means "inherit"; it is not the same as an empty list, which would be a
+ * schedule addressed to nobody. Only a non-null override replaces the account
+ * value, which is why an untouched schedule keeps delivering exactly where it
+ * always did.
+ */
+function applyScheduleRecipients(account, schedule) {
+  if (!account) return account;
+  if (!schedule) return account;
+  const to = schedule.toAddrs && schedule.toAddrs.length ? schedule.toAddrs : account.to;
+  // CC is taken from the schedule whenever it overrode To as well: a schedule
+  // that names its own recipients but inherits the account's CC list would copy
+  // people who have nothing to do with it.
+  const cc = schedule.toAddrs && schedule.toAddrs.length
+    ? (schedule.ccAddrs || [])
+    : account.cc;
+  return {
+    ...account,
+    to,
+    cc,
+    subject: schedule.subject || account.subject,
+  };
+}
+
+/**
+ * What next_run_at should be once this run finishes.
+ *
+ * A run the user asked for by hand must not move the timetable: pressing Send
+ * now on a Monday-09:00 schedule sends a report now and leaves Monday 09:00
+ * alone. Recomputing would silently push it a week whenever somebody tested it.
+ * A paused schedule keeps its NULL either way.
+ */
+function nextRunAfter(schedule, manual) {
+  if (manual) return schedule.nextRunAt || null;
+  return calcNextRun(schedule);
 }
 
 // ── One scheduled run ─────────────────────────────────────────────────────────
@@ -84,10 +162,11 @@ function calcNextRun(schedule) {
  * selection, their mail settings. The workbook is built in memory and emailed;
  * scheduled reports are never written to disk (CLAUDE.md §6.8).
  */
-async function runScheduledJob(schedule) {
-  const userId = schedule.userId;
-  const runId  = await schedulesDb.startRun(userId);
-  let fileSize = null;
+async function runScheduledJob(schedule, { manual = false } = {}) {
+  const userId     = schedule.userId;
+  const scheduleId = schedule.id;
+  const runId      = await schedulesDb.startRun(userId, scheduleId);
+  let fileSize     = null;
 
   try {
     const conn = await dtConnections.getResolved(userId);
@@ -95,7 +174,7 @@ async function runScheduledJob(schedule) {
       throw new Error('No DependencyTrack connection is configured for this account.');
     }
 
-    const selected = await schedulesDb.getProjects(userId);
+    const selected = await schedulesDb.getProjects(userId, scheduleId);
     if (selected.length === 0) throw new Error('No projects are selected for this schedule.');
 
     // Resolve stored UUIDs against live DT data — a project may have been
@@ -118,7 +197,7 @@ async function runScheduledJob(schedule) {
       throw new Error('None of the selected projects were found in DependencyTrack.');
     }
     log('info', 'Scheduled report starting', {
-      userId, selected: selected.length, resolved: projects.length,
+      userId, scheduleId, selected: selected.length, resolved: projects.length,
     });
 
     const riskTypes  = (schedule.riskTypes && schedule.riskTypes.length)
@@ -132,28 +211,36 @@ async function runScheduledJob(schedule) {
     const buffer = await buildExcelReport(null, { riskTypes, appTitle, ...reportData });
     fileSize = buffer.length;
 
-    const mail = await mailSettings.getResolved(userId);
+    const account = await mailSettings.getResolved(userId);
+    const mail = applyScheduleRecipients(account, schedule);
     if (mail && mail.enabled) {
       // The same naming rule manual reports use. A schedule with a name sends
       // it verbatim on every run; without one it keeps the timestamped form.
       const filename = reports.reportFilename(schedule.reportName, 'scheduled_report');
       await sendEmail(mail, { filename, content: buffer }, { appTitle });
-      log('info', 'Scheduled report emailed', { userId, bytes: buffer.length });
+      log('info', 'Scheduled report emailed', {
+        userId, scheduleId, bytes: buffer.length,
+        // Recipient counts, never addresses — a log line is not the place for
+        // somebody's mailing list (CLAUDE.md §6.5).
+        recipients: mail.to.length, ccRecipients: mail.cc.length,
+        addressing: schedule.toAddrs ? 'schedule' : 'account',
+      });
     } else {
-      log('warn', 'Scheduled report built but email is disabled — nothing was sent', { userId });
+      log('warn', 'Scheduled report built but email is disabled — nothing was sent',
+        { userId, scheduleId });
     }
 
     await schedulesDb.completeRun(runId, { status: 'success', fileSizeBytes: fileSize });
-    await schedulesDb.finishRun(userId, {
-      status: 'success', nextRunAt: calcNextRun(schedule),
+    await schedulesDb.finishRun(scheduleId, {
+      status: 'success', nextRunAt: nextRunAfter(schedule, manual),
     });
     return { ok: true };
 
   } catch (err) {
-    log('error', `Scheduled report failed: ${err.message}`, { userId });
+    log('error', `Scheduled report failed: ${err.message}`, { userId, scheduleId });
     await schedulesDb.completeRun(runId, { status: 'failed', error: err.message, fileSizeBytes: fileSize });
-    await schedulesDb.finishRun(userId, {
-      status: 'failed', error: err.message, nextRunAt: calcNextRun(schedule),
+    await schedulesDb.finishRun(scheduleId, {
+      status: 'failed', error: err.message, nextRunAt: nextRunAfter(schedule, manual),
     });
 
     // Best-effort alert to the From address, so a failure is noticed without
@@ -173,7 +260,8 @@ async function runScheduledJob(schedule) {
         });
       }
     } catch (alertErr) {
-      log('error', `Failure alert email could not be sent: ${alertErr.message}`, { userId });
+      log('error', `Failure alert email could not be sent: ${alertErr.message}`,
+        { userId, scheduleId });
     }
     return { ok: false, error: err.message };
   }
@@ -225,6 +313,7 @@ function stop() {
 function isRunning() { return _ticking; }
 
 module.exports = {
-  calcNextRun, runScheduledJob, tick, start, stop, isRunning,
+  calcNextRun, nextRunAfter, applyScheduleRecipients, runScheduledJob,
+  tick, start, stop, isRunning,
   POLL_INTERVAL_MS, MAX_CONCURRENT, STALE_CLAIM_MINS,
 };

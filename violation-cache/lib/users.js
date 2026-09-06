@@ -72,7 +72,9 @@ async function create({ loginId, email, firstName, lastName, passwordHash }) {
       await client.query('INSERT INTO dt_connections (user_id) VALUES ($1)', [user.id]);
       await client.query('INSERT INTO user_settings (user_id) VALUES ($1)', [user.id]);
       await client.query('INSERT INTO mail_settings (user_id) VALUES ($1)', [user.id]);
-      await client.query('INSERT INTO schedules (user_id) VALUES ($1)', [user.id]);
+      // No schedules row: an account starts with none and creates them as it
+      // wants them. One was seeded here only because the old schema required
+      // exactly one per user (migration 009 removed that).
 
       return user;
     });
@@ -284,7 +286,8 @@ async function listWithStats({ limit = 500 } = {}) {
             COALESCE(r.reports, 0)::int            AS "reportCount",
             COALESCE(r.bytes, 0)::bigint           AS "storageBytes",
             COALESCE(c.is_configured, false)       AS "dtConfigured",
-            COALESCE(sc.enabled, false)            AS "scheduleEnabled",
+            COALESCE(sc.active, 0)::int            AS "schedulesActive",
+            COALESCE(sc.total, 0)::int             AS "scheduleCount",
             -- The number actually enforced, and whether it was chosen for this
             -- account or inherited. The screen shows both: a limit with no
             -- indication of where it came from cannot be acted on, because the
@@ -306,7 +309,13 @@ async function listWithStats({ limit = 500 } = {}) {
            FROM reports WHERE user_id = u.id
        ) r ON true
        LEFT JOIN dt_connections c ON c.user_id = u.id
-       LEFT JOIN schedules sc      ON sc.user_id = u.id
+       -- LATERAL aggregate, not a plain join: a user owns any number of
+       -- schedules now, and joining the table directly would repeat their whole
+       -- row once per schedule and inflate every count on the screen.
+       LEFT JOIN LATERAL (
+         SELECT count(*) AS total, count(*) FILTER (WHERE enabled) AS active
+           FROM schedules WHERE user_id = u.id
+       ) sc ON true
        LEFT JOIN user_settings st  ON st.user_id = u.id
        -- One row by construction (singleton primary key), so this is a constant
        -- the planner materialises once, not a join that grows the result.
@@ -351,12 +360,17 @@ async function detailForAdmin(loginId) {
             (st.max_reports IS NOT NULL) AS "maxReportsOverridden",
             aps.default_max_reports::int AS "defaultMaxReports",
 
+            COALESCE(st.max_schedules, aps.default_max_schedules)::int AS "maxSchedules",
+            (st.max_schedules IS NOT NULL) AS "maxSchedulesOverridden",
+            aps.default_max_schedules::int AS "defaultMaxSchedules",
+
             m.enabled AS "mailEnabled", m.smtp_host AS "mailHost",
             m.smtp_port AS "mailPort", m.from_addr AS "mailFrom",
             COALESCE(array_length(m.to_addrs, 1), 0) AS "mailRecipients",
             (m.smtp_pass_ciphertext IS NOT NULL) AS "mailHasPassword",
 
-            sc.enabled AS "scheduleEnabled", sc.frequency, sc.hour,
+            COALESCE(sc.total, 0)::int  AS "scheduleCount",
+            COALESCE(sc.active, 0)::int AS "schedulesActive",
             sc.next_run_at AS "nextRunAt", sc.last_run_at AS "lastRunAt",
             sc.last_run_status AS "lastRunStatus",
             (SELECT count(*)::int FROM schedule_projects p WHERE p.user_id = u.id) AS "scheduleProjects",
@@ -387,7 +401,17 @@ async function detailForAdmin(loginId) {
        LEFT JOIN dt_connections c ON c.user_id = u.id
        LEFT JOIN user_settings st ON st.user_id = u.id
        LEFT JOIN mail_settings m  ON m.user_id  = u.id
-       LEFT JOIN schedules sc     ON sc.user_id = u.id
+       -- Aggregated for the same reason as the listing above, with the next and
+       -- last run taken across all of this account's schedules: the screen
+       -- answers "is anything scheduled, and when did it last go out", not
+       -- "what does schedule number three do".
+       LEFT JOIN LATERAL (
+         SELECT count(*) AS total, count(*) FILTER (WHERE enabled) AS active,
+                min(next_run_at) FILTER (WHERE enabled) AS next_run_at,
+                max(last_run_at) AS last_run_at,
+                (ARRAY_AGG(last_run_status ORDER BY last_run_at DESC NULLS LAST))[1] AS last_run_status
+           FROM schedules WHERE user_id = u.id
+       ) sc ON true
        -- Singleton, so this stays a constant rather than multiplying rows.
        CROSS JOIN app_settings aps
       WHERE u.login_id = $1 AND u.id <> $2 AND aps.id = TRUE`,
