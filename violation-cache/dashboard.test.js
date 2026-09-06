@@ -2577,14 +2577,18 @@ describe('index.html schedule drill-down', () => {
   });
 
   test('every way out of the editor goes through the same guard', () => {
-    // Back, Discard and closing the whole panel are three ways to lose work.
+    // Back, footer Cancel and closing the whole panel are three ways to lose
+    // work, and all three ask the same question.
     const close = extractFunction(INDEX_HTML, 'closeScheduleEditor');
     assert.match(close, /confirmDiscardSchedule/);
     const panel = extractFunction(INDEX_HTML, 'closeConfigPanel');
     assert.match(panel, /_schedEditorOpen && !\(await confirmDiscardSchedule\(\)\)/,
       'closing the panel must respect the drill-down\'s unsaved changes too');
-    assert.match(INDEX_HTML, /onclick="closeScheduleEditor\(true\)"/,
-      'Discard must skip the prompt rather than ask twice');
+    assert.match(INDEX_HTML, /id="cfgBackBtn"[^>]*onclick="closeScheduleEditor\(\)"/,
+      'Back must ask, so it passes no discard flag');
+    const cancel = extractFunction(INDEX_HTML, 'cancelPanel');
+    assert.match(cancel, /closeScheduleEditor\(false\)/,
+      'the footer\'s Cancel must ask too');
   });
 
   test('the dirty flag is cleared after the fields are populated, never before', () => {
@@ -2600,6 +2604,130 @@ describe('index.html schedule drill-down', () => {
   test('the panel always opens on the list, never on a stale schedule', () => {
     const fn = extractFunction(INDEX_HTML, 'openConfigPanel');
     assert.match(fn, /closeScheduleEditor\(true\)/);
+  });
+});
+
+// ── The settings panel's chrome ──────────────────────────────────────────────
+// Four defects found in the deployed build, all of them in how the drill-down
+// shares the panel with the settings list.
+describe('index.html settings panel chrome', () => {
+  test('the hidden attribute is made to win against class rules', () => {
+    // The browser's own rule is `[hidden] { display: none }` in the user-agent
+    // stylesheet, and ANY author rule setting `display` on the same element
+    // beats it. `.cfg-panel-footer` is flex and `.btn` is inline-flex, so
+    // `el.hidden = true` did nothing to either: the panel showed both footers
+    // at once, and a schedule that did not exist yet offered "Cancel this
+    // schedule". Declaring the rule here is what makes the attribute mean what
+    // it says.
+    assert.match(INDEX_HTML, /\[hidden\]\s*\{\s*display:\s*none\s*!important;\s*\}/);
+    // The two classes that would otherwise beat it are still display-setting,
+    // so the rule is load-bearing rather than decorative.
+    assert.match(INDEX_HTML, /\.btn \{[\s\S]{0,120}display: inline-flex/);
+    assert.match(INDEX_HTML, /\.cfg-panel-footer \{[\s\S]{0,120}display: flex/);
+  });
+
+  test('there is exactly one footer, serving both views', () => {
+    // Two footers meant two Save buttons and two Cancel buttons on screen
+    // together, and the Cancel belonging to Settings closed the whole panel
+    // from inside the schedule editor.
+    const footers = (INDEX_HTML.match(/class="cfg-panel-footer"/g) || []).length;
+    assert.equal(footers, 1, `expected one panel footer, found ${footers}`);
+    assert.doesNotMatch(INDEX_HTML, /cfgSchedFooter|cfgMainFooter|cfgSchedSaveBtn/,
+      'the second footer must be deleted, not hidden — a dead second implementation gets rendered by accident');
+  });
+
+  test('the footer buttons dispatch on whichever view is open', () => {
+    assert.match(INDEX_HTML, /id="cfgSaveBtn"[^>]*onclick="savePanel\(\)"/);
+    assert.match(INDEX_HTML, /id="cfgCancelBtn"[^>]*onclick="cancelPanel\(\)"/);
+    const save = extractFunction(INDEX_HTML, 'savePanel');
+    assert.match(save, /_schedEditorOpen.*saveScheduleEditor\(\)/s);
+    assert.match(save, /saveConfigPanel\(\)/);
+    const cancel = extractFunction(INDEX_HTML, 'cancelPanel');
+    assert.match(cancel, /_schedEditorOpen.*closeScheduleEditor\(false\)/s);
+    assert.match(cancel, /closeConfigPanel\(false\)/);
+  });
+
+  test('Cancel inside the editor goes back to Settings, it does not close the panel', () => {
+    // The reported behaviour: from a schedule, Cancel threw away the user's
+    // place as well as their edits. closeScheduleEditor restores the list;
+    // closeConfigPanel would dismiss the whole panel.
+    const cancel = extractFunction(INDEX_HTML, 'cancelPanel');
+    const editorBranch = cancel.slice(0, cancel.indexOf('closeConfigPanel'));
+    assert.match(editorBranch, /closeScheduleEditor/);
+    assert.doesNotMatch(editorBranch, /closeConfigPanel/);
+    // And leaving the editor restores the list rather than the panel's closed
+    // state, so "back" really is one step.
+    const close = extractFunction(INDEX_HTML, 'closeScheduleEditor');
+    assert.match(close, /cfgMainView'\)\.hidden\s*=\s*false/);
+    assert.match(close, /cfgSchedView'\)\.hidden\s*=\s*true/);
+    assert.doesNotMatch(close, /classList\.remove\('open'\)/);
+  });
+
+  test('the primary button says which of the two things it saves', () => {
+    const mode = extractFunction(INDEX_HTML, 'setPanelFooterMode');
+    assert.match(mode, /'Save schedule'/);
+    assert.match(mode, /'Save'/);
+    for (const fn of ['openScheduleEditor', 'closeScheduleEditor']) {
+      assert.match(extractFunction(INDEX_HTML, fn), /setPanelFooterMode\(/, fn);
+    }
+    // Saving keeps the editor open, so the label it restores is the editor's.
+    const save = extractFunction(INDEX_HTML, 'saveScheduleEditor');
+    assert.match(save, /btn\.textContent = 'Save schedule'/);
+  });
+
+  test('both views space their sections, not just the panel body', () => {
+    // The body's flex gap used to reach the sections directly. The drill-down
+    // wrapped them in #cfgMainView / #cfgSchedView, which made them
+    // grandchildren — a flex gap does not reach those, and every section sat
+    // flush against the next.
+    assert.match(INDEX_HTML, /\.cfg-view \{[^}]*display: flex[^}]*flex-direction: column[^}]*gap: 16px/);
+    assert.match(INDEX_HTML, /id="cfgMainView" class="cfg-view"/);
+    assert.match(INDEX_HTML, /id="cfgSchedView" class="cfg-view"/);
+    // Same gap as the body, so the two views cannot drift apart visually.
+    const body = /\.cfg-panel-body \{[^}]*\}/.exec(INDEX_HTML)[0];
+    const view = /\.cfg-view \{[^}]*\}/.exec(INDEX_HTML)[0];
+    assert.equal(/gap: (\d+px)/.exec(body)[1], /gap: (\d+px)/.exec(view)[1]);
+  });
+
+  test('the toolbar entry point shows the panel it drills into', () => {
+    // The editor is a view inside the settings panel, so opening the editor
+    // alone rendered it into a panel still translated off-screen: the toolbar's
+    // Schedule Reports looked dead. openConfigPanel also populates the Settings
+    // view behind it, which Back and Cancel return to — without it that view is
+    // blank and a Save there writes empty SMTP fields over the stored ones.
+    const fn = extractFunction(INDEX_HTML, 'scheduleReports');
+    const editor = fn.indexOf('openScheduleEditor(');
+    assert.ok(editor > -1, 'the toolbar must open the editor');
+    const open = fn.lastIndexOf('openConfigPanel()', editor);
+    assert.ok(open > -1, 'the panel must be opened before the editor drills in');
+    // The function opens Settings from its "email is not configured" branch too,
+    // and that one returns. Asking only "is openConfigPanel mentioned first"
+    // passes with the real call deleted, so the check is that nothing returns
+    // between the two: they are on one path.
+    assert.doesNotMatch(fn.slice(open, editor), /\breturn\b/,
+      'the panel must be opened on the path that actually reaches the editor');
+  });
+
+  test('the schedule form marks the schedule dirty, never Settings', () => {
+    // openScheduleEditor ends by calling onSchedFreqChange(), so pointing these
+    // at markConfigDirty made merely opening a schedule claim Settings had
+    // unsaved changes — and left a changed frequency or time marking nothing,
+    // so Cancel discarded it without asking.
+    for (const name of ['onSchedFreqChange', 'onSchedTimeChange']) {
+      const fn = extractFunction(INDEX_HTML, name);
+      assert.match(fn, /markSchedDirty\(\)/, `${name} must mark the schedule`);
+      assert.doesNotMatch(fn, /markConfigDirty\(\)/, `${name} must not mark Settings`);
+    }
+    // The mail toggle really does belong to Settings, so it keeps the other flag.
+    assert.match(extractFunction(INDEX_HTML, 'onMailToggle'), /markConfigDirty\(\)/);
+  });
+
+  test('the new footer handlers are window-exported', () => {
+    // CLAUDE.md §8.2 — an inline handler calls window.*, so one left off the
+    // export block leaves the only Save button in the panel doing nothing.
+    for (const fn of ['savePanel', 'cancelPanel']) {
+      assert.match(INDEX_HTML, new RegExp(`window\\.${fn}\\s*=\\s*${fn};`), fn);
+    }
   });
 });
 
