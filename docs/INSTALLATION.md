@@ -168,6 +168,9 @@ docker compose --env-file .env up -d
 | `SECRET_ENCRYPTION_KEY` | _(generated)_ | AES-256-GCM key protecting stored DependencyTrack API keys and SMTP passwords. **Required.** Back it up: losing it makes every stored secret unreadable and users must re-enter their API key |
 | `VIOLATION_CACHE_TTL_HOURS` | `24` | Hours a built violation map stays valid. The cache is shared by accounts that use the same DependencyTrack connection, so this is not multiplied by the number of users |
 | `VIOLATION_JOB_STALL_MINUTES` | `15` | How long a refetch may go **without finishing a page** before it is presumed wedged and stopped. This is not a limit on total run time — a large portfolio runs as long as it needs. Raise it if a single page can legitimately take longer than this to come back |
+| `SCHEDULER_CONCURRENCY` | `5` | How many scheduled reports build at once, **across all accounts**. One account's own schedules always run one at a time whatever this says, so five schedules due at 09:00 never become five crawls against one connection. See the note below before raising it |
+| `REPORT_CONCURRENCY` | `5` | Parallel project fetches inside a single report |
+| `VIOLATION_CONCURRENCY` | `3` | Parallel violation fetches during a cache build |
 | `POSTGRES_USER` | `dtdash` | Database role |
 | `POSTGRES_PASSWORD` | _(generated)_ | Database password. `install.sh` generates one when absent. **Changing it after first start will break the connection** — PostgreSQL only reads it when initialising the cluster |
 | `POSTGRES_DB` | `dtdash` | Database name |
@@ -175,6 +178,22 @@ docker compose --env-file .env up -d
 | `SESSION_ABSOLUTE_HOURS` | `8` | Absolute session lifetime |
 | `SESSION_IDLE_HOURS` | `2` | Idle session lifetime |
 | `LOG_FORMAT` | `text` | `text` or `json` for structured output |
+
+### Before raising `SCHEDULER_CONCURRENCY`
+
+The ceiling that matters is **DependencyTrack's, not this service's**. Total load
+upstream is `SCHEDULER_CONCURRENCY × REPORT_CONCURRENCY` — already 25 concurrent
+requests at the defaults. Past DependencyTrack's limit you get 5xx responses,
+which trigger retries with 2s/4s/8s backoff, so raising the number makes
+everything slower rather than faster. Peak memory scales with it too: every
+report builds its workbook in memory.
+
+Measure first. If reports are starting within a minute of their scheduled time
+there is nothing to gain. If they are late, count how many schedules are due in
+your busiest hour — the sustained rate is roughly
+`SCHEDULER_CONCURRENCY ÷ average report duration`. If few are due but each is
+slow, raise `REPORT_CONCURRENCY` instead: finishing one report faster clears the
+queue at the same peak memory, where more parallel reports multiply it.
 
 ### Signing in
 
@@ -197,12 +216,14 @@ administrator. To reset them, delete that file and re-run the installer — or
 answer **y** when the installer offers to reset them.
 
 The administrator has **⚙ Settings and 📥 Reports of their own**: their own
-DependencyTrack connection, report quota, mail configuration and schedule, held
+DependencyTrack connection, quotas, mail configuration and schedules, held
 separately from every user account. They see their own dashboard exactly as a
 user does. What they do **not** have is a Profile panel — their name and password
 live in the credentials file rather than the database — and they cannot read any
 other account's DependencyTrack key, SMTP password or report contents. The
-🛡 Administration panel shows metadata and usage totals only.
+🛡 Administration screen shows metadata, usage totals, the service-wide quota
+defaults and the sign-in branding — never anybody else's secrets or report
+contents.
 
 **Report limits are set by the administrator**, not by users. Each account sees
 its own limit in ⚙ Settings but cannot change it. In 🛡 Administration the

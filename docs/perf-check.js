@@ -71,9 +71,12 @@ async function seed(pool) {
        FROM generate_series(1, $2) g
      ON CONFLICT DO NOTHING`, [passwordHash, USERS]);
 
-  for (const t of ['dt_connections', 'user_settings', 'mail_settings', 'schedules']) {
+  for (const t of ['dt_connections', 'user_settings', 'mail_settings']) {
     await pool.query(`INSERT INTO ${t} (user_id) SELECT id FROM users ON CONFLICT DO NOTHING`);
   }
+  // Schedules are NOT seeded per user any more: an account owns any number of
+  // them and starts with none (migration 009). Seeding one each would both
+  // misrepresent the table and hide the shape the claim query actually meets.
 
   // Half the accounts share 50 distinct DependencyTrack connections, so the
   // "caches grow with connections, not users" property is measurable.
@@ -99,14 +102,29 @@ async function seed(pool) {
        JOIN LATERAL (SELECT id FROM users OFFSET (g % $2) LIMIT 1) u ON true`,
     [REPORTS, USERS]);
 
+  // A tenth of the accounts schedule reports, and those accounts own two or
+  // three each — the shape the claim query and the settings list actually meet.
   await pool.query(
-    `UPDATE schedules SET enabled = true, frequency = 'daily', hour = 9,
-            next_run_at = now() + make_interval(mins => (abs(hashtext(user_id::text)) % 1440))
-      WHERE user_id IN (SELECT id FROM users ORDER BY created_at LIMIT $1)`,
+    `INSERT INTO schedules (user_id, enabled, frequency, hour, minute, next_run_at)
+     SELECT u.id, true, 'daily', 9, 0,
+            now() + make_interval(mins => (abs(hashtext(u.id::text || g::text)) % 1440))
+       FROM (SELECT id FROM users ORDER BY created_at LIMIT $1) u,
+            generate_series(1, 3) g`,
     [Math.floor(USERS / 10)]);
   await pool.query(
+    `INSERT INTO schedule_projects (user_id, schedule_id, project_uuid, project_name)
+     SELECT s.user_id, s.id, gen_random_uuid(), 'svc'
+       FROM schedules s, generate_series(1, 4)`);
+  // A handful overdue, so the claim query has something to find.
+  await pool.query(
     `UPDATE schedules SET next_run_at = now() - interval '1 minute'
-      WHERE enabled AND user_id IN (SELECT user_id FROM schedules WHERE enabled ORDER BY user_id LIMIT 5)`);
+      WHERE id IN (SELECT id FROM schedules WHERE enabled ORDER BY id LIMIT 5)`);
+  // Run history, so runStats and recentRuns are measured against a table with
+  // enough rows for the index to matter.
+  await pool.query(
+    `INSERT INTO schedule_runs (user_id, schedule_id, status, started_at)
+     SELECT s.user_id, s.id, 'success', now() - make_interval(days => (g * 7) % 80)
+       FROM schedules s, generate_series(1, 12) g`);
 
   // Enough cache rows that the fingerprint lookup is measured on a table with
   // an index worth using, not on a single page.
@@ -189,6 +207,7 @@ function summarise(plan, rowsIn) {
            (SELECT count(*) FROM reports)                     AS reports,
            (SELECT count(*) FROM user_sessions)               AS sessions,
            (SELECT count(*) FROM schedules WHERE enabled)     AS schedules,
+           (SELECT count(*) FROM schedule_runs)               AS schedule_runs,
            (SELECT count(*) FROM dt_connections WHERE is_configured) AS connections,
            (SELECT count(*) FROM violation_caches)            AS caches`);
   console.log('\nDataset:', counts[0]);
@@ -199,6 +218,12 @@ function summarise(plan, rowsIn) {
   const { rows: aUser } = await pool.query('SELECT id FROM users ORDER BY created_at LIMIT 1');
   const { rows: aSess } = await pool.query('SELECT token_hash FROM user_sessions LIMIT 1');
   const userId = aUser[0].id;
+  // An account that actually owns schedules, so the per-schedule plans are
+  // measured against rows rather than against nothing.
+  const { rows: aSched } = await pool.query(
+    'SELECT id, user_id FROM schedules ORDER BY created_at LIMIT 1');
+  const schedUserId = aSched.length ? aSched[0].user_id : userId;
+  const scheduleId  = aSched.length ? aSched[0].id : null;
   const md5 = (s) => crypto.createHash('md5').update(s).digest('hex');
 
   // Every query below is the one the service actually issues, copied from the
@@ -223,10 +248,31 @@ function summarise(plan, rowsIn) {
              count(*) FILTER (WHERE status = 'running')::int   AS running
         FROM reports WHERE user_id = $1 AND status IN ('completed','running')`, [userId]],
 
-    ['lib/schedules.js — claim due schedules', `
-      SELECT user_id FROM schedules
-       WHERE enabled AND running_since IS NULL AND next_run_at IS NOT NULL AND next_run_at <= now()
-       ORDER BY next_run_at FOR UPDATE SKIP LOCKED LIMIT 5`, []],
+    // The poller's hot path. The NOT EXISTS clause is what keeps one account's
+    // schedules from all running at once (migration 009) and it needs
+    // ix_sched_running, or it degrades to a sequential scan of the whole table
+    // on every claim (migration 010, P19).
+    ['lib/schedules.js — claim one due schedule', `
+      SELECT s.id FROM schedules s
+       WHERE s.enabled AND s.running_since IS NULL
+         AND s.next_run_at IS NOT NULL AND s.next_run_at <= now()
+         AND NOT EXISTS (
+           SELECT 1 FROM schedules r
+            WHERE r.user_id = s.user_id AND r.running_since IS NOT NULL
+         )
+       ORDER BY s.next_run_at FOR UPDATE SKIP LOCKED LIMIT 1`, []],
+
+    ['lib/schedules.js — one account\'s schedules, with project counts', `
+      SELECT s.id, s.name, s.enabled, s.next_run_at,
+             (SELECT count(*)::int FROM schedule_projects p WHERE p.schedule_id = s.id)
+        FROM schedules s WHERE s.user_id = $1 ORDER BY s.created_at, s.id`, [schedUserId]],
+
+    ['lib/schedules.js — the schedule quota check on every create', `
+      SELECT count(*)::int FROM schedules WHERE user_id = $1`, [schedUserId]],
+
+    ['lib/schedules.js — run statistics for one schedule', `
+      SELECT count(*)::int, count(*) FILTER (WHERE status = 'success')::int
+        FROM schedule_runs WHERE user_id = $1 AND schedule_id = $2`, [schedUserId, scheduleId]],
 
     ['lib/caches.js — cache metadata by fingerprint', `
       SELECT fingerprint, status, project_count, failed_pipelines,
@@ -246,9 +292,10 @@ function summarise(plan, rowsIn) {
       SELECT u.id, u.login_id, u.email, u.first_name, u.last_name, u.created_at, u.last_login_at,
              (s.id IS NOT NULL), s.last_seen_at,
              COALESCE(r.reports, 0)::int, COALESCE(r.bytes, 0)::bigint,
-             COALESCE(c.is_configured, false), COALESCE(sc.enabled, false),
+             COALESCE(c.is_configured, false),
              COALESCE(st.max_reports, a.default_max_reports)::int,
-             (st.max_reports IS NOT NULL)
+             (st.max_reports IS NOT NULL),
+             COALESCE(sc.total, 0)::int, COALESCE(sc.active, 0)::int
         FROM (SELECT id, login_id, email, first_name, last_name, created_at, last_login_at
                 FROM users ORDER BY created_at LIMIT 500) u
         LEFT JOIN LATERAL (SELECT id, last_seen_at FROM user_sessions
@@ -257,7 +304,11 @@ function summarise(plan, rowsIn) {
         LEFT JOIN LATERAL (SELECT count(*) AS reports, COALESCE(sum(file_size_bytes), 0) AS bytes
                              FROM reports WHERE user_id = u.id) r ON true
         LEFT JOIN dt_connections c ON c.user_id = u.id
-        LEFT JOIN schedules sc      ON sc.user_id = u.id
+        -- LATERAL aggregate, not a plain join: an account owns any number of
+        -- schedules now, and joining the table directly would repeat the whole
+        -- user row once per schedule and inflate every count on the screen.
+        LEFT JOIN LATERAL (SELECT count(*) AS total, count(*) FILTER (WHERE enabled) AS active
+                             FROM schedules WHERE user_id = u.id) sc ON true
         LEFT JOIN user_settings st  ON st.user_id = u.id
         CROSS JOIN app_settings a
        WHERE a.id = TRUE

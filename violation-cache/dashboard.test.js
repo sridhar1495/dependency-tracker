@@ -2706,3 +2706,197 @@ describe('index.html pause, send now and history', () => {
     }
   });
 });
+
+// ── Documentation must not drift from the code ───────────────────────────────
+// Every stale claim these tests catch was real: the integration guide documented
+// three schedule routes that had been deleted, the README said the installer
+// asks for a DependencyTrack URL it stopped asking for, and the installation
+// guide's environment table was missing three variables the service reads.
+// Prose has no compiler, so this is the only thing that keeps it honest.
+
+const README    = fs.readFileSync(path.join(__dirname, '..', 'README.md'), 'utf8');
+const INSTALL_MD = fs.readFileSync(path.join(__dirname, '..', 'docs', 'INSTALLATION.md'), 'utf8');
+const INTEGRATION_MD = fs.readFileSync(path.join(__dirname, '..', 'docs', 'DASHBOARD_INTEGRATION.md'), 'utf8');
+const PERF_MD   = fs.readFileSync(path.join(__dirname, '..', 'docs', 'PERFORMANCE.md'), 'utf8');
+const SERVER_SRC = fs.readFileSync(path.join(__dirname, 'server.js'), 'utf8');
+
+/** Every `/violation-cache/...` and `/admin/...` path the route modules answer. */
+function handledRoutes() {
+  const found = new Set();
+  for (const f of fs.readdirSync(path.join(__dirname, 'routes'))) {
+    const src = fs.readFileSync(path.join(__dirname, 'routes', f), 'utf8');
+    // Exact-path handlers.
+    for (const m of src.matchAll(/parsedPath === '([^']+)'/g)) found.add(m[1]);
+    for (const m of src.matchAll(/path === '([^']+)'/g)) found.add(m[1]);
+    // Sub-actions on the schedule collection.
+    for (const m of src.matchAll(/action === '([a-z-]+)'/g)) {
+      found.add(`/violation-cache/schedules/:id/${m[1]}`);
+    }
+    // Regex-matched id routes, e.g. /admin/users/([^/]+)/settings
+    for (const m of src.matchAll(/parsedPath\.match\(\/\^([^/]*(?:\/[^(]*)*)\(\[\^\/\]\+\)([^/]*(?:\/[^$]*)*)\$\//g)) {
+      found.add((m[1] + ':id' + (m[2] || '')).replace(/\\\//g, '/'));
+    }
+  }
+  return found;
+}
+
+describe('documentation matches the routes the code answers', () => {
+  test('no document mentions a route the code no longer has', () => {
+    // The failure this exists for: DASHBOARD_INTEGRATION.md documented
+    // GET /violation-cache/schedule/status, DELETE /violation-cache/schedule and
+    // POST /violation-cache/schedule/ack-notification for a whole release after
+    // they were deleted. A reader following the guide would have got 404s.
+    const gone = [
+      '/violation-cache/schedule/status',
+      '/violation-cache/schedule/arm',
+      '/violation-cache/schedule/ack-notification',
+    ];
+    for (const doc of [README, INSTALL_MD, INTEGRATION_MD, PERF_MD, SERVER_SRC]) {
+      for (const route of gone) {
+        assert.ok(!doc.includes(route), `a deleted route is still documented: ${route}`);
+      }
+    }
+    // The singular collection, as a whole word — /violation-cache/schedules is fine.
+    for (const doc of [INTEGRATION_MD, SERVER_SRC]) {
+      assert.doesNotMatch(doc, /\/violation-cache\/schedule(?![sr])/,
+        'the singular /violation-cache/schedule endpoint no longer exists');
+    }
+  });
+
+  test('every schedule route the code answers is in the integration guide', () => {
+    // Schedules are the surface that moved most, and the guide is what somebody
+    // integrating against this reads.
+    const scheduleRoutes = [...handledRoutes()].filter(r => r.startsWith('/violation-cache/schedules'));
+    assert.ok(scheduleRoutes.length >= 4, 'expected the schedule collection to be discovered');
+    for (const r of scheduleRoutes) {
+      assert.ok(INTEGRATION_MD.includes(r), `${r} is handled but not documented`);
+    }
+    for (const r of ['/violation-cache/schedules/:id/run-now',
+                     '/violation-cache/schedules/:id/runs',
+                     '/violation-cache/schedules/:id/arm',
+                     '/violation-cache/schedules/:id/disable']) {
+      assert.ok(INTEGRATION_MD.includes(r), `${r} is handled but not documented`);
+    }
+  });
+
+  test('every administration route is documented', () => {
+    for (const r of ['/admin/overview', '/admin/users', '/admin/storage', '/admin/settings',
+                     '/admin/users/:loginId/settings', '/admin/users/:loginId/password',
+                     '/admin/branding', '/admin/branding/background']) {
+      assert.ok(INTEGRATION_MD.includes(r), `${r} is administrator-only but undocumented`);
+    }
+  });
+
+  test('server.js\'s own route header lists what it dispatches', () => {
+    // The header is the first thing a reader of the service meets, and it had
+    // drifted too — missing run-now, runs and every branding route.
+    //
+    // Scoped to the comment block, not the whole file: `require('./routes/
+    // branding')` contains the substring "/branding", so a whole-file search
+    // passes even with every branding line deleted from the header. The first
+    // version of this test did exactly that and caught nothing.
+    const header = SERVER_SRC.split('\n')
+      .filter(l => /^\/\/ {3}(GET|POST|PUT|DELETE)/.test(l)).join('\n');
+    assert.ok(header.length > 500, 'the route header was not found');
+    for (const r of ['/violation-cache/schedules/:id/run-now',
+                     '/violation-cache/schedules/:id/runs',
+                     '/admin/branding',
+                     '/admin/branding/background',
+                     '/admin/users/:loginId/password',
+                     '/branding/background']) {
+      assert.ok(header.includes(r), `server.js's route header omits ${r}`);
+    }
+    // GET /branding as its own entry, not just as part of the background path.
+    assert.match(header, /GET {4}\/branding {2}\/branding\/background/,
+      'the two public branding routes must be listed');
+  });
+});
+
+describe('documentation matches the configuration the code reads', () => {
+  test('every environment variable the service reads is in the installation guide', () => {
+    const cfgSrc = fs.readFileSync(path.join(__dirname, 'lib', 'config.js'), 'utf8');
+    // The variables an operator sets. CACHE_DIR, PORT and POSTGRES_HOST are
+    // fixed by docker-compose and are not theirs to change.
+    const internal = new Set(['CACHE_DIR', 'PORT', 'POSTGRES_HOST', 'ENV_FILE',
+                              'CONFIG_INVALID', 'CACHE_TTL_HOURS']);
+    const declared = [...cfgSrc.matchAll(/'([A-Z][A-Z_]{3,})'/g)]
+      .map(m => m[1]).filter(v => !internal.has(v));
+    assert.ok(declared.length >= 8, 'expected to discover the configuration surface');
+    for (const v of new Set(declared)) {
+      assert.ok(INSTALL_MD.includes(v), `${v} is read by the service but absent from INSTALLATION.md`);
+    }
+  });
+
+  test('the documented defaults are the defaults the code uses', () => {
+    // A table that says 5 while the code says 3 is worse than no table.
+    const { DEFAULTS } = require('./lib/config');
+    for (const [name, value] of [['SCHEDULER_CONCURRENCY', '5'],
+                                 ['REPORT_CONCURRENCY', '5'],
+                                 ['VIOLATION_CONCURRENCY', '3'],
+                                 ['SESSION_ABSOLUTE_HOURS', '8'],
+                                 ['SESSION_IDLE_HOURS', '2']]) {
+      assert.equal(DEFAULTS[name], value, `${name}'s default moved; update the docs`);
+      const tick = String.fromCharCode(96);   // a backtick, unquotable in a template
+      assert.match(INSTALL_MD,
+        new RegExp(tick + name + tick + '[^|]*\\|[^|]*' + tick + value + tick),
+        `INSTALLATION.md does not show ${name} defaulting to ${value}`);
+    }
+  });
+
+  test('.env.example carries every operator-facing variable', () => {
+    const envExample = fs.readFileSync(path.join(__dirname, '..', '.env.example'), 'utf8');
+    for (const v of ['SCHEDULER_CONCURRENCY', 'VIOLATION_JOB_STALL_MINUTES',
+                     'VIOLATION_CACHE_TTL_HOURS', 'SESSION_ABSOLUTE_HOURS', 'LOG_FORMAT']) {
+      assert.ok(envExample.includes(v), `.env.example omits ${v}`);
+    }
+  });
+
+  test('docker-compose passes through what the service reads', () => {
+    const compose = fs.readFileSync(path.join(__dirname, '..', 'docker-compose.yml'), 'utf8');
+    for (const v of ['SCHEDULER_CONCURRENCY', 'VIOLATION_JOB_STALL_MINUTES', 'SECRET_ENCRYPTION_KEY']) {
+      assert.ok(compose.includes(v), `docker-compose.yml does not pass ${v} through`);
+    }
+  });
+});
+
+describe('the documents describe the behaviour the code has', () => {
+  test('the README no longer claims the installer asks for a DependencyTrack URL', () => {
+    // install.sh stopped asking when connections became per-user, and the README
+    // said otherwise for several releases.
+    const installer = fs.readFileSync(path.join(__dirname, '..', 'install.sh'), 'utf8');
+    assert.doesNotMatch(installer, /read .*DT_API_INTERNAL_URL|prompt.*API URL/i,
+      'install.sh must not ask for a DependencyTrack connection');
+    assert.match(README, /does \*\*not\*\* ask for a DependencyTrack URL/,
+      'the README must say the installer does not ask for it');
+  });
+
+  test('the administration allow-list is stated as six everywhere it is stated', () => {
+    const adminSrc = fs.readFileSync(path.join(__dirname, 'routes', 'admin.js'), 'utf8');
+    const writes = [...adminSrc.matchAll(/method === '(PUT|POST|DELETE)'/g)].length;
+    assert.equal(writes, 6);
+    assert.match(README, /exactly six things/);
+    assert.doesNotMatch(README, /exactly three things/, 'the README still says three');
+  });
+
+  test('one schedule per user is not claimed anywhere', () => {
+    for (const [name, doc] of [['README', README], ['INSTALLATION', INSTALL_MD],
+                               ['DASHBOARD_INTEGRATION', INTEGRATION_MD]]) {
+      assert.doesNotMatch(doc, /Cancel Schedule\b/, `${name} describes the removed single-schedule button`);
+      assert.doesNotMatch(doc, /the schedule toggle/i, `${name} describes the removed master toggle`);
+      assert.doesNotMatch(doc, /server local time/i, `${name} still says times are server-local`);
+    }
+  });
+
+  test('the performance evidence describes the current schema', () => {
+    // perf-check.js seeded a schedules row per user and joined it as if unique,
+    // which stopped being true at migration 009 — the harness would have
+    // reported inflated counts rather than failing.
+    const perfSrc = fs.readFileSync(path.join(__dirname, '..', 'docs', 'perf-check.js'), 'utf8');
+    assert.doesNotMatch(perfSrc, /LEFT JOIN schedules \w+\s+ON/,
+      'a plain join on schedules multiplies the user row — use a LATERAL aggregate');
+    assert.doesNotMatch(perfSrc, /'mail_settings', 'schedules'/,
+      'schedules are not seeded one per account any more');
+    assert.match(PERF_MD, /ix_sched_running/, 'the claim index is not in the evidence');
+    assert.match(PERF_MD, /SCHEDULER_CONCURRENCY/, 'the scheduler ceiling is not in the evidence');
+  });
+});

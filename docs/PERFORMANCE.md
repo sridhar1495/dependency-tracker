@@ -5,7 +5,12 @@ measurement, not an assertion, and each is reproducible from this repository.
 
 Everything below was captured against PostgreSQL 16 with the tuning flags from
 `docker-compose.yml`, on a dataset of **5,000 accounts, 20,000 reports, 1,000
-sessions, 2,500 configured DependencyTrack connections and 500 schedules**.
+sessions, 2,500 configured DependencyTrack connections, 1,500 schedules across
+500 accounts, and 18,000 scheduled runs**.
+
+Schedules are seeded three to an account rather than one each: a user owns any
+number of them (migration 009), and seeding one apiece would both misrepresent
+the table and hide the shape the claim query actually meets.
 
 Reproduce with:
 
@@ -26,15 +31,18 @@ the correct plan and is not a finding.
 
 | Query | Time | Buffers | Plan |
 |---|---|---|---|
-| `lib/auth.js` — resolve a bearer token | **0.027 ms** | 6 | Index Scan `ux_sessions_token` |
-| `lib/users.js` — find an account at sign-in | **0.023 ms** | 3 | Index Scan `ux_users_login_id` (citext) |
-| `lib/reports-db.js` — list one account's reports | **0.039 ms** | 6 | Index Scan `ix_reports_user_created` |
-| `lib/reports-db.js` — per-user quota count | **0.033 ms** | 6 | Bitmap Index Scan on `reports (user_id)` |
-| `lib/schedules.js` — claim due schedules | **0.032 ms** | 13 | Index Scan `ix_sched_due` + `LockRows` |
-| `lib/caches.js` — cache metadata by fingerprint | **0.012 ms** | 1 | see §1.1 |
-| `lib/dt-connections.js` — resolve one connection | **0.019 ms** | 3 | Index Scan `dt_connections_pkey` |
-| `lib/users.js` — administration listing (500 rows) | **9.3 ms** | 4,916 | see §1.2 |
-| `lib/disk.js` — storage by account (top 5) | **21.4 ms** | 768 | aggregate over 20,000 reports |
+| `lib/auth.js` — resolve a bearer token | **0.028 ms** | 6 | Index Scan `ux_sessions_token` |
+| `lib/users.js` — find an account at sign-in | **0.035 ms** | 3 | Index Scan `ux_users_login_id` (citext) |
+| `lib/reports-db.js` — list one account's reports | **0.038 ms** | 6 | Index Scan `ix_reports_user_created` |
+| `lib/reports-db.js` — per-user quota count | **0.035 ms** | 6 | Bitmap Index Scan on `reports (user_id)` |
+| `lib/schedules.js` — claim one due schedule | **0.059 ms** | 5 | `ix_sched_due` + `ix_sched_running`, see §1.3 |
+| `lib/schedules.js` — one account's schedules | **0.064 ms** | 14 | Bitmap Index Scan `ix_sched_user` |
+| `lib/schedules.js` — schedule quota count | **0.021 ms** | 5 | Bitmap Index Scan `ix_sched_user` |
+| `lib/schedules.js` — run statistics for one schedule | **0.037 ms** | 5 | Index Scan `ix_runs_schedule_time` |
+| `lib/caches.js` — cache metadata by fingerprint | **0.014 ms** | 1 | see §1.1 |
+| `lib/dt-connections.js` — resolve one connection | **0.015 ms** | 3 | Index Scan `dt_connections_pkey` |
+| `lib/users.js` — administration listing (500 rows) | **12.1 ms** | 7,303 | see §1.2 |
+| `lib/disk.js` — storage by account (top 5) | **25.7 ms** | 768 | aggregate over 20,000 reports |
 
 Every per-request query is an index scan reading fewer than 15 pages. The two
 double-digit figures both belong to the administration screen — a single page
@@ -47,6 +55,14 @@ each account's effective report limit and whether it was inherited or set.
 `app_settings` is a singleton, so the planner materialises it once rather than
 multiplying rows: 10.0 ms / 4,873 buffers before, 9.3 ms / 4,916 after — inside
 run-to-run noise.
+
+**Migration 009 cost it 3 ms, and had to.** Counting each account's schedules
+went from reading one joined row to a `LEFT JOIN LATERAL` aggregate over the
+table: 9.3 ms / 4,916 buffers to 12.1 ms / 7,303. That is the price of the
+feature, and the alternative was not cheaper but wrong — a plain
+`LEFT JOIN schedules ON user_id` repeats the entire user row once per schedule
+and inflates every count on the screen. Still one page view by one operator,
+not a per-request path.
 
 ### 1.1 The cache lookup shows a sequential scan, and that is correct
 
@@ -101,6 +117,29 @@ Two changes fixed it:
 are hash-join builds against `dt_connections` and `schedules` with `loops=1`,
 which is the right plan for joining a 500-row page against a 5,000-row table.
 
+### 1.3 The claim's serialisation guard needed an index of its own
+
+Migration 009 let a user own several schedules and gave `claimOne()` a
+`NOT EXISTS` clause to keep only one of them running at a time. That clause is
+correct, and it was executing as a **sequential scan of the whole `schedules`
+table on every claim** — 1,503 rows read to establish that nothing was running.
+
+The poller claims up to `SCHEDULER_CONCURRENCY` times a minute and a job refills
+its own slot on completion, so that scan ran several times a minute and grew
+with every schedule anybody added. Migration 010 added a partial index on
+`(user_id) WHERE running_since IS NOT NULL`, which by construction contains only
+what is running at that instant — a handful of rows however large the table is,
+the same reasoning as `ix_sched_due`.
+
+| | Plan for the guard | Buffers (claim) |
+|---|---|---|
+| Before | Seq Scan, 1,503 rows filtered | 42 |
+| After | **Index Scan `ix_sched_running`** | **5** |
+
+This is what CLAUDE.md §16's `EXPLAIN` requirement is for: nothing else would
+have noticed, because the query was correct and fast enough to look fine at the
+size it was first written against.
+
 ---
 
 ## 2. Load behaviour
@@ -124,7 +163,29 @@ other nineteen callers lost the `pg_try_advisory_lock` election, were told
 `building`, and read the winner's result. **Adding users does not multiply the
 load placed on DependencyTrack.**
 
-### 2.2 Bounded concurrency
+### 2.2 The scheduler pool has no idle capacity
+
+The tick used to claim a batch and `await` all of it before claiming again, so
+one slow report idled every other slot until it finished. Eight overdue
+schedules across eight accounts, pool ceiling three:
+
+```
+✓ tick returned in 13 ms without waiting for the reports it started
+✓ three claims visible in the database
+✓ one report held its slot indefinitely while the other two cycled four more
+✓ the pool stayed full throughout, and drained with no claim left behind
+```
+
+Under the batch design none of those four replacements could have started. The
+sustained ceiling is `SCHEDULER_CONCURRENCY ÷ average report duration`; what
+changed is that the service now reaches it instead of collapsing to the rate of
+its slowest job.
+
+**One account's schedules still run one at a time** — that is enforced in the
+database by the `NOT EXISTS` clause above, not by the pool, so it survives a
+restart and would survive a second replica.
+
+### 2.3 Bounded concurrency
 
 ```
 ✓ backends never exceeded the pool max of 15   (peak = 15)
@@ -133,7 +194,7 @@ load placed on DependencyTrack.**
 
 Sampled from `pg_stat_activity` every 40 ms across the burst above.
 
-### 2.3 The token cache removes the per-request database read
+### 2.4 The token cache removes the per-request database read
 
 ```
 ✓ 40 authenticated requests caused 0 reads of user_sessions
@@ -142,7 +203,7 @@ Sampled from `pg_stat_activity` every 40 ms across the burst above.
 Measured as the change in `pg_stat_user_tables.idx_scan + seq_scan` for
 `user_sessions`. The first request populated the cache; the next 39 hit it.
 
-### 2.4 `last_seen_at` is throttled
+### 2.5 `last_seen_at` is throttled
 
 ```
 ✓ 40 requests inside the touch interval caused no session write
@@ -159,7 +220,7 @@ only about once a second — which puts a neighbouring phase's tail inside the
 measurement window and reports writes that this phase did not cause. The column
 value is exact and attributable to one session.
 
-### 2.5 Report progress is throttled
+### 2.6 Report progress is throttled
 
 Covered by the database tier (`db.test.js`): consecutive `writeProgress()` calls
 inside one second return `false` without writing, and `{ force: true }` writes
@@ -172,7 +233,9 @@ after every project × risk type — roughly 1,500 writes for a 500-project repo
 
 | Table | Grows with | Bounded by |
 |---|---|---|
-| `users`, `dt_connections`, `user_settings`, `mail_settings`, `schedules` | accounts | one row per account |
+| `users`, `dt_connections`, `user_settings`, `mail_settings` | accounts | one row per account |
+| `schedules` | **schedules, not accounts** | per-account `max_schedules`, enforced on creation |
+| `schedule_projects` | projects selected per schedule | cascades when the schedule is cancelled |
 | `app_settings` | nothing | exactly one row, enforced by a singleton primary key |
 | `user_sessions` | live sessions | one per account (partial unique index) + a 10-minute sweeper |
 | `reports`, `report_file_chunks` | reports | per-user `max_reports`, enforced on creation and on lowering the limit |
@@ -189,7 +252,13 @@ rows**, because the fingerprint is `sha256(url + key)` rather than a user id.
 
 - **Report generation throughput.** Dominated by DependencyTrack's own response
   times, not by anything in this service. Concurrency is bounded at
-  `REPORT_CONCURRENCY` (5) and `VIOLATION_CONCURRENCY` (3).
+  `SCHEDULER_CONCURRENCY` (5) × `REPORT_CONCURRENCY` (5) upstream requests, and
+  `VIOLATION_CONCURRENCY` (3) for cache builds.
+- **Where DependencyTrack's knee is.** The number worth tuning is DT's, not this
+  service's, and it belongs to whoever runs DT. Before raising
+  `SCHEDULER_CONCURRENCY`, measure how late reports actually start
+  (`started_at − next_run_at`); if that is under a minute there is nothing to
+  gain, and past DT's limit the retries make it worse rather than better.
 - **A real DependencyTrack instance.** Every measurement above uses a stub, by
   design: these are properties of this service, and a live DT would add variance
   without adding information. CLAUDE.md §10.5 forbids tests that need a live DT.
