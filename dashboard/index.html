@@ -1985,9 +1985,16 @@ function schedLocalToUtc(l) {
 
 const SCHED_DAY_NAMES = ['Sunday', 'Monday', 'Tuesday', 'Wednesday', 'Thursday', 'Friday', 'Saturday'];
 
+// One rule for what the time field holds, shared by the hint and the save so
+// they cannot disagree about whether a value is usable. Seconds are tolerated
+// and ignored: `<input type="time">` emits `HH:MM:SS` whenever `step` is under
+// a minute, and a stricter pattern would reject a time the user really did
+// pick — a trap for whoever sets `step` next rather than a defect today.
+const SCHED_TIME_RE = /^(\d{1,2}):(\d{2})(?::\d{2}(?:\.\d+)?)?$/;
+
 /** Read the picker's local values, whatever the frequency. */
 function readSchedLocalForm() {
-  const [h, m] = String(document.getElementById('cfgSchedTime').value || '').split(':');
+  const [, h, m] = SCHED_TIME_RE.exec(String(document.getElementById('cfgSchedTime').value || '')) || [];
   const weekDays = [];
   document.querySelectorAll('.cfg-weekday input:checked').forEach(cb => weekDays.push(parseInt(cb.value, 10)));
   return {
@@ -2011,6 +2018,15 @@ function renderSchedUtcHint() {
   let zone = '';
   try { zone = Intl.DateTimeFormat().resolvedOptions().timeZone || ''; } catch (e) { zone = ''; }
   if (zoneEl) zoneEl.textContent = zone ? `(${zone})` : '(your local time)';
+
+  // An empty field must not be described. readSchedLocalForm() falls back to
+  // 09:00 so the converters always have something to work with, but stating a
+  // time the user has not chosen as the one that will be stored is a lie the
+  // rest of this line exists to prevent.
+  if (!SCHED_TIME_RE.test(String(document.getElementById('cfgSchedTime').value || ''))) {
+    hintEl.textContent = 'Choose a time to see when it will be stored.';
+    return;
+  }
 
   const freq  = document.getElementById('cfgSchedFreq').value;
   const local = readSchedLocalForm();
@@ -2080,7 +2096,7 @@ async function saveConfigPanel() {
 
       // An empty <input type="time"> reads as '', which would otherwise be
       // silently defaulted to 09:00 by the converter.
-      if (!/^\d{2}:\d{2}$/.test(timeVal)) {
+      if (!SCHED_TIME_RE.test(timeVal)) {
         showToast('Please choose a time for the schedule.', 'error');
         return;
       }

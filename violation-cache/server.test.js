@@ -1333,6 +1333,49 @@ describe('calcNextRun()', () => {
     }
   });
 
+  // Date.UTC() normalises an overflowing day, so the weekly scan walking off the
+  // end of a month or a year is correct by construction rather than by a branch.
+  // That is exactly the kind of correctness that is easy to break later, and
+  // nothing else in this file would notice.
+  test('the weekly scan crosses a month boundary', () => {
+    // Saturday 28 March 2026; the next Wednesday is 1 April.
+    assert.equal(
+      calcNextRun({ frequency: 'weekly', hour: 9, weekDays: [3] }, new Date('2026-03-28T10:00:00Z')).toISOString(),
+      '2026-04-01T09:00:00.000Z');
+  });
+
+  test('every frequency crosses a year boundary', () => {
+    const nye = new Date('2026-12-31T10:00:00Z');   // a Thursday
+    assert.equal(calcNextRun({ frequency: 'daily', hour: 9 }, nye).toISOString(),
+      '2027-01-01T09:00:00.000Z');
+    assert.equal(calcNextRun({ frequency: 'weekly', hour: 9, weekDays: [0] }, nye).toISOString(),
+      '2027-01-03T09:00:00.000Z');
+    assert.equal(calcNextRun({ frequency: 'monthly', hour: 9, monthDay: 5 }, nye).toISOString(),
+      '2027-01-05T09:00:00.000Z');
+  });
+
+  test('a leap day is a normal day', () => {
+    assert.equal(
+      calcNextRun({ frequency: 'daily', hour: 9 }, new Date('2028-02-28T10:00:00Z')).toISOString(),
+      '2028-02-29T09:00:00.000Z');
+    assert.equal(
+      calcNextRun({ frequency: 'weekly', hour: 9, weekDays: [3] }, new Date('2028-02-27T10:00:00Z')).toISOString(),
+      '2028-03-01T09:00:00.000Z');
+  });
+
+  test('a run that has just fired is not scheduled for the same instant again', () => {
+    // finishRun() calls this with `now` effectively equal to the time that just
+    // fired. Returning that same instant would make the poller claim the row on
+    // its next tick and every tick after it, so the comparison must be <=, not <.
+    const exact = new Date('2026-03-11T09:00:00Z');
+    assert.equal(calcNextRun({ frequency: 'daily', hour: 9 }, exact).toISOString(),
+      '2026-03-12T09:00:00.000Z');
+    assert.equal(calcNextRun({ frequency: 'weekly', hour: 9, weekDays: [3] }, exact).toISOString(),
+      '2026-03-18T09:00:00.000Z');
+    assert.equal(calcNextRun({ frequency: 'monthly', hour: 9, monthDay: 11 }, exact).toISOString(),
+      '2026-04-11T09:00:00.000Z');
+  });
+
   test('out-of-range or missing fields fall back rather than producing an Invalid Date', () => {
     for (const bad of [
       { frequency: 'daily' },

@@ -2369,3 +2369,65 @@ describe('what the picker stores is what the scheduler fires', () => {
     });
   });
 });
+
+// ── Edge cases the converters have to survive ────────────────────────────────
+describe('schedule conversion edge cases (index.html)', () => {
+  test('an existing UTC row is shown in local time and re-saves unchanged', () => {
+    // Migration 008 defaults minute to 0, so every schedule that existed before
+    // this feature reads as `hour` UTC. A user in India now correctly sees that
+    // their "9" fires at 14:30 their time — the number in the box changes, the
+    // delivery does not. Saving without touching it must not move it.
+    for (const tz of ZONES) {
+      inZone(tz, () => {
+        const stored = { hour: 9, minute: 0, weekDays: [3], monthDay: 10 };
+        const shown  = sched.schedUtcToLocal(stored);
+        const resaved = sched.schedLocalToUtc(shown);
+        assert.equal(resaved.hour, 9, `${tz} drifted the hour`);
+        assert.equal(resaved.minute, 0, `${tz} drifted the minute`);
+        assert.deepEqual(resaved.weekDays, [3], `${tz} drifted the weekday`);
+      });
+    }
+  });
+
+  test('a local time inside a spring-forward gap still converts to a real instant', () => {
+    // 02:30 on 8 March 2026 does not exist in New York — the clock jumps from
+    // 02:00 to 03:00. Date normalises it rather than failing, and the result
+    // must be a usable pair of integers, not NaN.
+    inZone('America/New_York', () => {
+      const utc = sched.schedLocalToUtc({ hour: 2, minute: 30, weekDays: [0], monthDay: 8 });
+      assert.ok(Number.isInteger(utc.hour) && utc.hour >= 0 && utc.hour <= 23, JSON.stringify(utc));
+      assert.ok(Number.isInteger(utc.minute) && utc.minute >= 0 && utc.minute <= 59, JSON.stringify(utc));
+      assert.ok(Number.isInteger(utc.monthDay), JSON.stringify(utc));
+    });
+  });
+
+  test('the shared time pattern accepts what the picker can actually emit', () => {
+    const re = new RegExp(
+      /const SCHED_TIME_RE = (\/.*?\/);/.exec(INDEX_HTML)[1].slice(1, -1)
+    );
+    for (const good of ['09:00', '9:00', '23:59', '00:00', '09:00:30', '09:00:30.500']) {
+      assert.ok(re.test(good), `${good} should be accepted`);
+    }
+    // An empty or half-typed field must be rejected, or the hint would describe
+    // a 09:00 default the user never chose as the value that will be stored.
+    for (const bad of ['', '9', '09:', ':30', 'abc', '09-00']) {
+      assert.ok(!re.test(bad), `${bad} should be rejected`);
+    }
+  });
+
+  test('the hint refuses to describe an empty time field', () => {
+    const fn = extractFunction(INDEX_HTML, 'renderSchedUtcHint');
+    assert.match(fn, /SCHED_TIME_RE\.test/,
+      'renderSchedUtcHint must gate on the same pattern the save does');
+    assert.match(fn, /Choose a time/);
+  });
+
+  test('the save and the hint agree on what a usable time is', () => {
+    // Two patterns would drift, and the failure is a user being told to choose
+    // a time they have already chosen.
+    assert.equal((INDEX_HTML.match(/SCHED_TIME_RE/g) || []).length, 4,
+      'expected the one declaration plus its three uses');
+    assert.doesNotMatch(INDEX_HTML, /\/\^\\d\{2\}:\\d\{2\}\$\//,
+      'the inline time pattern must be gone, not duplicated alongside SCHED_TIME_RE');
+  });
+});
