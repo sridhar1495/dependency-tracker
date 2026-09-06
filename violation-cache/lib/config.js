@@ -22,6 +22,7 @@ const DEFAULTS = {
   CACHE_TTL_HOURS:           '24',
   REPORT_CONCURRENCY:        '5',
   VIOLATION_CONCURRENCY:     '3',
+  SCHEDULER_CONCURRENCY:     '5',
   VIOLATION_JOB_STALL_MINUTES: '15',
   POSTGRES_HOST:             'dt-postgres',
   POSTGRES_PORT:             '5432',
@@ -104,6 +105,13 @@ function parseConfig(env) {
     cacheTtlMs:           positiveInt(env, 'CACHE_TTL_HOURS', { min: 1, max: 8760 }) * 3_600_000,
     reportConcurrency:    positiveInt(env, 'REPORT_CONCURRENCY', { min: 1, max: 50 }),
     violationConcurrency: positiveInt(env, 'VIOLATION_CONCURRENCY', { min: 1, max: 50 }),
+
+    // How many scheduled reports may build at once, across all accounts. Each
+    // one is still limited to reportConcurrency upstream calls, so the total
+    // load on DependencyTrack is the product of the two — raising this without
+    // knowing where DT's knee is buys 5xx responses and retries, not speed.
+    // Capped at 50 for the same reason the other two are.
+    schedulerConcurrency: positiveInt(env, 'SCHEDULER_CONCURRENCY', { min: 1, max: 50 }),
 
     // How long a violation-cache build may go WITHOUT advancing a page before it
     // is presumed wedged. This is not a cap on how long a build may take: a

@@ -4637,3 +4637,218 @@ describe('routes — send now and run history', () => {
     } finally { restore(); restoreSettings(); }
   });
 });
+
+// ── The scheduler pool: no head-of-line blocking ─────────────────────────────
+// The tick used to claim a batch and `await Promise.all` on it, so one slow
+// report idled every other slot until it finished. These tests pin the shape
+// that replaced it: the tick fills and returns, and each job releases its own
+// slot the moment it settles.
+//
+// Job duration is controlled through dtConnections.getResolved — the first
+// thing runScheduledJob awaits. A promise held open is a slow job; a throw is a
+// job that finishes immediately (as a failure, which still releases the slot).
+describe('scheduler pool — a slow report must not idle the others', () => {
+  const dtConnectionsMod2 = require('./lib/dt-connections');
+  const mailSettingsMod   = require('./lib/mail-settings');
+
+  /** Silence everything runScheduledJob touches except the one lever we hold. */
+  function harness({ concurrency = 5, due = 0 } = {}) {
+    const restores = [];
+    let handed = 0;
+    const gates = [];                       // one resolver per started job
+
+    restores.push(stub(schedulesMod, {
+      claimOne: async () => {
+        if (handed >= due) return null;
+        handed++;
+        return { id: `sched-${handed}`, userId: `user-${handed}`, hour: 9, minute: 0,
+                 frequency: 'daily', riskTypes: ['security'], nextRunAt: null };
+      },
+      startRun:    async () => 1,
+      completeRun: async () => {},
+      finishRun:   async () => {},
+      getProjects: async () => [],
+    }));
+    restores.push(stub(dtConnectionsMod2, {
+      getResolved: () => new Promise((resolve, reject) => gates.push({ resolve, reject })),
+    }));
+    // The failure path emails an alert; keep it off the network.
+    restores.push(stub(mailSettingsMod, { getResolved: async () => null }));
+
+    schedulerMod.configure({ schedulerConcurrency: concurrency });
+    const settle = async (rounds = 12) => {
+      for (let n = 0; n < rounds; n++) await new Promise(r => setImmediate(r));
+    };
+    return {
+      gates,
+      settle,
+      /** Let job `i` finish (as a failure, which is enough to free its slot). */
+      finish: async (i) => {
+        assert.ok(gates[i], `job ${i} was never started — the pool leaked between tests`);
+        gates[i].reject(new Error('done'));
+        // Let the rejection propagate through runScheduledJob's catch, its
+        // finally, and the refill it triggers.
+        await settle();
+      },
+      /**
+       * Drain to empty before handing the pool to the next test.
+       *
+       * The pool is process-global, so a job left in flight would occupy a slot
+       * in every test that follows and the failure would surface somewhere
+       * unrelated. Rejecting repeatedly is needed because each release refills.
+       */
+      restore: async () => {
+        for (let round = 0; round < 40 && schedulerMod.runningCount() > 0; round++) {
+          gates.forEach(g => { try { g.reject(new Error('cleanup')); } catch (_) {} });
+          await settle(4);
+        }
+        restores.forEach(r => r());
+        schedulerMod.configure({ schedulerConcurrency: 5 });
+        assert.equal(schedulerMod.runningCount(), 0, 'the pool must drain between tests');
+      },
+    };
+  }
+
+  test('the tick returns while reports are still building', async () => {
+    // The old tick awaited Promise.all, so it could not return until the
+    // slowest job in the batch had finished. Raced against a deadline rather
+    // than simply awaited: under that design this hangs forever, and a test
+    // that hangs burns a CI timeout instead of naming the defect.
+    const h = harness({ concurrency: 3, due: 3 });
+    try {
+      const TIMED_OUT = Symbol('timed out');
+      const deadline = new Promise(r => setTimeout(() => r(TIMED_OUT), 500));
+      const result = await Promise.race([schedulerMod.tick(), deadline]);
+      assert.notEqual(result, TIMED_OUT,
+        'tick() must not wait for the reports it started — that is head-of-line blocking');
+      await h.settle();
+      assert.equal(result.started, 3);
+      assert.equal(schedulerMod.runningCount(), 3,
+        'the tick must not wait for the reports it started');
+      assert.equal(schedulerMod.isRunning(), true);
+    } finally { await h.restore(); }
+  });
+
+  test('the pool never exceeds its ceiling, however much is due', async () => {
+    const h = harness({ concurrency: 2, due: 10 });
+    try {
+      await schedulerMod.tick();
+      await h.settle();
+      assert.equal(schedulerMod.runningCount(), 2, 'two slots, two jobs');
+      // A second tick while full must claim nothing.
+      const again = await schedulerMod.tick();
+      assert.equal(again.started, 0);
+      assert.equal(schedulerMod.runningCount(), 2);
+    } finally { await h.restore(); }
+  });
+
+  test('a finished job refills its own slot immediately, without another tick', async () => {
+    // This is the whole point. Under the old design the freed slot sat idle
+    // until every job in the batch had finished AND the next minute elapsed.
+    const h = harness({ concurrency: 2, due: 6 });
+    try {
+      await schedulerMod.tick();
+      await h.settle();
+      assert.equal(schedulerMod.runningCount(), 2);
+
+      await h.finish(0);                    // one finishes; no tick is called
+      assert.equal(schedulerMod.runningCount(), 2,
+        'the freed slot must be refilled by the job itself, not by the poller');
+      assert.equal(h.gates.length, 3, 'a third job was started');
+
+      await h.finish(1);
+      assert.equal(h.gates.length, 4);
+      assert.equal(schedulerMod.runningCount(), 2, 'still full');
+    } finally { await h.restore(); }
+  });
+
+  test('a slow report does not hold the other slots hostage', async () => {
+    // The regression this change exists for: one 30-minute job used to stop the
+    // other four slots being reused for the whole 30 minutes.
+    const h = harness({ concurrency: 3, due: 12 });
+    try {
+      await schedulerMod.tick();
+      await h.settle();
+      assert.equal(h.gates.length, 3);
+
+      // Job 0 never finishes. The other two cycle repeatedly regardless.
+      for (const i of [1, 2, 3, 4, 5, 6]) await h.finish(i);
+
+      assert.equal(h.gates.length, 9,
+        'the two free slots must keep taking work while the slow one runs');
+      assert.equal(schedulerMod.runningCount(), 3, 'the pool stays full');
+      // And the slow one is still there, holding exactly one slot.
+      assert.ok(h.gates[0], 'the slow job is still in flight');
+    } finally { await h.restore(); }
+  });
+
+  test('the pool drains to empty when nothing more is due', async () => {
+    const h = harness({ concurrency: 3, due: 3 });
+    try {
+      await schedulerMod.tick();
+      await h.settle();
+      for (const i of [0, 1, 2]) await h.finish(i);
+      assert.equal(schedulerMod.runningCount(), 0);
+      assert.equal(schedulerMod.isRunning(), false);
+      assert.equal(h.gates.length, 3, 'nothing more was claimed than was due');
+    } finally { await h.restore(); }
+  });
+
+  test('a claim failure does not wedge the pool', async () => {
+    // If claimOne throws, the loop must release its guard or the scheduler
+    // would never claim again for the life of the process.
+    const restore = stub(schedulesMod, {
+      claimOne: async () => { throw new Error('database gone'); },
+    });
+    try {
+      const result = await schedulerMod.tick();
+      assert.ok(result.error, 'the failure is reported');
+      assert.equal(schedulerMod.runningCount(), 0);
+      // The very next tick must be able to claim again.
+      restore();
+      const h = harness({ concurrency: 1, due: 1 });
+      try {
+        const after = await schedulerMod.tick();
+        await h.settle();
+        assert.equal(after.started, 1, 'the claim guard must have been released');
+      } finally { await h.restore(); }
+    } finally { /* the inner harness owns the cleanup */ }
+  });
+
+  test('nothing is claimed when the pool is already full at boot-time defaults', async () => {
+    assert.equal(schedulerMod.maxConcurrent(), schedulerMod.FALLBACK_CONCURRENCY,
+      'the ceiling returns to its default between tests');
+  });
+});
+
+describe('scheduler concurrency is configurable', () => {
+  test('SCHEDULER_CONCURRENCY sets the ceiling', () => {
+    const base = { POSTGRES_PASSWORD: 'x', SECRET_ENCRYPTION_KEY: 'a'.repeat(64) };
+    assert.equal(parseConfig({ ...base }).schedulerConcurrency, 5, 'default');
+    assert.equal(parseConfig({ ...base, SCHEDULER_CONCURRENCY: '12' }).schedulerConcurrency, 12);
+  });
+
+  test('it is bounded like the other concurrency limits', () => {
+    // Unbounded, it would be a way to point 50 x REPORT_CONCURRENCY requests at
+    // somebody's DependencyTrack with one environment variable.
+    const base = { POSTGRES_PASSWORD: 'x', SECRET_ENCRYPTION_KEY: 'a'.repeat(64) };
+    for (const bad of ['0', '-1', '51', 'lots', '2.5']) {
+      assert.throws(() => parseConfig({ ...base, SCHEDULER_CONCURRENCY: bad }),
+        /SCHEDULER_CONCURRENCY/, JSON.stringify(bad));
+    }
+    // An empty value means "not set" for every variable in this file — compose
+    // renders an unset variable as an empty string — so it takes the default
+    // rather than refusing to boot.
+    assert.equal(parseConfig({ ...base, SCHEDULER_CONCURRENCY: '' }).schedulerConcurrency, 5);
+  });
+
+  test('configure() ignores nonsense rather than disabling the scheduler', () => {
+    // A zero or a NaN reaching the pool would stop it claiming anything at all,
+    // which is a worse failure than ignoring a bad value.
+    for (const bad of [0, -3, 1.5, null, undefined, 'five']) {
+      schedulerMod.configure({ schedulerConcurrency: bad });
+      assert.ok(schedulerMod.maxConcurrent() >= 1, JSON.stringify(bad));
+    }
+    schedulerMod.configure({ schedulerConcurrency: 5 });
+  });
+});

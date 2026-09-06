@@ -26,17 +26,32 @@ const branding = require('./branding');
 // the single rule for what a report is called, shared with the manual path.
 const reports = require('./reports');
 const { collectReportData } = reports;
-const { makeSemaphore } = require('./async-utils');
 const schedulesDb = require('./schedules');
 const mailSettings = require('./mail-settings');
 const dtConnections = require('./dt-connections');
 
 const POLL_INTERVAL_MS  = 60_000;  // one tick a minute
-const MAX_CONCURRENT    = 5;       // bounded concurrency (CLAUDE.md §13)
 const STALE_CLAIM_MINS  = 45;      // longer than the 30-minute report watchdog
 
-let _pollTimer = null;
-let _ticking   = false;
+// How many scheduled reports may build at once, across all accounts
+// (SCHEDULER_CONCURRENCY, default 5). Read through configure() rather than as a
+// constant so an operator can tune it for their DependencyTrack without a
+// rebuild — the ceiling that matters is DT's, not this service's.
+const FALLBACK_CONCURRENCY = 5;
+let _maxConcurrent = FALLBACK_CONCURRENCY;
+
+/** Set the pool ceiling. Called once from the boot sequence. */
+function configure({ schedulerConcurrency } = {}) {
+  if (Number.isInteger(schedulerConcurrency) && schedulerConcurrency > 0) {
+    _maxConcurrent = schedulerConcurrency;
+  }
+}
+function maxConcurrent() { return _maxConcurrent; }
+
+let _pollTimer    = null;
+let _running      = 0;      // jobs building right now, in this process
+let _claiming     = false;  // a claim loop is in progress
+let _refillWanted = false;  // a slot freed while that loop was running
 
 // ── Timing ────────────────────────────────────────────────────────────────────
 // Q19: hour/minute/weekDays/monthDay are UTC, and this function reads them with
@@ -268,27 +283,88 @@ async function runScheduledJob(schedule, { manual = false } = {}) {
 }
 
 // ── Poller ────────────────────────────────────────────────────────────────────
+// P20: a continuous worker pool, not a batch per tick.
+//
+// The tick used to claim up to N due schedules and then `await Promise.all` on
+// all of them before it could claim anything else. One slow report therefore
+// idled every other slot: with five claimed, four finishing in two minutes and
+// one taking thirty, the service ran at a fifth of its capacity for
+// twenty-eight minutes while work sat queued behind it. That is head-of-line
+// blocking, and it cost more throughput than the concurrency number did.
+//
+// Now the tick only *fills* free slots and returns. Each job releases its own
+// slot when it settles and immediately pulls the next piece of work, so a fast
+// job never waits on a slow neighbour and a freed slot is reused in
+// milliseconds rather than at the next minute boundary.
+//
+// `_running` and `_claiming` are process-global mutable state, which §7.5
+// normally forbids — but they describe THIS PROCESS's capacity, not any
+// principal's data. The per-user guarantee still lives in the database, in
+// claimOne's NOT EXISTS clause, which is what keeps it correct across a restart
+// and across replicas.
+
 /**
- * One tick: claim what is due and run it, bounded to MAX_CONCURRENT.
+ * Claim and start work until the pool is full or nothing is due.
  *
- * Exported so tests can drive a tick directly instead of waiting a minute.
+ * Jobs are deliberately NOT awaited here: awaiting them is precisely what
+ * caused the blocking this replaces. Each one re-enters through its own
+ * `finally`, so the pool refills itself.
+ *
+ * @returns {Promise<number>} how many jobs this call started
+ */
+async function fill() {
+  // Two claim loops must not run at once or they would over-claim past the
+  // ceiling. A caller that arrives while one is in progress asks it to go round
+  // again rather than giving up, so a slot freed mid-loop is not stranded.
+  if (_claiming) { _refillWanted = true; return 0; }
+  _claiming = true;
+  let started = 0;
+  try {
+    do {
+      _refillWanted = false;
+      while (_running < maxConcurrent()) {
+        const row = await schedulesDb.claimOne();
+        if (!row) break;                       // nothing due, or every account busy
+        _running++;
+        started++;
+        log('info', 'Scheduled report claimed', {
+          userId: row.userId, scheduleId: row.id, running: _running,
+        });
+        // runScheduledJob owns its own error handling and always releases the
+        // database claim; the catch here is the last resort that keeps a thrown
+        // error from becoming an unhandled rejection (CLAUDE.md §11.1).
+        runScheduledJob(row)
+          .catch(err => log('error', `Scheduled report crashed: ${err.message}`,
+            { userId: row.userId, scheduleId: row.id }))
+          .finally(() => {
+            _running--;
+            // A slot just freed. Take the next piece of work now instead of
+            // waiting up to a minute for the next tick — this is the whole
+            // point of the change.
+            fill().catch(err => log('error', `Scheduler refill failed: ${err.message}`));
+          });
+      }
+    } while (_refillWanted);
+  } finally {
+    _claiming = false;
+  }
+  return started;
+}
+
+/**
+ * One tick: top the pool up.
+ *
+ * Returns as soon as the free slots are filled, so a long-running report cannot
+ * delay the next claim. Exported so tests can drive a tick directly instead of
+ * waiting a minute.
  */
 async function tick() {
-  if (_ticking) return { skipped: true };   // a slow tick must not overlap itself
-  _ticking = true;
   try {
-    const due = await schedulesDb.claimDue(MAX_CONCURRENT);
-    if (due.length === 0) return { claimed: 0 };
-
-    log('info', `Scheduler claimed ${due.length} due schedule(s)`);
-    const sem = makeSemaphore(MAX_CONCURRENT);
-    await Promise.all(due.map(s => sem(() => runScheduledJob(s))));
-    return { claimed: due.length };
+    const started = await fill();
+    return { started, running: _running };
   } catch (err) {
     log('error', `Scheduler tick failed: ${err.message}`);
-    return { error: err.message };
-  } finally {
-    _ticking = false;
+    return { error: err.message, running: _running };
   }
 }
 
@@ -302,18 +378,33 @@ async function start() {
   if (_pollTimer) clearInterval(_pollTimer);
   _pollTimer = setInterval(() => { tick(); }, POLL_INTERVAL_MS);
   if (_pollTimer.unref) _pollTimer.unref();
-  log('info', 'Scheduler poller started', { intervalSeconds: POLL_INTERVAL_MS / 1000, maxConcurrent: MAX_CONCURRENT });
+  log('info', 'Scheduler poller started', {
+    intervalSeconds: POLL_INTERVAL_MS / 1000, maxConcurrent: maxConcurrent(),
+  });
 }
 
-/** Stop the poller. Called from the SIGTERM handler. */
+/**
+ * Stop the poller. Called from the SIGTERM handler.
+ *
+ * In-flight jobs are not awaited: a report can take half an hour and a shutdown
+ * cannot wait that long. Their database claims are recovered by
+ * releaseStaleClaims() at the next boot, which is the same mechanism that
+ * handles a crash — so an abandoned run is a case the service already has an
+ * answer for rather than a new one this introduces.
+ */
 function stop() {
   if (_pollTimer) { clearInterval(_pollTimer); _pollTimer = null; }
 }
 
-function isRunning() { return _ticking; }
+/** True while any scheduled report is building in this process. */
+function isRunning() { return _running > 0; }
+
+/** How many are building right now — for tests and for the boot log. */
+function runningCount() { return _running; }
 
 module.exports = {
+  configure, maxConcurrent,
   calcNextRun, nextRunAfter, applyScheduleRecipients, runScheduledJob,
-  tick, start, stop, isRunning,
-  POLL_INTERVAL_MS, MAX_CONCURRENT, STALE_CLAIM_MINS,
+  fill, tick, start, stop, isRunning, runningCount,
+  POLL_INTERVAL_MS, STALE_CLAIM_MINS, FALLBACK_CONCURRENCY,
 };

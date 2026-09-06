@@ -208,7 +208,7 @@ Inline comments use lettered prefixes to trace design decisions:
 - **O-numbers** — observability notes (`// O3: JSON log format for log aggregators`)
 - **S-numbers** — security rationale (`// S2: token hashed before storage`) — **new in revision 2**
 
-Highest numbers currently in use: **Q20, P19, O5, S32**. When adding logic with a
+Highest numbers currently in use: **Q20, P20, O5, S32**. When adding logic with a
 non-obvious trade-off, add the next number in the appropriate series. Check the
 current maximum before assigning — parallel branches can claim the same number.
 
@@ -491,6 +491,26 @@ if (method === 'GET' && path === '/violation-cache/status') {
   because of the `candidate <= now` guard; do not remove one without the other.
 - Scheduling is driven by **one poller** that ticks every 60 seconds and claims due
   rows with `FOR UPDATE SKIP LOCKED`. Never create one timer per user.
+- **The tick fills a worker pool; it does not await a batch** (P20). It used to
+  claim N due schedules and `await Promise.all` on all of them before claiming
+  again, so one slow report idled every other slot — five claimed, four done in
+  two minutes, one taking thirty, and the service ran at a fifth of capacity for
+  twenty-eight minutes with work queued behind it. `fill()` now starts jobs
+  without awaiting them and each job refills its own slot from its `finally`, so
+  a freed slot is reused in milliseconds rather than at the next minute
+  boundary. Do not reintroduce an `await` over the started jobs: that single
+  keyword is the whole defect.
+- `_running` and `_claiming` are process-global mutable state, which §7.5
+  normally forbids. They describe **this process's capacity**, not a principal's
+  data; the per-user guarantee still lives in the database, in `claimOne`'s
+  `NOT EXISTS` clause, which is what keeps it correct across restarts and
+  replicas.
+- **How many run at once is `SCHEDULER_CONCURRENCY`** (default 5), read through
+  `scheduler.configure()` at boot rather than as a constant. The number that
+  matters is DependencyTrack's, not this service's: total upstream load is
+  `SCHEDULER_CONCURRENCY × REPORT_CONCURRENCY`, so raising it past DT's knee
+  buys 5xx responses and retries rather than throughput, and peak memory scales
+  with it because each report builds its workbook in memory.
 - Per-schedule overlap protection is the `running_since` column, not a process
   variable.
 - **A user owns any number of schedules, and at most one of them runs at a
@@ -1140,6 +1160,12 @@ redundant.
 - Every validation rule, including boundary lengths and rejected characters.
 - Password hashing round-trip, and rejection of a tampered hash.
 - Token minting and hashing; encryption round-trip and auth-tag failure.
+- The scheduler pool: the tick returns while reports are still building, the
+  ceiling is never exceeded, a finished job refills its own slot without another
+  tick, and a report that never finishes does not stop the other slots cycling.
+  The first of those is raced against a deadline rather than simply awaited —
+  under the batch design it hangs, and a test that hangs burns a CI timeout
+  instead of naming the defect.
 - `calcNextRun` for all three frequencies, including a weekly schedule that
   fires today and one whose time has already passed, and that the answer does
   not move when `process.env.TZ` does.
@@ -1240,8 +1266,10 @@ aspirations, and each is verifiable.
   by `EXPLAIN (ANALYZE, BUFFERS)` attached to the PR that introduces it.
 - **No unbounded table growth.** Sessions are swept; audit and run history are
   retained 90 days.
-- **Bounded concurrency everywhere.** Pool 15, scheduler 5, report fetches 5,
-  violation fetches 3.
+- **Bounded concurrency everywhere.** Pool 15, scheduler 5
+  (`SCHEDULER_CONCURRENCY`), report fetches 5, violation fetches 3.
+- **No idle capacity while work is queued.** The scheduler's slots are refilled
+  by the job that frees them, not by the next poll (§6.8).
 
 ---
 
@@ -1264,6 +1292,7 @@ aspirations, and each is verifiable.
 | `VIOLATION_JOB_STALL_MINUTES` | server | Silence after which a refetch is presumed wedged (default 15) |
 | `PORT` | server | Cache service listen port (default 3001) |
 | `REPORT_CONCURRENCY` | server | Max parallel project fetches (default 5) |
+| `SCHEDULER_CONCURRENCY` | server | Scheduled reports building at once, across all accounts (default 5). One account's own schedules always run one at a time regardless. Upstream load is this × `REPORT_CONCURRENCY` |
 | `VIOLATION_CONCURRENCY` | server | Max parallel violation fetches (default 3) |
 | `LOG_FORMAT` | server | `text` (default) or `json` |
 | `TEST_DATABASE_URL` | tests | Enables the database integration tier |

@@ -140,6 +140,10 @@ reports.configure({
   reportConcurrency:    cfg.reportConcurrency,
   violationConcurrency: cfg.violationConcurrency,
 });
+// How many scheduled reports may build at once, across all accounts. The total
+// load this puts on DependencyTrack is this times reportConcurrency, so the two
+// are read from the same place and tuned together.
+scheduler.configure({ schedulerConcurrency: cfg.schedulerConcurrency });
 
 // Context handed to every route module. Per-user values are never put here —
 // module scope holds only genuinely global state (CLAUDE.md §7.5).
@@ -290,6 +294,7 @@ async function boot() {
     violationConcurrency: cfg.violationConcurrency,
     jobStallMinutes:      cfg.jobStallMs / 60_000,
     schedulerPollSeconds: scheduler.POLL_INTERVAL_MS / 1000,
+    schedulerConcurrency: scheduler.maxConcurrent(),
     logFormat:            cfg.logFormat,
     // Connections are per-user now; there is no service-wide DT URL or key to
     // report, and none is ever logged (CLAUDE.md §6.5).

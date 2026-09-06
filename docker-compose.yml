@@ -72,6 +72,10 @@ services:
       # wedged. Not a cap on total run time — a large portfolio that keeps making
       # progress runs as long as it needs to.
       VIOLATION_JOB_STALL_MINUTES: "${VIOLATION_JOB_STALL_MINUTES:-15}"
+      # How many scheduled reports build at once, across all accounts. One
+      # account's own schedules still run one at a time whatever this says.
+      # Total upstream load is this times REPORT_CONCURRENCY.
+      SCHEDULER_CONCURRENCY: "${SCHEDULER_CONCURRENCY:-5}"
       PORT: "3001"
       # AES-256-GCM key for stored DT API keys and SMTP passwords. The service
       # refuses to start without it — a key saved under a missing encryption key
