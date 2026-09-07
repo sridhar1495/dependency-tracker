@@ -48,8 +48,10 @@ administrator credentials it created.
 - **A risk trend over time**, above the summary cards: critical, high, medium
   and low across the last week, month or year, as a stacked area, lines, or four
   small multiples. A point is recorded each time violation data is refetched, so
-  the history builds up day by day. A day with no refresh shows as a gap rather
-  than a flat line — the chart never invents a reading nobody took.
+  the history builds up day by day. A day with no refresh carries the previous
+  reading so the trend stays continuous, drawn dashed and shaded with no data
+  marker — so it reads as one line without any carried number being mistakable
+  for a measurement.
 - **Excel reports on demand**, with security findings, a CWE summary, and
   licence and operational policy violations.
 - **Scheduled reports by email.** Each account can have several — a weekly

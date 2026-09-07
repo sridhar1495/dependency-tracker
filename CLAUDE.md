@@ -857,12 +857,23 @@ page's own source rather than copying them.
 
 Four rules the panel must keep:
 
-- **A gap is drawn as a gap.** A day nobody refreshed has no reading, so
-  `trendValues()` returns `null` and both `trendLinePath()` and
-  `trendAreaPath()` start a fresh subpath after it. Joining across it would
-  draw a straight line between two real measurements and invite somebody to
-  read a value off the middle of it. Carrying the previous day forward is the
-  same error wearing a flatter hat.
+- **An unrefreshed day carries the previous reading, and the drawing says so**
+  (Q23). This reverses the rule that shipped first, deliberately: breaking the
+  line at every gap was the literally truthful picture, and it read to most
+  people as "the tool stopped working" — a worse misreading than the one it
+  avoided. Carrying forward *on its own* would be worse still, because a flat
+  line across four days is a claim that the portfolio held steady and nobody
+  measured that. So four things travel together and none may be removed alone:
+  the bridging stroke is **dashed**, the span is **shaded with a hard edge**,
+  a carried day gets **no data marker**, and the tooltip **names the day the
+  number came from**. Continuous to read, impossible to quote as a measurement.
+  `trendValues()` still returns `null` for an uncaptured day and the path
+  helpers still break at `null` — that is what makes the solid overlay stop at
+  the gap and let the dashes show through. Days *before* the first reading stay
+  empty: there is nothing to carry, and extending the earliest value backwards
+  across a year would be invention rather than inference. The header's
+  "5 of 7 days recorded" is now the only unqualified statement of how much was
+  actually measured, so it stays.
 - **The default metric is the one the cards show.** "Critical" means two things
   in this product — pure CVE severity, and that plus the operational, licence
   and security-policy failures. The panel sits directly above the cards, so its
@@ -1108,7 +1119,8 @@ The frontend never performs uniqueness checks — those are backend-only, via
 | `inferSuffix(name, ver)` | frontend | Strip version from name |
 | `trendValues(point, metric)` | frontend | Fold a stored day into the four plotted numbers; `null` for a gap |
 | `trendNiceCeil(max)` | frontend | Round axis ceiling; never 0, because every y divides by it |
-| `trendLinePath` / `trendAreaPath` | frontend | SVG paths that break at gaps rather than bridging them |
+| `trendCarry(rows)` | frontend | Carry the last reading over unrefreshed days; flags which positions were inherited |
+| `trendLinePath` / `trendAreaPath` | frontend | SVG paths that break at `null` — what lets the solid overlay reveal the dashed bridge |
 | `query(sql, params)` / `tx(fn)` | server | All database access |
 | `makeSemaphore(limit)` | server | Promise concurrency limit |
 | `sleep(ms)` | server | Promise delay |
@@ -1348,11 +1360,17 @@ redundant.
   break.
 - The trend charts: the fold against the KPI formula (a cross-layer check — the
   tile arithmetic is read out of `index.html` too, so changing one without the
-  other fails); a gap folding to `null` rather than zero; a line and a stacked
-  band both breaking at one; `trendNiceCeil(0)` returning a usable axis rather
-  than a page of `NaN` for a clean portfolio; and a single captured day landing
-  in the middle of the plot rather than at `Infinity`. Every helper is extracted
-  from the page, not copied.
+  other fails); a gap folding to `null` rather than zero; `trendNiceCeil(0)`
+  returning a usable axis rather than a page of `NaN` for a clean portfolio; and
+  a single captured day landing in the middle of the plot rather than at
+  `Infinity`. Every helper is extracted from the page, not copied.
+- Carrying forward (Q23) needs all four of its signals tested together, because
+  each one alone is what stops a carried number reading as a measured one: the
+  carried position is flagged, it draws no marker, the bridge is dashed while
+  the measured overlay still breaks, the band is emitted *after* the series so a
+  stacked fill cannot hide it, and the tooltip scans back to name the day the
+  number came from. A leading gap must stay empty rather than back-filling the
+  first reading into a year of history nobody recorded.
 - **Authorisation:** every route rejects a missing or invalid token with 401;
   cross-user access returns 404; the profile endpoint ignores login ID and email.
 - Do **not** write tests that require a live DT API.

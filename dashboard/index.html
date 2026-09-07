@@ -305,6 +305,15 @@
     .trend-grid-line { stroke: var(--border); stroke-width: 1; }
     .trend-axis-text { fill: var(--text-muted); font-size: 10px; font-family: inherit; }
     .trend-crosshair { stroke: var(--text-muted); stroke-width: 1; stroke-dasharray: 3 3; }
+    /* The span covering days nobody refreshed. Faint on purpose: it has to be
+       noticeable enough to stop somebody quoting a number off it, and quiet
+       enough not to compete with the data. A custom property rather than a
+       literal so it inverts with the theme like everything else. */
+    .trend-gap-band { fill: var(--text-muted); fill-opacity: 0.10; }
+    .trend-gap-edge {
+      stroke: var(--text-muted); stroke-width: 1;
+      stroke-dasharray: 2 3; stroke-opacity: 0.45;
+    }
     /* The capture markers sit on top of the line, so they need the panel's own
        background rather than transparency to read as points rather than blobs. */
     .trend-dot { stroke: var(--surface); stroke-width: 1.5; }
@@ -330,6 +339,16 @@
     .trend-tip-row { display: flex; align-items: center; gap: 6px; }
     .trend-tip-row .trend-swatch { width: 8px; height: 8px; }
     .trend-tip-val { margin-left: auto; padding-left: 12px; font-weight: 600; }
+    /* Why these numbers are the numbers — separated from them, so it reads as
+       provenance rather than as another row of data. */
+    .trend-tip-note {
+      margin-top: 6px; padding-top: 6px; border-top: 1px solid var(--border);
+      color: var(--text-muted); font-size: 10px; white-space: normal; max-width: 210px;
+    }
+    .trend-swatch-gap {
+      background: var(--text-muted); opacity: 0.28;
+      border: 1px dashed var(--text-muted);
+    }
 
     /* ── Controls ─────────────────────────────────────────────────────────── */
     .controls {
@@ -3916,6 +3935,67 @@ function trendStack(rows) {
   return { bands, max };
 }
 
+/**
+ * Carry the last reading across days nobody refreshed, so the trend is one
+ * continuous shape rather than a run of disconnected islands.
+ *
+ * Q23: this reverses an earlier rule, deliberately and with the trade-off
+ * understood. Breaking the line at every gap was the literally truthful
+ * drawing, but a broken chart reads to most people as "the tool stopped
+ * working", which is a worse misreading than the one it was avoiding. Carrying
+ * forward on its own would be worse still — a flat line across four days is a
+ * claim that the portfolio held steady, and nobody measured that.
+ *
+ * So the value carries and the drawing says so: the bridging stretch is dashed,
+ * the span is shaded, no marker is placed on a carried day, and the tooltip
+ * names the day the number actually came from. Continuous to read, impossible
+ * to quote as a measurement.
+ *
+ * Days BEFORE the first reading are left null. There is nothing to carry, and
+ * extending the earliest value backwards across a year of empty history would
+ * be invention rather than inference.
+ *
+ * @param {Array<object|null>} rows  per-day values, null where uncaptured
+ * @returns {{values: Array<object|null>, carried: boolean[], measured: Array<object|null>}}
+ *   `values` is what to draw, `measured` is the same series with gaps still
+ *   null — the solid overlay is drawn from it — and `carried[i]` marks a
+ *   position whose number was inherited rather than taken.
+ */
+function trendCarry(rows) {
+  const values = [], carried = [], measured = [];
+  let last = null;
+  for (const row of rows) {
+    if (row !== null && row !== undefined) {
+      last = row;
+      values.push(row); measured.push(row); carried.push(false);
+      continue;
+    }
+    measured.push(null);
+    // Nothing seen yet: leave it genuinely empty rather than inventing a past.
+    values.push(last);
+    carried.push(last !== null);
+  }
+  return { values, carried, measured };
+}
+
+/**
+ * Index ranges of consecutive carried days, for the "not measured here" shading.
+ *
+ * One band per run rather than one per day: four adjacent rectangles with
+ * shared edges render as visible seams, and the thing being marked is the
+ * stretch, not each day in it.
+ */
+function trendGapRuns(carried) {
+  const runs = [];
+  let start = -1;
+  for (let i = 0; i < carried.length; i++) {
+    if (carried[i]) { if (start === -1) start = i; continue; }
+    if (start !== -1) { runs.push({ start, end: i - 1 }); start = -1; }
+  }
+  if (start !== -1) runs.push({ start, end: carried.length - 1 });
+  return runs;
+}
+
 /** The largest single value across every series — the ceiling for an unstacked chart. */
 function trendPeak(rows, keys) {
   let max = 0;
@@ -4082,8 +4162,10 @@ function renderTrend() {
       `<span class="trend-legend-item"><span class="trend-swatch" style="background:${l.colour}"></span>${l.label}</span>`
     ).join('') +
     (captured < points.length
-      ? '<span class="trend-legend-item" title="A day with no refetch has no reading, so the line breaks rather than guessing one">'
-        + '◌ gap = no refresh that day</span>'
+      ? '<span class="trend-legend-item" '
+        + 'title="No refetch ran on those days, so the previous reading is carried across them. '
+        + 'The dashes and the shading mark the stretch as inherited rather than measured.">'
+        + '<span class="trend-swatch trend-swatch-gap"></span>shaded = no refresh; last reading carried forward</span>'
       : '');
 
   attachTrendHover(points, rows);
@@ -4106,12 +4188,18 @@ function trendCellHtml(points, rows, levels, height, title) {
 
   const stacked = !_trendView.split && _trendView.chartMain === 'stacked';
   const keys    = levels.map(l => l.key);
+  // Q23: the drawn series carries the last reading across unrefreshed days, so
+  // the chart is one continuous shape. `measured` keeps the real readings only,
+  // and the solid stroke is drawn from it — what shows through in between is
+  // the dashed bridge underneath.
+  const carry   = trendCarry(rows);
+  const drawn   = carry.values;
   // Each small multiple scales to its OWN peak, not a shared one. A portfolio
   // with 4 critical and 900 low would otherwise flatten the critical chart into
   // the axis, which is the one series somebody split the view to look at. The
   // y labels are printed on every chart, so the differing scales are visible
   // rather than implied.
-  const max     = trendNiceCeil(stacked ? trendStack(rows).max : trendPeak(rows, keys));
+  const max     = trendNiceCeil(stacked ? trendStack(drawn).max : trendPeak(drawn, keys));
   const g       = trendGeometry(width, height, points.length, max);
 
   let body = '';
@@ -4137,7 +4225,7 @@ function trendCellHtml(points, rows, levels, height, title) {
   }
 
   if (stacked) {
-    const { bands } = trendStack(rows);
+    const { bands } = trendStack(drawn);
     for (let b = 0; b < bands.length; b++) {
       const d = trendAreaPath(bands[b].upper, bands[b].lower, g);
       if (d) body += `<path d="${d}" fill="${TREND_LEVELS[b].colour}" fill-opacity="0.75"/>`;
@@ -4148,20 +4236,30 @@ function trendCellHtml(points, rows, levels, height, title) {
     // so a year of them is still visible rather than sub-pixel.
     const slot = points.length > 1 ? (g.x1 - g.x0) / (points.length - 1) : (g.x1 - g.x0);
     const bw   = Math.max(1, Math.min(18, slot * 0.7));
-    for (let i = 0; i < rows.length; i++) {
-      if (rows[i] === null) continue;
-      const v = Math.max(0, rows[i][l.key] || 0);
+    for (let i = 0; i < drawn.length; i++) {
+      if (drawn[i] === null) continue;
+      const v = Math.max(0, drawn[i][l.key] || 0);
       const y = g.y(v);
+      // A carried bar is drawn faintly rather than omitted: a missing bar looks
+      // like a zero, which is the reading it most needs not to be confused with.
       body += `<rect x="${(g.x(i) - bw / 2).toFixed(1)}" y="${y.toFixed(1)}" `
            +  `width="${bw.toFixed(1)}" height="${Math.max(0, g.y0 - y).toFixed(1)}" `
-           +  `fill="${l.colour}" fill-opacity="0.8"/>`;
+           +  `fill="${l.colour}" fill-opacity="${carry.carried[i] ? '0.3' : '0.8'}"/>`;
     }
   } else {
     for (const l of levels) {
-      const values = rows.map(r => (r === null ? null : Math.max(0, r[l.key] || 0)));
-      const d = trendLinePath(values, g);
-      if (d) body += `<path d="${d}" fill="none" stroke="${l.colour}" stroke-width="2" `
-                  +  `stroke-linejoin="round" stroke-linecap="round"/>`;
+      const pick = (src) => src.map(r => (r === null ? null : Math.max(0, r[l.key] || 0)));
+      // Two strokes, one on top of the other. The continuous one is dashed; the
+      // measured one is solid and breaks at every gap, so it covers the dashed
+      // path exactly except across the stretches nobody refreshed — which is
+      // the only place the dashes show.
+      const bridge = trendLinePath(pick(drawn), g);
+      if (bridge) body += `<path d="${bridge}" fill="none" stroke="${l.colour}" stroke-width="2" `
+                       +  `stroke-dasharray="4 4" stroke-opacity="0.65" `
+                       +  `stroke-linejoin="round" stroke-linecap="round"/>`;
+      const solid = trendLinePath(pick(carry.measured), g);
+      if (solid) body += `<path d="${solid}" fill="none" stroke="${l.colour}" stroke-width="2" `
+                      +  `stroke-linejoin="round" stroke-linecap="round"/>`;
     }
   }
 
@@ -4169,16 +4267,42 @@ function trendCellHtml(points, rows, levels, height, title) {
   // between two gaps visible at all — a one-point run draws no line and no area.
   const isBar = _trendView.split && _trendView.chartSplit === 'bar';
   if (!isBar && points.length <= TREND_GEOM.maxDots) {
-    const stack = stacked ? trendStack(rows).bands : null;
-    for (let i = 0; i < rows.length; i++) {
-      if (rows[i] === null) continue;
+    const stack = stacked ? trendStack(drawn).bands : null;
+    for (let i = 0; i < drawn.length; i++) {
+      // A marker asserts "a reading was taken here", so a carried day gets none.
+      // It is what keeps the numbers quotable: every dot is a measurement.
+      if (drawn[i] === null || carry.carried[i]) continue;
       for (let b = 0; b < levels.length; b++) {
         const key = levels[b].key;
         const v = stacked
           ? stack[TREND_LEVELS.findIndex(l => l.key === key)].upper[i]
-          : Math.max(0, rows[i][key] || 0);
+          : Math.max(0, drawn[i][key] || 0);
         body += `<circle class="trend-dot" cx="${g.x(i).toFixed(1)}" cy="${g.y(v).toFixed(1)}" `
              +  `r="2.5" fill="${levels[b].colour}"/>`;
+      }
+    }
+  }
+
+  // The "not measured here" bands, drawn OVER the data rather than under it.
+  // Underneath, a stacked area covers them almost completely — and the stacked
+  // view is the one with no dashed stroke to fall back on, so the band is its
+  // only signal. One band per run covers all four series at once, because what
+  // is being marked is the stretch, not any one of them.
+  const runs = trendGapRuns(carry.carried);
+  if (runs.length) {
+    const half = points.length > 1 ? (g.x1 - g.x0) / (points.length - 1) / 2 : 0;
+    for (const r of runs) {
+      const left  = Math.max(g.x0, g.x(r.start) - half);
+      const right = Math.min(g.x1, g.x(r.end) + half);
+      const w = Math.max(0, right - left);
+      body += `<rect class="trend-gap-band" x="${left.toFixed(1)}" y="${g.y1}" `
+           +  `width="${w.toFixed(1)}" height="${(g.y0 - g.y1).toFixed(1)}"/>`;
+      // Crisp edges as well as the wash. A translucent fill over saturated
+      // colour is easy to miss; a hard boundary is not, and it says precisely
+      // where the measured data stops and starts again.
+      for (const x of [left, right]) {
+        body += `<line class="trend-gap-edge" x1="${x.toFixed(1)}" y1="${g.y1}" `
+             +  `x2="${x.toFixed(1)}" y2="${g.y0}"/>`;
       }
     }
   }
@@ -4204,6 +4328,10 @@ function trendCellHtml(points, rows, levels, height, title) {
  * because innerHTML replaces the elements the listeners were attached to.
  */
 function attachTrendHover(points, rows) {
+  // Computed once here rather than per pointer move: the readout has to name
+  // the day a carried number actually came from, and that is a property of the
+  // series, not of the mouse.
+  const carry = trendCarry(rows);
   for (const cell of document.querySelectorAll('.trend-cell')) {
     const svg  = cell.querySelector('svg');
     const hair = cell.querySelector('.trend-crosshair');
@@ -4224,7 +4352,7 @@ function attachTrendHover(points, rows) {
       hair.setAttribute('x1', String(x0 + ((x1 - x0) * i) / Math.max(1, n - 1)));
       hair.setAttribute('x2', hair.getAttribute('x1'));
       hair.hidden = false;
-      showTrendTip(cell, ev, points[i], rows[i]);
+      showTrendTip(cell, ev, points, i, carry);
     };
     const leave = () => { hair.hidden = true; hideTrendTip(); };
 
@@ -4233,7 +4361,7 @@ function attachTrendHover(points, rows) {
   }
 }
 
-function showTrendTip(cell, ev, point, row) {
+function showTrendTip(cell, ev, points, i, carry) {
   let tip = document.getElementById('trendTip');
   if (!tip) {
     tip = document.createElement('div');
@@ -4241,16 +4369,34 @@ function showTrendTip(cell, ev, point, row) {
     tip.className = 'trend-tip';
     document.body.appendChild(tip);
   }
+  const point = points[i];
+  const row   = carry.values[i];
+
+  // The day the number was actually taken on. Scanning back rather than
+  // storing it: a carried run can be any length, and the reading it inherited
+  // is the nearest measured day to its left.
+  let sourceDay = null;
+  if (carry.carried[i]) {
+    for (let k = i - 1; k >= 0; k--) {
+      if (carry.measured[k] !== null) { sourceDay = points[k].day; break; }
+    }
+  }
+
   // Always all four, even in the split view. Hovering one small multiple to
   // read only the series you are already looking at would be pointless; the
   // value of the crosshair is seeing what the other three did on that day.
   tip.innerHTML =
     `<div class="trend-tip-day">${escHtml(trendDayLabel(point.day))}</div>` +
     (row === null
-      ? '<div>No refresh that day</div>'
+      // Before the first reading there is nothing to carry and nothing to show.
+      ? '<div>No data yet — history starts at the first refresh</div>'
       : TREND_LEVELS.map(l =>
           `<div class="trend-tip-row"><span class="trend-swatch" style="background:${l.colour}"></span>`
-          + `${l.label}<span class="trend-tip-val">${row[l.key]}</span></div>`).join(''));
+          + `${l.label}<span class="trend-tip-val">${row[l.key]}</span></div>`).join('')
+        + (sourceDay
+            ? `<div class="trend-tip-note">No refresh that day — showing `
+              + `${escHtml(trendDayLabel(sourceDay))}'s reading</div>`
+            : ''));
 
   // Flip to the left of the pointer near the right edge, so the tooltip is
   // never the thing that makes the page scroll sideways.
