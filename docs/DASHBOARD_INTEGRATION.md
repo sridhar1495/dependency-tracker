@@ -136,10 +136,22 @@ moment a violation refetch completes — that is the only point at which the
 service holds a complete picture of the portfolio. The last refresh of a day
 wins, so the point reflects the most recent measurement rather than the first.
 
-**Gaps are shown as gaps.** A day nobody refreshed has no reading, so the line
-breaks and the tooltip says "No refresh that day". Carrying the previous day
-forward would draw a flat line asserting a measurement that was never taken.
-The legend calls this out whenever the window contains one.
+**A day with no refresh carries the previous reading, and is marked as carried.**
+The chart stays one continuous shape — a broken line reads as "the tool stopped
+working" — but the stretch is drawn so it cannot be mistaken for measurement:
+
+- the bridging line is **dashed** (in the stacked view, the span is shaded)
+- the span is **shaded, with a dashed edge** at each boundary
+- a carried day has **no data marker** — every dot on the chart is a real reading
+- the tooltip says **"No refresh that day — showing 3 Sep's reading"**, and
+  still lists the numbers so they can be read
+
+The header keeps an unqualified count — "5 of 7 days recorded" — so how much was
+actually measured is always on screen. The legend explains the shading whenever
+the window contains one.
+
+**Days before your first reading stay empty.** There is nothing to carry, so
+they draw nothing at all rather than extending the earliest value backwards.
 
 **It starts empty.** History only exists from the point the feature was
 deployed, and only for days on which somebody refreshed. Until the first refetch
@@ -264,6 +276,9 @@ consequences worth planning around:
   hiding it: that day comes back with `captured: false` and null totals. The
   series is dense — every day in the window is present — so a consumer can index
   by position without checking for gaps, but it must not read a gap as a zero.
+  The endpoint reports the absence; deciding what to *draw* there belongs to the
+  caller. The dashboard carries the previous reading across and marks the
+  stretch as inherited (see [Risk Trend](#risk-trend)).
 - **Rotating your DependencyTrack API key starts the history over.** History is
   keyed by a fingerprint of the URL and key, the same way the shared cache is,
   so a new key is a new series.
