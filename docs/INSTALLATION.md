@@ -171,6 +171,7 @@ docker compose --env-file .env up -d
 | `SCHEDULER_CONCURRENCY` | `5` | How many scheduled reports build at once, **across all accounts**. One account's own schedules always run one at a time whatever this says, so five schedules due at 09:00 never become five crawls against one connection. See the note below before raising it |
 | `REPORT_CONCURRENCY` | `5` | Parallel project fetches inside a single report |
 | `VIOLATION_CONCURRENCY` | `3` | Parallel violation fetches during a cache build |
+| `SNAPSHOT_RETENTION_DAYS` | `400` | How long the daily risk history is kept. One row per DependencyTrack connection per day, written when a refetch completes. The default is a year plus five weeks so the trend graph's year view stays fully covered. Lowering it discards measurements of days that have already passed and cannot be recovered |
 | `POSTGRES_USER` | `dtdash` | Database role |
 | `POSTGRES_PASSWORD` | _(generated)_ | Database password. `install.sh` generates one when absent. **Changing it after first start will break the connection** — PostgreSQL only reads it when initialising the cluster |
 | `POSTGRES_DB` | `dtdash` | Database name |
