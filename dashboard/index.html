@@ -922,14 +922,15 @@
 
     <!-- Controls row 2: filters + tree actions + export -->
     <div class="controls filters">
-      <input class="search-input" id="searchInput" placeholder="Search projects…" oninput="debouncedFilter()" />
+      <input class="search-input" id="searchInput" aria-label="Search projects by name"
+             placeholder="Search projects…" oninput="debouncedFilter()" />
 
       <!-- Toggle buttons immediately after search -->
       <button class="btn" id="latestFilterBtn" onclick="toggleLatestFilter()" title="Show only projects marked as Latest version (+ their parent groups)">★ Latest Only</button>
       <button class="btn" id="flatViewBtn" onclick="toggleFlatView()" title="Show only leaf projects in a flat list (no hierarchy)">⊟ Flat View</button>
 
       <!-- Dropdowns: Risk → Category → Tags -->
-      <select class="filter-select" id="riskFilter" onchange="applyFilters()">
+      <select class="filter-select" id="riskFilter" aria-label="Filter by risk severity" onchange="applyFilters()">
         <option value="all">All risk levels</option>
         <option value="critical">Has Critical</option>
         <option value="high">Has High</option>
@@ -937,7 +938,7 @@
         <option value="low">Has Low</option>
         <option value="ok">Clean (OK)</option>
       </select>
-      <select class="filter-select" id="categoryFilter" onchange="applyFilters()">
+      <select class="filter-select" id="categoryFilter" aria-label="Filter by risk category" onchange="applyFilters()">
         <option value="all">All categories</option>
         <option value="security">Security</option>
         <option value="operations">Operational</option>
@@ -946,7 +947,7 @@
       </select>
 
       <!-- Tags single-select: show projects that carry the chosen tag -->
-      <select class="filter-select" id="tagFilter" onchange="applyFilters()">
+      <select class="filter-select" id="tagFilter" aria-label="Filter by project tag" onchange="applyFilters()">
         <option value="all">All tags</option>
       </select>
 
@@ -1199,7 +1200,11 @@
           </div>
           <div style="flex:1">
             <label class="cfg-label" style="margin-top:0">Password</label>
-            <input id="cfgSmtpPass" class="cfg-input" type="password" placeholder="(unchanged)" oninput="markConfigDirty()" />
+            <!-- The field holds the '••••••••' sentinel when a password is
+                 stored. Clearing it on focus is what makes that safe: without
+                 it, typing a new password would append to the eight bullets. -->
+            <input id="cfgSmtpPass" class="cfg-input" type="password" placeholder="(unchanged)"
+                   onfocus="clearSmtpPassPlaceholder()" oninput="markConfigDirty()" />
           </div>
         </div>
         <label class="cfg-label">From Address</label>
@@ -1741,7 +1746,8 @@ async function saveProfile() {
   let err = nameError(firstName, 'First name') || nameError(lastName, 'Last name');
   if (!err && password) {
     if (/\s/.test(password)) err = 'Password cannot contain spaces.';
-    else if (password.length < 8 || password.length > 128) err = 'Password must be 8 to 128 characters.';
+    // Mirrors lib/validate.js (CLAUDE.md §8.8) — length only, no complexity.
+    else if (password.length < 12 || password.length > 128) err = 'Password must be 12 to 128 characters.';
     else if (password !== confirm) err = 'Passwords do not match.';
   }
   if (err) { setProfileError(err); return; }
@@ -1892,7 +1898,13 @@ async function loadConfigFromServer() {
       document.getElementById('cfgSmtpPort').value    = smtp.port || 587;
       document.getElementById('cfgSmtpSecure').checked = !!smtp.secure;
       document.getElementById('cfgSmtpUser').value    = smtp.user || '';
-      document.getElementById('cfgSmtpPass').value    = '';
+      // The server sends '••••••••' when a password is stored, and both the save
+      // path and testEmailFromPanel() treat that literal as "use the stored one"
+      // (CLAUDE.md §6.9). Blanking the field here broke the second half of that
+      // contract: Send Test Email then read an empty box, decided no password was
+      // meant, and authenticated with '' — so a correctly configured account was
+      // told its credentials were rejected. Keep what the server sent.
+      document.getElementById('cfgSmtpPass').value    = smtp.pass || '';
       document.getElementById('cfgMailFrom').value    = m.from || '';
       document.getElementById('cfgMailTo').value      = (m.to || []).join(', ');
       document.getElementById('cfgMailCc').value      = (m.cc || []).join(', ');
@@ -2192,10 +2204,10 @@ async function saveConfigPanel() {
     let mailConfig;
     if (mailEnabled) {
       const smtpPass = document.getElementById('cfgSmtpPass').value;
-      // Only send placeholder when password field is blank AND a password is stored.
-      // If no password was ever stored (relay mode), send empty so it stays empty.
+      // Only send the sentinel when the field is blank AND a password is stored.
+      // If none was ever stored (relay mode), send empty so it stays empty.
       const hasStoredPass = !!(existingMail.smtp && existingMail.smtp.pass);
-      const pass = smtpPass || (hasStoredPass ? '\u2022\u2022\u2022\u2022\u2022\u2022\u2022\u2022' : '');
+      const pass = smtpPass || (hasStoredPass ? SMTP_PASS_PLACEHOLDER : '');
       mailConfig = {
         enabled: true,
         smtp: {
@@ -2335,16 +2347,31 @@ async function testConnectionFromPanel() {
   }
 }
 
+/* The sentinel the server sends in place of a stored SMTP password, and the
+   only value the save path and the test path both read as "leave it alone"
+   (CLAUDE.md §6.9). Named rather than repeated: the literal appearing in one
+   place and not the other is exactly how the two halves came apart. */
+const SMTP_PASS_PLACEHOLDER = '••••••••';
+
+/** Empty the field when it still holds the sentinel, so typing replaces it. */
+function clearSmtpPassPlaceholder() {
+  const el = document.getElementById('cfgSmtpPass');
+  if (el && el.value === SMTP_PASS_PLACEHOLDER) el.value = '';
+}
+
 async function testEmailFromPanel() {
   const btn = document.querySelector('[onclick="testEmailFromPanel()"]');
   if (btn) { btn.disabled = true; btn.textContent = 'Sending…'; }
   try {
-    // Read current form values so the test uses what is on screen,
-    // not what was last saved.  The password field shows '••••••••'
-    // when a stored password exists and the user hasn't changed it —
-    // send useStoredPass:true so the server substitutes the real value.
-    const passVal      = document.getElementById('cfgSmtpPass').value;
-    const useStoredPass = passVal === '••••••••';
+    // Read current form values so the test uses what is on screen, not what was
+    // last saved. A field still holding the sentinel means "the stored one" —
+    // send useStoredPass so the server substitutes the real value. An EMPTY
+    // field is also "the stored one" rather than "no password": the box is
+    // cleared on focus, and a genuinely password-less relay has no username
+    // either, which the server already handles.
+    const passVal       = document.getElementById('cfgSmtpPass').value;
+    const userVal       = document.getElementById('cfgSmtpUser').value.trim();
+    const useStoredPass = passVal === SMTP_PASS_PLACEHOLDER || (passVal === '' && userVal !== '');
     const toRaw  = document.getElementById('cfgMailTo').value.trim();
     const ccRaw  = document.getElementById('cfgMailCc').value.trim();
     const body = {
@@ -3429,9 +3456,9 @@ function renderTree(matchSet) {
     if (isGroup) {
       // Parent rows get a checkbox that selects/deselects all visible leaf descendants.
       // data-leaf="0" excludes them from the global leaf count used by updateSelectAllCheckbox.
-      selectCell = `<td class="select-cell"><input type="checkbox" class="proj-select-cb" data-uuid="${escHtml(node.uuid)}" data-leaf="0" onchange="toggleParentSelection('${escHtml(node.uuid)}', JSON.parse(this.dataset.visibleUuids))" data-visible-uuids="${visibleUuidsJson}"></td>`;
+      selectCell = `<td class="select-cell"><input type="checkbox" class="proj-select-cb" aria-label="Select all projects under ${escHtml(node.name)}" data-uuid="${escHtml(node.uuid)}" data-leaf="0" onchange="toggleParentSelection('${escHtml(node.uuid)}', JSON.parse(this.dataset.visibleUuids))" data-visible-uuids="${visibleUuidsJson}"></td>`;
     } else {
-      selectCell = `<td class="select-cell"><input type="checkbox" class="proj-select-cb" data-uuid="${escHtml(node.uuid)}" data-leaf="1" onchange="toggleProjectSelection('${escHtml(node.uuid)}')" ${selectedProjectUuids.has(node.uuid) ? 'checked' : ''}></td>`;
+      selectCell = `<td class="select-cell"><input type="checkbox" class="proj-select-cb" aria-label="Select ${escHtml(node.name)}" data-uuid="${escHtml(node.uuid)}" data-leaf="1" onchange="toggleProjectSelection('${escHtml(node.uuid)}')" ${selectedProjectUuids.has(node.uuid) ? 'checked' : ''}></td>`;
     }
 
     let html = selectCell;
@@ -3763,10 +3790,22 @@ function exportCSV() {
     ];
   });
 
+  // Quoting is not enough on its own. Excel evaluates a cell whose text begins
+  // =, +, - or @ as a formula even when the CSV quoted it, and project names
+  // reach us from SBOM metadata rather than from the operator — so a package
+  // could name itself into a formula that runs when somebody opens the export.
+  // A leading apostrophe is the standard neutraliser: Excel treats the cell as
+  // text and does not display it.
+  function csvCell(v) {
+    let s = String(v ?? '');
+    if (/^[=+\-@\t\r]/.test(s)) s = `'${s}`;
+    return `"${s.replace(/"/g, '""')}"`;
+  }
+
   // P5: build Blob from an array of chunks instead of one giant joined string.
   // For large portfolios this avoids holding the full CSV in a single heap string.
   function csvRow(row) {
-    return row.map(v => `"${String(v ?? '').replace(/"/g, '""')}"`).join(',') + '\r\n';
+    return row.map(csvCell).join(',') + '\r\n';
   }
   const blobParts = ['\uFEFF', csvRow(headers)]; // BOM for Excel UTF-8 compatibility
   for (const row of rows) blobParts.push(csvRow(row));
@@ -5070,6 +5109,7 @@ window.cancelPanel          = cancelPanel;
 window.connectFromPanel     = connectFromPanel;
 window.testConnectionFromPanel = testConnectionFromPanel;
 window.testEmailFromPanel   = testEmailFromPanel;
+window.clearSmtpPassPlaceholder = clearSmtpPassPlaceholder;
 window.cancelSchedule       = cancelSchedule;
 window.scheduleReports      = scheduleReports;
 

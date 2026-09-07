@@ -568,6 +568,12 @@ if (method === 'GET' && path === '/violation-cache/status') {
 
 ### 7.1 Passwords
 
+- **Minimum 12 characters, maximum 128, no spaces — and no complexity rule.**
+  That is the whole policy, deliberately: current NIST and OWASP guidance is
+  that a longer minimum beats character-class requirements, which mostly produce
+  `Passw0rd!`. It lives in `lib/validate.js` and is mirrored in all three pages
+  (§8.8); the four copies change in one commit or not at all. Existing passwords
+  are hashed and keep working — only a new one or a change has to clear it.
 - `crypto.scrypt`, N=16384, r=8, p=1, 16-byte random salt, 64-byte derived key.
 - Stored as `scrypt$N$r$p$<base64 salt>$<base64 dk>` so parameters can be raised later.
 - **Always the asynchronous `crypto.scrypt`. `scryptSync` is prohibited** — it blocks
@@ -914,7 +920,7 @@ was then overwritten by the first render.
   license:     { fail, warn, info, unassigned },
   secpolicy:   { fail, warn, info, unassigned },
   _nameLower:  string,          // P4: pre-computed, do not recompute elsewhere
-  _incomplete: boolean          // true when this row's fetch partially failed
+  _dataWarn:   string | null    // why this row's numbers may be incomplete, or null
 }
 ```
 
@@ -1022,6 +1028,16 @@ The frontend never performs uniqueness checks — those are backend-only, via
 `dashboard/nginx.conf.template` uses `envsubst` placeholders (`${VAR_NAME}`).
 
 - `/auth/*`, `/profile` and `/violation-cache/*` → `dt-violation-cache:3001`.
+- **`client_max_body_size 6m`.** The report route deliberately accepts a 5 MB
+  body for a large project selection (§12); nginx's 1 MB default rejected it
+  here first, with nginx's own HTML 413 rather than the JSON the dashboard can
+  explain.
+- **`nosniff` and `Referrer-Policy` are repeated in every location that sets
+  `Cache-Control`.** nginx does not merge `add_header`: a block declaring one of
+  its own replaces the whole inherited set, so a header defined only at server
+  level silently disappears from exactly the responses that carry data.
+  `X-Frame-Options` is deliberately absent — the dashboard is documented as
+  iframe-embeddable, which is also why CORS is open (§12).
 - SPA routing: `try_files $uri $uri/ /index.html`; `login.html` served directly.
 - There is **no `/api/*` block and no `/dt-config` block**. DependencyTrack is
   per-user, reached through `/violation-cache/dt/`; forwarding `/api/*` to one
@@ -1251,7 +1267,11 @@ redundant.
 ### 11.2 Frontend
 
 - `showToast(message, 'error')` for user-visible errors.
-- Mark per-project failures with `_incomplete: true` and surface a banner.
+- Mark a row whose numbers may be incomplete with `_dataWarn` — a sentence
+  saying why, which `renderTree` turns into the ⚠ beside the name. It is set for
+  one case today: a project whose `metrics` the API did not embed. Violation
+  counts arriving later are covered by the banner instead, which says
+  "⏳ Refetching violations…" while they are still zero.
 - Never swallow errors silently — at minimum log them to the console.
 - Graceful degradation: with no DT connection configured, show mock data and a
   clear "demo data" notice.
@@ -1262,11 +1282,19 @@ redundant.
 
 - **Authentication is mandatory on every backend route.** New routes are
   authenticated by default; a public route must be listed explicitly and justified.
-  The list is `/auth/register`, `/auth/check-availability`, `/auth/login`, and —
-  **S32** — `/branding` and `/branding/background`, which the sign-in page needs
-  before a token exists. Branding on a sign-in screen is public by construction:
+  The list is `/auth/register`, `/auth/check-availability`, `/auth/login`,
+  `/branding` and `/branding/background` (**S32**), which the sign-in page needs
+  before a token exists, and `/healthz` (**S33**). Branding on a sign-in screen is public by construction:
   anyone who can reach the page can already see it. They return the title and the
   image and nothing else — no account, no setting, no count.
+  **`/healthz` returns `{"status":"ok"}` and nothing else** — no account, no
+  setting, no count, no version, so it discloses exactly what a closed port
+  would. It is answered in `server.js` before route dispatch rather than in a
+  route module, because a liveness probe that fails when the application is
+  unwell cannot tell "unwell" from "gone". The compose healthcheck used to point
+  at `/violation-cache/status`, which stopped being public when phase 2 made
+  every route private — `wget` exits non-zero on a 401, so the container
+  reported unhealthy for its whole life while working perfectly.
 - Secrets never appear in responses or logs (§6.5, §7.7).
 - Parameterised SQL only (§5.1).
 - `crypto.timingSafeEqual` for all credential and token comparisons.
@@ -1280,6 +1308,21 @@ redundant.
   iframe-embedding model. This is acceptable **only because** bearer-token
   authentication now gates the data behind it. Do not remove one without the other.
 - `escHtml()` before interpolating any user-supplied text into `innerHTML`.
+- **The CSV export neutralises formula-leading values.** A cell whose text starts
+  `=`, `+`, `-` or `@` is prefixed with an apostrophe, which Excel treats as
+  text and does not display. Quoting alone does not stop this: Excel evaluates a
+  quoted cell too, and project names reach the export from SBOM metadata rather
+  than from the operator. The xlsx path needs no equivalent — `exceljs` writes
+  string cells, which Excel does not evaluate.
+- **The DependencyTrack URL is a deliberate outbound trust boundary.** A signed-in
+  account chooses it, and the service then fetches it — that is the product's
+  whole job, and DependencyTrack normally lives on an internal host, so blocking
+  private ranges would break the common install. What bounds it instead: the
+  proxy forwards **GET only**, under **`/api/v1/` only**, using the key of the
+  account that owns the connection, and the response is returned to that same
+  account. Anyone who can reach this is already authenticated and could point a
+  browser at the same host. Do not add a private-range block without deciding
+  that question again — an env opt-out would be required for it to be usable.
 
 ---
 

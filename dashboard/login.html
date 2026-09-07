@@ -500,7 +500,9 @@ const THEME_KEY = 'dt_theme';
 // Uniqueness is never decided here; it is asked of the backend on blur.
 const NAME_MIN = 3, NAME_MAX = 128;
 const LOGIN_MIN = 3, LOGIN_MAX = 64;
-const PASSWORD_MIN = 8, PASSWORD_MAX = 128;
+// Mirrors lib/validate.js, which is the authority (CLAUDE.md §8.8). Length
+// only — no complexity rule — and the two must change in the same commit.
+const PASSWORD_MIN = 12, PASSWORD_MAX = 128;
 const EMAIL_MAX = 254;
 
 const NAME_RE  = /^\p{L}+(?: \p{L}+)*$/u;

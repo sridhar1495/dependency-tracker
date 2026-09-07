@@ -28,6 +28,8 @@
 //   DELETE /admin/branding/background           — restore the animated background
 //   GET    /branding  /branding/background      — public: the sign-in page reads
 //                                                 these before a token exists
+//   GET    /healthz                             — public: the container health
+//                                                 probe; {"status":"ok"} only
 //   GET    /violation-cache/status              — build state for this user's connection
 //   GET    /violation-cache/data                — the cached map (gzipped)
 //   POST   /violation-cache/refresh             — trigger a background rebuild
@@ -105,6 +107,14 @@ const PUBLIC_PATHS = new Set([
   // only and lives in routes/admin.js.
   '/branding',                 // application title + background metadata
   '/branding/background',      // the background image bytes
+  // S33: the container healthcheck. It returns {"status":"ok"} and nothing
+  // else — no account, no setting, no count, no version, so it discloses
+  // exactly what a closed TCP port would. It is public because the probe runs
+  // before any account exists and holds no credential; the previous check
+  // pointed at /violation-cache/status, which stopped being public when phase 2
+  // made every route private, and the container has reported unhealthy ever
+  // since.
+  '/healthz',
 ]);
 
 function isPublic(path) {
@@ -180,6 +190,17 @@ const server = http.createServer(async (req, res) => {
   const parsedPath = new URL(url, 'http://x').pathname;
   const ctx = { method, url, path: parsedPath, req, res, deps: routeDeps };
 
+  // ── Container health ────────────────────────────────────────────────────
+  // Answered here rather than in a route module because it must not depend on
+  // anything a route module needs — a liveness probe that fails when the
+  // application is unwell is a probe that cannot report the difference between
+  // "unwell" and "gone". It says only that this process is listening; it names
+  // no account, setting, count or version (S33).
+  if (method === 'GET' && parsedPath === '/healthz') {
+    jsonReply(res, 200, { status: 'ok' });
+    return;
+  }
+
   try {
     // ── Authentication, before any route sees the request ────────────────
     // A missing, malformed, expired or revoked token is a single 401 with a
@@ -220,8 +241,9 @@ const server = http.createServer(async (req, res) => {
         return;
       }
     }
-    res.writeHead(404);
-    res.end('Not found');
+    // JSON, like every other error response (CLAUDE.md §11.1) — a client that
+    // branches on `code` gets nothing from a bare text body.
+    jsonReply(res, 404, { error: 'Not found.', code: 'NOT_FOUND' });
   } catch (err) {
     log('error', `Unhandled route error: ${err.message}`, { path: parsedPath, method });
     if (!res.headersSent) jsonReply(res, 500, { error: 'Internal server error' });

@@ -1936,15 +1936,24 @@ describe('validate — email', () => {
 });
 
 describe('validate — password', () => {
-  test('accepts eight characters or more, with any non-space character', () => {
-    assert.equal(v.validatePassword('password'), null);
+  test('accepts twelve characters or more, with any non-space character', () => {
+    assert.equal(v.validatePassword('correcthorse'), null);
     assert.equal(v.validatePassword('p@$$w0rd!#%^&*()'), null);
-    assert.equal(v.validatePassword('日本語パスワード'), null);
+    assert.equal(v.validatePassword('日本語のパスワードですよ'), null);   // 12 chars
   });
 
-  test('rejects anything shorter than eight', () => {
-    assert.ok(v.validatePassword('passwor'));
-    assert.equal(v.validatePassword('passwor8'), null);
+  test('length is the whole rule — no character class is required', () => {
+    // Deliberate: current NIST/OWASP guidance is that a longer minimum beats
+    // complexity requirements, which mostly produce Passw0rd!. A test says so,
+    // because "no rule" and "a rule nobody implemented" look identical.
+    assert.equal(v.validatePassword('aaaaaaaaaaaa'), null);
+    assert.equal(v.validatePassword('123456789012'), null);
+  });
+
+  test('rejects anything shorter than twelve', () => {
+    assert.ok(v.validatePassword('correcthors'));
+    assert.equal(v.validatePassword('correcthorse'), null);
+    assert.match(v.validatePassword('short'), /at least 12/);
   });
 
   test('rejects spaces and tabs', () => {
@@ -1968,7 +1977,7 @@ describe('validate — whole payloads', () => {
   const reserved = v.reservedLoginIds('admin');
   const good = {
     firstName: 'Alice', lastName: 'Smith', loginId: 'alice',
-    email: 'alice@example.com', password: 'password123', confirmPassword: 'password123',
+    email: 'alice@example.com', password: 'correcthorsebattery', confirmPassword: 'correcthorsebattery',
   };
 
   test('accepts a complete valid registration', () => {
@@ -2008,12 +2017,14 @@ describe('validate — whole payloads', () => {
 
   test('profile update validates a supplied password and its confirmation', () => {
     assert.equal(v.validateProfileUpdate({ password: 'short' }).valid, false);
+    // Eleven characters: under the minimum, so still refused here.
+    assert.equal(v.validateProfileUpdate({ password: 'longenough1' }).valid, false);
     assert.equal(
-      v.validateProfileUpdate({ password: 'longenough1', confirmPassword: 'mismatch' }).valid,
+      v.validateProfileUpdate({ password: 'longenoughnow', confirmPassword: 'mismatch' }).valid,
       false
     );
     assert.equal(
-      v.validateProfileUpdate({ password: 'longenough1', confirmPassword: 'longenough1' }).valid,
+      v.validateProfileUpdate({ password: 'longenoughnow', confirmPassword: 'longenoughnow' }).valid,
       true
     );
   });
@@ -3286,8 +3297,8 @@ const mailMod   = require('./lib/mail');
 describe('routes — registration conflicts', () => {
   const body = (over = {}) => JSON.stringify({
     firstName: 'Alice', lastName: 'Ant', loginId: 'alice',
-    email: 'alice@example.com', password: 'password123',
-    confirmPassword: 'password123', ...over,
+    email: 'alice@example.com', password: 'correcthorsebattery',
+    confirmPassword: 'correcthorsebattery', ...over,
   });
   const post = (raw) => ({
     method: 'POST', url: '/auth/register', path: '/auth/register',
@@ -4108,7 +4119,7 @@ describe('routes — the sign-in conflict check', () => {
   const post = (over = {}) => ({
     method: 'POST', url: '/auth/login', path: '/auth/login',
     req: Readable.from([JSON.stringify({
-      loginId: 'alice', password: 'password123', isAdmin: false, ...over,
+      loginId: 'alice', password: 'correcthorsebattery', isAdmin: false, ...over,
     })]),
     res: makeRes(),
   });

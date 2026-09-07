@@ -112,12 +112,19 @@ async function handle({ method, path: parsedPath, req, res, principal }) {
         return true;
       }
 
-      // A password change invalidates other sessions for this account. The
+      // Evict on ANY successful update, not only a password change. The cached
+      // principal carries the name, so evicting only on a password change left
+      // /auth/me — and therefore the header on the next page load — reporting
+      // the old name for up to the 60-second cache TTL, while the panel showed
+      // the new one from this response. The row is already written; this only
+      // decides how long the cache is allowed to disagree with it.
+      auth.evictUser(principal.userId);
+
+      // A password change also invalidates other sessions for this account. The
       // current session survives so the user is not signed out mid-edit.
       let passwordChanged = false;
       if (patch.passwordHash) {
         passwordChanged = true;
-        auth.evictUser(principal.userId);
         log('info', 'Password changed', { userId: principal.userId });
       }
 

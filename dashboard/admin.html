@@ -531,16 +531,28 @@
   </div>
 
   <!-- ── Report limit editor ──────────────────────────────────────────── -->
+  <!-- One dialog for both quotas. They are the same kind of decision about the
+       same account, taken by the same principal and saved by the same route, so
+       splitting them into two dialogs would only be two ways to get it wrong.
+       The schedule half was missing entirely: the detail pane showed the limit
+       with a Set/default pill and the route already accepted maxSchedules, but
+       there was no control, so raising one account's allowance meant calling the
+       API by hand. -->
   <div class="modal-overlay" id="limitModal">
     <div class="modal">
-      <h2>Change report limit</h2>
+      <h2>Change account limits</h2>
       <p id="limitModalText"></p>
       <div class="field">
         <label class="label" for="limitInput">Maximum reports</label>
         <input class="input" id="limitInput" type="number" min="1" max="1000" step="1">
         <div class="err" id="limitErr"></div>
+      </div>
+      <div class="field">
+        <label class="label" for="limitSchedInput">Maximum schedules</label>
+        <input class="input" id="limitSchedInput" type="number" min="1" max="100" step="1">
+        <div class="err" id="limitSchedErr"></div>
         <div class="hint">
-          Leave it blank to return this account to the global default.
+          Leave either blank to return that limit to the global default.
         </div>
       </div>
       <div class="modal-actions">
@@ -959,7 +971,7 @@
         ${kv('In progress', txt(d.reports.running))}
         ${kv('Failed', txt(d.reports.failed))}
         ${kv('Storage used', escHtml(formatBytes(d.reports.storageBytes)))}
-        ${kv('Limit', `${limitLine} <button class="btn-xs" id="btnEditLimit" title="Change this account's report limit">✎</button>`)}
+        ${kv('Limit', `${limitLine} <button class="btn-xs" id="btnEditLimit" title="Change this account's limits">✎</button>`)}
       </div>
 
       <div class="card">
@@ -975,9 +987,11 @@
         <h3>Schedules</h3>
         ${kv('Schedules', txt(d.schedules.total))}
         ${kv('Active', txt(d.schedules.active))}
-        ${kv('Limit', d.schedules.overridden
-            ? `${escHtml(String(d.schedules.maxSchedules))}<span class="pill-set">Set</span>`
-            : `${escHtml(String(d.schedules.maxSchedules))}<span class="pill-inherit">default</span>`)}
+        ${kv('Limit', `${escHtml(String(d.schedules.maxSchedules))}` +
+            (d.schedules.overridden
+              ? '<span class="pill-set">Set</span>'
+              : '<span class="pill-inherit">default</span>') +
+            ` <button class="btn-xs" id="btnEditSchedLimit" title="Change this account's limits">✎</button>`)}
         ${kv('Projects', txt(d.schedules.projectCount))}
         ${kv('Next run', txt(fmtDate(d.schedules.nextRunAt)))}
         ${kv('Last run', txt(lastRun))}
@@ -989,8 +1003,11 @@
         are not readable from here.
       </div>`;
 
-    $('btnEditLimit').onclick = () => openLimitModal(d);
-    $('btnResetPw').onclick   = () => openPwModal(d);
+    // Both pencils open the same dialog: the two limits are one decision about
+    // one account, and the dialog shows both whichever one you reached it from.
+    $('btnEditLimit').onclick      = () => openLimitModal(d);
+    $('btnEditSchedLimit').onclick = () => openLimitModal(d);
+    $('btnResetPw').onclick        = () => openPwModal(d);
   }
 
   function clearSelection() {
@@ -1002,17 +1019,22 @@
       '<div class="detail-empty">Select an account on the left to see its detail.</div>';
   }
 
-  // ── Report limit editing ───────────────────────────────────────────────
+  // ── Account limit editing ──────────────────────────────────────────────
+  // Both quotas, one dialog, one request. `null` means "follow the global
+  // default" and is the only way to express that — a stored 10 is
+  // indistinguishable from an unset 10 (CLAUDE.md §7.5).
   function openLimitModal(d) {
     _limitTarget = d.account.loginId;
+    const rep = `${d.settings.maxReports} report${d.settings.maxReports === 1 ? '' : 's'}` +
+      (d.settings.overridden ? ' (set here)' : ` (default ${d.settings.defaultMaxReports})`);
+    const sch = `${d.schedules.maxSchedules} schedule${d.schedules.maxSchedules === 1 ? '' : 's'}` +
+      (d.schedules.overridden ? ' (set here)' : ` (default ${d.schedules.defaultMaxSchedules})`);
     $('limitModalText').textContent =
-      `${d.account.loginId} is currently limited to ${d.settings.maxReports} report` +
-      `${d.settings.maxReports === 1 ? '' : 's'}` +
-      (d.settings.overridden
-        ? ', set for this account.'
-        : `, inherited from the global default of ${d.settings.defaultMaxReports}.`);
-    $('limitInput').value = d.settings.overridden ? String(d.settings.maxReports) : '';
+      `${d.account.loginId} is currently allowed ${rep} and ${sch}.`;
+    $('limitInput').value      = d.settings.overridden  ? String(d.settings.maxReports)    : '';
+    $('limitSchedInput').value = d.schedules.overridden ? String(d.schedules.maxSchedules) : '';
     $('limitErr').textContent = '';
+    $('limitSchedErr').textContent = '';
     $('limitModal').classList.add('open');
     $('limitInput').focus();
   }
@@ -1022,20 +1044,26 @@
     $('limitModal').classList.remove('open');
   }
 
+  /** Blank → null (follow the default); otherwise a bounded integer. */
+  function readLimitField(inputId, errId, max) {
+    const raw = $(inputId).value.trim();
+    $(errId).textContent = '';
+    if (raw === '') return { ok: true, value: null };
+    const n = Number(raw);
+    if (!Number.isInteger(n) || n < 1 || n > max) {
+      $(errId).textContent = `Enter a whole number between 1 and ${max}, or leave it blank.`;
+      return { ok: false };
+    }
+    return { ok: true, value: n };
+  }
+
   async function confirmLimit() {
     if (!_limitTarget) return;
-    const raw = $('limitInput').value.trim();
-    // Blank is meaningful: it clears the override and returns the account to
-    // the global default.
-    let value = null;
-    if (raw !== '') {
-      const n = Number(raw);
-      if (!Number.isInteger(n) || n < 1 || n > 1000) {
-        $('limitErr').textContent = 'Enter a whole number between 1 and 1000, or leave it blank.';
-        return;
-      }
-      value = n;
-    }
+    const reports   = readLimitField('limitInput', 'limitErr', 1000);
+    const schedules = readLimitField('limitSchedInput', 'limitSchedErr', 100);
+    // Both are validated before either is sent, so a bad second field cannot
+    // leave the first half applied.
+    if (!reports.ok || !schedules.ok) return;
 
     const target = _limitTarget;
     $('limitOk').disabled = true;
@@ -1043,23 +1071,25 @@
       const r = await apiFetch(`/admin/users/${encodeURIComponent(target)}/settings`, {
         method:  'PUT',
         headers: { 'Content-Type': 'application/json' },
-        body:    JSON.stringify({ maxReports: value }),
+        body:    JSON.stringify({ maxReports: reports.value, maxSchedules: schedules.value }),
       });
       const bd = await r.json().catch(() => ({}));
       if (!r.ok) {
-        $('limitErr').textContent = bd.error || 'Could not save the limit.';
+        $('limitErr').textContent = bd.error || 'Could not save the limits.';
         return;
       }
       closeLimitModal();
+      const part = (n, overridden, noun) =>
+        `${n} ${noun}${n === 1 ? '' : 's'}${overridden ? '' : ' (default)'}`;
       showToast(
-        bd.overridden
-          ? `${target} is now limited to ${bd.maxReports} reports.`
-          : `${target} follows the global default of ${bd.maxReports} reports.`,
+        `${target} is now allowed ` +
+        `${part(bd.maxReports, bd.overridden, 'report')} and ` +
+        `${part(bd.maxSchedules, bd.schedulesOverridden, 'schedule')}.`,
         'success'
       );
       await loadUsers();
     } catch (e) {
-      $('limitErr').textContent = 'Could not save the limit: ' + e.message;
+      $('limitErr').textContent = 'Could not save the limits: ' + e.message;
     } finally {
       $('limitOk').disabled = false;
     }
@@ -1092,7 +1122,8 @@
     // (CLAUDE.md §8.8).
     if (!password) { $('pwErr').textContent = 'Password is required.'; return; }
     if (/\s/.test(password)) { $('pwErr').textContent = 'Password cannot contain spaces.'; return; }
-    if (password.length < 8)   { $('pwErr').textContent = 'Password must be at least 8 characters.'; return; }
+    // Mirrors lib/validate.js (CLAUDE.md §8.8) — length only, no complexity.
+    if (password.length < 12)  { $('pwErr').textContent = 'Password must be at least 12 characters.'; return; }
     if (password.length > 128) { $('pwErr').textContent = 'Password must be at most 128 characters.'; return; }
 
     const target = _pwTarget;

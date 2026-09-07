@@ -18,7 +18,12 @@
 
 const NAME_MIN = 3,   NAME_MAX = 128;
 const LOGIN_MIN = 3,  LOGIN_MAX = 64;
-const PASSWORD_MIN = 8, PASSWORD_MAX = 128;
+// Length is the whole rule, deliberately. Current NIST and OWASP guidance is
+// that a longer minimum beats character-class requirements, which mostly push
+// people toward Passw0rd! and its cousins. 12 is the floor; 128 leaves room for
+// a passphrase. Existing passwords are hashed and keep working — only a new one
+// or a change has to clear this.
+const PASSWORD_MIN = 12, PASSWORD_MAX = 128;
 const EMAIL_MAX = 254;
 const REPORT_NAME_MAX = 120;
 const APP_TITLE_MAX   = 60;

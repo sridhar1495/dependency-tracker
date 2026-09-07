@@ -179,6 +179,20 @@ docker compose --env-file .env up -d
 | `SESSION_IDLE_HOURS` | `2` | Idle session lifetime |
 | `LOG_FORMAT` | `text` | `text` or `json` for structured output |
 
+### Container health
+
+`dt-violation-cache` exposes `GET /healthz`, which returns `{"status":"ok"}` and
+nothing else. It is what the compose healthcheck probes, and it is public because
+the probe runs before any account exists. `dt-dashboard` waits for that check to
+pass before it starts, which is what stops the nginx container serving the
+dashboard while the backend is still applying migrations — the window that
+produced 502s on a cold start.
+
+```bash
+docker compose ps          # all three should read (healthy)
+curl -s localhost:3000/healthz   # {"status":"ok"}
+```
+
 ### Before raising `SCHEDULER_CONCURRENCY`
 
 The ceiling that matters is **DependencyTrack's, not this service's**. Total load

@@ -1022,13 +1022,19 @@ describe('validation mirror — login.html vs lib/validate.js', () => {
     if (!EMAIL_RE.test(value)) return 'invalid';
     return null;
   }
-  function fePassword(value) {
-    if (typeof value !== 'string' || value.length === 0) return 'required';
-    if (/\s/.test(value)) return 'space';
-    if (value.length < 8) return 'too short';
-    if (value.length > 128) return 'too long';
-    return null;
-  }
+  // Built from login.html's own source rather than re-implemented here. A copy
+  // is a second implementation that can agree with the backend while the page
+  // does not: this rule said `length < 8` and kept passing after the page moved
+  // to 12, which is the whole failure mode a mirror test exists to catch.
+  const fePassword = (() => {
+    const src = extractFunction(LOGIN_HTML, 'validatePassword');
+    const min = /PASSWORD_MIN\s*=\s*(\d+)/.exec(LOGIN_HTML);
+    const max = /PASSWORD_MAX\s*=\s*(\d+)/.exec(LOGIN_HTML);
+    assert.ok(min && max, 'login.html must declare its password bounds');
+    // eslint-disable-next-line no-new-func
+    return new Function('PASSWORD_MIN', 'PASSWORD_MAX',
+      `${src}; return validatePassword;`)(Number(min[1]), Number(max[1]));
+  })();
 
   test('names: frontend and backend agree on accept/reject for every case', () => {
     const corpus = ['Alice', 'Mary Jane', 'José', 'Müller', '山田太郎', 'Al', ' Alice', 'Alice ',
@@ -1067,8 +1073,12 @@ describe('validation mirror — login.html vs lib/validate.js', () => {
   });
 
   test('passwords: frontend and backend agree', () => {
-    const corpus = ['password', 'p@$$w0rd!', '日本語パスワード', 'passwor', 'pass word',
-                    'pass\tword', '', 'a'.repeat(128), 'a'.repeat(129)];
+    // Spans the 12-character boundary in both directions, so a change to one
+    // side's minimum without the other is a failure rather than a coincidence.
+    const corpus = ['correcthorse', 'correcthors', 'p@$$w0rd!#%^&*()', 'aaaaaaaaaaaa',
+                    '日本語のパスワードですよ', 'password', 'passwor', 'pass word',
+                    'pass\tword', '', 'a'.repeat(11), 'a'.repeat(12),
+                    'a'.repeat(128), 'a'.repeat(129)];
     for (const value of corpus) {
       assert.equal(
         fePassword(value) === null,
@@ -1445,9 +1455,29 @@ describe('admin.html write actions', () => {
     const fn = /async function confirmLimit[\s\S]*?\n  \}/.exec(ADMIN_HTML)[0];
     assert.match(fn, /method:\s*'PUT'/);
     assert.match(fn, /\/settings/);
-    assert.match(fn, /maxReports: value/);
+    assert.match(fn, /maxReports: reports\.value/);
     // Blank means "return to the default" — a distinct outcome from any number.
-    assert.match(fn, /let value = null/);
+    assert.match(/function readLimitField[\s\S]*?\n  \}/.exec(ADMIN_HTML)[0],
+      /return \{ ok: true, value: null \}/);
+  });
+
+  test('both quotas are editable from the screen, in one request', () => {
+    // The schedule limit was displayed with a Set/default pill and accepted by
+    // the route, but had no control at all — so raising one account's allowance
+    // meant calling the API by hand. They are the same decision about the same
+    // account, so they share one dialog and one PUT.
+    assert.match(ADMIN_HTML, /id="limitSchedInput"/);
+    assert.match(ADMIN_HTML, /id="btnEditSchedLimit"/);
+    const fn = /async function confirmLimit[\s\S]*?\n  \}/.exec(ADMIN_HTML)[0];
+    assert.match(fn, /maxSchedules: schedules\.value/);
+    assert.equal((fn.match(/apiFetch\(/g) || []).length, 1, 'one request, not two');
+    // Both fields are validated before either is sent, so a bad second field
+    // cannot leave the first half applied.
+    assert.match(fn, /if \(!reports\.ok \|\| !schedules\.ok\) return;/);
+    // And the detail pane has to say what "default" means before anyone can
+    // decide whether to override it.
+    const route = fs.readFileSync(path.join(__dirname, 'routes', 'admin.js'), 'utf8');
+    assert.match(route, /defaultMaxSchedules: row\.defaultMaxSchedules/);
   });
 
   test('cancelling is a real path, not just a hidden dialog', () => {
@@ -1459,7 +1489,7 @@ describe('admin.html write actions', () => {
   test('the password reset validates before the round trip', () => {
     // Mirrors lib/validate.js. The backend remains the authority (CLAUDE.md §8.8).
     const fn = /async function confirmPasswordReset[\s\S]*?\n  \}/.exec(ADMIN_HTML)[0];
-    assert.match(fn, /length < 8/);
+    assert.match(fn, /length < 12/);
     assert.match(fn, /length > 128/);
     assert.match(fn, /\\s/, 'a password with spaces must be caught');
     assert.match(fn, /method:\s*'POST'/);
@@ -2604,6 +2634,163 @@ describe('index.html schedule drill-down', () => {
   test('the panel always opens on the list, never on a stale schedule', () => {
     const fn = extractFunction(INDEX_HTML, 'openConfigPanel');
     assert.match(fn, /closeScheduleEditor\(true\)/);
+  });
+});
+
+// ── The pre-release fixes ────────────────────────────────────────────────────
+describe('SMTP password sentinel', () => {
+  test('the page keeps the sentinel the server sends', () => {
+    // Blanking it here is what broke Send Test Email: the field then read as
+    // "no password meant", and a correctly configured account was told its
+    // credentials were rejected.
+    const fn = extractFunction(INDEX_HTML, 'loadConfigFromServer');
+    assert.match(fn, /cfgSmtpPass'\)\.value\s*=\s*smtp\.pass/);
+    assert.doesNotMatch(fn, /cfgSmtpPass'\)\.value\s*=\s*''/);
+  });
+
+  test('both halves compare against one named constant', () => {
+    assert.match(INDEX_HTML, /const SMTP_PASS_PLACEHOLDER = '\u2022{8}'/);
+    const test_ = extractFunction(INDEX_HTML, 'testEmailFromPanel');
+    assert.match(test_, /passVal === SMTP_PASS_PLACEHOLDER/);
+    const save = extractFunction(INDEX_HTML, 'saveConfigPanel');
+    assert.match(save, /SMTP_PASS_PLACEHOLDER/);
+    // No comparison spells the literal out any more — that divergence is what
+    // let the two halves disagree.
+    assert.doesNotMatch(test_, /=== '\u2022{8}'/);
+    assert.doesNotMatch(save, /'\u2022{8}'/);
+  });
+
+  test('an empty field with a username still means "the stored one"', () => {
+    const fn = extractFunction(INDEX_HTML, 'testEmailFromPanel');
+    assert.match(fn, /passVal === '' && userVal !== ''/);
+  });
+
+  test('focus clears the sentinel so typing replaces it', () => {
+    // Without this a new password would be appended to the eight bullets.
+    assert.match(INDEX_HTML, /onfocus="clearSmtpPassPlaceholder\(\)"/);
+    assert.match(INDEX_HTML, /window\.clearSmtpPassPlaceholder = clearSmtpPassPlaceholder;/);
+  });
+});
+
+describe('container health', () => {
+  const SERVER = fs.readFileSync(path.join(__dirname, 'server.js'), 'utf8');
+  const COMPOSE = fs.readFileSync(path.join(__dirname, '..', 'docker-compose.yml'), 'utf8');
+
+  test('/healthz is public, or the probe can never pass', () => {
+    const block = /const PUBLIC_PATHS = new Set\(\[([\s\S]*?)\]\);/.exec(SERVER)[1];
+    assert.match(block, /'\/healthz'/);
+  });
+
+  test('it answers before route dispatch and says nothing else', () => {
+    const handler = /parsedPath === '\/healthz'[\s\S]{0,200}/.exec(SERVER)[0];
+    assert.match(handler, /jsonReply\(res, 200, \{ status: 'ok' \}\)/);
+    // Ahead of the try/catch that wraps route dispatch, so a probe does not
+    // depend on anything a route module needs.
+    assert.ok(SERVER.indexOf("parsedPath === '/healthz'") < SERVER.indexOf('for (const mod of routeModules)'));
+  });
+
+  test('the healthcheck probes it, not an authenticated route', () => {
+    const tests = [...COMPOSE.matchAll(/^\s*test: \[.*$/gm)].map(m => m[0]);
+    assert.ok(tests.some(t => t.includes('localhost:3001/healthz')),
+      'the backend healthcheck must probe /healthz');
+    assert.ok(!tests.some(t => t.includes('violation-cache/status')),
+      'no healthcheck may probe an authenticated route');
+  });
+
+  test('nginx waits for the backend before it serves', () => {
+    // The window where nginx was up and the backend was still migrating is
+    // where the 502s came from.
+    const dash = /^  dt-dashboard:$[\s\S]*?(?=^  dt-violation-cache:$)/m.exec(COMPOSE)[0];
+    assert.match(dash, /depends_on:[\s\S]*?dt-violation-cache:[\s\S]*?condition: service_healthy/);
+  });
+});
+
+describe('compose forwards what the docs promise', () => {
+  const COMPOSE = fs.readFileSync(path.join(__dirname, '..', 'docker-compose.yml'), 'utf8');
+  const ENV_EXAMPLE = fs.readFileSync(path.join(__dirname, '..', '.env.example'), 'utf8');
+  const backendEnv = /dt-violation-cache:[\s\S]*?dt-postgres:/.exec(COMPOSE)[0];
+
+  test('every operator-tunable variable actually reaches the container', () => {
+    // These were documented in README, INSTALLATION and .env.example while
+    // compose forwarded none of them, so setting them did nothing at all.
+    for (const name of ['REPORT_CONCURRENCY', 'VIOLATION_CONCURRENCY', 'LOG_FORMAT',
+                        'SCHEDULER_CONCURRENCY', 'VIOLATION_JOB_STALL_MINUTES',
+                        'SESSION_ABSOLUTE_HOURS', 'SESSION_IDLE_HOURS']) {
+      assert.match(backendEnv, new RegExp(`^\\s+${name}:`, 'm'),
+        `${name} is documented but not forwarded by docker-compose.yml`);
+    }
+  });
+
+  test('and each one is offered in .env.example', () => {
+    for (const name of ['REPORT_CONCURRENCY', 'VIOLATION_CONCURRENCY', 'LOG_FORMAT']) {
+      assert.match(ENV_EXAMPLE, new RegExp(`^${name}=`, 'm'), name);
+    }
+  });
+});
+
+describe('nginx hardening', () => {
+  const NGINX_RAW = fs.readFileSync(
+    path.join(__dirname, '..', 'dashboard', 'nginx.conf.template'), 'utf8');
+  // Directives only. A comment explaining why a header is absent must not read
+  // as the header being present.
+  const NGINX = NGINX_RAW.split('\n').filter(l => !/^\s*#/.test(l)).join('\n');
+
+  test('the body limit covers the 5 MB the report route accepts', () => {
+    assert.match(NGINX, /client_max_body_size\s+6m;/);
+  });
+
+  test('the security headers survive every location that sets its own', () => {
+    // nginx replaces rather than merges add_header, so a header declared only
+    // at server level disappears from exactly the responses carrying data.
+    const blocks = NGINX.split(/location /).slice(1);
+    for (const b of blocks) {
+      if (!/add_header/.test(b)) continue;
+      assert.match(b, /X-Content-Type-Options/, 'a location sets headers but drops nosniff');
+      assert.match(b, /Referrer-Policy/, 'a location sets headers but drops Referrer-Policy');
+    }
+    assert.match(NGINX, /server_tokens off;/);
+  });
+
+  test('X-Frame-Options stays absent for the iframe model', () => {
+    assert.doesNotMatch(NGINX, /X-Frame-Options/);
+  });
+});
+
+describe('smaller pre-release fixes', () => {
+  const SERVER = fs.readFileSync(path.join(__dirname, 'server.js'), 'utf8');
+  const PROFILE = fs.readFileSync(path.join(__dirname, 'routes', 'profile.js'), 'utf8');
+
+  test('the 404 fallthrough is JSON like every other error', () => {
+    assert.match(SERVER, /jsonReply\(res, 404, \{ error: 'Not found\.', code: 'NOT_FOUND' \}\)/);
+    assert.doesNotMatch(SERVER, /res\.end\('Not found'\)/);
+  });
+
+  test('a profile update evicts the cached principal whatever changed', () => {
+    // Evicting only on a password change left /auth/me reporting the old name
+    // for up to the 60-second cache TTL.
+    const fn = /if \(method === 'PUT' && parsedPath === '\/profile'\)[\s\S]*?\n  \}/.exec(PROFILE)[0];
+    const evict = fn.indexOf('auth.evictUser(principal.userId)');
+    const pwBranch = fn.indexOf('if (patch.passwordHash)');
+    assert.ok(evict > -1 && evict < pwBranch, 'eviction must not be inside the password branch');
+  });
+
+  test('the CSV export neutralises formula-leading values', () => {
+    const fn = extractFunction(INDEX_HTML, 'exportCSV');
+    assert.match(fn, /\^\[=\+\\-@/, 'a leading =, +, - or @ must be detected');
+    assert.match(fn, /`'\$\{s\}`/, 'and prefixed with an apostrophe');
+  });
+
+  test('the controls a screen reader could not name now have names', () => {
+    for (const id of ['searchInput', 'riskFilter', 'categoryFilter', 'tagFilter']) {
+      const el = new RegExp(`id="${id}"[^>]*`).exec(INDEX_HTML);
+      assert.ok(el, id);
+      const tag = new RegExp(`<(input|select)[^>]*id="${id}"[^>]*>`).exec(INDEX_HTML)[0];
+      assert.match(tag, /aria-label="/, `${id} has no accessible name`);
+    }
+    // Row checkboxes are named after what they select, so the selection column
+    // is not a column of anonymous checkboxes.
+    const render = extractFunction(INDEX_HTML, 'renderTree');
+    assert.match(render, /aria-label="Select \$\{escHtml\(node\.name\)\}"/);
   });
 });
 
