@@ -5,6 +5,22 @@ server {
     root /usr/share/nginx/html;
     index index.html;
 
+    # The report route deliberately accepts a 5 MB body, because the selected
+    # project list can be very large. nginx's default is 1 MB, so a big
+    # selection was rejected here with nginx's own HTML 413 before the backend
+    # ever saw it — and the dashboard, expecting JSON, could not explain why.
+    # 6m leaves headroom for the rest of the envelope.
+    client_max_body_size 6m;
+
+    # Do not advertise the nginx version to every caller.
+    server_tokens off;
+
+    # X-Frame-Options is deliberately ABSENT: this dashboard is documented as
+    # embeddable in an iframe, and CORS is open for the same reason. These two
+    # cost nothing and take nothing away from that.
+    add_header X-Content-Type-Options "nosniff" always;
+    add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+
     # Resolve upstream hostnames per-request rather than at startup, so nginx
     # starts (and serves the static dashboard) even when the cache service is
     # not yet reachable.
@@ -37,6 +53,11 @@ server {
         proxy_set_header Host $http_host;
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        # nginx replaces, rather than merges, the inherited add_header set
+        # as soon as a block declares one of its own — so the two security
+        # headers have to be repeated here or this location loses them.
+        add_header X-Content-Type-Options "nosniff" always;
+        add_header Referrer-Policy "strict-origin-when-cross-origin" always;
         add_header Cache-Control "no-store" always;
     }
 
@@ -48,6 +69,11 @@ server {
         proxy_set_header Host $http_host;
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        # nginx replaces, rather than merges, the inherited add_header set
+        # as soon as a block declares one of its own — so the two security
+        # headers have to be repeated here or this location loses them.
+        add_header X-Content-Type-Options "nosniff" always;
+        add_header Referrer-Policy "strict-origin-when-cross-origin" always;
         add_header Cache-Control "no-store" always;
     }
 
@@ -57,6 +83,11 @@ server {
         proxy_set_header Host $http_host;
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+        # nginx replaces, rather than merges, the inherited add_header set
+        # as soon as a block declares one of its own — so the two security
+        # headers have to be repeated here or this location loses them.
+        add_header X-Content-Type-Options "nosniff" always;
+        add_header Referrer-Policy "strict-origin-when-cross-origin" always;
         add_header Cache-Control "no-store" always;
     }
 
@@ -78,6 +109,20 @@ server {
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
     }
 
+    # Backend liveness, for an operator or a load balancer probing the published
+    # port. The container's own healthcheck talks to localhost:3001 directly and
+    # does not come through here — but without this block /healthz would fall
+    # through to the SPA fallback and answer with index.html, which any probe
+    # would read as a healthy 200 no matter what the backend was doing.
+    location /healthz {
+        set $vchealth "http://dt-violation-cache:3001";
+        proxy_pass $vchealth;
+        proxy_set_header Host $http_host;
+        add_header X-Content-Type-Options "nosniff" always;
+        add_header Referrer-Policy "strict-origin-when-cross-origin" always;
+        add_header Cache-Control "no-store" always;
+    }
+
     # Proxy violation cache service requests to the dt-violation-cache container.
     # Uses a variable so nginx doesn't fail on startup if the container isn't up yet.
     location /violation-cache/ {
@@ -85,6 +130,11 @@ server {
         proxy_pass $vcache;
         proxy_set_header Host $http_host;
         proxy_read_timeout 300s;   # long enough to cover a full rebuild poll cycle
+        # nginx replaces, rather than merges, the inherited add_header set
+        # as soon as a block declares one of its own — so the two security
+        # headers have to be repeated here or this location loses them.
+        add_header X-Content-Type-Options "nosniff" always;
+        add_header Referrer-Policy "strict-origin-when-cross-origin" always;
         add_header Cache-Control "no-store" always;
     }
 
@@ -97,6 +147,11 @@ server {
     # Cache static assets
     location ~* \.(js|css|png|jpg|gif|ico|svg|woff2?)$ {
         expires 1d;
+        # nginx replaces, rather than merges, the inherited add_header set
+        # as soon as a block declares one of its own — so the two security
+        # headers have to be repeated here or this location loses them.
+        add_header X-Content-Type-Options "nosniff" always;
+        add_header Referrer-Policy "strict-origin-when-cross-origin" always;
         add_header Cache-Control "public, immutable";
     }
 

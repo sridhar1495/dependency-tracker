@@ -541,6 +541,10 @@ async function handle({ method, path: parsedPath, req, res, principal }) {
           lastRunStatus: row.lastRunStatus,
           maxSchedules:  row.maxSchedules,
           overridden:    row.maxSchedulesOverridden === true,
+          // The screen has to say what "default" means before an administrator
+          // can decide whether to override it, exactly as it does for reports.
+          defaultMaxSchedules: row.defaultMaxSchedules,
+          limits: { min: appSettings.MIN_MAX_SCHEDULES, max: appSettings.MAX_MAX_SCHEDULES },
         },
         reports: {
           total:        row.reportCount,

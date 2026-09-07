@@ -119,6 +119,10 @@ Copy `.env.example` to `.env` and set:
 | `SESSION_IDLE_HOURS` | Idle session lifetime (default `2`) |
 | `LOG_FORMAT` | `text` (default) or `json` |
 
+> All three concurrency limits and `LOG_FORMAT` are forwarded into the container
+> by `docker-compose.yml`. They were documented here before they were, so setting
+> them used to do nothing.
+
 ---
 
 ## Tech Stack
@@ -126,6 +130,8 @@ Copy `.env.example` to `.env` and set:
 - **Dashboard**: HTML5, CSS3, Vanilla JS (ES2020+), Fetch API — no framework, no build step
 - **Backend**: Node.js 22, built-in `http`/`https` (no web framework). Three npm
   dependencies, all MIT: `pg`, `exceljs`, `nodemailer`
+- **Passwords**: minimum 12 characters, maximum 128, no spaces, no complexity
+  rule — length beats character classes, per current NIST and OWASP guidance
 - **Auth and crypto**: Node's built-in `crypto` only — scrypt password hashing,
   random bearer tokens, AES-256-GCM secret encryption. No auth library, no JWT
 - **Database**: PostgreSQL 16 (PostgreSQL Licence), parameterised SQL, no ORM

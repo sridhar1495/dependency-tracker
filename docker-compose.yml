@@ -32,6 +32,13 @@ services:
     # nginx serves the two static pages and proxies /auth, /profile and
     # /violation-cache to the backend. It no longer proxies DependencyTrack —
     # that is per-user and goes through /violation-cache/dt/.
+    # nginx used to start on its own, so it served the dashboard while the
+    # backend was still running migrations and every proxied call in that window
+    # came back 502. Waiting for the backend to be healthy closes it — which is
+    # only possible now that its healthcheck can actually pass.
+    depends_on:
+      dt-violation-cache:
+        condition: service_healthy
     volumes:
       - ./dashboard:/usr/share/nginx/html:ro
       # nginx:alpine's entrypoint runs envsubst on *.template files in this dir
@@ -55,11 +62,17 @@ services:
     container_name: dt-violation-cache
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "wget", "-qO-", "http://localhost:3001/violation-cache/status"]
+      # /healthz, not /violation-cache/status. The latter is an authenticated
+      # route, so it answers 401 and wget exits non-zero — this container
+      # reported unhealthy for its whole life while working perfectly. /healthz
+      # is public by design and returns {"status":"ok"} and nothing else.
+      test: ["CMD", "wget", "-qO-", "http://localhost:3001/healthz"]
       interval: 30s
       timeout: 5s
       retries: 3
-      start_period: 15s
+      # Migrations run before the listener opens, so a cold start with a large
+      # ledger needs more than a couple of seconds before the first probe.
+      start_period: 30s
     logging:
       driver: "json-file"
       options:
@@ -96,6 +109,14 @@ services:
       POSTGRES_DB: "${POSTGRES_DB:-dtdash}"
       SESSION_ABSOLUTE_HOURS: "${SESSION_ABSOLUTE_HOURS:-8}"
       SESSION_IDLE_HOURS: "${SESSION_IDLE_HOURS:-2}"
+      # These three are read by lib/config.js and documented in README.md,
+      # docs/INSTALLATION.md and .env.example — but were never forwarded, so
+      # setting them did nothing at all. LOG_FORMAT was the worst of it: an
+      # operator pointing a log aggregator at this service got text and no
+      # explanation.
+      REPORT_CONCURRENCY: "${REPORT_CONCURRENCY:-5}"
+      VIOLATION_CONCURRENCY: "${VIOLATION_CONCURRENCY:-3}"
+      LOG_FORMAT: "${LOG_FORMAT:-text}"
     depends_on:
       dt-postgres:
         condition: service_healthy
