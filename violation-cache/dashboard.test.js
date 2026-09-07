@@ -2637,6 +2637,103 @@ describe('index.html schedule drill-down', () => {
   });
 });
 
+// ── Per-schedule body and the CC switch ──────────────────────────────────────
+describe('index.html schedule delivery: body and CC switch', () => {
+  const SCHED_VIEW = /<div id="cfgSchedView"[\s\S]*?<!-- end cfgSchedView -->/.exec(INDEX_HTML)[0];
+
+  test('the editor has a message field, bounded like the column', () => {
+    assert.match(SCHED_VIEW, /id="cfgSchedMessage"[^>]*maxlength="5000"/);
+    assert.match(SCHED_VIEW, /id="cfgSchedMessageErr"/);
+    // It is a textarea, not an input: a covering note is multi-line.
+    assert.match(SCHED_VIEW, /<textarea id="cfgSchedMessage"/);
+  });
+
+  test('it does not reuse the id of the control PR #113 deleted', () => {
+    // cfgSchedBody was the old single-schedule container. Reviving a retired id
+    // makes the history unreadable, which is why a test guards the whole set.
+    assert.doesNotMatch(INDEX_HTML, /cfgSchedBody/);
+  });
+
+  test('the CC switch sits on the CC label row, right-aligned', () => {
+    assert.match(SCHED_VIEW, /class="cfg-label-row"[\s\S]{0,400}id="cfgSchedCcEnabled"/);
+    assert.match(INDEX_HTML, /\.cfg-label-row \{[^}]*justify-content: space-between/);
+  });
+
+  test('turning it off clears and disables the field rather than ignoring it', () => {
+    // Addresses left visible under an off switch read as though they were still
+    // being used.
+    const fn = extractFunction(INDEX_HTML, 'onSchedCcToggle');
+    assert.match(fn, /cc\.disabled = !on/);
+    assert.match(fn, /cc\.value = ''/);
+    assert.match(fn, /No copy will be sent/);
+    assert.match(fn, /markSchedDirty\(\)/, 'flipping it is an unsaved change');
+  });
+
+  test('the three CC states survive the round trip', () => {
+    const read = extractFunction(INDEX_HTML, 'readScheduleEditor');
+    assert.match(read, /const ccEnabled = document\.getElementById\('cfgSchedCcEnabled'\)\.checked/);
+    assert.match(read, /to, cc, subject, mailBody, ccEnabled,/);
+    const open = extractFunction(INDEX_HTML, 'openScheduleEditor');
+    // A new schedule inherits; an existing one carries whichever state it holds.
+    assert.match(open, /base\.ccEnabled === undefined \? true : base\.ccEnabled !== false/);
+    assert.match(open, /onSchedCcToggle\(\)/);
+  });
+
+  test('the route distinguishes "copy nobody" from "inherit" on the way out', () => {
+    // `||` collapsed the empty array to null, so the browser could never tell
+    // the two apart — the same conflation the data layer used to make inbound.
+    const route = fs.readFileSync(path.join(__dirname, 'routes', 'schedule.js'), 'utf8');
+    assert.match(route, /cc:\s*row\.ccAddrs \?\? null/);
+    assert.doesNotMatch(route, /cc:\s*row\.ccAddrs \|\| null/);
+    assert.match(route, /ccEnabled:\s*!\(Array\.isArray\(row\.ccAddrs\) && row\.ccAddrs\.length === 0\)/);
+    assert.match(route, /mailBody:\s*row\.body \|\| null/);
+  });
+
+  test('the list says when a schedule copies nobody', () => {
+    // Otherwise it looks identical to one that inherits the account CC.
+    const fn = extractFunction(INDEX_HTML, 'renderScheduleList');
+    assert.match(fn, /sc\.ccEnabled === false/);
+    assert.match(fn, /no CC/);
+    assert.match(fn, /escHtml\(sc\.cc\.join/, 'CC addresses are user text');
+  });
+
+  test('the placeholders say what a blank field will actually use', () => {
+    const fn = extractFunction(INDEX_HTML, 'applySchedDeliveryPlaceholders');
+    assert.match(fn, /cfgSchedMessage/);
+    assert.match(fn, /Account default message/);
+  });
+
+  test('the new handler is window-exported', () => {
+    assert.match(INDEX_HTML, /window\.onSchedCcToggle\s*=\s*onSchedCcToggle;/);
+  });
+});
+
+describe('migration 011', () => {
+  const SQL = fs.readFileSync(
+    path.join(__dirname, 'db', 'migrations', '011_schedule_body_and_cc.sql'), 'utf8');
+
+  test('it is idempotent at the file level', () => {
+    assert.match(SQL, /ADD COLUMN IF NOT EXISTS body/);
+    assert.match(SQL, /IF NOT EXISTS \(SELECT 1 FROM pg_constraint WHERE conname = 'sched_body_len'\)/);
+  });
+
+  test('it states its data impact, because it writes rows', () => {
+    assert.match(SQL, /DATA IMPACT/);
+    assert.match(SQL, /UPDATE schedules/);
+  });
+
+  test('the backfill preserves what the retired rule used to do', () => {
+    // Rows that overrode To sent no CC under the old merge. Without this they
+    // would silently START copying the account list on their next run.
+    assert.match(SQL, /SET cc_addrs = '\{\}'::text\[\]/);
+    assert.match(SQL, /WHERE to_addrs IS NOT NULL/);
+    assert.match(SQL, /AND cc_addrs IS NULL/);
+    // cardinality(), not array_length() — the latter returns NULL for an empty
+    // array, the trap migration 010 documents.
+    assert.match(SQL, /cardinality\(to_addrs\)/);
+  });
+});
+
 // ── The pre-release fixes ────────────────────────────────────────────────────
 describe('SMTP password sentinel', () => {
   test('the page keeps the sentinel the server sends', () => {

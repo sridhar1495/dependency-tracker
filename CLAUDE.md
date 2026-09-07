@@ -288,7 +288,7 @@ await tx(async (client) => {
 | `app_settings` | Service-wide settings the administrator owns (singleton row) |
 | `user_settings` | Per-user report and schedule limits — `NULL` means "follow the global default" |
 | `mail_settings` | Per-user SMTP connection **and default recipients** |
-| `schedules`, `schedule_projects`, `schedule_runs` | Scheduled reports, **any number per user** (migration 009). `report_name` `NULL` means "generate one"; `name` is the label in the settings list and a different field. `schedule_runs.schedule_id` is `ON DELETE SET NULL` so cancelling never erases the record that it ran. `to_addrs`/`cc_addrs`/`subject` are recipient overrides — `NULL` means "use the account's" (migration 010) |
+| `schedules`, `schedule_projects`, `schedule_runs` | Scheduled reports, **any number per user** (migration 009). `report_name` `NULL` means "generate one"; `name` is the label in the settings list and a different field. `schedule_runs.schedule_id` is `ON DELETE SET NULL` so cancelling never erases the record that it ran. `to_addrs`/`cc_addrs`/`subject`/`body` are delivery overrides — `NULL` means "use the account's" (migrations 010, 011). An empty `cc_addrs` means "copy nobody"; an empty `to_addrs` is refused |
 | `reports`, `report_file_chunks` | Report metadata and file bytes |
 | `violation_caches` | Shared violation cache, keyed by connection fingerprint |
 | `branding_assets` | The administrator's sign-in background. Bytes live here, **not** on `app_settings`, because the administration listing cross-joins that table |
@@ -531,17 +531,35 @@ if (method === 'GET' && path === '/violation-cache/status') {
   `user_settings.max_schedules` override, resolved in `userSettings.get()` and
   nowhere else, enforced on create with 429 `QUOTA_REACHED`. Being over it
   blocks; it never deletes a schedule.
-- **Only the addressing is per schedule.** `mail_settings` keeps the SMTP host,
-  port, TLS, credentials and From address, because they describe one mail server
-  the account authenticates to — duplicating them per schedule would mean
-  re-entering a password to change a recipient. `schedules.to_addrs`,
-  `cc_addrs` and `subject` override the account defaults, merged in
-  `scheduler.applyScheduleRecipients()` and nowhere else. `NULL` means
-  "inherit"; an empty `to_addrs` would mean "send to nobody" and the database
-  refuses it — with `cardinality()`, not `array_length()`, which returns `NULL`
-  for an empty array and so passes a `CHECK` that meant to reject it.
-  **Overriding `To` drops the account's `CC`** rather than copying people who
-  have nothing to do with that report.
+- **Only the addressing and the covering note are per schedule.**
+  `mail_settings` keeps the SMTP host, port, TLS, credentials and From address,
+  because they describe one mail server the account authenticates to —
+  duplicating them per schedule would mean re-entering a password to change a
+  recipient. `schedules.to_addrs`, `cc_addrs`, `subject` and `body` override the
+  account defaults, merged in `scheduler.applyScheduleRecipients()` and nowhere
+  else. `NULL` means "inherit". The body is `mailBody` on the wire, because the
+  route handler's own variable for the request payload is already `body`.
+- **`to_addrs` and `cc_addrs` are deliberately not symmetric.** An empty
+  `to_addrs` would mean "send to nobody", which is a silent outage rather than a
+  configuration, so the database refuses it — with `cardinality()`, not
+  `array_length()`, which returns `NULL` for an empty array and so passes a
+  `CHECK` that meant to reject it. An empty `cc_addrs` is the opposite: a real
+  instruction, and the only way to say "copy nobody".
+- **CC has three states and each is reachable** (migration 011): `NULL` inherits
+  the account list, `[]` copies nobody, a populated array overrides. All three
+  existed in the schema after migration 010 and none of the middle one was
+  reachable — `schedules.normalise()` folded an empty list into `NULL` on the
+  way in and the route's `forClient()` used `||` to fold it back on the way out.
+  The wire carries `ccEnabled` alongside `cc` because JSON cannot otherwise
+  distinguish "copy nobody" from "inherit"; omitting the flag keeps the old
+  meaning, so an older caller is unaffected.
+  This **retired an implicit rule**: overriding `To` used to drop the account's
+  `CC` silently, which was the least-bad default while "copy nobody" could not
+  be expressed. With a visible switch, dropping CC behind the user's back while
+  the switch reads "on" is the surprising behaviour, not the safe one. Migration
+  011 writes `cc_addrs = '{}'` into exactly the rows that relied on the old rule
+  (`to_addrs` overridden, `cc_addrs` NULL), so no existing schedule changes
+  where its mail goes.
 - **A manual run does not move the timetable.** `POST /schedules/:id/run-now`
   takes the same claim the poller takes — so Send now waits its turn rather
   than opening a second crawl — and `nextRunAfter()` preserves `next_run_at`.
@@ -750,6 +768,13 @@ there is no way out that silently drops what was typed. `_schedDirty` is
 cleared *after* the fields are populated, never before: every write above fires
 an `oninput` handler, so resetting it first leaves a freshly opened editor
 claiming unsaved changes.
+
+**The CC switch is the only way to say "copy nobody".** A blank CC field with
+the switch on means "inherit the account's list", which is a different
+instruction, so turning the switch off *clears and disables* the field rather
+than leaving addresses visible under a control that says they are unused. The
+placeholder states which of the two is in force, and the settings list marks a
+schedule that copies nobody so it does not look identical to one that inherits.
 
 **The panel has one footer, and its buttons dispatch on the open view.**
 `savePanel()` and `cancelPanel()` branch on `_schedEditorOpen`; only the primary

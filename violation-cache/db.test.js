@@ -2580,3 +2580,116 @@ describe('administrator principal', { skip: !ENABLED && 'TEST_DATABASE_URL not s
     }
   });
 });
+
+// ── Migration 011: the body column and the three CC states ───────────────────
+describe('per-schedule body and CC states', { skip: !ENABLED && 'TEST_DATABASE_URL not set' }, () => {
+  let pool, users, schedules, dtCrypto;
+
+  before(async () => {
+    pool = require('./db/pool');
+    if (!pool.isReady()) {
+      const url = new URL(DB_URL);
+      process.env.POSTGRES_HOST     = url.hostname;
+      process.env.POSTGRES_PORT     = url.port || '5432';
+      process.env.POSTGRES_USER     = decodeURIComponent(url.username);
+      process.env.POSTGRES_PASSWORD = decodeURIComponent(url.password) || 'x';
+      process.env.POSTGRES_DB       = url.pathname.replace(/^\//, '');
+      const { parseConfig } = require('./lib/config');
+      pool.init(parseConfig(process.env).db);
+      await migrate({ pool: pool.getPool(), dir: MIGRATIONS_DIR });
+    }
+    users     = require('./lib/users');
+    schedules = require('./lib/schedules');
+    dtCrypto  = require('./lib/crypto');
+  });
+
+  let owner;
+  before(async () => {
+    owner = await users.create({
+      loginId: 'ccstates', email: 'ccstates@example.com',
+      firstName: 'Cee', lastName: 'States',
+      passwordHash: await dtCrypto.hashPassword('correcthorsebattery'),
+    });
+  });
+  after(async () => { if (owner) await users.deleteById(owner.id); });
+
+  const mk = (over = {}) => schedules.create(owner.id, {
+    name: 'test', frequency: 'daily', hour: 9, minute: 0,
+    riskTypes: ['security'], enabled: true, ...over,
+  });
+
+  test('the body column exists and is bounded by a CHECK', async () => {
+    const col = await pool.query(
+      `SELECT data_type FROM information_schema.columns
+        WHERE table_name = 'schedules' AND column_name = 'body'`);
+    assert.equal(col.rows.length, 1);
+    const chk = await pool.query(
+      `SELECT conname FROM pg_constraint WHERE conname = 'sched_body_len'`);
+    assert.equal(chk.rows.length, 1, 'the length bound must live in the database too');
+  });
+
+  test('the database refuses a body over the limit', async () => {
+    const row = await mk({ name: 'bodycheck' });
+    await assert.rejects(
+      pool.query('UPDATE schedules SET body = $1 WHERE id = $2', ['x'.repeat(5001), row.id]),
+      /sched_body_len/);
+    await schedules.remove(owner.id, row.id);
+  });
+
+  test('a body round-trips with its newlines intact', async () => {
+    const text = 'Line one\nLine two\n\nLine four';
+    const row = await mk({ name: 'bodyrt', mailBody: text });
+    const back = await schedules.get(owner.id, row.id);
+    assert.equal(back.body, text);
+    await schedules.remove(owner.id, row.id);
+  });
+
+  test('all three CC states persist distinctly', async () => {
+    // The point of the whole change: NULL, empty and populated are three
+    // different instructions and the storage must keep them apart.
+    const inherit = await mk({ name: 'cc-inherit', ccEnabled: true, cc: [] });
+    const nobody  = await mk({ name: 'cc-nobody',  ccEnabled: false });
+    const own     = await mk({ name: 'cc-own',     ccEnabled: true, cc: ['a@b.co'] });
+
+    const rows = await pool.query(
+      'SELECT name, cc_addrs FROM schedules WHERE id = ANY($1) ORDER BY name',
+      [[inherit.id, nobody.id, own.id]]);
+    const byName = Object.fromEntries(rows.rows.map(r => [r.name, r.cc_addrs]));
+
+    assert.equal(byName['cc-inherit'], null, 'inherit is NULL');
+    assert.deepEqual(byName['cc-nobody'], [], 'copy nobody is an empty array, not NULL');
+    assert.deepEqual(byName['cc-own'], ['a@b.co']);
+
+    for (const r of [inherit, nobody, own]) await schedules.remove(owner.id, r.id);
+  });
+
+  test('an empty CC survives a read back through the data layer', async () => {
+    // It used to be flattened to NULL on the way out, which is what made the
+    // state unreachable even once it was stored.
+    const row = await mk({ name: 'cc-empty-rt', ccEnabled: false });
+    const back = await schedules.get(owner.id, row.id);
+    assert.deepEqual(back.ccAddrs, [], 'an empty array must not come back as null');
+    await schedules.remove(owner.id, row.id);
+  });
+
+  test('switching a schedule between the three states is not one-way', async () => {
+    const row = await mk({ name: 'cc-cycle', ccEnabled: true, cc: ['a@b.co'] });
+    await schedules.update(owner.id, row.id, { ccEnabled: false });
+    assert.deepEqual((await schedules.get(owner.id, row.id)).ccAddrs, []);
+    await schedules.update(owner.id, row.id, { ccEnabled: true, cc: [] });
+    assert.equal((await schedules.get(owner.id, row.id)).ccAddrs, null);
+    await schedules.update(owner.id, row.id, { ccEnabled: true, cc: ['c@d.co'] });
+    assert.deepEqual((await schedules.get(owner.id, row.id)).ccAddrs, ['c@d.co']);
+    await schedules.remove(owner.id, row.id);
+  });
+
+  test('the To CHECK still refuses an empty override', async () => {
+    // Unchanged by this migration, and worth re-asserting beside its opposite:
+    // an empty CC is a real instruction, an empty To is a silent outage.
+    const row = await mk({ name: 'to-empty' });
+    await assert.rejects(
+      pool.query("UPDATE schedules SET to_addrs = '{}'::text[] WHERE id = $1", [row.id]),
+      /sched_to_addrs_nonempty/);
+    await schedules.remove(owner.id, row.id);
+  });
+});

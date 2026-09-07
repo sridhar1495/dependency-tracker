@@ -32,6 +32,9 @@ const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const VALID_FREQUENCIES = new Set(['daily', 'weekly', 'monthly']);
 const VALID_RISK_TYPES  = new Set(['security', 'license', 'operational']);
 const MAX_NAME_LENGTH   = 120;
+// Matches the sched_body_len CHECK. Bounded in both places for the usual
+// reason: the database is the guarantee, this is the readable error.
+const MAX_BODY_LENGTH   = 5000;
 
 // Schedule ids and project_uuid are uuid columns. Anything else is rejected
 // here rather than handed to PostgreSQL, which would raise a type error — and
@@ -48,7 +51,7 @@ const SCHEDULE_COLUMNS = `
   last_run_at AS "lastRunAt", last_run_status AS "lastRunStatus",
   last_run_error AS "lastRunError", failure_notification AS "failureNotification",
   report_name AS "reportName", created_at AS "createdAt",
-  to_addrs AS "toAddrs", cc_addrs AS "ccAddrs", subject
+  to_addrs AS "toAddrs", cc_addrs AS "ccAddrs", subject, body
 `;
 
 const PROJECT_COUNT = `
@@ -185,10 +188,20 @@ function normalise(input) {
       out.toAddrs = list;
     }
   }
-  if (input.cc !== undefined) {
+  // ── CC has three states, and all three are now reachable ────────────────
+  //   ccEnabled false            → []   copy nobody, whatever To says
+  //   ccEnabled true  + blank    → NULL inherit the account's CC list
+  //   ccEnabled true  + adresses → the override
+  //
+  // `ccEnabled` is a separate flag rather than a convention about the list
+  // because JSON cannot otherwise distinguish the middle state from the first:
+  // this function used to fold an empty list into NULL, so "copy nobody" was
+  // expressible in PostgreSQL and unreachable from the product. Omitting the
+  // flag keeps the old meaning, so an existing caller is unaffected.
+  if (input.ccEnabled === false) {
+    out.ccAddrs = [];
+  } else if (input.cc !== undefined) {
     const list = toAddressList(input.cc);
-    // An empty CC is meaningful only when To is also overridden; on its own it
-    // reads as "inherit", which is what NULL says.
     if (list.length === 0) out.ccAddrs = null;
     else {
       const bad = list.find(a => !EMAIL_RE.test(a));
@@ -203,6 +216,22 @@ function normalise(input) {
       throw fail('A subject may not contain control characters.', 'subject');
     }
     out.subject = trimmed === '' ? null : trimmed;
+  }
+
+  // The covering note. Named `mailBody` on the wire because the route handler's
+  // own variable for the request payload is already called `body`, and one of
+  // the two would have had to be read as the other at every call site.
+  //
+  // Blank means "use the account's", the same as every other override here.
+  // Control characters are NOT rejected: a body is multi-line prose and needs
+  // its newlines, unlike a subject that travels in a single header.
+  if (input.mailBody !== undefined) {
+    const raw = typeof input.mailBody === 'string' ? input.mailBody : '';
+    const trimmed = raw.trim();
+    if (trimmed.length > MAX_BODY_LENGTH) {
+      throw fail(`A message body may be at most ${MAX_BODY_LENGTH} characters.`, 'mailBody');
+    }
+    out.body = trimmed === '' ? null : trimmed;
   }
 
   // An optional delivery name. NULL means "generate one", so an empty string
@@ -230,6 +259,7 @@ const WRITABLE = [
   ['weekDays', 'week_days'], ['monthDay', 'month_day'], ['riskTypes', 'risk_types'],
   ['name', 'name'], ['reportName', 'report_name'],
   ['toAddrs', 'to_addrs'], ['ccAddrs', 'cc_addrs'], ['subject', 'subject'],
+  ['body', 'body'],
 ];
 
 // Arrays need their type stated: an empty JS array reaches PostgreSQL with no

@@ -4447,6 +4447,70 @@ describe('routes — the test email reports why it failed', () => {
   });
 });
 
+// ── The three CC states and the body override ────────────────────────────────
+// Both halves of this landed together because they share one cause: an override
+// only works if every layer agrees on what "not set" means.
+describe('schedules.normalise() — CC states and body', () => {
+  const schedulesMod = require('./lib/schedules');
+  const n = (input) => schedulesMod.normalise(input);
+
+  test('ccEnabled false stores an empty list — "copy nobody"', () => {
+    assert.deepEqual(n({ ccEnabled: false }).ccAddrs, []);
+    // And it wins over whatever is in the field, because the field is disabled
+    // on screen and its contents are not what the user is asking for.
+    assert.deepEqual(n({ ccEnabled: false, cc: ['x@y.z'] }).ccAddrs, []);
+  });
+
+  test('ccEnabled true with a blank field stores NULL — "inherit"', () => {
+    assert.equal(n({ ccEnabled: true, cc: [] }).ccAddrs, null);
+    assert.equal(n({ ccEnabled: true, cc: '' }).ccAddrs, null);
+  });
+
+  test('ccEnabled true with addresses stores the override', () => {
+    assert.deepEqual(n({ ccEnabled: true, cc: ['a@b.co'] }).ccAddrs, ['a@b.co']);
+  });
+
+  test('omitting the flag keeps the old meaning, so an old caller still works', () => {
+    // Without ccEnabled the empty list is "inherit", which is what every
+    // existing client sends and what the field meant before this change.
+    assert.equal(n({ cc: [] }).ccAddrs, null);
+    assert.deepEqual(n({ cc: ['a@b.co'] }).ccAddrs, ['a@b.co']);
+    assert.equal(n({}).ccAddrs, undefined, 'an absent field is not written at all');
+  });
+
+  test('a malformed CC address is refused whatever the flag says', () => {
+    assert.throws(() => n({ ccEnabled: true, cc: ['not-an-email'] }), /not a valid email/);
+  });
+
+  test('the body is named mailBody on the wire, and blank means inherit', () => {
+    // `body` is taken: the route handler's own variable for the request payload
+    // is called that, and one of the two would have had to be read as the other.
+    assert.equal(n({ mailBody: 'A covering note' }).body, 'A covering note');
+    assert.equal(n({ mailBody: '   ' }).body, null);
+    assert.equal(n({ mailBody: '' }).body, null);
+    assert.equal(n({}).body, undefined);
+  });
+
+  test('the body keeps its newlines, unlike a subject', () => {
+    // A subject travels in a single header and rejects control characters; a
+    // body is prose and its line breaks are part of what the reader sees.
+    const out = n({ mailBody: 'Line one\nLine two\n\nLine four' });
+    assert.match(out.body, /Line one\nLine two/);
+    assert.throws(() => n({ subject: 'bad\u0001subject' }), /control characters/);
+  });
+
+  test('an over-long body is refused, naming its own field', () => {
+    try {
+      n({ mailBody: 'x'.repeat(5001) });
+      assert.fail('should have thrown');
+    } catch (e) {
+      assert.equal(e.field, 'mailBody');
+      assert.match(e.message, /at most 5000/);
+    }
+    assert.equal(n({ mailBody: 'x'.repeat(5000) }).body.length, 5000);
+  });
+});
+
 // ── Per-schedule recipients ──────────────────────────────────────────────────
 // The SMTP connection belongs to the account and the addressing belongs to the
 // schedule. Getting the merge wrong sends somebody's licence report to the
@@ -4478,19 +4542,44 @@ describe('applyScheduleRecipients()', () => {
     assert.equal(merged.from, account.from);
   });
 
-  test('overriding To drops the account CC rather than copying strangers', () => {
-    // A schedule addressed to the legal team should not also copy whoever the
-    // account happens to CC on everything else.
-    const merged = schedulerMod.applyScheduleRecipients(account, { toAddrs: ['legal@co.com'], ccAddrs: null });
-    assert.deepEqual(merged.to, ['legal@co.com']);
+  test('CC has three states and each one means what it says', () => {
+    // This replaces an implicit rule: overriding To used to drop the account CC
+    // silently, because "copy nobody" could not be expressed. It can now, so
+    // the switch decides and To has nothing to do with it. Migration 011 wrote
+    // the old outcome into the rows it applied to, so no existing schedule
+    // changed where its mail goes — but a NEW schedule that overrides To and
+    // leaves CC inheriting will copy the account list, which is what its editor
+    // shows it doing.
+    const inherit = schedulerMod.applyScheduleRecipients(account,
+      { toAddrs: ['legal@co.com'], ccAddrs: null });
+    assert.deepEqual(inherit.cc, ['boss@co.com'], 'null inherits, whatever To says');
+
+    const nobody = schedulerMod.applyScheduleRecipients(account,
+      { toAddrs: ['legal@co.com'], ccAddrs: [] });
+    assert.deepEqual(nobody.cc, [], 'an empty array copies nobody');
+
+    const own = schedulerMod.applyScheduleRecipients(account,
+      { toAddrs: ['legal@co.com'], ccAddrs: ['counsel@co.com'] });
+    assert.deepEqual(own.cc, ['counsel@co.com'], 'a list is used as given');
+  });
+
+  test('an empty To is still "inherit", never "send to nobody"', () => {
+    // The database refuses an empty To, but a corrupt or hand-edited row must
+    // not silently stop delivering. CC is the opposite — an empty CC is a real
+    // instruction — which is exactly why the two are not treated alike.
+    const merged = schedulerMod.applyScheduleRecipients(account, { toAddrs: [], ccAddrs: [] });
+    assert.deepEqual(merged.to, ['everyone@co.com']);
     assert.deepEqual(merged.cc, []);
   });
 
-  test('an empty override array is treated as "inherit", never as "send to nobody"', () => {
-    // The database refuses an empty To, but a corrupt or hand-edited row must
-    // not silently stop delivering.
-    const merged = schedulerMod.applyScheduleRecipients(account, { toAddrs: [], ccAddrs: [] });
-    assert.deepEqual(merged.to, ['everyone@co.com']);
+  test('the body overrides like the subject, and blank inherits', () => {
+    const own = schedulerMod.applyScheduleRecipients(account, { body: 'Weekly ops note' });
+    assert.equal(own.body, 'Weekly ops note');
+    const inherited = schedulerMod.applyScheduleRecipients(account, { body: null });
+    assert.equal(inherited.body, 'Body');
+    // And it never disturbs the connection, same as every other override here.
+    assert.deepEqual(own.smtp, account.smtp);
+    assert.equal(own.from, account.from);
   });
 
   test('a missing account or schedule is passed through unchanged', () => {
