@@ -206,6 +206,60 @@ compact per-project count map in a JSON file, and serves only that file to the b
 | `/violation-cache/status` | GET | `{status, progress: {pagesDone, pagesTotal}}` |
 | `/violation-cache/data` | GET | The cached map `{uuid: {ops, lic, secpolicy}}`, served gzipped. Build metadata comes from `/status` |
 | `/violation-cache/refresh` | POST | Trigger a background rebuild (409 if already running) |
+| `/violation-cache/risk-series` | GET | Daily risk history for your connection — see [Risk history](#risk-history) |
+
+### Risk history
+
+`GET /violation-cache/risk-series?period=week|month|year` returns what the
+portfolio looked like on each of the last 7, 30 or 365 days. `period` defaults to
+`week`; any other value is a 400 with code `INVALID_PERIOD`.
+
+A point is recorded **when a refetch completes**, one per DependencyTrack
+connection per day, and the last build of a day overwrites the earlier ones. Two
+consequences worth planning around:
+
+- **A day with no refetch has no point.** The response says so rather than
+  hiding it: that day comes back with `captured: false` and null totals. The
+  series is dense — every day in the window is present — so a consumer can index
+  by position without checking for gaps, but it must not read a gap as a zero.
+- **Rotating your DependencyTrack API key starts the history over.** History is
+  keyed by a fingerprint of the URL and key, the same way the shared cache is,
+  so a new key is a new series.
+
+```jsonc
+{
+  "period": "week", "days": 7, "configured": true,
+  "from": "2026-09-01", "to": "2026-09-07",
+  "points": [
+    { "day": "2026-09-01", "captured": false,
+      "rootProjectCount": null, "sev": null, "pol": null },
+    { "day": "2026-09-02", "captured": true, "rootProjectCount": 42,
+      "sev": { "critical": 12, "high": 30, "medium": 55, "low": 8, "unassigned": 3 },
+      "pol": { "opsFail": 4, "opsWarn": 1, "opsInfo": 0,
+               "licFail": 2, "licWarn": 0, "licInfo": 6,
+               "secpolFail": 1, "secpolWarn": 3, "secpolInfo": 0 } }
+  ]
+}
+```
+
+`sev` and `pol` are kept apart on purpose, because "critical" means two things
+in this dashboard and the caller has to choose which one it is plotting:
+
+- **Pure CVE severity** is `sev.critical` — the vulnerability counts
+  DependencyTrack embeds per project.
+- **The KPI tile number** is `sev.critical + pol.opsFail + pol.licFail +
+  pol.secpolFail`, which is what the cards at the top of the dashboard display.
+  `high` folds in the `Warn` counts and `medium` the `Info` counts; `low` is
+  `sev.low + sev.unassigned` and has no policy component.
+
+Both halves are summed over the same projects — DependencyTrack's root projects,
+active only, which is the set the tiles sum — so either projection reconciles
+with the cards.
+
+An account with no DependencyTrack connection gets the same envelope with
+`configured: false` and every day uncaptured, rather than an error.
+
+Retention is `SNAPSHOT_RETENTION_DAYS` (default 400).
 
 ### Manual operations
 
@@ -369,8 +423,11 @@ image and nothing else: no account, no setting, no count.
 | Hierarchy (roots) | `GET /violation-cache/dt/api/v1/project?onlyRoot=true` | All root-level projects (paginated), proxied with your stored key |
 | Hierarchy (children) | `GET /violation-cache/dt/api/v1/project/{uuid}/children` | Children per project (paginated) |
 | Config | `GET /violation-cache/config` | Your connection (never the key), settings, mail and schedule |
+| Config | `POST /violation-cache/config/test-connection` | Probe a URL and key before saving them |
+| Config | `DELETE /violation-cache/config/dt-key` | Forget the stored DependencyTrack API key |
 | Violation cache | `GET /violation-cache/status` | Cache state and build progress |
 | Violation cache | `GET /violation-cache/data` | Cached per-project violation counts |
+| Violation cache | `GET /violation-cache/risk-series` | Daily risk history for the trend view |
 
 ### Project fields
 

@@ -117,6 +117,9 @@ services:
       REPORT_CONCURRENCY: "${REPORT_CONCURRENCY:-5}"
       VIOLATION_CONCURRENCY: "${VIOLATION_CONCURRENCY:-3}"
       LOG_FORMAT: "${LOG_FORMAT:-text}"
+      # How long the daily risk history behind the trend graph is kept. Lowering
+      # it discards measurements of days that have already passed.
+      SNAPSHOT_RETENTION_DAYS: "${SNAPSHOT_RETENTION_DAYS:-400}"
     depends_on:
       dt-postgres:
         condition: service_healthy
