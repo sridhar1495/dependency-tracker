@@ -3191,6 +3191,23 @@ describe('documentation matches the routes the code answers', () => {
     }
   });
 
+  test('every /violation-cache route the code answers is in the integration guide', () => {
+    // Deliberately derived from the source rather than listed here. The two
+    // enumerated tests around this one only cover the routes somebody
+    // remembered to add, which is the same failure mode as the drift they were
+    // written to catch: /violation-cache/config/dt-key and
+    // /violation-cache/config/test-connection had been undocumented since they
+    // shipped, and no assertion noticed because neither was on anybody's list.
+    // A new route is now documented by default.
+    const routes = [...handledRoutes()]
+      .filter(r => r.startsWith('/violation-cache/'))
+      .sort();
+    assert.ok(routes.length >= 8, 'expected the cache and config routes to be discovered');
+    const missing = routes.filter(r => !INTEGRATION_MD.includes(r));
+    assert.deepEqual(missing, [],
+      `handled but undocumented: ${missing.join(', ')}`);
+  });
+
   test('every administration route is documented', () => {
     for (const r of ['/admin/overview', '/admin/users', '/admin/storage', '/admin/settings',
                      '/admin/users/:loginId/settings', '/admin/users/:loginId/password',

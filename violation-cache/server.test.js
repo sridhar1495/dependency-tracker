@@ -4952,3 +4952,405 @@ describe('scheduler concurrency is configurable', () => {
     schedulerMod.configure({ schedulerConcurrency: 5 });
   });
 });
+
+// ── Risk snapshots ────────────────────────────────────────────────────────────
+// The daily history behind the trend panel. Everything asserted here is pure —
+// the folding, the calendar arithmetic and the dense-window construction —
+// leaving only the SQL itself for the database tier (CLAUDE.md §10.2).
+
+const snapshotsMod = require('./lib/snapshots');
+
+describe('snapshots.summarise() — folding one day\'s totals', () => {
+  const project = (uuid, metrics) => ({ uuid, metrics });
+
+  test('sums the embedded severity metrics across root projects', () => {
+    const t = snapshotsMod.summarise([
+      project('a', { critical: 2, high: 5, medium: 1, low: 0, unassigned: 3 }),
+      project('b', { critical: 1, high: 0, medium: 4, low: 7, unassigned: 0 }),
+    ], {});
+    assert.equal(t.rootProjectCount, 2);
+    assert.deepEqual(t.sev, { critical: 3, high: 5, medium: 5, low: 7, unassigned: 3 });
+  });
+
+  test('sums the violation map over the SAME projects, not the whole map', () => {
+    // The map is keyed by every project that has a violation, roots and children
+    // alike. Only the roots may be counted, or a parent's numbers are added to
+    // its children's and the totals stop agreeing with the KPI tiles.
+    const map = {
+      a: { ops: { fail: 3, warn: 1, info: 0 }, lic: { fail: 2, warn: 0, info: 0 },
+           secpolicy: { fail: 1, warn: 0, info: 0 } },
+      child: { ops: { fail: 99, warn: 99, info: 99 }, lic: { fail: 99, warn: 99, info: 99 },
+               secpolicy: { fail: 99, warn: 99, info: 99 } },
+    };
+    const t = snapshotsMod.summarise([project('a', {})], map);
+    assert.equal(t.pol.ops_fail, 3);
+    assert.equal(t.pol.lic_fail, 2);
+    assert.equal(t.pol.secpol_fail, 1);
+    assert.equal(t.rootProjectCount, 1, 'the child is in the map but is not a root');
+  });
+
+  test('translates secpolicy in the map to the secpol columns', () => {
+    // The map spells it in full; the columns use the dashboard's abbreviation.
+    // Getting this wrong loses the security-policy counts silently — every
+    // number would still be a valid integer, just always zero.
+    const t = snapshotsMod.summarise(
+      [project('a', {})],
+      { a: { secpolicy: { fail: 4, warn: 5, info: 6 } } }
+    );
+    assert.deepEqual(
+      [t.pol.secpol_fail, t.pol.secpol_warn, t.pol.secpol_info], [4, 5, 6]
+    );
+  });
+
+  test('a project with no metrics contributes zero rather than NaN', () => {
+    // One NaN poisons the whole day's sum and the CHECK then rejects the write,
+    // losing fourteen good numbers along with the bad one.
+    const t = snapshotsMod.summarise([
+      project('a', null),
+      project('b', { critical: 'not a number', high: undefined, medium: null }),
+      project('c', { critical: 5 }),
+    ], null);
+    assert.equal(t.sev.critical, 5);
+    for (const v of Object.values(t.sev)) assert.ok(Number.isInteger(v), `${v} is not an integer`);
+    for (const v of Object.values(t.pol)) assert.ok(Number.isInteger(v), `${v} is not an integer`);
+  });
+
+  test('a project missing from the violation map has no violations, not an error', () => {
+    const t = snapshotsMod.summarise([project('never-crawled', { critical: 1 })], { other: {} });
+    assert.equal(t.sev.critical, 1);
+    assert.equal(t.pol.ops_fail, 0);
+  });
+
+  test('an empty portfolio folds to a complete row of zeroes', () => {
+    // Not an absent row: "we looked and there was nothing" is a measurement,
+    // and a graph that drops to zero is the correct picture of it.
+    const t = snapshotsMod.summarise([], {});
+    assert.equal(t.rootProjectCount, 0);
+    assert.equal(Object.keys(t.sev).length, 5);
+    assert.equal(Object.keys(t.pol).length, 9);
+    assert.ok(Object.values(t.sev).every(v => v === 0));
+    assert.ok(Object.values(t.pol).every(v => v === 0));
+  });
+
+  test('a project without a uuid is skipped entirely', () => {
+    const t = snapshotsMod.summarise([{ metrics: { critical: 9 } }, project('a', { critical: 1 })], {});
+    assert.equal(t.rootProjectCount, 1);
+    assert.equal(t.sev.critical, 1);
+  });
+
+  test('negative and fractional upstream counts are floored at zero and to integers', () => {
+    const t = snapshotsMod.summarise([project('a', { critical: -5, high: 2.7 })], {});
+    assert.equal(t.sev.critical, 0, 'the CHECK forbids a negative, so it must never be written');
+    assert.equal(t.sev.high, 2);
+  });
+});
+
+describe('snapshots — calendar arithmetic is UTC only', () => {
+  test('utcDay reads the UTC calendar, not the process timezone', () => {
+    // Q21: the same trap §6.8 describes for schedules. A container an hour west
+    // of UTC would otherwise file a 00:30 UTC build under the previous day, and
+    // nothing in any diff would show why the graph shifted.
+    const instant = new Date('2026-09-07T00:30:00Z');
+    const saved = process.env.TZ;
+    try {
+      for (const tz of ['UTC', 'America/Los_Angeles', 'Asia/Kolkata', 'Pacific/Chatham']) {
+        process.env.TZ = tz;
+        assert.equal(snapshotsMod.utcDay(instant), '2026-09-07', `TZ=${tz}`);
+      }
+    } finally {
+      if (saved === undefined) delete process.env.TZ; else process.env.TZ = saved;
+    }
+  });
+
+  test('shiftDay crosses month, year and leap-day boundaries', () => {
+    assert.equal(snapshotsMod.shiftDay('2026-03-01', -1), '2026-02-28');
+    assert.equal(snapshotsMod.shiftDay('2024-03-01', -1), '2024-02-29', 'a leap year has a 29th');
+    assert.equal(snapshotsMod.shiftDay('2026-01-01', -1), '2025-12-31');
+    assert.equal(snapshotsMod.shiftDay('2026-12-31', 1), '2027-01-01');
+    assert.equal(snapshotsMod.shiftDay('2026-09-07', 0), '2026-09-07');
+  });
+
+  test('a year window is 365 days ending today, inclusive', () => {
+    const now = new Date('2026-09-07T12:00:00Z');
+    assert.deepEqual(snapshotsMod.window(7, now),   { from: '2026-09-01', to: '2026-09-07' });
+    assert.deepEqual(snapshotsMod.window(30, now),  { from: '2026-08-09', to: '2026-09-07' });
+    assert.deepEqual(snapshotsMod.window(365, now), { from: '2025-09-08', to: '2026-09-07' });
+  });
+
+  test('a window of one day is today alone', () => {
+    const now = new Date('2026-09-07T12:00:00Z');
+    assert.deepEqual(snapshotsMod.window(1, now), { from: '2026-09-07', to: '2026-09-07' });
+  });
+});
+
+describe('snapshots.densify() — a gap is reported, never filled in', () => {
+  const row = (day, critical) => ({
+    day, root_project_count: 1,
+    sev_critical: critical, sev_high: 0, sev_medium: 0, sev_low: 0, sev_unassigned: 0,
+    ops_fail: 0, ops_warn: 0, ops_info: 0,
+    lic_fail: 0, lic_warn: 0, lic_info: 0,
+    secpol_fail: 0, secpol_warn: 0, secpol_info: 0,
+  });
+
+  test('every day in the window is present, in order', () => {
+    const points = snapshotsMod.densify('2026-09-01', 7, new Map());
+    assert.equal(points.length, 7);
+    assert.deepEqual(points.map(p => p.day), [
+      '2026-09-01', '2026-09-02', '2026-09-03', '2026-09-04',
+      '2026-09-05', '2026-09-06', '2026-09-07',
+    ]);
+  });
+
+  test('a day nobody refreshed is null, not the previous day carried forward', () => {
+    // Carrying forward draws a flat line asserting a measurement that was never
+    // taken. A trend graph may show a gap; it may not invent a reading.
+    const byDay = new Map([['2026-09-01', row('2026-09-01', 40)], ['2026-09-03', row('2026-09-03', 10)]]);
+    const points = snapshotsMod.densify('2026-09-01', 3, byDay);
+    assert.equal(points[0].captured, true);
+    assert.equal(points[0].sev.critical, 40);
+    assert.equal(points[1].captured, false);
+    assert.equal(points[1].sev, null);
+    assert.equal(points[1].rootProjectCount, null);
+    assert.equal(points[2].sev.critical, 10, 'the day after a gap is its own reading');
+  });
+
+  test('both halves come back separated, so the caller chooses the projection', () => {
+    // The schema stores components precisely so this decision stays reversible.
+    // Folding here would put it back where it cannot be changed.
+    const r = row('2026-09-01', 12);
+    r.ops_fail = 4; r.lic_fail = 2; r.secpol_fail = 1;
+    const [p] = snapshotsMod.densify('2026-09-01', 1, new Map([['2026-09-01', r]]));
+    assert.equal(p.sev.critical, 12, 'pure CVE severity');
+    assert.equal(p.sev.critical + p.pol.opsFail + p.pol.licFail + p.pol.secpolFail, 19,
+      'the KPI tile number is derivable from the same point');
+  });
+
+  test('emptySeries has the identical shape to a populated one', () => {
+    // The unconfigured account renders through the same code path as an account
+    // with a year of history, so there is no second branch to keep in step.
+    const now = new Date('2026-09-07T12:00:00Z');
+    const empty = snapshotsMod.emptySeries(7, now);
+    assert.deepEqual(Object.keys(empty).sort(), ['from', 'points', 'to']);
+    assert.equal(empty.points.length, 7);
+    assert.ok(empty.points.every(p => p.captured === false && p.sev === null && p.pol === null));
+    assert.deepEqual(Object.keys(empty.points[0]).sort(),
+      ['captured', 'day', 'pol', 'rootProjectCount', 'sev']);
+  });
+});
+
+describe('routes — the risk series is scoped and bounded', () => {
+  const configured = (fingerprint) => ({
+    apiUrl: 'http://dt:8080', isConfigured: true, fingerprint, hasApiKey: true,
+  });
+  const call = (url, principal) => {
+    const res = makeRes();
+    return routeCache.handle({
+      method: 'GET', url, path: '/violation-cache/risk-series', res, principal,
+    }).then(() => res);
+  };
+
+  test('an unknown period is refused rather than clamped', () => {
+    // Parsing a raw day count would let a caller ask for 100,000 days and make
+    // the service assemble a dense array of them.
+    return (async () => {
+      for (const bad of ['decade', '9999', '', 'WEEK', '7']) {
+        const res = await call(`/violation-cache/risk-series?period=${bad}`, asUser(USER_A));
+        assert.equal(res.statusCode, 400, `period=${bad} should be refused`);
+        assert.equal(res.json.code, 'INVALID_PERIOD');
+      }
+    })();
+  });
+
+  test('the three accepted periods map to 7, 30 and 365 days', async () => {
+    const seen = [];
+    const restoreConn = stub(dtConnectionsMod, { getForClient: async () => configured('abcdef012345') });
+    const restoreSnaps = stub(snapshotsMod, {
+      series: async (fp, days) => { seen.push([fp, days]); return { from: 'x', to: 'y', points: [] }; },
+    });
+    try {
+      for (const p of ['week', 'month', 'year']) {
+        const res = await call(`/violation-cache/risk-series?period=${p}`, asUser(USER_A));
+        assert.equal(res.statusCode, 200);
+        assert.equal(res.json.period, p);
+      }
+      assert.deepEqual(seen.map(s => s[1]), [7, 30, 365]);
+    } finally { restoreConn(); restoreSnaps(); }
+  });
+
+  test('no period at all defaults to the week', async () => {
+    const restoreConn = stub(dtConnectionsMod, { getForClient: async () => configured('abcdef012345') });
+    const restoreSnaps = stub(snapshotsMod, {
+      series: async () => ({ from: 'x', to: 'y', points: [] }),
+    });
+    try {
+      const res = await call('/violation-cache/risk-series', asUser(USER_A));
+      assert.equal(res.statusCode, 200);
+      assert.equal(res.json.period, 'week');
+      assert.equal(res.json.days, 7);
+    } finally { restoreConn(); restoreSnaps(); }
+  });
+
+  test('the fingerprint selects the series, and it is read from the caller\'s own row', async () => {
+    // The isolation guarantee: a user can only ever reach the history of the
+    // connection their own row points at (CLAUDE.md §7.5).
+    const asked = [];
+    const scoped = [];
+    const restoreConn = stub(dtConnectionsMod, {
+      getForClient: async (userId) => { scoped.push(userId); return configured(`fp-for-${userId.slice(0, 4)}`); },
+    });
+    const restoreSnaps = stub(snapshotsMod, {
+      series: async (fp) => { asked.push(fp); return { from: 'x', to: 'y', points: [] }; },
+    });
+    try {
+      await call('/violation-cache/risk-series', asUser(USER_A));
+      await call('/violation-cache/risk-series', asUser(USER_B));
+      assert.deepEqual(scoped, [USER_A, USER_B], 'the lookup is scoped by user id');
+      assert.deepEqual(asked, ['fp-for-1111', 'fp-for-2222'],
+        'each caller reads only their own connection\'s history');
+    } finally { restoreConn(); restoreSnaps(); }
+  });
+
+  test('S34: the series never decrypts the API key', async () => {
+    // getResolved decrypts; getForClient does not. A graph has no use for the
+    // key, so it must not put one in memory — and an unreadable key must not be
+    // able to break a panel that does not need it.
+    let resolvedCalls = 0;
+    const restoreConn = stub(dtConnectionsMod, {
+      getForClient: async () => configured('abcdef012345'),
+      getResolved: async () => { resolvedCalls++; throw new Error('must not be called'); },
+    });
+    const restoreSnaps = stub(snapshotsMod, {
+      series: async () => ({ from: 'x', to: 'y', points: [] }),
+    });
+    try {
+      const res = await call('/violation-cache/risk-series?period=month', asUser(USER_A));
+      assert.equal(res.statusCode, 200);
+      assert.equal(resolvedCalls, 0, 'the key was decrypted for a route that has no use for it');
+      assert.ok(!JSON.stringify(res.json).includes('apiKey'));
+    } finally { restoreConn(); restoreSnaps(); }
+  });
+
+  test('an account with no connection gets an empty window, not an error', async () => {
+    // A missing connection is not a failure for a trend panel: it is an empty
+    // state. Answering 503 would make the dashboard show an error toast for an
+    // account that has simply not finished setting up.
+    let queried = 0;
+    const restoreConn = stub(dtConnectionsMod, {
+      getForClient: async () => ({ isConfigured: false, fingerprint: null }),
+    });
+    const restoreSnaps = stub(snapshotsMod, { series: async () => { queried++; return null; } });
+    try {
+      const res = await call('/violation-cache/risk-series?period=week', asUser(USER_A));
+      assert.equal(res.statusCode, 200);
+      assert.equal(res.json.configured, false);
+      assert.equal(res.json.points.length, 7);
+      assert.ok(res.json.points.every(p => p.captured === false));
+      assert.equal(queried, 0, 'a query whose answer is known must not be sent');
+    } finally { restoreConn(); restoreSnaps(); }
+  });
+
+  test('a database failure is a 500 with a stable code, not a stack trace', async () => {
+    const restoreConn = stub(dtConnectionsMod, { getForClient: async () => configured('abcdef012345') });
+    const restoreSnaps = stub(snapshotsMod, {
+      series: async () => { throw new Error('relation "risk_snapshots" does not exist'); },
+    });
+    try {
+      const res = await call('/violation-cache/risk-series', asUser(USER_A));
+      assert.equal(res.statusCode, 500);
+      assert.equal(res.json.code, 'INTERNAL');
+      assert.ok(!res.body.includes('risk_snapshots'), 'the internal error must not reach the client');
+    } finally { restoreConn(); restoreSnaps(); }
+  });
+});
+
+describe('violation cache — the snapshot cannot fail the build', () => {
+  const conn = { apiUrl: 'http://dt:8080', apiKey: 'secret-key-1234', fingerprint: 'abcdef012345' };
+
+  test('a snapshot failure is swallowed and reported, never thrown', async () => {
+    // The cache row is already 'ready' by the time this runs. Turning a
+    // successful build into a failed one because a graph point could not be
+    // written is a strictly worse trade for everyone not looking at the graph.
+    const restoreFetch = stub(dtFetchMod, {
+      dtGetWithRetry: async () => { throw new Error('DT went away'); },
+    });
+    try {
+      const out = await violationCacheMod.captureSnapshot(conn, {});
+      assert.equal(out.captured, false);
+      assert.match(out.error, /DT went away/);
+    } finally { restoreFetch(); }
+  });
+
+  test('an upsert failure is swallowed too', async () => {
+    const restoreFetch = stub(dtFetchMod, { dtGetWithRetry: async () => ({ json: [], headers: {} }) });
+    const restoreSnaps = stub(snapshotsMod, {
+      upsertForDay: async () => { throw new Error('deadlock detected'); },
+    });
+    try {
+      const out = await violationCacheMod.captureSnapshot(conn, {});
+      assert.equal(out.captured, false);
+    } finally { restoreFetch(); restoreSnaps(); }
+  });
+
+  test('it crawls root projects only, active only — the set the tiles sum', async () => {
+    // Summing every project instead double-counts: a parent's numbers already
+    // carry its descendants'. These two query parameters are the whole
+    // agreement between the graph and the cards above it.
+    const urls = [];
+    const restoreFetch = stub(dtFetchMod, {
+      dtGetWithRetry: async (url) => { urls.push(url); return { json: [], headers: {} }; },
+    });
+    const restoreSnaps = stub(snapshotsMod, { upsertForDay: async () => '2026-09-07' });
+    try {
+      await violationCacheMod.captureSnapshot(conn, {});
+      assert.equal(urls.length, 1);
+      assert.match(urls[0], /onlyRoot=true/);
+      assert.match(urls[0], /excludeInactive=true/);
+      assert.match(urls[0], /^\/api\/v1\/project\?/);
+    } finally { restoreFetch(); restoreSnaps(); }
+  });
+
+  test('it pages until a short page, and stops at the ceiling', async () => {
+    const full = () => Array.from({ length: violationCacheMod.PROJECT_PAGE_SIZE },
+      (_, i) => ({ uuid: `p${i}`, metrics: {} }));
+    let calls = 0;
+    const restoreFetch = stub(dtFetchMod, {
+      dtGetWithRetry: async () => { calls++; return { json: full(), headers: {} }; },
+    });
+    const restoreSnaps = stub(snapshotsMod, { upsertForDay: async () => '2026-09-07' });
+    try {
+      await violationCacheMod.captureSnapshot(conn, {});
+      assert.equal(calls, violationCacheMod.MAX_PROJECT_PAGES,
+        'an upstream that never returns a short page must not spin forever');
+    } finally { restoreFetch(); restoreSnaps(); }
+  });
+
+  test('it accepts both the bare-array and {values:[]} shapes', async () => {
+    for (const shape of [[{ uuid: 'a', metrics: { critical: 3 } }],
+                         { values: [{ uuid: 'a', metrics: { critical: 3 } }] }]) {
+      let captured = null;
+      const restoreFetch = stub(dtFetchMod, {
+        dtGetWithRetry: async () => ({ json: shape, headers: {} }),
+      });
+      const restoreSnaps = stub(snapshotsMod, {
+        upsertForDay: async (fp, totals) => { captured = totals; return '2026-09-07'; },
+      });
+      try {
+        await violationCacheMod.captureSnapshot(conn, {});
+        assert.equal(captured.sev.critical, 3, `shape ${JSON.stringify(shape).slice(0, 20)}`);
+      } finally { restoreFetch(); restoreSnaps(); }
+    }
+  });
+
+  test('the API key is never logged in full by the snapshot path', async () => {
+    const lines = [];
+    const restoreLog = stub(require('./lib/log'), {
+      log: (level, msg, meta) => lines.push(`${msg} ${JSON.stringify(meta || {})}`),
+    });
+    const restoreFetch = stub(dtFetchMod, { dtGetWithRetry: async () => ({ json: [], headers: {} }) });
+    const restoreSnaps = stub(snapshotsMod, { upsertForDay: async () => '2026-09-07' });
+    try {
+      await violationCacheMod.captureSnapshot(conn, {});
+      for (const l of lines) assert.ok(!l.includes('secret-key-1234'), `key leaked: ${l}`);
+    } finally { restoreLog(); restoreFetch(); restoreSnaps(); }
+  });
+});

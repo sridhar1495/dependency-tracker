@@ -21,8 +21,17 @@ const { log } = require('./log');
 // the DT API (§6.2).
 const dtFetch = require('./dt-fetch');
 const caches = require('./caches');
+const snapshots = require('./snapshots');
 
 const PAGE_SIZE  = 100;
+// Root projects only, which is the set the dashboard's KPI tiles sum. 500 at a
+// time matches the scheduler's crawl of the same endpoint.
+const PROJECT_PAGE_SIZE = 500;
+// A defensive ceiling on the snapshot crawl: 100,000 root projects. It exists so
+// an upstream that never returns a short page cannot spin here forever — the
+// build has already been stored by this point, so there is no watchdog left
+// watching this loop.
+const MAX_PROJECT_PAGES = 200;
 const RISK_TYPES = ['OPERATIONAL', 'LICENSE', 'SECURITY'];
 const STATES     = ['FAIL', 'WARN', 'INFO'];
 const CAT        = { OPERATIONAL: 'ops', LICENSE: 'lic', SECURITY: 'secpolicy' };
@@ -86,6 +95,66 @@ async function getStatus(conn) {
     projectCount:    meta.projectCount || 0,
     failedPipelines: meta.failedPipelines || 0,
   };
+}
+
+/**
+ * Record today's totals for this connection, after a build has stored its map.
+ *
+ * Q22: this is the only moment the service holds a complete, self-consistent
+ * picture of a portfolio — the violation counts have just been crawled, and the
+ * severity counts are one paged request away. Capturing anywhere else would mean
+ * either a second full crawl or a snapshot assembled from two different
+ * instants.
+ *
+ * It NEVER throws. The cache row is already 'ready' when this runs, so a
+ * failure here must cost a missing point on a graph and nothing else: turning a
+ * successful build into a failed one because the history could not be written
+ * would be a strictly worse trade for every user who is not looking at the
+ * graph.
+ *
+ * The project crawl asks for root projects, active only — the same two filters
+ * the dashboard applies — so the totals recorded here are the totals the tiles
+ * would show for that instant.
+ *
+ * @param {{apiUrl: string, apiKey: string, fingerprint: string}} conn
+ * @param {object} map  the violation count map this build produced
+ */
+async function captureSnapshot(conn, map) {
+  const { apiUrl, apiKey, fingerprint } = conn;
+  try {
+    const projects = [];
+    for (let page = 1; page <= MAX_PROJECT_PAGES; page++) {
+      const { json } = await dtFetch.dtGetWithRetry(
+        `/api/v1/project?onlyRoot=true&excludeInactive=true` +
+        `&pageSize=${PROJECT_PAGE_SIZE}&pageNumber=${page}`,
+        apiUrl, apiKey
+      );
+      // DependencyTrack has answered this endpoint as a bare array and as
+      // { values: [...] } across versions; the dashboard already accepts both.
+      const batch = Array.isArray(json) ? json : (Array.isArray(json?.values) ? json.values : []);
+      projects.push(...batch);
+      if (batch.length < PROJECT_PAGE_SIZE) break;
+      if (page === MAX_PROJECT_PAGES) {
+        log('warn', 'Snapshot project crawl hit its page ceiling — totals may be partial', {
+          fingerprint: fingerprint.slice(0, 12), pages: page,
+        });
+      }
+    }
+
+    const totals = snapshots.summarise(projects, map);
+    const day = await snapshots.upsertForDay(fingerprint, totals);
+    log('info', 'Risk snapshot recorded', {
+      fingerprint: fingerprint.slice(0, 12), day,
+      rootProjects: totals.rootProjectCount,
+      critical: totals.sev.critical, high: totals.sev.high,
+    });
+    return { captured: true, day };
+  } catch (err) {
+    log('warn', `Risk snapshot not recorded: ${err.message}`, {
+      fingerprint: fingerprint.slice(0, 12),
+    });
+    return { captured: false, error: err.message };
+  }
 }
 
 /**
@@ -228,12 +297,28 @@ async function runJob(conn) {
       return { started: true, completed: false, stalled: true };
     }
 
+    // The crawl is over, so the watchdog has nothing left to watch. Stopping it
+    // here — rather than leaving it to the finally block — keeps it from
+    // measuring the snapshot's own project crawl as silence and logging a
+    // "build stalled" error against a build that has in fact just succeeded.
+    // clearInterval is idempotent, so the finally still covers every other path.
+    clearInterval(watchdog);
+
     await caches.storeResult(fingerprint, map, {
       projectCount: Object.keys(map).length,
       failedPipelines: progress.failedPipelines,
       ttlMs: cfg().cacheTtlMs,
     });
-    return { started: true, completed: true, projectCount: Object.keys(map).length };
+
+    // After the store, never before: a snapshot is a record of a build that
+    // completed, and this must not be able to fail one that did.
+    const snapshot = await captureSnapshot(conn, map);
+
+    return {
+      started: true, completed: true,
+      projectCount: Object.keys(map).length,
+      snapshotDay: snapshot.captured ? snapshot.day : null,
+    };
 
   } catch (err) {
     log('error', `Violation cache build failed: ${err.message}`, {
@@ -249,10 +334,10 @@ async function runJob(conn) {
 }
 
 module.exports = {
-  configure, runJob, getStatus, isBuilding,
+  configure, runJob, getStatus, isBuilding, captureSnapshot,
   // Exposed so a caller reading a row directly applies the same stall window
   // this module builds with, rather than a second copy of the default.
   stallWindowMs: stallMs,
-  PAGE_SIZE, RISK_TYPES, STATES, CAT, SEV,
+  PAGE_SIZE, PROJECT_PAGE_SIZE, MAX_PROJECT_PAGES, RISK_TYPES, STATES, CAT, SEV,
   DEFAULT_STALL_MS, HEARTBEAT_MS,
 };

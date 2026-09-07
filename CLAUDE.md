@@ -109,7 +109,7 @@ dependency-tracker/
 │   │   ├── users.js sessions.js login-audit.js admin.js
 │   │   ├── dt-connections.js user-settings.js app-settings.js mail-settings.js
 │   │   ├── disk.js             # Filesystem headroom and database size
-│   │   ├── reports-db.js caches.js schedules.js scheduler.js
+│   │   ├── reports-db.js caches.js snapshots.js schedules.js scheduler.js
 │   │   ├── dt-fetch.js excel.js cwe.js mail.js reports.js violation-cache.js
 │   │   └── branding.js image.js   # title + sign-in background
 │   ├── routes/                 # auth.js profile.js admin.js dt-proxy.js config.js reports.js schedule.js cache.js branding.js
@@ -208,7 +208,7 @@ Inline comments use lettered prefixes to trace design decisions:
 - **O-numbers** — observability notes (`// O3: JSON log format for log aggregators`)
 - **S-numbers** — security rationale (`// S2: token hashed before storage`) — **new in revision 2**
 
-Highest numbers currently in use: **Q20, P20, O5, S32**. When adding logic with a
+Highest numbers currently in use: **Q22, P20, O5, S34**. When adding logic with a
 non-obvious trade-off, add the next number in the appropriate series. Check the
 current maximum before assigning — parallel branches can claim the same number.
 
@@ -291,6 +291,7 @@ await tx(async (client) => {
 | `schedules`, `schedule_projects`, `schedule_runs` | Scheduled reports, **any number per user** (migration 009). `report_name` `NULL` means "generate one"; `name` is the label in the settings list and a different field. `schedule_runs.schedule_id` is `ON DELETE SET NULL` so cancelling never erases the record that it ran. `to_addrs`/`cc_addrs`/`subject`/`body` are delivery overrides — `NULL` means "use the account's" (migrations 010, 011). An empty `cc_addrs` means "copy nobody"; an empty `to_addrs` is refused |
 | `reports`, `report_file_chunks` | Report metadata and file bytes |
 | `violation_caches` | Shared violation cache, keyed by connection fingerprint |
+| `risk_snapshots` | One row per connection per day, written when a violation-cache build completes; the history behind the trend view (migration 012). Keyed by fingerprint for the same reason the cache is, so accounts sharing a connection share one series. Stores the severity counts and the policy counts **separately** — "critical" means two different things in this product and a schema that accretes history must not decide which one a graph plots. **No foreign key to `violation_caches`**: a cache row is a 24-hour artefact that housekeeping deletes as a matter of routine, and a cascade would let that destroy a year of measurements |
 | `branding_assets` | The administrator's sign-in background. Bytes live here, **not** on `app_settings`, because the administration listing cross-joins that table |
 | `schema_migrations` | Migration ledger |
 
@@ -376,6 +377,30 @@ however long that needs. Only a build that has not finished a single page within
 the stall window is stopped. Do not reintroduce an absolute deadline — the flat
 30-minute one it replaced killed healthy crawls for having a lot of data and
 discarded every page they had already fetched.
+
+**A completed build also records the day's risk snapshot** (Q22, migration 012).
+This is the only moment the service holds a complete, self-consistent picture of
+a portfolio: the violation counts have just been crawled and the severity counts
+are one paged request away, so capturing anywhere else would mean either a
+second full crawl or a snapshot stitched from two different instants.
+
+Three properties are load-bearing:
+
+- **It runs after `storeResult`, and it never throws.** The cache row is already
+  `ready`, so a failure here costs a missing point on a graph and nothing more.
+  Turning a successful build into a failed one because the history could not be
+  written is a strictly worse trade for every user who is not looking at the
+  graph.
+- **The watchdog is stopped before it, explicitly.** Left running, it would read
+  the snapshot's own project crawl as silence and log "build stalled" against a
+  build that has in fact just succeeded. `clearInterval` is idempotent, so the
+  `finally` still covers every other path.
+- **The crawl asks for `onlyRoot=true&excludeInactive=true`.** Those two
+  parameters are the entire agreement between the graph and the KPI tiles above
+  it: the tiles sum DependencyTrack's active root projects, because a parent's
+  numbers already carry its descendants'. Summing every project instead
+  double-counts, and the graph would then contradict the cards on the same
+  screen.
 
 ### 6.4 Semaphore
 
@@ -1041,6 +1066,8 @@ The frontend never performs uniqueness checks — those are backend-only, via
 | `mintToken` / `hashToken` | server | Session token helpers |
 | `encryptSecret` / `decryptSecret` | server | AES-256-GCM wrappers |
 | `calcNextRun(schedule, now)` | server | Pure function: next fire time, in UTC |
+| `snapshots.summarise(projects, map)` | server | Pure fold of one day's risk totals |
+| `snapshots.series(fp, days)` | server | Dense daily history; a gap is `captured: false`, never carried forward |
 | `collectReportData(...)` | server | Shared collection core for manual and scheduled reports |
 | `sendEmail(mailCfg, ...)` | server | Deliver report via nodemailer |
 
@@ -1258,6 +1285,15 @@ redundant.
   clears back to it, an empty `to_addrs` is refused by the database, and the
   merge is checked against a real SMTP conversation so the assertion is about
   which addresses reach `RCPT TO` rather than which object was built.
+- Risk snapshots: the fold sums the same projects for both halves and never
+  yields `NaN` from a missing upstream metric; a day nobody refreshed comes back
+  `captured: false` rather than as the previous day carried forward; the upsert
+  overwrites within a day instead of adding a row; the retention sweep keeps
+  what is inside the window. Two of these need a real PostgreSQL and are worth
+  the tier on their own — that the history survives `caches.sweepOrphaned()`
+  deleting the cache row beside it, and that the day still reads back as a
+  string when `process.env.TZ` moves, which is what a plain `SELECT day` would
+  break.
 - **Authorisation:** every route rejects a missing or invalid token with 401;
   cross-user access returns 404; the profile endpoint ignores login ID and email.
 - Do **not** write tests that require a live DT API.
@@ -1365,7 +1401,9 @@ aspirations, and each is verifiable.
 - **No sequential scans on a hot path.** Every hot query is index-backed, evidenced
   by `EXPLAIN (ANALYZE, BUFFERS)` attached to the PR that introduces it.
 - **No unbounded table growth.** Sessions are swept; audit and run history are
-  retained 90 days.
+  retained 90 days; daily risk snapshots are swept at `SNAPSHOT_RETENTION_DAYS`
+  (default 400), and the table is bounded at that times the number of distinct
+  connections.
 - **Bounded concurrency everywhere.** Pool 15, scheduler 5
   (`SCHEDULER_CONCURRENCY`), report fetches 5, violation fetches 3.
 - **No idle capacity while work is queued.** The scheduler's slots are refilled
@@ -1390,6 +1428,7 @@ aspirations, and each is verifiable.
 | `SESSION_IDLE_HOURS` | server | Idle session lifetime (default 2) |
 | `VIOLATION_CACHE_TTL_HOURS` | server | Cache expiry in hours (default 24) |
 | `VIOLATION_JOB_STALL_MINUTES` | server | Silence after which a refetch is presumed wedged (default 15) |
+| `SNAPSHOT_RETENTION_DAYS` | server | Days of daily risk history kept for the trend view (default 400 — a year plus five weeks, so the year window never truncates) |
 | `PORT` | server | Cache service listen port (default 3001) |
 | `REPORT_CONCURRENCY` | server | Max parallel project fetches (default 5) |
 | `SCHEDULER_CONCURRENCY` | server | Scheduled reports building at once, across all accounts (default 5). One account's own schedules always run one at a time regardless. Upstream load is this × `REPORT_CONCURRENCY` |
