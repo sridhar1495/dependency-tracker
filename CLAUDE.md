@@ -848,6 +848,37 @@ amount of CSS between them is accepted and preferred over introducing a shared
 asset. A test asserts every custom property is present in all three, so they
 cannot drift apart silently.
 
+**The risk trend is a panel in `index.html`, not a page, and its charts are
+hand-rolled inline SVG.** §3 caps the dependency list at three packages and
+there is no build step to tree-shake a charting library, so the scales, the
+paths and the axes are ~250 lines here. Being small is what makes them
+testable: every helper is pure and `dashboard.test.js` extracts them from the
+page's own source rather than copying them.
+
+Four rules the panel must keep:
+
+- **A gap is drawn as a gap.** A day nobody refreshed has no reading, so
+  `trendValues()` returns `null` and both `trendLinePath()` and
+  `trendAreaPath()` start a fresh subpath after it. Joining across it would
+  draw a straight line between two real measurements and invite somebody to
+  read a value off the middle of it. Carrying the previous day forward is the
+  same error wearing a flatter hat.
+- **The default metric is the one the cards show.** "Critical" means two things
+  in this product — pure CVE severity, and that plus the operational, licence
+  and security-policy failures. The panel sits directly above the cards, so its
+  default must be their arithmetic or the screen contradicts itself; the other
+  reading is one dropdown away, which is what storing both components in
+  `risk_snapshots` bought. A test asserts `trendValues('total')` still matches
+  `computeSummaryTotals()` term for term.
+- **`renderTrend()` returns early while the panel is collapsed.** `clientWidth`
+  of a hidden element is zero, and the charts are sized from a measurement — so
+  rendering while shut caches every SVG at padding width until the next resize.
+- **Colours are custom properties inside the SVG**, never hex literals. An SVG
+  `fill="var(--critical)"` re-resolves on a theme switch exactly as a div's
+  background does, so the charts follow the theme with no JavaScript at all. A
+  hex in an SVG attribute is precisely where that mistake hides from a CSS
+  review, so a test forbids one in `TREND_LEVELS`.
+
 Adding a page needs no nginx change: `try_files` serves a real file before the
 SPA fallback is considered.
 
@@ -929,6 +960,9 @@ Flat, module-scoped globals, no reactive framework.
 | `dtHasApiKey` | boolean | A key is stored — **never its value** |
 | `_cacheBuilding` | boolean | A violation-cache build is in flight for this connection |
 | `_cacheWatchTimer` | number \| null | Slow poll that notices builds started by other users |
+| `_trendSeries` | object \| null | Last `/risk-series` envelope; server-side history, independent of `allProjects` |
+| `_trendReqSeq` | number | Monotonic request id — only the newest response may render |
+| `_trendView` | object | How this viewer likes the panel; persisted under one `localStorage` key |
 
 `_cacheBuilding` is never assigned directly — every write goes through
 `setCacheBuilding()`, which also disables the toolbar's ↻ Refresh. The toolbar
@@ -939,6 +973,14 @@ the same control: ↻ Refresh reloads the project hierarchy as well, and nothing
 else picks up a newly added project without a full page reload.
 
 Never mutate `allProjects` after initial load. Derive everything else from it.
+
+**The trend panel derives from nothing on this list.** It is server-side history
+keyed by connection, so a filter, a search or a hierarchy reload leaves it
+alone — and a completed refetch must explicitly call `loadTrend()`, because the
+build writes today's snapshot on its way out and the series in hand is one point
+stale the moment the banner turns green. `_trendReqSeq` exists because the
+period control is a dropdown: choosing "year" then "week" fires two requests, and
+the year's larger payload can easily land second.
 
 **A refetch must re-run `applyFilters()`, not replay `currentMatchSet`.** The
 risk and category filters are computed *from* violation counts, so a match set
@@ -1013,6 +1055,13 @@ The frontend never performs uniqueness checks — those are backend-only, via
   only, so the compositor runs it off the main thread. It must stay decorative:
   `aria-hidden`, behind a `z-index`, and disabled under
   `@media (prefers-reduced-motion: reduce)`.
+- **Chart geometry is measured, and a measured chart needs a debounced redraw.**
+  The trend SVGs are built at a pixel width read from the container, so
+  `onTrendResize()` re-renders on resize — debounced at 150 ms, because a window
+  drag fires continuously and rebuilding four SVGs per frame is exactly the work
+  §13 forbids. How many date labels fit is derived from the plot width too
+  (`trendLabelCapacity`) rather than being a constant: the same seven days have
+  room for seven dates on the combined chart and for two in a small multiple.
 - Accent colour `--accent: #6366f1`. Severity colours are variables
   (`--critical`, `--high`, …).
 - Never hard-code a colour hex inside a component rule.
@@ -1057,6 +1106,9 @@ The frontend never performs uniqueness checks — those are backend-only, via
 | `openModal(id)` / `closeModal(id)` | frontend | Modal show/hide |
 | `escHtml(s)` | frontend | Escape before `innerHTML` interpolation |
 | `inferSuffix(name, ver)` | frontend | Strip version from name |
+| `trendValues(point, metric)` | frontend | Fold a stored day into the four plotted numbers; `null` for a gap |
+| `trendNiceCeil(max)` | frontend | Round axis ceiling; never 0, because every y divides by it |
+| `trendLinePath` / `trendAreaPath` | frontend | SVG paths that break at gaps rather than bridging them |
 | `query(sql, params)` / `tx(fn)` | server | All database access |
 | `makeSemaphore(limit)` | server | Promise concurrency limit |
 | `sleep(ms)` | server | Promise delay |
@@ -1294,6 +1346,13 @@ redundant.
   deleting the cache row beside it, and that the day still reads back as a
   string when `process.env.TZ` moves, which is what a plain `SELECT day` would
   break.
+- The trend charts: the fold against the KPI formula (a cross-layer check — the
+  tile arithmetic is read out of `index.html` too, so changing one without the
+  other fails); a gap folding to `null` rather than zero; a line and a stacked
+  band both breaking at one; `trendNiceCeil(0)` returning a usable axis rather
+  than a page of `NaN` for a clean portfolio; and a single captured day landing
+  in the middle of the plot rather than at `Infinity`. Every helper is extracted
+  from the page, not copied.
 - **Authorisation:** every route rejects a missing or invalid token with 401;
   cross-user access returns 404; the profile endpoint ignores login ID and email.
 - Do **not** write tests that require a live DT API.

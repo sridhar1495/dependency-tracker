@@ -252,6 +252,85 @@
     .c-low      { color: var(--low); }
     .c-ok       { color: var(--ok); }
 
+    /* ── Risk trend panel ─────────────────────────────────────────────────── */
+    /* Hand-rolled inline SVG, no charting library: §3 forbids a fourth npm
+       package and there is no build step to tree-shake one anyway. Every colour
+       is a custom property, so the charts follow the theme with no JS at all —
+       an SVG `stroke: var(--critical)` re-resolves on the theme switch exactly
+       as a div's background does. */
+    .trend {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      margin-bottom: 16px;
+      flex-shrink: 0;
+    }
+    .trend-head {
+      display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+      padding: 12px 16px;
+    }
+    /* The caret and title are one button, so the whole label is the hit target
+       for expanding — a 12px caret alone is a hostile thing to aim at. */
+    .trend-toggle {
+      display: flex; align-items: center; gap: 8px;
+      background: none; border: none; padding: 0; cursor: pointer;
+      color: var(--text); font-size: 14px; font-weight: 600;
+      font-family: inherit;
+    }
+    .trend-toggle:hover { color: var(--accent); }
+    .trend-caret { font-size: 11px; color: var(--text-muted); transition: transform 0.15s; }
+    .trend.collapsed .trend-caret { transform: rotate(-90deg); }
+    .trend-sub { font-size: 11px; color: var(--text-muted); font-weight: 400; }
+    .trend-controls { display: flex; align-items: center; gap: 6px; margin-left: auto; flex-wrap: wrap; }
+    .trend-controls select {
+      background: var(--surface2); color: var(--text);
+      border: 1px solid var(--border); border-radius: 6px;
+      padding: 4px 8px; font-size: 12px; font-family: inherit;
+    }
+    .trend-body { padding: 0 16px 14px; }
+    .trend-status {
+      padding: 28px 16px; text-align: center;
+      font-size: 13px; color: var(--text-muted); line-height: 1.7;
+    }
+    /* Small multiples. auto-fit rather than a fixed 2×2 so the four charts
+       become 2×2, then 1×4, without a breakpoint of their own. */
+    .trend-charts { display: grid; gap: 12px; }
+    .trend-charts.split { grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); }
+    .trend-cell { position: relative; min-width: 0; }
+    .trend-cell-title {
+      font-size: 11px; color: var(--text-muted);
+      text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 2px;
+    }
+    .trend-cell svg { display: block; width: 100%; }
+    .trend-grid-line { stroke: var(--border); stroke-width: 1; }
+    .trend-axis-text { fill: var(--text-muted); font-size: 10px; font-family: inherit; }
+    .trend-crosshair { stroke: var(--text-muted); stroke-width: 1; stroke-dasharray: 3 3; }
+    /* The capture markers sit on top of the line, so they need the panel's own
+       background rather than transparency to read as points rather than blobs. */
+    .trend-dot { stroke: var(--surface); stroke-width: 1.5; }
+
+    .trend-legend {
+      display: flex; gap: 14px; flex-wrap: wrap;
+      margin-top: 8px; font-size: 11px; color: var(--text-muted);
+    }
+    .trend-legend-item { display: flex; align-items: center; gap: 5px; }
+    .trend-swatch { width: 10px; height: 10px; border-radius: 2px; flex-shrink: 0; }
+
+    /* Positioned against .trend-cell, and pointer-events:none so it can never
+       sit between the pointer and the overlay that is tracking it. */
+    .trend-tip {
+      position: absolute; z-index: 60; pointer-events: none;
+      background: var(--surface2); border: 1px solid var(--border);
+      border-radius: var(--radius); padding: 8px 10px;
+      font-size: 11px; color: var(--text); line-height: 1.6;
+      box-shadow: 0 6px 20px rgba(0,0,0,0.35);
+      white-space: nowrap;
+    }
+    .trend-tip-day { color: var(--text-muted); margin-bottom: 4px; }
+    .trend-tip-row { display: flex; align-items: center; gap: 6px; }
+    .trend-tip-row .trend-swatch { width: 8px; height: 8px; }
+    .trend-tip-val { margin-left: auto; padding-left: 12px; font-weight: 600; }
+
     /* ── Controls ─────────────────────────────────────────────────────────── */
     .controls {
       display: flex; align-items: center; gap: 8px;
@@ -927,6 +1006,41 @@
 
     <div class="data-banner" id="dataBanner"></div>
 
+    <!-- ── Risk trend ──────────────────────────────────────────────────────
+         Above the cards deliberately: it is the same four numbers over time,
+         so it reads as context for them rather than as a separate report. -->
+    <section class="trend" id="trendPanel" aria-labelledby="trendTitle">
+      <div class="trend-head">
+        <button class="trend-toggle" id="trendToggle" onclick="toggleTrendPanel()"
+                aria-expanded="true" aria-controls="trendBody">
+          <span class="trend-caret" id="trendCaret" aria-hidden="true">▾</span>
+          <span id="trendTitle">Risk trend</span>
+          <span class="trend-sub" id="trendRange"></span>
+        </button>
+        <div class="trend-controls" id="trendControls">
+          <select id="trendPeriod" onchange="onTrendPeriodChange()" aria-label="Trend period">
+            <option value="week">Last 7 days</option>
+            <option value="month">Last 30 days</option>
+            <option value="year">Last year</option>
+          </select>
+          <!-- "Critical" means two things in this dashboard. The default is the
+               one the cards below show, so the panel and the cards can never
+               disagree; the other is one choice away. -->
+          <select id="trendMetric" onchange="onTrendMetricChange()" aria-label="What the trend counts">
+            <option value="total">All risk — matches the cards</option>
+            <option value="security">Security findings only</option>
+          </select>
+          <button class="btn-xs" id="trendChartType" onclick="toggleTrendChartType()"></button>
+          <button class="btn-xs" id="trendSplit" onclick="toggleTrendSplit()"></button>
+        </div>
+      </div>
+      <div class="trend-body" id="trendBody">
+        <div class="trend-status" id="trendStatus" hidden></div>
+        <div class="trend-charts" id="trendCharts"></div>
+        <div class="trend-legend" id="trendLegend" hidden></div>
+      </div>
+    </section>
+
     <div class="summary-grid" id="summaryGrid"></div>
 
     <!-- Controls row 1: title -->
@@ -1441,6 +1555,23 @@ let flatView         = false;  // when true: leaf-only flat list, no hierarchy
 let _searchDebounce    = null;   // timer id for search input debounce (200 ms)
 let _fetchController   = null;   // AbortController — cancelled on every new connect/refresh
 let selectedProjectUuids = new Set(); // UUIDs of leaf projects manually checked for report
+
+// ── Risk trend panel state ─────────────────────────────────────────────────
+// The series is server-side history keyed by connection, so it is independent
+// of allProjects and survives a filter, a refetch or a hierarchy reload.
+let _trendSeries  = null;   // last /risk-series envelope, or null before the first load
+let _trendError   = null;   // why the last load failed, or null
+let _trendReqSeq  = 0;      // monotonic request id: only the newest response may render
+let _trendResizeTimer = null;
+// How the viewer likes to look at it. Persisted in localStorage under one key —
+// per-viewer convenience, exactly what §8.10's storage note sanctions, and
+// nothing here is data the server needs to know.
+let _trendView = {
+  open: true, period: 'week', metric: 'total',
+  chartMain: 'stacked',  // stacked | line
+  chartSplit: 'line',    // line | bar
+  split: false,
+};
 
 // ── Config panel state ─────────────────────────────────────────────────────
 let _configPanelDirty = false;   // true when any config panel field has changed
@@ -3606,6 +3737,586 @@ function renderFlatList() {
   updateSelectAllCheckbox();
 }
 
+// ══ Risk trend panel ═══════════════════════════════════════════════════════
+// Four severities over time, drawn as inline SVG. No charting library: §3 caps
+// the dependency list at three packages and there is no build step, so the
+// scales, the paths and the axes are all here. They are small, and being small
+// is what makes them testable — every helper below is pure and is unit-tested
+// against the page's own source rather than a copy (§10.5).
+
+const TREND_STORAGE_KEY = 'dt_trend_view';
+
+// Order matters twice: it is the stacking order from the axis upward, and the
+// legend order. Critical sits on the baseline so the band people care about
+// most is the one that can be read directly off the axis.
+const TREND_LEVELS = [
+  { key: 'critical', label: 'Critical', colour: 'var(--critical)' },
+  { key: 'high',     label: 'High',     colour: 'var(--high)' },
+  { key: 'medium',   label: 'Medium',   colour: 'var(--medium)' },
+  { key: 'low',      label: 'Low',      colour: 'var(--low)' },
+];
+
+const TREND_GEOM = {
+  mainH: 220, splitH: 132,
+  padL: 44, padR: 12, padT: 10, padB: 22,
+  // Beyond this many points a marker per day is noise rather than information,
+  // and 365 circles is a real amount of DOM for no gain.
+  maxDots: 40,
+};
+
+/**
+ * Fold one day's stored components into the four numbers a chart plots.
+ *
+ * This is the same arithmetic computeSummaryTotals() applies to live projects,
+ * and it has to stay that way: the panel sits directly above the cards, so a
+ * different sum would put two contradicting numbers on one screen. A test
+ * asserts the two agree.
+ *
+ * `metric` is what makes both readings reachable from one stored row:
+ *   total    — severity plus the policy failures, which is what the cards show
+ *   security — pure CVE severity, with unassigned folded into low as the cards do
+ *
+ * @returns {object|null} null for a day nobody refreshed — NOT zero, which
+ *   would be the claim that somebody looked and found nothing.
+ */
+function trendValues(point, metric) {
+  if (!point || !point.captured || !point.sev || !point.pol) return null;
+  const s = point.sev, p = point.pol;
+  const low = (s.low || 0) + (s.unassigned || 0);
+  if (metric === 'security') {
+    return { critical: s.critical || 0, high: s.high || 0, medium: s.medium || 0, low };
+  }
+  return {
+    critical: (s.critical || 0) + (p.opsFail || 0) + (p.licFail || 0) + (p.secpolFail || 0),
+    high:     (s.high || 0)     + (p.opsWarn || 0) + (p.licWarn || 0) + (p.secpolWarn || 0),
+    medium:   (s.medium || 0)   + (p.opsInfo || 0) + (p.licInfo || 0) + (p.secpolInfo || 0),
+    low,
+  };
+}
+
+/**
+ * A "nice" axis ceiling at or above max: 1, 2 or 5 times a power of ten.
+ *
+ * Zero has to return 1, not 0 — every y coordinate divides by this, and an
+ * all-clean portfolio is a perfectly ordinary thing to be looking at.
+ */
+function trendNiceCeil(max) {
+  const m = Number(max);
+  if (!Number.isFinite(m) || m <= 0) return 1;
+  const pow  = Math.pow(10, Math.floor(Math.log10(m)));
+  const norm = m / pow;
+  const step = norm <= 1 ? 1 : norm <= 2 ? 2 : norm <= 5 ? 5 : 10;
+  return step * pow;
+}
+
+/**
+ * Axis values from 0 to max, at a step that is itself round.
+ *
+ * How many intervals is derived from max's leading digit rather than fixed,
+ * because max is already 1, 2 or 5 times a power of ten and those want
+ * different divisors: a fixed four intervals turns a ceiling of 50 into
+ * 13/25/38/50, which are the right positions wearing wrong-looking numbers.
+ * Five intervals into 1 or 5, four into 2, and every label lands whole.
+ *
+ * "2.5 vulnerabilities" is not a thing, so the small end counts by ones.
+ */
+function trendTicks(max) {
+  const m = Math.max(1, Math.round(Number(max) || 0));
+  if (m <= 5) return Array.from({ length: m + 1 }, (_, i) => i);
+  const pow       = Math.pow(10, Math.floor(Math.log10(m)));
+  const mantissa  = Math.round(m / pow);
+  const intervals = mantissa === 2 ? 4 : 5;
+  const step      = m / intervals;
+  return [...new Set(Array.from({ length: intervals + 1 }, (_, i) => Math.round(i * step)))];
+}
+
+/**
+ * Pixel geometry for one chart. Returned as plain functions so the path
+ * builders below take no view state at all.
+ */
+function trendGeometry(width, height, n, max) {
+  const { padL, padR, padT, padB } = TREND_GEOM;
+  const x0 = padL, x1 = Math.max(padL + 1, width - padR);
+  const y0 = height - padB, y1 = padT;
+  return {
+    width, height, n, max, x0, x1, y0, y1,
+    // A single captured day has no span to spread across, and (x1-x0)/(n-1)
+    // would be Infinity. Put it in the middle, where its dot is still readable.
+    x: (i) => (n <= 1 ? (x0 + x1) / 2 : x0 + ((x1 - x0) * i) / (n - 1)),
+    y: (v) => y0 - ((y0 - y1) * Math.max(0, Number(v) || 0)) / (max || 1),
+  };
+}
+
+/**
+ * An SVG path through a series, BREAKING at every gap.
+ *
+ * A null is a day nobody measured. Joining across it would draw a straight line
+ * between two real readings and invite somebody to read a value off the middle
+ * of it — inventing data is the one thing this panel must not do. Each run of
+ * consecutive readings therefore starts a fresh subpath.
+ *
+ * @param {Array<number|null>} values
+ */
+function trendLinePath(values, g) {
+  let d = '', open = false;
+  for (let i = 0; i < values.length; i++) {
+    const v = values[i];
+    if (v === null || v === undefined) { open = false; continue; }
+    d += `${open ? 'L' : 'M'}${g.x(i).toFixed(1)} ${g.y(v).toFixed(1)} `;
+    open = true;
+  }
+  return d.trim();
+}
+
+/**
+ * A filled band between two edges, one closed shape per unbroken run.
+ *
+ * Same reasoning as the line: a stacked area that bridges a gap claims the
+ * portfolio held steady on a day nobody looked at it.
+ */
+function trendAreaPath(upper, lower, g) {
+  let d = '';
+  let i = 0;
+  while (i < upper.length) {
+    if (upper[i] === null || upper[i] === undefined) { i++; continue; }
+    let j = i;
+    while (j + 1 < upper.length && upper[j + 1] !== null && upper[j + 1] !== undefined) j++;
+    // A run of one has no area to fill; its dot carries the reading instead.
+    if (j > i) {
+      let seg = '';
+      for (let k = i; k <= j; k++) seg += `${k === i ? 'M' : 'L'}${g.x(k).toFixed(1)} ${g.y(upper[k]).toFixed(1)} `;
+      for (let k = j; k >= i; k--) seg += `L${g.x(k).toFixed(1)} ${g.y(lower[k]).toFixed(1)} `;
+      d += seg + 'Z ';
+    }
+    i = j + 1;
+  }
+  return d.trim();
+}
+
+/**
+ * Cumulative edges for a stacked chart, in TREND_LEVELS order.
+ *
+ * @param {Array<object|null>} rows  per-day values, null for an uncaptured day
+ * @returns {{bands: Array<{key, lower, upper}>, max: number}}
+ */
+function trendStack(rows) {
+  const bands = TREND_LEVELS.map(l => ({ key: l.key, lower: [], upper: [] }));
+  let max = 0;
+  for (const row of rows) {
+    let acc = 0;
+    for (let b = 0; b < bands.length; b++) {
+      if (row === null) { bands[b].lower.push(null); bands[b].upper.push(null); continue; }
+      const lower = acc;
+      acc += Math.max(0, row[TREND_LEVELS[b].key] || 0);
+      bands[b].lower.push(lower);
+      bands[b].upper.push(acc);
+    }
+    if (row !== null) max = Math.max(max, acc);
+  }
+  return { bands, max };
+}
+
+/** The largest single value across every series — the ceiling for an unstacked chart. */
+function trendPeak(rows, keys) {
+  let max = 0;
+  for (const row of rows) {
+    if (row === null) continue;
+    for (const k of keys) max = Math.max(max, Math.max(0, row[k] || 0));
+  }
+  return max;
+}
+
+/** '2026-09-07' → '7 Sep'. Parsed as UTC, because that is the day it names. */
+function trendDayLabel(day) {
+  const [y, m, d] = String(day).split('-').map(Number);
+  if (!y || !m || !d) return String(day);
+  const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec'];
+  return `${d} ${months[m - 1]}`;
+}
+
+/**
+ * Which x indices get a label, so a year does not print 365 of them.
+ *
+ * The cap is passed in rather than fixed, because how many dates fit is a
+ * property of the chart's width, not of the window: the same seven days have
+ * room for seven labels across the combined chart and for three in a small
+ * multiple. The default is 7 so the week view — the one people land on —
+ * labels every day rather than mysteriously skipping one.
+ */
+function trendLabelIndices(n, maxLabels = 7) {
+  if (n <= 0) return [];
+  const cap = Math.max(2, maxLabels);
+  if (n <= cap) return Array.from({ length: n }, (_, i) => i);
+  const step = (n - 1) / (cap - 1);
+  return [...new Set(Array.from({ length: cap }, (_, i) => Math.round(i * step)))];
+}
+
+/** How many date labels fit across a plot of this pixel width. */
+function trendLabelCapacity(plotWidth) {
+  const PER_LABEL = 58;   // '31 Dec' at 10px plus breathing room
+  return Math.max(2, Math.min(7, Math.floor(plotWidth / PER_LABEL)));
+}
+
+// ── Persistence ───────────────────────────────────────────────────────────
+function loadTrendView() {
+  try {
+    const raw = localStorage.getItem(TREND_STORAGE_KEY);
+    if (raw) Object.assign(_trendView, JSON.parse(raw) || {});
+  } catch (_) { /* private window, cleared storage, or storage disabled */ }
+  // A stored value from an older build must not be able to ask for a period the
+  // server refuses, or a chart type nothing knows how to draw.
+  if (!['week', 'month', 'year'].includes(_trendView.period)) _trendView.period = 'week';
+  if (!['total', 'security'].includes(_trendView.metric)) _trendView.metric = 'total';
+  if (!['stacked', 'line'].includes(_trendView.chartMain)) _trendView.chartMain = 'stacked';
+  if (!['line', 'bar'].includes(_trendView.chartSplit)) _trendView.chartSplit = 'line';
+  _trendView.open  = _trendView.open !== false;
+  _trendView.split = _trendView.split === true;
+}
+
+function saveTrendView() {
+  try { localStorage.setItem(TREND_STORAGE_KEY, JSON.stringify(_trendView)); }
+  catch (_) { /* never worth failing a render over */ }
+}
+
+// ── Loading ───────────────────────────────────────────────────────────────
+/**
+ * Fetch the history for the selected period.
+ *
+ * Sequence-numbered because the period control is a dropdown: choosing "year"
+ * and then "week" fires two requests, and the year's larger payload can easily
+ * land second. Without the guard the panel would settle on the series the user
+ * did not ask for.
+ */
+async function loadTrend() {
+  const seq = ++_trendReqSeq;
+  try {
+    const r = await apiFetch(
+      `/violation-cache/risk-series?period=${encodeURIComponent(_trendView.period)}`);
+    if (seq !== _trendReqSeq) return;          // superseded
+    if (!r.ok) throw new Error(`HTTP ${r.status}`);
+    _trendSeries = await r.json();
+    _trendError  = null;
+  } catch (err) {
+    if (seq !== _trendReqSeq) return;
+    _trendSeries = null;
+    _trendError  = err.message;
+  }
+  renderTrend();
+}
+
+// ── Rendering ─────────────────────────────────────────────────────────────
+function renderTrend() {
+  const panel = document.getElementById('trendPanel');
+  if (!panel) return;
+
+  panel.classList.toggle('collapsed', !_trendView.open);
+  const body = document.getElementById('trendBody');
+  const toggle = document.getElementById('trendToggle');
+  body.hidden = !_trendView.open;
+  toggle.setAttribute('aria-expanded', String(_trendView.open));
+  document.getElementById('trendPeriod').value = _trendView.period;
+  document.getElementById('trendMetric').value = _trendView.metric;
+
+  const typeBtn = document.getElementById('trendChartType');
+  typeBtn.textContent = _trendView.split
+    ? (_trendView.chartSplit === 'line' ? '▮ Bars' : '⁄ Lines')
+    : (_trendView.chartMain === 'stacked' ? '⁄ Lines' : '▤ Stacked');
+  typeBtn.title = 'Switch how the trend is drawn';
+  const splitBtn = document.getElementById('trendSplit');
+  splitBtn.textContent = _trendView.split ? '▣ Combined' : '⊞ Split by severity';
+  splitBtn.title = _trendView.split
+    ? 'Show all four severities on one chart'
+    : 'Show each severity on its own chart';
+
+  // Nothing below this point matters while the panel is shut, and measuring a
+  // hidden element gives a width of zero — which would render every chart at
+  // 44px wide and cache that until the next resize.
+  if (!_trendView.open) return;
+
+  const status  = document.getElementById('trendStatus');
+  const charts  = document.getElementById('trendCharts');
+  const legend  = document.getElementById('trendLegend');
+  const range   = document.getElementById('trendRange');
+
+  const show = (msg) => {
+    status.innerHTML = msg;
+    status.hidden = false;
+    charts.innerHTML = '';
+    legend.hidden = true;
+    range.textContent = '';
+  };
+
+  if (_trendError) {
+    show('The risk history could not be loaded. ' +
+         '<button class="btn-xs" onclick="loadTrend()">↻ Retry</button>');
+    return;
+  }
+  if (!_trendSeries) { show('Loading…'); return; }
+  if (!_trendSeries.configured) {
+    show('No DependencyTrack connection yet.<br>' +
+         'Connect one in <strong>⚙ Settings</strong> and the history starts building from your next refresh.');
+    return;
+  }
+
+  const points   = _trendSeries.points || [];
+  const captured = points.filter(p => p.captured).length;
+  if (captured === 0) {
+    show('No history recorded yet.<br>' +
+         'A point is stored each time violation data is refetched — the first will appear after the next refresh.');
+    return;
+  }
+
+  status.hidden = true;
+  range.textContent =
+    `· ${captured} of ${points.length} day${points.length === 1 ? '' : 's'} recorded`;
+
+  const rows = points.map(p => trendValues(p, _trendView.metric));
+  charts.classList.toggle('split', _trendView.split);
+  charts.innerHTML = _trendView.split
+    ? TREND_LEVELS.map(l => trendCellHtml(points, rows, [l], TREND_GEOM.splitH, l.label)).join('')
+    : trendCellHtml(points, rows, TREND_LEVELS, TREND_GEOM.mainH, '');
+
+  legend.hidden = false;
+  legend.innerHTML =
+    TREND_LEVELS.map(l =>
+      `<span class="trend-legend-item"><span class="trend-swatch" style="background:${l.colour}"></span>${l.label}</span>`
+    ).join('') +
+    (captured < points.length
+      ? '<span class="trend-legend-item" title="A day with no refetch has no reading, so the line breaks rather than guessing one">'
+        + '◌ gap = no refresh that day</span>'
+      : '');
+
+  attachTrendHover(points, rows);
+}
+
+/** One chart: its title, its SVG, and the container the tooltip is placed in. */
+function trendCellHtml(points, rows, levels, height, title) {
+  // Measured, not assumed: the panel sits in a flex column whose width moves
+  // with the zoom level and every breakpoint. The number mirrors what the CSS
+  // grid will actually do — `repeat(auto-fit, minmax(260px, 1fr))` with a 12px
+  // gap — so the viewBox matches the box it lands in. It only has to be close:
+  // the SVG is width:100%, so an imperfect guess scales rather than clips.
+  const GRID_GAP = 12, MIN_CELL = 260, FALLBACK_W = 600;
+  const hostW = document.getElementById('trendCharts').clientWidth || FALLBACK_W;
+  const cols  = _trendView.split
+    ? Math.max(1, Math.min(TREND_LEVELS.length,
+        Math.floor((hostW + GRID_GAP) / (MIN_CELL + GRID_GAP))))
+    : 1;
+  const width = Math.max(200, Math.floor((hostW - (cols - 1) * GRID_GAP) / cols));
+
+  const stacked = !_trendView.split && _trendView.chartMain === 'stacked';
+  const keys    = levels.map(l => l.key);
+  // Each small multiple scales to its OWN peak, not a shared one. A portfolio
+  // with 4 critical and 900 low would otherwise flatten the critical chart into
+  // the axis, which is the one series somebody split the view to look at. The
+  // y labels are printed on every chart, so the differing scales are visible
+  // rather than implied.
+  const max     = trendNiceCeil(stacked ? trendStack(rows).max : trendPeak(rows, keys));
+  const g       = trendGeometry(width, height, points.length, max);
+
+  let body = '';
+
+  // Gridlines and y labels first, so every mark sits on top of them.
+  for (const t of trendTicks(max)) {
+    const y = g.y(t).toFixed(1);
+    body += `<line class="trend-grid-line" x1="${g.x0}" y1="${y}" x2="${g.x1}" y2="${y}"/>`
+         +  `<text class="trend-axis-text" x="${g.x0 - 6}" y="${y}" text-anchor="end" dominant-baseline="middle">${t}</text>`;
+  }
+  const labelIx = trendLabelIndices(points.length, trendLabelCapacity(g.x1 - g.x0));
+  for (const i of labelIx) {
+    // The end labels are anchored inward rather than centred. A centred date at
+    // the last x sits half outside the plot, and the right padding would have to
+    // grow to half a label's width — on every chart — to contain something only
+    // two of them need. The newest day is the one most likely to be read, and it
+    // was the one being clipped.
+    const anchor = i === 0 ? 'start'
+                 : i === points.length - 1 ? 'end'
+                 : 'middle';
+    body += `<text class="trend-axis-text" x="${g.x(i).toFixed(1)}" y="${g.y0 + 14}" `
+         +  `text-anchor="${anchor}">${escHtml(trendDayLabel(points[i].day))}</text>`;
+  }
+
+  if (stacked) {
+    const { bands } = trendStack(rows);
+    for (let b = 0; b < bands.length; b++) {
+      const d = trendAreaPath(bands[b].upper, bands[b].lower, g);
+      if (d) body += `<path d="${d}" fill="${TREND_LEVELS[b].colour}" fill-opacity="0.75"/>`;
+    }
+  } else if (_trendView.split && _trendView.chartSplit === 'bar') {
+    const l = levels[0];
+    // Bars sized from the slot width so they never overlap, and floored at 1px
+    // so a year of them is still visible rather than sub-pixel.
+    const slot = points.length > 1 ? (g.x1 - g.x0) / (points.length - 1) : (g.x1 - g.x0);
+    const bw   = Math.max(1, Math.min(18, slot * 0.7));
+    for (let i = 0; i < rows.length; i++) {
+      if (rows[i] === null) continue;
+      const v = Math.max(0, rows[i][l.key] || 0);
+      const y = g.y(v);
+      body += `<rect x="${(g.x(i) - bw / 2).toFixed(1)}" y="${y.toFixed(1)}" `
+           +  `width="${bw.toFixed(1)}" height="${Math.max(0, g.y0 - y).toFixed(1)}" `
+           +  `fill="${l.colour}" fill-opacity="0.8"/>`;
+    }
+  } else {
+    for (const l of levels) {
+      const values = rows.map(r => (r === null ? null : Math.max(0, r[l.key] || 0)));
+      const d = trendLinePath(values, g);
+      if (d) body += `<path d="${d}" fill="none" stroke="${l.colour}" stroke-width="2" `
+                  +  `stroke-linejoin="round" stroke-linecap="round"/>`;
+    }
+  }
+
+  // Markers for every captured reading. They are what makes an isolated day
+  // between two gaps visible at all — a one-point run draws no line and no area.
+  const isBar = _trendView.split && _trendView.chartSplit === 'bar';
+  if (!isBar && points.length <= TREND_GEOM.maxDots) {
+    const stack = stacked ? trendStack(rows).bands : null;
+    for (let i = 0; i < rows.length; i++) {
+      if (rows[i] === null) continue;
+      for (let b = 0; b < levels.length; b++) {
+        const key = levels[b].key;
+        const v = stacked
+          ? stack[TREND_LEVELS.findIndex(l => l.key === key)].upper[i]
+          : Math.max(0, rows[i][key] || 0);
+        body += `<circle class="trend-dot" cx="${g.x(i).toFixed(1)}" cy="${g.y(v).toFixed(1)}" `
+             +  `r="2.5" fill="${levels[b].colour}"/>`;
+      }
+    }
+  }
+
+  // The crosshair and the transparent tracking surface. The rect is last so it
+  // is above every mark and receives the pointer wherever it is in the plot.
+  body += `<line class="trend-crosshair" x1="0" y1="${g.y1}" x2="0" y2="${g.y0}" hidden/>`
+       +  `<rect class="trend-hit" x="${g.x0}" y="${g.y1}" width="${g.x1 - g.x0}" `
+       +  `height="${g.y0 - g.y1}" fill="transparent"/>`;
+
+  return `<div class="trend-cell" data-x0="${g.x0}" data-x1="${g.x1}" data-width="${width}">`
+       + (title ? `<div class="trend-cell-title">${escHtml(title)} ${_trendView.metric === 'security' ? 'findings' : 'issues'}</div>` : '')
+       + `<svg viewBox="0 0 ${width} ${height}" width="100%" height="${height}" `
+       + `role="img" aria-label="${escHtml(title || 'Risk')} over the selected period">${body}</svg>`
+       + `</div>`;
+}
+
+/**
+ * Pointer tracking: nearest day, crosshair, and a readout of every series.
+ *
+ * Bound to the cell rather than the SVG so the tooltip can be positioned in
+ * ordinary page coordinates, and torn down implicitly on the next render
+ * because innerHTML replaces the elements the listeners were attached to.
+ */
+function attachTrendHover(points, rows) {
+  for (const cell of document.querySelectorAll('.trend-cell')) {
+    const svg  = cell.querySelector('svg');
+    const hair = cell.querySelector('.trend-crosshair');
+    const hit  = cell.querySelector('.trend-hit');
+    if (!svg || !hit) continue;
+    const x0 = Number(cell.dataset.x0), x1 = Number(cell.dataset.x1);
+    const vbWidth = Number(cell.dataset.width);
+
+    const move = (ev) => {
+      const box = svg.getBoundingClientRect();
+      if (!box.width) return;
+      // The SVG is laid out at 100% width but its coordinates are the viewBox's,
+      // so a client offset has to be scaled back before it means anything.
+      const vx = ((ev.clientX - box.left) / box.width) * vbWidth;
+      const n  = points.length;
+      const i  = n <= 1 ? 0
+        : Math.max(0, Math.min(n - 1, Math.round(((vx - x0) / (x1 - x0)) * (n - 1))));
+      hair.setAttribute('x1', String(x0 + ((x1 - x0) * i) / Math.max(1, n - 1)));
+      hair.setAttribute('x2', hair.getAttribute('x1'));
+      hair.hidden = false;
+      showTrendTip(cell, ev, points[i], rows[i]);
+    };
+    const leave = () => { hair.hidden = true; hideTrendTip(); };
+
+    hit.addEventListener('mousemove', move);
+    hit.addEventListener('mouseleave', leave);
+  }
+}
+
+function showTrendTip(cell, ev, point, row) {
+  let tip = document.getElementById('trendTip');
+  if (!tip) {
+    tip = document.createElement('div');
+    tip.id = 'trendTip';
+    tip.className = 'trend-tip';
+    document.body.appendChild(tip);
+  }
+  // Always all four, even in the split view. Hovering one small multiple to
+  // read only the series you are already looking at would be pointless; the
+  // value of the crosshair is seeing what the other three did on that day.
+  tip.innerHTML =
+    `<div class="trend-tip-day">${escHtml(trendDayLabel(point.day))}</div>` +
+    (row === null
+      ? '<div>No refresh that day</div>'
+      : TREND_LEVELS.map(l =>
+          `<div class="trend-tip-row"><span class="trend-swatch" style="background:${l.colour}"></span>`
+          + `${l.label}<span class="trend-tip-val">${row[l.key]}</span></div>`).join(''));
+
+  // Flip to the left of the pointer near the right edge, so the tooltip is
+  // never the thing that makes the page scroll sideways.
+  const pad = 14;
+  tip.style.visibility = 'hidden';
+  tip.style.left = '0px';
+  tip.style.top  = '0px';
+  const w = tip.offsetWidth, h = tip.offsetHeight;
+  const left = (ev.clientX + pad + w > window.innerWidth) ? ev.clientX - w - pad : ev.clientX + pad;
+  const top  = (ev.clientY + pad + h > window.innerHeight) ? ev.clientY - h - pad : ev.clientY + pad;
+  tip.style.left = `${Math.max(4, left)}px`;
+  tip.style.top  = `${Math.max(4, top)}px`;
+  tip.style.position = 'fixed';
+  tip.style.visibility = 'visible';
+}
+
+function hideTrendTip() {
+  const tip = document.getElementById('trendTip');
+  if (tip) tip.style.visibility = 'hidden';
+}
+
+// ── Handlers ──────────────────────────────────────────────────────────────
+function toggleTrendPanel() {
+  _trendView.open = !_trendView.open;
+  saveTrendView();
+  renderTrend();
+}
+
+function onTrendPeriodChange() {
+  _trendView.period = document.getElementById('trendPeriod').value;
+  saveTrendView();
+  loadTrend();   // a different window is different data, not a different drawing
+}
+
+function onTrendMetricChange() {
+  _trendView.metric = document.getElementById('trendMetric').value;
+  saveTrendView();
+  renderTrend(); // both projections come out of the series already in hand
+}
+
+function toggleTrendChartType() {
+  if (_trendView.split) {
+    _trendView.chartSplit = _trendView.chartSplit === 'line' ? 'bar' : 'line';
+  } else {
+    _trendView.chartMain = _trendView.chartMain === 'stacked' ? 'line' : 'stacked';
+  }
+  saveTrendView();
+  renderTrend();
+}
+
+function toggleTrendSplit() {
+  _trendView.split = !_trendView.split;
+  saveTrendView();
+  renderTrend();
+}
+
+/**
+ * Charts are drawn at a measured pixel width, so a resized window needs a
+ * redraw. Debounced: a drag fires this continuously, and re-rendering four
+ * SVGs per frame is exactly the kind of work §13 says not to do.
+ */
+function onTrendResize() {
+  clearTimeout(_trendResizeTimer);
+  _trendResizeTimer = setTimeout(() => { if (_trendView.open) renderTrend(); }, 150);
+}
+
 // ── KPI summary cards ──────────────────────────────────────────────────────
 // Values come from summaryTotals, computed once after data load.
 // Tile clicks and filter changes do not alter these numbers.
@@ -4168,6 +4879,10 @@ function startCachePoll() {
         setCacheBuilding(false);
         clearInterval(_cachePollTimer); _cachePollTimer = null;
         startCacheWatch();
+        // The build that just finished wrote today's snapshot on its way out,
+        // so the series in hand is one point out of date. Fire-and-forget: the
+        // violation data below is what the user is waiting for.
+        loadTrend();
         try {
           applyViolationData(await fetchCacheMap());
           banner.innerHTML = buildReadyBanner(s);
@@ -5138,6 +5853,17 @@ window.__cacheWatchTick     = async () => {
   const s = await r.json();
   if (s.status === 'building') { setCacheBuilding(true); stopCacheWatch(); startCachePoll(); }
 };
+// Exposed so an end-to-end test can assert on the data the panel is actually
+// drawing, rather than trying to read numbers back out of SVG path geometry.
+// Read-only: neither can change what is rendered.
+window.__trendSeries        = () => _trendSeries;
+window.__trendValues        = trendValues;
+window.toggleTrendPanel     = toggleTrendPanel;
+window.onTrendPeriodChange  = onTrendPeriodChange;
+window.onTrendMetricChange  = onTrendMetricChange;
+window.toggleTrendChartType = toggleTrendChartType;
+window.toggleTrendSplit     = toggleTrendSplit;
+window.loadTrend            = loadTrend;
 window.debouncedFilter      = debouncedFilter;
 window.applyFilters         = applyFilters;
 window.toggleLatestFilter   = toggleLatestFilter;
@@ -5207,6 +5933,15 @@ window.scheduleReports      = scheduleReports;
   initTheme();
   renderUserMenu();
   buildColHeaders();
+
+  // The trend panel is server-side history keyed by connection, so it does not
+  // wait on the project hierarchy and is not affected by a filter. Painted from
+  // the stored view first so the panel arrives in the shape the viewer left it,
+  // then filled when the series lands.
+  loadTrendView();
+  renderTrend();
+  loadTrend();
+  window.addEventListener('resize', onTrendResize);
   // Held until afterLoad() has rendered a table. Set here rather than in the
   // markup so the disabled state and the reason for it live together.
   setTableControlsEnabled(false);
