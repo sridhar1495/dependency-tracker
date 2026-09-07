@@ -3329,3 +3329,371 @@ describe('the documents describe the behaviour the code has', () => {
     assert.match(PERF_MD, /SCHEDULER_CONCURRENCY/, 'the scheduler ceiling is not in the evidence');
   });
 });
+
+// ── Risk trend panel ──────────────────────────────────────────────────────────
+// The chart maths, extracted from index.html rather than copied, so a test can
+// never pass against a version of the code the page no longer contains
+// (CLAUDE.md §10.5). Everything asserted here is pure: no DOM, no fetch.
+
+const TREND_FN_NAMES = [
+  'trendValues', 'trendNiceCeil', 'trendTicks', 'trendGeometry',
+  'trendLinePath', 'trendAreaPath', 'trendStack', 'trendPeak',
+  'trendDayLabel', 'trendLabelIndices', 'trendLabelCapacity',
+];
+const trend = new Function(
+  // TREND_LEVELS and TREND_GEOM are const declarations the helpers close over.
+  INDEX_HTML.match(/const TREND_LEVELS = \[[\s\S]*?\];/)[0] + '\n'
+  + INDEX_HTML.match(/const TREND_GEOM = \{[\s\S]*?\n\};/)[0] + '\n'
+  + TREND_FN_NAMES.map(n => extractFunction(INDEX_HTML, n)).join('\n')
+  + `\nreturn { ${TREND_FN_NAMES.join(', ')}, TREND_LEVELS };`
+)();
+
+/** A captured day in the shape /risk-series returns. */
+const snapDay = (day, sev, pol) => ({
+  day, captured: true, rootProjectCount: 1,
+  sev: { critical: 0, high: 0, medium: 0, low: 0, unassigned: 0, ...sev },
+  pol: {
+    opsFail: 0, opsWarn: 0, opsInfo: 0, licFail: 0, licWarn: 0, licInfo: 0,
+    secpolFail: 0, secpolWarn: 0, secpolInfo: 0, ...pol,
+  },
+});
+const gapDay = (day) => ({ day, captured: false, rootProjectCount: null, sev: null, pol: null });
+
+describe('trend — folding a stored day into what a chart plots', () => {
+  test('"total" reproduces the KPI card arithmetic exactly', () => {
+    // The panel sits directly above the cards. A different sum would put two
+    // contradicting numbers for the same word on one screen, which is the whole
+    // reason the metric defaults to this one.
+    const point = snapDay('2026-09-07',
+      { critical: 10, high: 20, medium: 30, low: 40, unassigned: 5 },
+      { opsFail: 1, licFail: 2, secpolFail: 3,
+        opsWarn: 4, licWarn: 5, secpolWarn: 6,
+        opsInfo: 7, licInfo: 8, secpolInfo: 9 });
+    const v = trend.trendValues(point, 'total');
+
+    const s = point.sev, o = point.pol;
+    assert.equal(v.critical, s.critical + o.opsFail + o.licFail + o.secpolFail);
+    assert.equal(v.high,     s.high     + o.opsWarn + o.licWarn + o.secpolWarn);
+    assert.equal(v.medium,   s.medium   + o.opsInfo + o.licInfo + o.secpolInfo);
+    assert.equal(v.low,      s.low      + s.unassigned);
+    assert.deepEqual(v, { critical: 16, high: 35, medium: 54, low: 45 });
+  });
+
+  test('the fold matches the page\'s own computeSummaryTotals, term for term', () => {
+    // Cross-layer: the tile formula is read out of index.html here too, so
+    // changing one without the other fails rather than drifting silently.
+    const src = extractFunction(INDEX_HTML, 'computeSummaryTotals');
+    for (const line of [
+      /t\.critical \+= \(s\.critical\|\|0\) \+ \(o\.fail\|\|0\) \+ \(l\.fail\|\|0\) \+ \(sp\.fail\|\|0\)/,
+      /t\.high\s+\+= \(s\.high\|\|0\)\s+\+ \(o\.warn\|\|0\) \+ \(l\.warn\|\|0\) \+ \(sp\.warn\|\|0\)/,
+      /t\.medium\s+\+= \(s\.medium\|\|0\)\s+\+ \(o\.info\|\|0\) \+ \(l\.info\|\|0\) \+ \(sp\.info\|\|0\)/,
+      /t\.low\s+\+= \(s\.low\|\|0\)\s+\+ \(s\.unassigned\|\|0\)/,
+    ]) {
+      assert.match(src, line,
+        'the KPI tile formula changed — trendValues() must change with it');
+    }
+  });
+
+  test('"security" is pure CVE severity, with unassigned folded into low', () => {
+    const point = snapDay('2026-09-07',
+      { critical: 10, high: 20, medium: 30, low: 40, unassigned: 5 },
+      { opsFail: 99, licFail: 99, secpolFail: 99 });
+    assert.deepEqual(trend.trendValues(point, 'security'),
+      { critical: 10, high: 20, medium: 30, low: 45 });
+  });
+
+  test('a day nobody refreshed folds to null, never to zero', () => {
+    // Zero is the claim that somebody looked and found nothing. A gap is the
+    // absence of a measurement, and the two must not render the same.
+    assert.equal(trend.trendValues(gapDay('2026-09-01'), 'total'), null);
+    assert.equal(trend.trendValues(null, 'total'), null);
+    assert.equal(trend.trendValues({ day: 'x', captured: true, sev: null, pol: null }, 'total'), null);
+  });
+
+  test('missing keys count as zero rather than producing NaN', () => {
+    const v = trend.trendValues({ day: 'd', captured: true, sev: {}, pol: {} }, 'total');
+    assert.deepEqual(v, { critical: 0, high: 0, medium: 0, low: 0 });
+  });
+});
+
+describe('trend — axis scaling', () => {
+  test('the ceiling is a round 1, 2 or 5 above the peak', () => {
+    assert.equal(trend.trendNiceCeil(7), 10);
+    assert.equal(trend.trendNiceCeil(11), 20);
+    assert.equal(trend.trendNiceCeil(23), 50);
+    assert.equal(trend.trendNiceCeil(120), 200);
+    assert.equal(trend.trendNiceCeil(1), 1);
+    assert.equal(trend.trendNiceCeil(10), 10);
+  });
+
+  test('an all-clean portfolio still gets a usable axis', () => {
+    // Every y coordinate divides by this. Returning 0 would make the chart a
+    // page of NaN for the most desirable state a portfolio can be in.
+    for (const v of [0, -5, null, undefined, NaN, 'x']) {
+      assert.equal(trend.trendNiceCeil(v), 1, `trendNiceCeil(${v})`);
+    }
+  });
+
+  test('the tick step is round, not just the ceiling', () => {
+    // A fixed four intervals turns a ceiling of 50 into 13/25/38/50 — the right
+    // positions wearing wrong-looking numbers.
+    assert.deepEqual(trend.trendTicks(50),  [0, 10, 20, 30, 40, 50]);
+    assert.deepEqual(trend.trendTicks(20),  [0, 5, 10, 15, 20]);
+    assert.deepEqual(trend.trendTicks(10),  [0, 2, 4, 6, 8, 10]);
+    assert.deepEqual(trend.trendTicks(200), [0, 50, 100, 150, 200]);
+  });
+
+  test('every tick is a whole number for every ceiling the scaler can produce', () => {
+    for (let k = 0; k < 5; k++) {
+      for (const mantissa of [1, 2, 5]) {
+        const max = mantissa * Math.pow(10, k);
+        const ticks = trend.trendTicks(max);
+        assert.ok(ticks.every(Number.isInteger), `max=${max} produced ${ticks}`);
+        assert.deepEqual(ticks, [...new Set(ticks)], `max=${max} repeated a label`);
+        assert.equal(ticks[0], 0);
+        assert.equal(ticks[ticks.length - 1], max);
+      }
+    }
+  });
+
+  test('a tiny ceiling counts by ones rather than by fractions', () => {
+    assert.deepEqual(trend.trendTicks(1), [0, 1]);
+    assert.deepEqual(trend.trendTicks(3), [0, 1, 2, 3]);
+    assert.deepEqual(trend.trendTicks(0), [0, 1]);
+  });
+});
+
+describe('trend — geometry', () => {
+  const g = () => trend.trendGeometry(500, 200, 7, 100);
+
+  test('x spreads the window across the plot and y is inverted', () => {
+    const geo = g();
+    assert.equal(geo.x(0), geo.x0);
+    assert.equal(geo.x(6), geo.x1);
+    assert.ok(geo.x(3) > geo.x(2));
+    assert.equal(geo.y(0), geo.y0, 'zero sits on the baseline');
+    assert.equal(geo.y(100), geo.y1, 'the ceiling sits at the top');
+    assert.ok(geo.y(50) > geo.y(100), 'y grows downward in SVG');
+  });
+
+  test('a single captured day lands in the middle rather than at Infinity', () => {
+    const geo = trend.trendGeometry(500, 200, 1, 10);
+    assert.ok(Number.isFinite(geo.x(0)));
+    assert.equal(geo.x(0), (geo.x0 + geo.x1) / 2);
+  });
+
+  test('no coordinate is ever NaN, whatever the value', () => {
+    const geo = g();
+    for (const v of [null, undefined, NaN, -3, 'x']) {
+      assert.ok(Number.isFinite(geo.y(v)), `y(${v}) is not finite`);
+    }
+  });
+
+  test('a zero-width container cannot invert the plot', () => {
+    const geo = trend.trendGeometry(0, 200, 7, 10);
+    assert.ok(geo.x1 > geo.x0, 'x1 must stay right of x0');
+  });
+});
+
+describe('trend — paths break at gaps rather than bridging them', () => {
+  const g = trend.trendGeometry(500, 200, 5, 100);
+
+  test('a line starts a new subpath after every gap', () => {
+    // Joining across a gap draws a straight line between two real readings and
+    // invites somebody to read a value off the middle of it.
+    const d = trend.trendLinePath([10, 20, null, 40, 50], g);
+    assert.equal((d.match(/M/g) || []).length, 2, 'two runs, two moves');
+    assert.equal((d.match(/L/g) || []).length, 2);
+  });
+
+  test('an unbroken series is one subpath', () => {
+    const d = trend.trendLinePath([1, 2, 3, 4, 5], g);
+    assert.equal((d.match(/M/g) || []).length, 1);
+  });
+
+  test('an all-gap series draws nothing at all', () => {
+    assert.equal(trend.trendLinePath([null, null, null], g), '');
+  });
+
+  test('a stacked band closes one shape per run', () => {
+    const d = trend.trendAreaPath([10, 20, null, 40, 50], [0, 0, null, 0, 0], g);
+    assert.equal((d.match(/Z/g) || []).length, 2, 'two runs, two closed shapes');
+  });
+
+  test('a one-day island produces no area — its marker carries the reading', () => {
+    const d = trend.trendAreaPath([null, 30, null], [null, 0, null], g);
+    assert.equal(d, '');
+  });
+
+  test('every emitted coordinate is finite', () => {
+    const d = trend.trendLinePath([0, null, 7], g) + ' '
+            + trend.trendAreaPath([5, 6, 7], [0, 0, 0], g);
+    assert.ok(!/NaN|Infinity|undefined/.test(d), d);
+  });
+});
+
+describe('trend — stacking', () => {
+  const rows = [
+    { critical: 1, high: 2, medium: 3, low: 4 },
+    null,
+    { critical: 5, high: 0, medium: 0, low: 0 },
+  ];
+
+  test('bands accumulate in severity order from the baseline up', () => {
+    const { bands, max } = trend.trendStack(rows);
+    assert.deepEqual(bands.map(b => b.key), ['critical', 'high', 'medium', 'low']);
+    assert.equal(bands[0].lower[0], 0, 'critical sits on the axis');
+    assert.equal(bands[0].upper[0], 1);
+    assert.equal(bands[1].upper[0], 3);
+    assert.equal(bands[3].upper[0], 10, 'the top band is the day total');
+    assert.equal(max, 10);
+  });
+
+  test('a gap stays a gap in every band', () => {
+    const { bands } = trend.trendStack(rows);
+    for (const b of bands) {
+      assert.equal(b.lower[1], null);
+      assert.equal(b.upper[1], null);
+    }
+  });
+
+  test('the peak of an unstacked chart is the largest single series value', () => {
+    assert.equal(trend.trendPeak(rows, ['critical', 'high', 'medium', 'low']), 5);
+    assert.equal(trend.trendPeak([null, null], ['critical']), 0);
+  });
+
+  test('a negative slipping through is clamped rather than drawn below the axis', () => {
+    const { max } = trend.trendStack([{ critical: -5, high: 3, medium: 0, low: 0 }]);
+    assert.equal(max, 3);
+  });
+});
+
+describe('trend — axis labels', () => {
+  test('a day is labelled in the calendar it names', () => {
+    assert.equal(trend.trendDayLabel('2026-09-07'), '7 Sep');
+    assert.equal(trend.trendDayLabel('2026-01-01'), '1 Jan');
+    assert.equal(trend.trendDayLabel('2026-12-31'), '31 Dec');
+  });
+
+  test('a malformed day is shown rather than swallowed', () => {
+    assert.equal(trend.trendDayLabel('nonsense'), 'nonsense');
+  });
+
+  test('a short window labels every point and a long one thins out', () => {
+    assert.deepEqual(trend.trendLabelIndices(7), [0, 1, 2, 3, 4, 5, 6]);
+    const year = trend.trendLabelIndices(365);
+    assert.ok(year.length <= 7, `365 days produced ${year.length} labels`);
+    assert.ok(year.length < 365, 'a year must not print a label per day');
+    assert.equal(year[0], 0);
+    assert.equal(year[year.length - 1], 364, 'the newest day is always labelled');
+  });
+
+  test('how many labels fit is derived from the width, not assumed', () => {
+    // The same seven days have room for seven dates across the combined chart
+    // and for three in a small multiple.
+    assert.ok(trend.trendLabelCapacity(1200) >= 6);
+    assert.ok(trend.trendLabelCapacity(200) < trend.trendLabelCapacity(1200));
+    assert.ok(trend.trendLabelCapacity(0) >= 2, 'never fewer than the two ends');
+    assert.deepEqual(trend.trendLabelIndices(7, trend.trendLabelCapacity(140)),
+      [0, 6], 'a very narrow chart still labels both ends');
+  });
+
+  test('the thinning never repeats an index', () => {
+    for (const n of [1, 2, 5, 6, 7, 8, 30, 90, 365]) {
+      const ix = trend.trendLabelIndices(n);
+      assert.deepEqual(ix, [...new Set(ix)], `n=${n}`);
+      assert.ok(ix.every(i => i >= 0 && i < n), `n=${n} produced an out-of-range index`);
+    }
+  });
+});
+
+describe('trend — the panel in the page', () => {
+  test('it renders above the summary cards', () => {
+    const panel = INDEX_HTML.indexOf('id="trendPanel"');
+    const grid  = INDEX_HTML.indexOf('id="summaryGrid"');
+    assert.ok(panel !== -1 && grid !== -1);
+    assert.ok(panel < grid, 'the trend panel must come before the summary grid');
+  });
+
+  test('every inline handler is window-exported', () => {
+    // §8.2: a handler missing from the export block fails silently at runtime.
+    const handlers = [...INDEX_HTML.matchAll(/on(?:click|change)="(\w+)\(/g)]
+      .map(m => m[1])
+      .filter(n => /^(toggleTrend|onTrend|loadTrend)/.test(n));
+    assert.ok(handlers.length >= 5, `expected the trend handlers, found ${handlers}`);
+    for (const h of [...new Set(handlers)]) {
+      assert.match(INDEX_HTML, new RegExp(`window\\.${h}\\s*=`), `${h} is not exported`);
+    }
+  });
+
+  test('the chart colours are custom properties, never hex literals', () => {
+    // §8.10: a hard-coded hex would not follow the theme, and an SVG attribute
+    // is exactly where that mistake hides from a CSS review.
+    const levels = INDEX_HTML.match(/const TREND_LEVELS = \[[\s\S]*?\];/)[0];
+    assert.ok(!/#[0-9a-fA-F]{3,8}/.test(levels), 'a literal colour crept into TREND_LEVELS');
+    for (const v of ['--critical', '--high', '--medium', '--low']) {
+      assert.ok(levels.includes(`var(${v})`), `${v} is not used`);
+    }
+  });
+
+  test('a period the server would refuse cannot come out of storage', () => {
+    // localStorage is viewer-writable and survives a downgrade. A stored
+    // "decade" would make every load a 400.
+    const fn = extractFunction(INDEX_HTML, 'loadTrendView');
+    assert.match(fn, /\['week', 'month', 'year'\]\.includes/,
+      'the stored period must be validated against what the route accepts');
+    assert.match(fn, /catch/, 'storage access must be guarded — it throws in some contexts');
+  });
+
+  test('saving the view never fails a render', () => {
+    assert.match(extractFunction(INDEX_HTML, 'saveTrendView'), /try\s*\{[\s\S]*catch/);
+  });
+
+  test('a superseded series response cannot overwrite a newer one', () => {
+    // Choosing "year" then "week" fires two requests and the year's larger
+    // payload can land second.
+    const fn = extractFunction(INDEX_HTML, 'loadTrend');
+    assert.match(fn, /_trendReqSeq/, 'the request must be sequence-guarded');
+    assert.equal((fn.match(/seq !== _trendReqSeq/g) || []).length, 2,
+      'both the success and the failure path must check');
+  });
+
+  test('a completed refetch reloads the series', () => {
+    // The build writes today's snapshot on its way out, so the series in hand
+    // is one point out of date the moment the banner turns green.
+    const poll = INDEX_HTML.slice(INDEX_HTML.indexOf('function startCachePoll'));
+    const ready = poll.slice(poll.indexOf("s.status === 'ready'"), poll.indexOf("} else {"));
+    assert.match(ready, /loadTrend\(\)/,
+      'a finished build must refresh the trend, or the newest point never appears');
+  });
+
+  test('the panel is not measured while it is collapsed', () => {
+    // clientWidth of a hidden element is zero, which would render every chart
+    // at padding width and cache that until the next resize.
+    const fn = extractFunction(INDEX_HTML, 'renderTrend');
+    const guard = fn.indexOf('if (!_trendView.open) return;');
+    assert.ok(guard !== -1, 'renderTrend must bail out while collapsed');
+    assert.ok(guard < fn.indexOf('trendCharts'), 'the guard must come before any measuring');
+  });
+
+  test('resize redraws are debounced', () => {
+    // §13: re-rendering four SVGs per frame during a window drag.
+    assert.match(extractFunction(INDEX_HTML, 'onTrendResize'), /clearTimeout[\s\S]*setTimeout/);
+  });
+
+  test('the period control offers exactly what the route accepts', () => {
+    const select = INDEX_HTML.slice(
+      INDEX_HTML.indexOf('id="trendPeriod"'),
+      INDEX_HTML.indexOf('</select>', INDEX_HTML.indexOf('id="trendPeriod"')));
+    const values = [...select.matchAll(/value="(\w+)"/g)].map(m => m[1]);
+    assert.deepEqual(values, ['week', 'month', 'year']);
+  });
+
+  test('the default metric is the one the cards show', () => {
+    // Defaulting to pure severity would put a different "Critical" directly
+    // above the card labelled Critical.
+    const decl = INDEX_HTML.match(/let _trendView = \{[\s\S]*?\n\};/)[0];
+    assert.match(decl, /metric: 'total'/);
+    assert.match(decl, /period: 'week'/, 'the plan specified a one-week default');
+  });
+});

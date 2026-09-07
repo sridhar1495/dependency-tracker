@@ -45,6 +45,11 @@ administrator credentials it created.
 - **A hierarchical portfolio view** of every project's security, licence and
   operational risk, filterable and searchable, built from a violation cache that
   accounts sharing a DependencyTrack connection build once between them.
+- **A risk trend over time**, above the summary cards: critical, high, medium
+  and low across the last week, month or year, as a stacked area, lines, or four
+  small multiples. A point is recorded each time violation data is refetched, so
+  the history builds up day by day. A day with no refresh shows as a gap rather
+  than a flat line — the chart never invents a reading nobody took.
 - **Excel reports on demand**, with security findings, a CWE summary, and
   licence and operational policy violations.
 - **Scheduled reports by email.** Each account can have several — a weekly

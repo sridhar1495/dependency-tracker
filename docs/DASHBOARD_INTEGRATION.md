@@ -112,6 +112,48 @@ Summary cards show **fixed totals computed once** immediately after data loads:
 
 Cards are clickable — clicking sets the risk-level filter on the table but does not change the card values.
 
+### Risk Trend
+
+Above the cards, the same four numbers over time. It is drawn from
+`GET /violation-cache/risk-series` (see [Risk history](#risk-history)), which is
+server-side history keyed to your DependencyTrack connection — so it is
+unaffected by a filter, a search, or reloading the hierarchy, and everybody on
+one connection sees the same series.
+
+| Control | What it does |
+|---|---|
+| Period | Last 7 days (default), 30 days, or a year |
+| Metric | **All risk** — the same arithmetic as the cards above (default) — or **Security findings only**, which is pure CVE severity with no policy violations folded in |
+| Chart type | Combined view: stacked area ⇄ lines. Split view: lines ⇄ bars |
+| Split by severity | One chart per severity instead of four series on one |
+| Header | Click the title to collapse the panel; the choice is remembered per browser |
+
+Hovering anywhere on a chart shows a crosshair and every severity's value for
+that day, whichever view is open.
+
+**Where the points come from.** One is recorded per connection per day, at the
+moment a violation refetch completes — that is the only point at which the
+service holds a complete picture of the portfolio. The last refresh of a day
+wins, so the point reflects the most recent measurement rather than the first.
+
+**Gaps are shown as gaps.** A day nobody refreshed has no reading, so the line
+breaks and the tooltip says "No refresh that day". Carrying the previous day
+forward would draw a flat line asserting a measurement that was never taken.
+The legend calls this out whenever the window contains one.
+
+**It starts empty.** History only exists from the point the feature was
+deployed, and only for days on which somebody refreshed. Until the first refetch
+completes the panel says so rather than drawing an empty axis.
+
+**In the split view each chart scales to its own peak.** A portfolio with 4
+critical and 900 low would otherwise flatten the critical chart into the axis.
+The y-axis labels are printed on every chart, so the differing scales are
+visible rather than implied.
+
+**Rotating your DependencyTrack API key restarts the history**, because the
+series is keyed by a fingerprint of the URL and key — the same way the shared
+violation cache is.
+
 ### Project Hyperlinks
 
 Set the **DT Frontend URL** in **⚙ Settings** to enable clickable project links. Each project name becomes a link to `<DT_FRONTEND_URL>/#/projects/<uuid>`.
