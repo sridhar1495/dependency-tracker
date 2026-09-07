@@ -31,6 +31,17 @@
     /* ── Reset & Base ─────────────────────────────────────────────────────── */
     *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
 
+    /* The `hidden` attribute must actually hide.
+       The browser's own rule is `[hidden] { display: none }` from the user-agent
+       stylesheet, and ANY author rule that sets `display` on the same element
+       beats it — author styles win over UA styles at equal specificity. So
+       `el.hidden = true` silently did nothing to `.btn` (inline-flex) or
+       `.cfg-panel-footer` (flex), and the settings panel showed both footers at
+       once and offered "Cancel this schedule" on a schedule that did not exist
+       yet. Declaring it here, with !important, makes the attribute mean what it
+       says wherever it is used. */
+    [hidden] { display: none !important; }
+
     :root {
       --bg:           #0f1117;
       --surface:      #1a1d27;
@@ -778,6 +789,12 @@
       flex: 1; overflow-y: auto; padding: 20px 24px;
       display: flex; flex-direction: column; gap: 16px;
     }
+    /* The body's gap used to space the sections directly. The drill-down wrapped
+       them in #cfgMainView / #cfgSchedView, which made the sections
+       grandchildren — a flex gap does not reach those, so every section sat flush
+       against the next. Each view carries the same column layout, so the spacing
+       is identical whichever one is showing. */
+    .cfg-view { display: flex; flex-direction: column; gap: 16px; }
     .cfg-panel-footer {
       display: flex; gap: 8px; padding: 16px 24px;
       border-top: 1px solid var(--border); flex-shrink: 0;
@@ -1113,7 +1130,7 @@
     <button class="cfg-close" onclick="closeConfigPanel(false)">&times;</button>
   </div>
   <div class="cfg-panel-body">
-  <div id="cfgMainView">
+  <div id="cfgMainView" class="cfg-view">
 
     <!-- Connection section -->
     <div class="cfg-section">
@@ -1222,7 +1239,7 @@
        grows a Back button. One schedule is open at a time by construction,
        which is the whole reason for the shape — a list of expandable rows lets
        somebody edit three at once and lose two of them. -->
-  <div id="cfgSchedView" hidden>
+  <div id="cfgSchedView" class="cfg-view" hidden>
     <div class="cfg-section">
       <div class="cfg-sub-title">Schedule</div>
       <label class="cfg-label" for="cfgSchedLabel">Name <span style="font-size:10px">(optional)</span></label>
@@ -1307,13 +1324,14 @@
             onclick="cancelScheduleFromEditor()">Cancel this schedule</button>
   </div><!-- end cfgSchedView -->
   </div><!-- end cfg-panel-body -->
-  <div class="cfg-panel-footer" id="cfgMainFooter">
-    <button class="btn primary" id="cfgSaveBtn" onclick="saveConfigPanel()">Save</button>
-    <button class="btn" onclick="cancelConfigPanel()">Cancel</button>
-  </div>
-  <div class="cfg-panel-footer" id="cfgSchedFooter" hidden>
-    <button class="btn primary" id="cfgSchedSaveBtn" onclick="saveScheduleEditor()">Save schedule</button>
-    <button class="btn" onclick="closeScheduleEditor(true)">Discard</button>
+  <!-- One footer, not one per view. Two of them meant two Save buttons and two
+       Cancel buttons on screen together, and the Cancel that belonged to
+       Settings closed the whole panel from inside the schedule editor. The
+       buttons dispatch on whichever view is open; only the primary's label
+       changes, so it always says what it is about to save. -->
+  <div class="cfg-panel-footer">
+    <button class="btn primary" id="cfgSaveBtn" onclick="savePanel()">Save</button>
+    <button class="btn" id="cfgCancelBtn" onclick="cancelPanel()">Cancel</button>
   </div>
 </div>
 
@@ -2009,18 +2027,25 @@ function updateSchedToggleState() {
   if (hint) hint.style.display = (mailEnabled && host && from && to) ? 'none' : '';
 }
 
+/* These two edit the SCHEDULE, so they mark the schedule dirty, not Settings.
+   They marked Settings back when the schedule form lived in that panel, and the
+   drill-down left the calls pointing at the wrong flag. Both halves of that were
+   wrong: openScheduleEditor() ends by calling onSchedFreqChange(), so merely
+   opening a schedule claimed Settings had unsaved changes and Cancel asked
+   about edits nobody had made — while changing a schedule's frequency or time
+   set no flag at all, so Cancel threw those edits away without asking. */
 function onSchedFreqChange() {
   const freq = document.getElementById('cfgSchedFreq').value;
   document.getElementById('cfgSchedWeekRow').style.display  = freq === 'weekly'  ? '' : 'none';
   document.getElementById('cfgSchedMonthRow').style.display = freq === 'monthly' ? '' : 'none';
   renderSchedUtcHint();
-  markConfigDirty();
+  markSchedDirty();
 }
 
 /** Any edit to the time, the weekdays or the month day. */
 function onSchedTimeChange() {
   renderSchedUtcHint();
-  markConfigDirty();
+  markSchedDirty();
 }
 
 // ── Schedule timezone conversion ──────────────────────────────────────────────
@@ -2227,6 +2252,29 @@ async function saveConfigPanel() {
 
 function cancelConfigPanel() { closeConfigPanel(false); }
 
+/* ── The panel footer ───────────────────────────────────────────────────────
+   One row of buttons serves both views, so what they do depends on which view
+   is open. Inside the schedule editor, Cancel means "leave this schedule", not
+   "close Settings" — going back to the list is one step, and closing the whole
+   panel from the drill-down threw away the user's place as well as their
+   edits. */
+function savePanel() {
+  if (_schedEditorOpen) return saveScheduleEditor();
+  return saveConfigPanel();
+}
+
+/** Cancel: back to the list from the editor, close the panel from the list. */
+function cancelPanel() {
+  if (_schedEditorOpen) return closeScheduleEditor(false);
+  return closeConfigPanel(false);
+}
+
+/** Label the primary button for the view that is open. */
+function setPanelFooterMode(mode) {
+  const save = document.getElementById('cfgSaveBtn');
+  if (save) save.textContent = mode === 'schedule' ? 'Save schedule' : 'Save';
+}
+
 /** The connection fields as the server expects them. A blank key is omitted. */
 function readConnectionForm() {
   const conn = {
@@ -2379,8 +2427,7 @@ async function openScheduleEditor(id = null, projects = null) {
   document.getElementById('cfgBackBtn').hidden      = false;
   document.getElementById('cfgMainView').hidden     = true;
   document.getElementById('cfgSchedView').hidden    = false;
-  document.getElementById('cfgMainFooter').hidden   = true;
-  document.getElementById('cfgSchedFooter').hidden  = false;
+  setPanelFooterMode('schedule');
   // A new schedule has nothing to run or delete yet.
   document.getElementById('cfgSchedDeleteBtn').hidden = !sc;
   document.getElementById('cfgSchedRunNowBtn').disabled = !sc;
@@ -2463,8 +2510,7 @@ async function closeScheduleEditor(discard = false) {
   document.getElementById('cfgBackBtn').hidden     = true;
   document.getElementById('cfgMainView').hidden    = false;
   document.getElementById('cfgSchedView').hidden   = true;
-  document.getElementById('cfgMainFooter').hidden  = false;
-  document.getElementById('cfgSchedFooter').hidden = true;
+  setPanelFooterMode('main');
 }
 
 /** True when it is safe to leave: nothing changed, or the user said discard. */
@@ -2663,7 +2709,7 @@ function readScheduleEditor() {
 async function saveScheduleEditor() {
   const body = readScheduleEditor();
   if (!body) return;
-  const btn = document.getElementById('cfgSchedSaveBtn');
+  const btn = document.getElementById('cfgSaveBtn');
   if (btn) { btn.disabled = true; btn.textContent = 'Saving…'; }
   try {
     if (_schedPendingProjects) body.projects = _schedPendingProjects;
@@ -2713,6 +2759,7 @@ async function saveScheduleEditor() {
   } catch (e) {
     showToast(`Could not save the schedule: ${e.message}`, 'error');
   } finally {
+    // Saving keeps the editor open, so the label goes back to the editor's.
     if (btn) { btn.disabled = false; btn.textContent = 'Save schedule'; }
   }
 }
@@ -2830,7 +2877,15 @@ async function scheduleReports() {
     const p = byUuid.get(uuid);
     return { uuid, name: p ? p.name : '', version: p ? p.version : '' };
   });
-  openScheduleEditor(null, projects);
+
+  // The editor is a view INSIDE the settings panel, not a dialog of its own, so
+  // it has to be shown. Opening the editor alone rendered it into a panel still
+  // translated off-screen and nothing appeared — the toolbar button looked dead.
+  // openConfigPanel() also populates the Settings view behind it, which is what
+  // Back and Cancel return to; without it that view would be blank and a Save
+  // there would write empty SMTP fields over the stored ones.
+  openConfigPanel();
+  await openScheduleEditor(null, projects);
 }
 
 // ── Mock Data ─────────────────────────────────────────────────────────────
@@ -5010,6 +5065,8 @@ window.runScheduleNow         = runScheduleNow;
 window.markSchedDirty         = markSchedDirty;
 window.saveConfigPanel      = saveConfigPanel;
 window.cancelConfigPanel    = cancelConfigPanel;
+window.savePanel            = savePanel;
+window.cancelPanel          = cancelPanel;
 window.connectFromPanel     = connectFromPanel;
 window.testConnectionFromPanel = testConnectionFromPanel;
 window.testEmailFromPanel   = testEmailFromPanel;

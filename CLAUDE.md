@@ -738,12 +738,30 @@ file with inline `<style>` and a single `<script>`.
 **The schedule editor is a drill-down inside the settings panel, not a dialog.**
 Clicking a schedule replaces the panel's body and the header grows a Back
 button. One schedule is open at a time by construction — a list of expandable
-rows lets somebody edit three at once and lose two of them — and Back, Discard
+rows lets somebody edit three at once and lose two of them — and Back, Cancel
 and closing the whole panel all pass through `confirmDiscardSchedule()`, so
 there is no way out that silently drops what was typed. `_schedDirty` is
 cleared *after* the fields are populated, never before: every write above fires
 an `oninput` handler, so resetting it first leaves a freshly opened editor
 claiming unsaved changes.
+
+**The panel has one footer, and its buttons dispatch on the open view.**
+`savePanel()` and `cancelPanel()` branch on `_schedEditorOpen`; only the primary
+button's label changes, so it always says which of the two things it is about to
+save. A second footer per view is what shipped first, and it put two Save
+buttons and two Cancel buttons on screen together — with the Cancel belonging to
+Settings closing the whole panel from inside a schedule. **Inside the editor,
+Cancel is one step back to the list**, never a dismissal: `cancelPanel()` calls
+`closeScheduleEditor(false)`, and only the list's Cancel reaches
+`closeConfigPanel()`.
+
+**The drill-down's handlers mark the drill-down dirty.** `onSchedFreqChange()`
+and `onSchedTimeChange()` call `markSchedDirty()`. They called
+`markConfigDirty()` while the schedule form still lived in the settings panel,
+and both halves of that were wrong after the split: `openScheduleEditor()` ends
+by calling `onSchedFreqChange()`, so merely opening a schedule claimed Settings
+had unsaved changes, while a changed frequency or send time set no flag at all
+and Cancel discarded it without asking.
 
 Administration was a slide-in panel while it did one read-only thing. It became a
 page when it grew a master/detail split and service configuration: a panel that
@@ -956,6 +974,20 @@ The frontend never performs uniqueness checks — those are backend-only, via
   clips itself inside a `position: fixed` wrapper. Centre a card taller than the
   viewport with `margin: auto`, not `align-items: center` — the latter overflows
   equally in both directions and the part above the top edge cannot be reached.
+- **`index.html` declares `[hidden] { display: none !important; }`, and it is
+  load-bearing.** The browser's own `[hidden] { display: none }` lives in the
+  user-agent stylesheet, so *any* author rule that sets `display` on the same
+  element beats it. `.btn` is `inline-flex` and `.cfg-panel-footer` is `flex`,
+  so `el.hidden = true` silently did nothing to either: both panel footers
+  rendered at once, and a schedule that did not exist yet offered "Cancel this
+  schedule". Prefer `el.hidden` over `style.display` — but only because this
+  rule makes the attribute mean what it says.
+- **A flex `gap` reaches children, not grandchildren.** `.cfg-panel-body` spaced
+  the `.cfg-section`s until the drill-down wrapped them in `#cfgMainView` /
+  `#cfgSchedView`, after which every section sat flush against the next. Both
+  views carry `.cfg-view` with the same column gap; a test asserts the two
+  numbers still match, because a wrapper introduced later is exactly how this
+  recurs.
 
 ### 8.11 Utility helpers (do not duplicate)
 
