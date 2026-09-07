@@ -2693,3 +2693,219 @@ describe('per-schedule body and CC states', { skip: !ENABLED && 'TEST_DATABASE_U
     await schedules.remove(owner.id, row.id);
   });
 });
+
+// ── Daily risk snapshots ──────────────────────────────────────────────────────
+// The SQL half of the trend feature: the upsert's last-write-wins behaviour, the
+// dense window, the retention sweep, and the two decisions that only a real
+// PostgreSQL can prove — that the history is keyed per connection rather than
+// per user, and that it survives the cache housekeeping that runs beside it.
+
+describe('risk snapshots', { skip: !ENABLED && 'TEST_DATABASE_URL not set' }, () => {
+  let pool, snapshots;
+
+  // 64 hex characters: risk_snapshots_fingerprint asserts the same SHA-256
+  // shape violation_caches has since migration 002.
+  const FP_A = 'a'.repeat(48) + '1111bbbb2222cccc';
+  const FP_B = 'c'.repeat(48) + '3333dddd4444eeee';
+
+  before(async () => {
+    pool = require('./db/pool');
+    if (!pool.isReady()) {
+      const url = new URL(DB_URL);
+      process.env.POSTGRES_HOST     = url.hostname;
+      process.env.POSTGRES_PORT     = url.port || '5432';
+      process.env.POSTGRES_USER     = decodeURIComponent(url.username);
+      process.env.POSTGRES_PASSWORD = decodeURIComponent(url.password) || 'x';
+      process.env.POSTGRES_DB       = url.pathname.replace(/^\//, '');
+      const { parseConfig } = require('./lib/config');
+      pool.init(parseConfig(process.env).db);
+      await migrate({ pool: pool.getPool(), dir: MIGRATIONS_DIR });
+    }
+    snapshots = require('./lib/snapshots');
+  });
+
+  after(async () => {
+    if (pool && pool.isReady()) {
+      await pool.query('DELETE FROM risk_snapshots WHERE fingerprint IN ($1, $2)', [FP_A, FP_B]);
+    }
+  });
+
+  /** Totals in the shape summarise() produces, with one value made distinctive. */
+  const totals = (critical, over = {}) => ({
+    rootProjectCount: 3,
+    sev: { critical, high: 1, medium: 2, low: 3, unassigned: 4 },
+    pol: {
+      ops_fail: 5, ops_warn: 0, ops_info: 0,
+      lic_fail: 6, lic_warn: 0, lic_info: 0,
+      secpol_fail: 7, secpol_warn: 0, secpol_info: 0,
+    },
+    ...over,
+  });
+  const at = (day) => new Date(`${day}T12:00:00Z`);
+
+  test('the table, its key and its non-negative CHECK all exist', async () => {
+    const pk = await pool.query(
+      `SELECT a.attname FROM pg_index i
+         JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = ANY(i.indkey)
+        WHERE i.indrelid = 'risk_snapshots'::regclass AND i.indisprimary
+        ORDER BY a.attname`);
+    assert.deepEqual(pk.rows.map(r => r.attname), ['day', 'fingerprint']);
+    const chk = await pool.query(
+      "SELECT conname FROM pg_constraint WHERE conname = 'risk_snapshots_nonneg'");
+    assert.equal(chk.rows.length, 1, 'the bound belongs in the database, not only in num()');
+  });
+
+  test('the fingerprint is held to the same shape violation_caches holds it to', async () => {
+    // Stated on one table but not the other, a truncated fingerprint would be
+    // refused by the cache and accepted here — a row of history nothing could
+    // ever look up again.
+    await assert.rejects(
+      pool.query(
+        "INSERT INTO risk_snapshots (fingerprint, day) VALUES ('too-short', '2026-01-01'::date)"),
+      /risk_snapshots_fingerprint/);
+  });
+
+  test('the primary key is the only index — no speculative second one', async () => {
+    // §5.4: the range scan and the day ordering both come out of the primary
+    // key, so a covering index would be pure write cost.
+    const ix = await pool.query(
+      "SELECT indexname FROM pg_indexes WHERE tablename = 'risk_snapshots'");
+    assert.equal(ix.rows.length, 1, `unexpected indexes: ${ix.rows.map(r => r.indexname)}`);
+  });
+
+  test('the CHECK refuses a negative count', async () => {
+    await assert.rejects(
+      pool.query(
+        `INSERT INTO risk_snapshots (fingerprint, day, sev_critical)
+         VALUES ($1, '2026-01-01'::date, -1)`, [FP_A]),
+      /risk_snapshots_nonneg/);
+  });
+
+  test('a second build on the same day overwrites rather than adding a row', async () => {
+    // Last write wins: a refetch at 16:00 knows more than the one at 09:00, and
+    // a day should end holding its most recent measurement.
+    await snapshots.upsertForDay(FP_A, totals(10), at('2026-05-04'));
+    const first = await pool.query(
+      'SELECT captured_at, sev_critical FROM risk_snapshots WHERE fingerprint = $1 AND day = $2::date',
+      [FP_A, '2026-05-04']);
+    assert.equal(first.rows[0].sev_critical, 10);
+
+    await new Promise(r => setTimeout(r, 15));
+    await snapshots.upsertForDay(FP_A, totals(42), at('2026-05-04'));
+
+    const after = await pool.query(
+      `SELECT count(*)::int AS n, max(sev_critical) AS c, max(captured_at) AS t
+         FROM risk_snapshots WHERE fingerprint = $1 AND day = $2::date`,
+      [FP_A, '2026-05-04']);
+    assert.equal(after.rows[0].n, 1, 'one row per connection per day');
+    assert.equal(after.rows[0].c, 42, 'the later build wins');
+    assert.ok(new Date(after.rows[0].t) > new Date(first.rows[0].captured_at),
+      'captured_at moves with the winning build');
+  });
+
+  test('every column round-trips, both halves intact', async () => {
+    await snapshots.upsertForDay(FP_A, totals(99), at('2026-05-05'));
+    const { rows } = await pool.query(
+      `SELECT root_project_count, sev_critical, sev_high, sev_medium, sev_low,
+              sev_unassigned, ops_fail, lic_fail, secpol_fail
+         FROM risk_snapshots WHERE fingerprint = $1 AND day = $2::date`,
+      [FP_A, '2026-05-05']);
+    assert.deepEqual(rows[0], {
+      root_project_count: 3, sev_critical: 99, sev_high: 1, sev_medium: 2,
+      sev_low: 3, sev_unassigned: 4, ops_fail: 5, lic_fail: 6, secpol_fail: 7,
+    });
+  });
+
+  test('two connections keep separate histories for the same day', async () => {
+    await snapshots.upsertForDay(FP_A, totals(1), at('2026-05-06'));
+    await snapshots.upsertForDay(FP_B, totals(2), at('2026-05-06'));
+    const a = await snapshots.series(FP_A, 1, at('2026-05-06'));
+    const b = await snapshots.series(FP_B, 1, at('2026-05-06'));
+    assert.equal(a.points[0].sev.critical, 1);
+    assert.equal(b.points[0].sev.critical, 2,
+      'one connection\'s history must never appear in another\'s series');
+  });
+
+  test('series returns a dense window with real gaps marked uncaptured', async () => {
+    await pool.query('DELETE FROM risk_snapshots WHERE fingerprint = $1', [FP_B]);
+    await snapshots.upsertForDay(FP_B, totals(7), at('2026-06-01'));
+    await snapshots.upsertForDay(FP_B, totals(9), at('2026-06-03'));
+
+    const s = await snapshots.series(FP_B, 5, at('2026-06-05'));
+    assert.deepEqual({ from: s.from, to: s.to }, { from: '2026-06-01', to: '2026-06-05' });
+    assert.deepEqual(s.points.map(p => p.captured), [true, false, true, false, false]);
+    assert.equal(s.points[0].sev.critical, 7);
+    assert.equal(s.points[2].sev.critical, 9);
+    assert.equal(s.points[1].sev, null, 'a gap is null, never the previous day repeated');
+  });
+
+  test('the window excludes days outside it', async () => {
+    // A row exists on 2026-06-01; a two-day window ending on the 5th must not
+    // reach back to it.
+    const s = await snapshots.series(FP_B, 2, at('2026-06-05'));
+    assert.equal(s.points.length, 2);
+    assert.ok(s.points.every(p => p.captured === false));
+  });
+
+  test('the day comes back as a string, whatever the process timezone', async () => {
+    // node-postgres parses a `date` into a JS Date at LOCAL midnight, so a
+    // container west of UTC would hand back the previous day for every point.
+    // SERIES_COLUMNS uses to_char to sidestep the driver's calendar; if that
+    // ever reverts, the Map lookup in densify() misses and every day reports
+    // itself as uncaptured.
+    const saved = process.env.TZ;
+    try {
+      for (const tz of ['UTC', 'America/Los_Angeles', 'Pacific/Kiritimati']) {
+        process.env.TZ = tz;
+        const s = await snapshots.series(FP_B, 1, at('2026-06-01'));
+        assert.equal(typeof s.points[0].day, 'string', `TZ=${tz}`);
+        assert.equal(s.points[0].day, '2026-06-01', `TZ=${tz}`);
+        assert.equal(s.points[0].captured, true, `TZ=${tz}: the row must still be found`);
+      }
+    } finally {
+      if (saved === undefined) delete process.env.TZ; else process.env.TZ = saved;
+    }
+  });
+
+  test('the sweep discards what is past retention and keeps what is not', async () => {
+    await pool.query('DELETE FROM risk_snapshots WHERE fingerprint = $1', [FP_A]);
+    const now = at('2026-07-31');
+    await snapshots.upsertForDay(FP_A, totals(1), at('2026-07-30'));  //  1 day old
+    await snapshots.upsertForDay(FP_A, totals(2), at('2026-07-01'));  // 30 days old
+    await snapshots.upsertForDay(FP_A, totals(3), at('2026-05-01'));  // 91 days old
+
+    const removed = await snapshots.sweep(60, now);
+    assert.equal(removed, 1, 'only the row older than the window goes');
+    const left = await pool.query(
+      'SELECT to_char(day, $2) AS d FROM risk_snapshots WHERE fingerprint = $1 ORDER BY day',
+      [FP_A, 'YYYY-MM-DD']);
+    assert.deepEqual(left.rows.map(r => r.d), ['2026-07-01', '2026-07-30']);
+  });
+
+  test('history survives the housekeeping that sweeps the cache row beside it', async () => {
+    // Migration 012 deliberately declares no foreign key. A cache row is a
+    // 24-hour artefact and caches.sweepOrphaned() deletes it as a matter of
+    // routine; a cascade would let that quietly destroy a year of measurements.
+    const caches = require('./lib/caches');
+    await pool.query(
+      `INSERT INTO violation_caches (fingerprint, status)
+       VALUES ($1, 'ready') ON CONFLICT (fingerprint) DO NOTHING`, [FP_A]);
+    await snapshots.upsertForDay(FP_A, totals(5), at('2026-07-30'));
+
+    // No dt_connections row points at this fingerprint, so the sweep removes it.
+    await caches.sweepOrphaned(0);
+    const gone = await pool.query(
+      'SELECT 1 FROM violation_caches WHERE fingerprint = $1', [FP_A]);
+    assert.equal(gone.rows.length, 0, 'the cache row should have been swept');
+
+    const kept = await snapshots.countFor(FP_A);
+    assert.ok(kept > 0, 'the history must outlive the cache row it was built from');
+  });
+
+  test('countFor is scoped to one connection', async () => {
+    const a = await snapshots.countFor(FP_A);
+    const none = await snapshots.countFor('f'.repeat(64));
+    assert.ok(a > 0);
+    assert.equal(none, 0);
+  });
+});

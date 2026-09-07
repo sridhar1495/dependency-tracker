@@ -140,6 +140,47 @@ This is what CLAUDE.md §16's `EXPLAIN` requirement is for: nothing else would
 have noticed, because the query was correct and fast enough to look fine at the
 size it was first written against.
 
+### 1.4 The risk series needs no index of its own
+
+Migration 012 adds `risk_snapshots`, and the trend panel asks it one question:
+this connection's rows, over a window, in day order. The primary key is already
+a btree on `(fingerprint, day)`, so the equality, the range and the ordering all
+come out of it — a covering index would be pure write cost on a table that takes
+one insert per connection per day.
+
+Measured at full retention for a large installation: **200 connections × 400
+days = 80,000 rows**, the biggest the table can get before the sweep, asking for
+the widest window the panel offers.
+
+```
+Sort (actual time=0.499..0.518 rows=365 loops=1)
+  Sort Key: day
+  Buffers: shared hit=21
+  ->  Bitmap Heap Scan on risk_snapshots (actual time=0.154..0.310 rows=365 loops=1)
+        Heap Blocks: exact=8
+        ->  Bitmap Index Scan on risk_snapshots_pkey (actual time=0.077..0.078 rows=365 loops=1)
+              Index Cond: ((fingerprint = '8f14…236d') AND (day >= '2025-09-08') AND (day <= '2026-09-07'))
+              Buffers: shared hit=10
+Execution Time: 0.533 ms
+```
+
+| | Rows scanned | Buffers | Time |
+|---|---|---|---|
+| Year window, 80,000-row table | **365** (exactly the window) | **21** | **0.53 ms** |
+
+Two notes on reading this plan:
+
+- **`ORDER BY` is qualified as `risk_snapshots.day` in the query, deliberately.**
+  The select list aliases `to_char(day, …) AS day`, and an unqualified
+  `ORDER BY day` binds to that output expression — sorting formatted strings
+  rather than dates. It happens to produce the same order, because `YYYY-MM-DD`
+  sorts lexicographically, but only as a coincidence of the format string.
+- **The retention sweep is a sequential scan, and that is accepted.** It runs
+  from ten-minutely housekeeping over a table bounded at
+  `SNAPSHOT_RETENTION_DAYS × connections`, not from a request path. An index on
+  `day` alone would serve it, and would cost a write on every insert to save a
+  scan nobody is waiting on.
+
 ---
 
 ## 2. Load behaviour

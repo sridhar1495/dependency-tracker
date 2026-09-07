@@ -33,6 +33,8 @@
 //   GET    /violation-cache/status              — build state for this user's connection
 //   GET    /violation-cache/data                — the cached map (gzipped)
 //   POST   /violation-cache/refresh             — trigger a background rebuild
+//   GET    /violation-cache/risk-series         — daily risk history for this
+//                                                 user's connection (week/month/year)
 //   GET    /violation-cache/config              — connection + settings + mail + schedules
 //   POST   /violation-cache/config              — save any subset of the above
 //   DELETE /violation-cache/config/dt-key       — forget the stored DT API key
@@ -71,6 +73,7 @@ const { migrate } = require('./db/migrate');
 const cryptoLib     = require('./lib/crypto');
 const cache         = require('./lib/violation-cache');
 const caches        = require('./lib/caches');
+const snapshots     = require('./lib/snapshots');
 const reports       = require('./lib/reports');
 const reportsDb     = require('./lib/reports-db');
 const scheduler     = require('./lib/scheduler');
@@ -264,7 +267,15 @@ async function housekeeping() {
   try {
     const runs = await schedulesDb.purgeRunsOlderThan(RUN_HISTORY_RETENTION_DAYS);
     const swept = await caches.sweepOrphaned();
-    if (runs || swept) log('info', 'Housekeeping complete', { scheduleRuns: runs, caches: swept });
+    // Snapshots are swept on their own retention, not with the caches: a cache
+    // row is a 24-hour artefact and this history is a year of measurements, so
+    // the two must not share a lifetime (migration 012).
+    const snaps = await snapshots.sweep(cfg.snapshotRetentionDays);
+    if (runs || swept || snaps) {
+      log('info', 'Housekeeping complete', {
+        scheduleRuns: runs, caches: swept, riskSnapshots: snaps,
+      });
+    }
   } catch (e) {
     log('warn', `Housekeeping failed: ${e.message}`);
   }
@@ -324,6 +335,7 @@ async function boot() {
     reportConcurrency:    cfg.reportConcurrency,
     violationConcurrency: cfg.violationConcurrency,
     jobStallMinutes:      cfg.jobStallMs / 60_000,
+    snapshotRetentionDays: cfg.snapshotRetentionDays,
     schedulerPollSeconds: scheduler.POLL_INTERVAL_MS / 1000,
     schedulerConcurrency: scheduler.maxConcurrent(),
     logFormat:            cfg.logFormat,

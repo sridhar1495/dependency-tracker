@@ -24,6 +24,7 @@ const DEFAULTS = {
   VIOLATION_CONCURRENCY:     '3',
   SCHEDULER_CONCURRENCY:     '5',
   VIOLATION_JOB_STALL_MINUTES: '15',
+  SNAPSHOT_RETENTION_DAYS:   '400',
   POSTGRES_HOST:             'dt-postgres',
   POSTGRES_PORT:             '5432',
   POSTGRES_USER:             'dtdash',
@@ -118,6 +119,14 @@ function parseConfig(env) {
     // large portfolio that keeps making progress runs to completion however long
     // that needs (CLAUDE.md §6.3).
     jobStallMs:           positiveInt(env, 'VIOLATION_JOB_STALL_MINUTES', { min: 1, max: 1440 }) * 60_000,
+
+    // How long a daily risk snapshot is kept. The default is a year plus five
+    // weeks, so the "year" window in the trend panel is always fully covered
+    // and does not start truncating the moment a point turns 365 days old.
+    // Floored at 7 because a shorter retention would empty the smallest window
+    // the panel offers; capped at 10 years, which is the point where the table
+    // stops being bounded in any useful sense (CLAUDE.md §13).
+    snapshotRetentionDays: positiveInt(env, 'SNAPSHOT_RETENTION_DAYS', { min: 7, max: 3650 }),
 
     // S1: session lifetimes, enforced from phase 2 onward.
     session: {
