@@ -142,17 +142,28 @@ function applyScheduleRecipients(account, schedule) {
   if (!account) return account;
   if (!schedule) return account;
   const to = schedule.toAddrs && schedule.toAddrs.length ? schedule.toAddrs : account.to;
-  // CC is taken from the schedule whenever it overrode To as well: a schedule
-  // that names its own recipients but inherits the account's CC list would copy
-  // people who have nothing to do with it.
-  const cc = schedule.toAddrs && schedule.toAddrs.length
-    ? (schedule.ccAddrs || [])
-    : account.cc;
+
+  // CC is read from the schedule directly, and all three of its states mean
+  // what they say:
+  //   []        copy nobody
+  //   [addrs]   these people
+  //   null      inherit the account's list
+  //
+  // This replaces an implicit rule — overriding To used to drop the account CC
+  // silently — which existed only because "copy nobody" could not be expressed.
+  // Now that the editor has a switch for it, dropping CC behind the user's back
+  // while the switch reads "on" would be the surprising behaviour rather than
+  // the safe one. Migration 011 wrote the old outcome into the rows it applied
+  // to, so no existing schedule changes where its mail goes.
+  const cc = Array.isArray(schedule.ccAddrs) ? schedule.ccAddrs : account.cc;
+
   return {
     ...account,
     to,
     cc,
     subject: schedule.subject || account.subject,
+    // Same rule as the subject: a blank override inherits.
+    body: schedule.body || account.body,
   };
 }
 

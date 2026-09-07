@@ -587,8 +587,14 @@ every schedule you own:
    - **Risk categories** to include
    - **Report file name** — optional; blank keeps the generated
      `scheduled_report_<timestamp>.xlsx` form
-   - **Delivery** — To, CC and Subject for *this* schedule. Leave blank to use
-     the account defaults; the placeholder shows what blank will actually use
+   - **Delivery** — To, CC, Subject and **Message** for *this* schedule. Leave
+     a field blank to use the account default; the placeholder shows what blank
+     will actually use
+   - **Send a copy** — the switch beside CC. On with a blank field inherits the
+     account's CC list; on with addresses uses those; **off sends no CC at all**,
+     which is a different instruction from blank and the only way to express it.
+     Turning it off clears and disables the field, so nothing on screen implies
+     an address is still in use
 4. **Save schedule**
 
 ### Timezones
@@ -676,12 +682,26 @@ exists.
 | Account (`mail_settings`) | Schedule (`schedules`) |
 |---|---|
 | SMTP host, port, TLS | To |
-| SMTP username, password | CC |
+| SMTP username, password | CC (three states — see below) |
 | From address | Subject |
-| Default To, CC, Subject | |
+| Default To, CC, Subject, Message | Message |
 
-Only the addressing is per schedule: duplicating the SMTP connection would mean
-re-entering a password to change a recipient. A schedule field left blank is
+Only the addressing and the covering note are per schedule: duplicating the SMTP
+connection would mean re-entering a password to change a recipient. The message
+body is sent as `mailBody` on the API, because the request payload itself is
+already called `body`.
+
+**CC has three states**, and they are not interchangeable:
+
+| Stored | Means | In the editor |
+|---|---|---|
+| `null` | Use the account's CC list | Switch on, field blank |
+| `[]` | Copy nobody | Switch off |
+| `["a@b.co"]` | Copy exactly these | Switch on, addresses typed |
+
+The API carries `ccEnabled` alongside `cc` because JSON cannot otherwise tell
+"copy nobody" from "inherit" — both would arrive as an empty list. Omitting the
+flag keeps the older meaning, so an existing integration is unaffected. A schedule field left blank is
 `null`, meaning "use the account's" — which is **not** the same as an empty list,
 and the database refuses an empty To because that would be a schedule addressed
 to nobody. Overriding To also drops the account's CC, rather than copying people

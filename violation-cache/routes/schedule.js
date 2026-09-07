@@ -48,8 +48,13 @@ function forClient(row, projects) {
     // one. The browser needs to tell those apart to show "using account
     // default" rather than "nobody", so null is passed through as null.
     to:                  row.toAddrs || null,
-    cc:                  row.ccAddrs || null,
+    // `??`, not `||`. An empty array is "copy nobody" and `||` collapsed it to
+    // null on the way out, so the browser could never tell that state from
+    // "inherit" — the same conflation the data layer used to make on the way in.
+    cc:                  row.ccAddrs ?? null,
+    ccEnabled:           !(Array.isArray(row.ccAddrs) && row.ccAddrs.length === 0),
     subject:             row.subject || null,
+    mailBody:            row.body || null,
     nextRun:             row.nextRunAt,
     lastRun:             row.lastRunAt,
     lastRunStatus:       row.lastRunStatus,

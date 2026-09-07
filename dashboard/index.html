@@ -818,6 +818,20 @@
       margin-bottom: 4px; margin-top: 8px;
     }
     .cfg-label:first-child { margin-top: 0; }
+    /* A label with a control on the same line, right-aligned. The label keeps
+       its own top margin so the row sits where a bare .cfg-label would. */
+    .cfg-label-row {
+      display: flex; align-items: center; justify-content: space-between;
+      gap: 8px; margin-top: 8px; margin-bottom: 4px;
+    }
+    .cfg-inline-toggle {
+      display: inline-flex; align-items: center; gap: 5px;
+      font-size: 11px; color: var(--text-muted); cursor: pointer;
+      white-space: nowrap;
+    }
+    .cfg-inline-toggle input {
+      accent-color: var(--accent); width: 13px; height: 13px; cursor: pointer;
+    }
     .cfg-row { display: flex; gap: 8px; align-items: flex-end; margin-bottom: 8px; }
     .cfg-input {
       background: var(--surface); border: 1px solid var(--border);
@@ -1300,9 +1314,9 @@
       <div id="cfgSchedProjects" style="font-size:11px;color:var(--text-muted);margin-top:8px"></div>
     </div>
 
-    <!-- Only the addressing is per schedule. The SMTP server, sign-in and From
-         address stay on the account above: changing who receives a report must
-         not mean re-entering a password. -->
+    <!-- Addressing and the covering note are per schedule. The SMTP server,
+         sign-in and From address stay on the account above: changing who
+         receives a report must not mean re-entering a password. -->
     <div class="cfg-section">
       <div class="cfg-sub-title">Delivery</div>
       <div style="font-size:11px;color:var(--text-muted);margin-bottom:8px">
@@ -1311,12 +1325,26 @@
       <label class="cfg-label" style="margin-top:0">To</label>
       <input id="cfgSchedTo" class="cfg-input" style="margin-bottom:4px" oninput="markSchedDirty()" />
       <div class="field-error" id="cfgSchedToErr" style="margin-bottom:4px"></div>
-      <label class="cfg-label">CC</label>
+
+      <!-- The switch is the only way to say "copy nobody". Blank with it on
+           means "inherit the account's CC", which is a different thing, and the
+           placeholder says which one is in force. -->
+      <div class="cfg-label-row">
+        <label class="cfg-label" for="cfgSchedCc" style="margin-bottom:0">CC</label>
+        <label class="cfg-inline-toggle" title="Turn off to send this schedule with no CC at all">
+          <input type="checkbox" id="cfgSchedCcEnabled" checked onchange="onSchedCcToggle()">
+          <span>Send a copy</span>
+        </label>
+      </div>
       <input id="cfgSchedCc" class="cfg-input" style="margin-bottom:4px" oninput="markSchedDirty()" />
       <div class="field-error" id="cfgSchedCcErr" style="margin-bottom:4px"></div>
       <label class="cfg-label">Subject</label>
       <input id="cfgSchedSubject" class="cfg-input" maxlength="200" oninput="markSchedDirty()" />
       <div class="field-error" id="cfgSchedSubjectErr"></div>
+      <label class="cfg-label" for="cfgSchedMessage">Message</label>
+      <textarea id="cfgSchedMessage" class="cfg-textarea" maxlength="5000"
+                oninput="markSchedDirty()"></textarea>
+      <div class="field-error" id="cfgSchedMessageErr"></div>
     </div>
 
     <div class="cfg-section">
@@ -1994,6 +2022,11 @@ function renderScheduleList() {
     const goesTo = (sc.to && sc.to.length)
       ? escHtml(sc.to.join(', '))
       : '<span style="color:var(--text-muted)">account default recipients</span>';
+    // "Copy nobody" is a deliberate choice, so the list says so rather than
+    // looking identical to a schedule that simply inherits the account's CC.
+    const ccNote = sc.ccEnabled === false
+      ? ' · <span style="color:var(--text-muted)">no CC</span>'
+      : ((sc.cc && sc.cc.length) ? ` · CC ${escHtml(sc.cc.join(', '))}` : '');
     // Pausing needs no save step, so the toggle acts immediately and must not
     // also open the editor — hence stopPropagation on the row click.
     const toggle = `<label class="cfg-toggle" style="transform:scale(0.8)" title="${sc.enabled ? 'Pause' : 'Resume'}"
@@ -2011,7 +2044,7 @@ function renderScheduleList() {
         <span style="color:var(--text-muted);font-size:16px;line-height:1">&#8250;</span>
       </div>
       <div style="font-size:12px;color:var(--text-muted)">${escHtml(describeSchedule(sc))} · ${projects}</div>
-      <div style="font-size:11px;color:var(--text-muted);margin-top:2px">To: ${goesTo}</div>
+      <div style="font-size:11px;color:var(--text-muted);margin-top:2px">To: ${goesTo}${ccNote}</div>
       <div style="font-size:11px;color:var(--text-muted);margin-top:2px">${state} · ${next} · ${last}</div>
     </div>`;
   }).join('');
@@ -2476,7 +2509,7 @@ async function openScheduleEditor(id = null, projects = null) {
   // anybody means by "the default is nine in the morning".
   const base = sc || { frequency: 'daily', weekDays: [], monthDay: 1,
                        riskTypes: ['security', 'license', 'operational'], name: '', reportName: '',
-                       to: null, cc: null, subject: null,
+                       to: null, cc: null, subject: null, mailBody: null, ccEnabled: true,
                        ...schedLocalToUtc({ hour: 9, minute: 0, weekDays: [1], monthDay: 1 }) };
   document.getElementById('cfgSchedLabel').value = base.name || '';
   document.getElementById('cfgSchedName').value  = base.reportName || '';
@@ -2486,9 +2519,16 @@ async function openScheduleEditor(id = null, projects = null) {
   document.getElementById('cfgSchedTo').value      = (base.to || []).join(', ');
   document.getElementById('cfgSchedCc').value      = (base.cc || []).join(', ');
   document.getElementById('cfgSchedSubject').value = base.subject || '';
+  document.getElementById('cfgSchedMessage').value    = base.mailBody || '';
+  // A new schedule inherits — the switch starts on, so it follows the account
+  // until somebody says otherwise. An existing one carries whichever of the
+  // three states it was saved in; only "copy nobody" turns the switch off.
+  document.getElementById('cfgSchedCcEnabled').checked =
+    base.ccEnabled === undefined ? true : base.ccEnabled !== false;
   applySchedDeliveryPlaceholders();
+  onSchedCcToggle();
   for (const id2 of ['cfgSchedLabelErr', 'cfgSchedNameErr', 'cfgSchedToErr',
-                     'cfgSchedCcErr', 'cfgSchedSubjectErr']) {
+                     'cfgSchedCcErr', 'cfgSchedSubjectErr', 'cfgSchedMessageErr']) {
     document.getElementById(id2).textContent = '';
   }
 
@@ -2522,8 +2562,29 @@ function applySchedDeliveryPlaceholders() {
       : empty;
   };
   show('cfgSchedTo', m.to, 'Set a recipient under Email, or type one here');
-  show('cfgSchedCc', m.cc, 'No copy recipients');
+  show('cfgSchedCc', m.cc, 'No copy recipients on the account either');
   show('cfgSchedSubject', m.subject, 'Account default subject');
+  show('cfgSchedMessage', m.body, 'Account default message');
+}
+
+/**
+ * The CC switch: off means "copy nobody", which is a different thing from a
+ * blank field. Blank with the switch on inherits the account's list, so the
+ * field is cleared and disabled rather than merely ignored — leaving addresses
+ * visible under an off switch would read as though they were still being used.
+ */
+function onSchedCcToggle() {
+  const on  = document.getElementById('cfgSchedCcEnabled').checked;
+  const cc  = document.getElementById('cfgSchedCc');
+  const err = document.getElementById('cfgSchedCcErr');
+  cc.disabled = !on;
+  if (!on) { cc.value = ''; err.textContent = ''; }
+  cc.placeholder = on
+    ? ((_appConfig && _appConfig.mail && (_appConfig.mail.cc || []).length)
+        ? `Account default: ${_appConfig.mail.cc.join(', ')}`
+        : 'No copy recipients on the account either')
+    : 'No copy will be sent';
+  markSchedDirty();
 }
 
 /** Leave the editor. Asks about unsaved work unless `discard` is true. */
@@ -2716,6 +2777,19 @@ function readScheduleEditor() {
     subjectErr.textContent = 'A subject may be at most 200 characters.';
     return null;
   }
+  // Not trimmed of its newlines the way a subject is: a covering note is prose
+  // and its line breaks are part of what the reader sees.
+  const mailBody  = document.getElementById('cfgSchedMessage').value;
+  const bodyErr   = document.getElementById('cfgSchedMessageErr');
+  bodyErr.textContent = '';
+  if (mailBody.length > 5000) {
+    bodyErr.textContent = 'A message may be at most 5000 characters.';
+    return null;
+  }
+  // Off means "copy nobody" — an empty list, which is a different instruction
+  // from the empty field that means "inherit". The flag carries the difference
+  // because JSON cannot.
+  const ccEnabled = document.getElementById('cfgSchedCcEnabled').checked;
 
   // The picker is browser-local; the backend stores UTC instants.
   const utc = schedLocalToUtc({ ...readSchedLocalForm(), weekDays: localWeekDays });
@@ -2728,7 +2802,7 @@ function readScheduleEditor() {
     monthDay:   utc.monthDay,
     riskTypes,
     reportName: String(reportName).trim(),
-    to, cc, subject,
+    to, cc, subject, mailBody, ccEnabled,
     enabled:    true,
   };
 }
@@ -5102,6 +5176,7 @@ window.cancelAllSchedules     = cancelAllSchedules;
 window.toggleSchedule         = toggleSchedule;
 window.runScheduleNow         = runScheduleNow;
 window.markSchedDirty         = markSchedDirty;
+window.onSchedCcToggle        = onSchedCcToggle;
 window.saveConfigPanel      = saveConfigPanel;
 window.cancelConfigPanel    = cancelConfigPanel;
 window.savePanel            = savePanel;
