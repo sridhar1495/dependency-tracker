@@ -1,13 +1,20 @@
 # SPDX-License-Identifier: MIT
 # Continuous integration for the Risk Dashboard.
 #
-# Two jobs, mirroring the two test tiers in CLAUDE.md §10.2:
+# Four jobs, mirroring the test tiers in CLAUDE.md §10.2:
 #
 #   offline  — runs everywhere with no database, no Docker and no network. This
 #              is the tier that must never be allowed to need any of them.
 #   database — the opt-in tier, run here against a real PostgreSQL 16 service
 #              container so the migrations, indexes and isolation guarantees are
 #              exercised on every change rather than only on a developer's box.
+#   e2e      — the assembled product: the real server.js, a real database, the
+#              real pages in Chromium, with only DependencyTrack and SMTP
+#              stubbed. It is what stops a change that is correct in every unit
+#              from being wrong once the layers are joined up.
+#   audit    — licences and advisories, recorded rather than enforced.
+#
+# The three test jobs run in parallel; none depends on another.
 
 name: CI
 
@@ -87,6 +94,53 @@ jobs:
         env:
           TEST_DATABASE_URL: postgres://dtdash:ci-password@127.0.0.1:5432/dtdash
         run: node --test db.test.js
+
+  e2e:
+    name: End-to-end regression suite
+    runs-on: ubuntu-latest
+    # Longer than the other jobs because it boots the product and drives a
+    # browser. A full run is ~1 minute; the ceiling is there so a wedged run
+    # fails rather than burning the hour GitHub would otherwise allow.
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: dtdash
+          POSTGRES_PASSWORD: ci-password
+          POSTGRES_DB: dtdash_e2e
+        ports: ['5432:5432']
+        options: >-
+          --health-cmd "pg_isready -U dtdash"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+
+      # --omit=dev, like every other job: the suite must pass against exactly
+      # the dependency set that ships (CLAUDE.md §3).
+      - name: Install production dependencies
+        working-directory: violation-cache
+        run: npm ci --omit=dev --no-audit --no-fund
+
+      # --no-save keeps Playwright out of package.json. §3 caps the dependency
+      # list at three packages, and the browser tier resolves it at run time
+      # rather than depending on it — so it stays a CI tool, not a dependency.
+      - name: Install Playwright (not a project dependency)
+        run: |
+          npm install -g --no-save playwright
+          npx --yes playwright install --with-deps chromium
+
+      - name: End-to-end suite
+        working-directory: violation-cache
+        env:
+          TEST_DATABASE_URL: postgres://dtdash:ci-password@127.0.0.1:5432/dtdash_e2e
+        run: node --test e2e.test.js
 
   audit:
     name: Dependency licences and advisories
