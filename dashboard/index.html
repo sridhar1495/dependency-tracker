@@ -565,6 +565,41 @@
     }
     .data-warn-icon:hover { opacity: 1; }
 
+    /* Eye icon: only rendered for a leaf row with at least one security
+       finding (§8.6 security counts), so its presence is itself the signal —
+       no disabled/placeholder state to design for. Sits before the tree
+       toggle, in the select cell's flow, per the request that this be "next
+       to the checkbox, not a new column". */
+    .vuln-eye-btn {
+      display: inline-flex; align-items: center; justify-content: center;
+      width: 20px; height: 20px; margin-right: 2px;
+      border: none; background: none; padding: 0; cursor: pointer;
+      color: var(--text-muted); font-size: 13px; border-radius: 4px;
+      vertical-align: middle; transition: color 0.15s, background 0.15s;
+    }
+    .vuln-eye-btn:hover { color: var(--accent); background: var(--surface2); }
+
+    /* ── Vulnerability detail dialog ─────────────────────────────────────── */
+    .vuln-table-wrap { max-height: 480px; overflow-y: auto; margin-top: 10px; }
+    .vuln-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+    .vuln-table th {
+      position: sticky; top: 0; background: var(--surface);
+      text-align: left; padding: 8px 10px; border-bottom: 2px solid var(--border);
+      color: var(--text-muted); font-weight: 600; white-space: nowrap;
+    }
+    .vuln-table td {
+      padding: 8px 10px; border-bottom: 1px solid var(--border); vertical-align: top;
+    }
+    .vuln-table tr:last-child td { border-bottom: none; }
+    .vuln-table .vuln-id { font-weight: 600; }
+    .vuln-table .vuln-component { color: var(--text-muted); }
+    .vuln-dialog-status {
+      padding: 32px 16px; text-align: center; color: var(--text-muted); font-size: 13px;
+    }
+    .vuln-dialog-note {
+      margin-top: 10px; font-size: 11px; color: var(--text-muted); text-align: center;
+    }
+
     /* ── Pills ────────────────────────────────────────────────────────────── */
     .pill {
       display: inline-flex; align-items: center; justify-content: center;
@@ -1219,6 +1254,33 @@
   </div>
 </div>
 
+<!-- ── Vulnerability detail dialog ─────────────────────────────────────────
+     Opened from the 👁 icon on a project row. Findings are fetched live from
+     DependencyTrack through the existing read proxy every time it opens — the
+     data is never cached client-side, so it is always current with whatever
+     the last refetch (or DT itself) knows. -->
+<div class="modal-overlay" id="vulnDialog">
+  <div class="modal" style="width:920px;max-width:96vw">
+    <button class="modal-close" onclick="closeModal('vulnDialog')">&times;</button>
+    <h2>🔎 Vulnerabilities — <span id="vulnDialogProject"></span></h2>
+    <div id="vulnDialogBody">
+      <div class="vuln-dialog-status" id="vulnDialogStatus"></div>
+      <div class="vuln-table-wrap" id="vulnDialogTableWrap" hidden>
+        <table class="vuln-table">
+          <thead>
+            <tr>
+              <th>Vulnerability</th><th>Severity</th><th>CVSS</th><th>CWE</th>
+              <th>Component</th><th>Current</th><th>Latest</th>
+            </tr>
+          </thead>
+          <tbody id="vulnDialogRows"></tbody>
+        </table>
+      </div>
+      <p class="vuln-dialog-note" id="vulnDialogNote" hidden></p>
+    </div>
+  </div>
+</div>
+
 <!-- ── Toast container ───────────────────────────────────────────────────── -->
 <div id="toastContainer"></div>
 
@@ -1525,6 +1587,13 @@ const CONFIG = {
   PROBE_RETRY_MS:     3000,   // ms between Connect-modal DT API probe retries
   PROBE_TIMEOUT_MS:   3000,   // abort timeout for each probe request
   MIN_SEARCH_LENGTH:     2,   // min chars before text filter activates (avoids O(n) on single char)
+  // Same page size violation-cache/lib/reports.js uses for the identical DT
+  // call, so the two paths are proven against the same shape of response.
+  VULN_PAGE_SIZE:      300,
+  // A hard ceiling on the dialog, not a limit on what DT holds. Stops one
+  // click against a portfolio project with thousands of findings from turning
+  // into an unbounded fetch loop; the note under the table says when it bites.
+  VULN_MAX_ROWS:       900,
 };
 
 // ── Constants ─────────────────────────────────────────────────────────────
@@ -3685,8 +3754,9 @@ function renderTree(matchSet) {
       selectCell = `<td class="select-cell"><input type="checkbox" class="proj-select-cb" aria-label="Select ${escHtml(node.name)}" data-uuid="${escHtml(node.uuid)}" data-leaf="1" onchange="toggleProjectSelection('${escHtml(node.uuid)}')" ${selectedProjectUuids.has(node.uuid) ? 'checked' : ''}></td>`;
     }
 
+    const vulnIcon = vulnEyeIconHtml(node, isGroup);
     let html = selectCell;
-    html += `<td class="project-name" style="padding-left:${indent + 10}px">${toggle}<span class="proj-name-text" title="${nameInner}">${nameInner}</span>${warnIcon}${navIcon}${vBadge}</td>`;
+    html += `<td class="project-name" style="padding-left:${indent + 10}px">${vulnIcon}${toggle}<span class="proj-name-text" title="${nameInner}">${nameInner}</span>${warnIcon}${navIcon}${vBadge}</td>`;
     html += `<td class="level-cell">${node.level}</td>`;
     html += `<td>${node.isLatest ? '<input type="checkbox" disabled checked title="Latest version">' : ''}</td>`;
 
@@ -3739,7 +3809,8 @@ function renderFlatList() {
       : '';
     // All rows in flat view are leaves — data-leaf="1" required by toggleSelectAll
     let html = `<td class="select-cell"><input type="checkbox" class="proj-select-cb" data-uuid="${escHtml(node.uuid)}" data-leaf="1" onchange="toggleProjectSelection('${escHtml(node.uuid)}')" ${selectedProjectUuids.has(node.uuid) ? 'checked' : ''}></td>`;
-    html += `<td class="project-name" style="padding-left:10px"><span class="tree-indent"></span><span class="proj-name-text" title="${nameInner}">${nameInner}</span>${warnIcon}${navIcon}${vBadge}</td>`;
+    const vulnIcon = vulnEyeIconHtml(node, false);
+    html += `<td class="project-name" style="padding-left:10px">${vulnIcon}<span class="tree-indent"></span><span class="proj-name-text" title="${nameInner}">${nameInner}</span>${warnIcon}${navIcon}${vBadge}</td>`;
     html += `<td class="level-cell">${node.level}</td>`;
     html += `<td>${node.isLatest ? '<input type="checkbox" disabled checked title="Latest version">' : ''}</td>`;
     CATS.forEach((cat, ci) => {
@@ -3754,6 +3825,168 @@ function renderFlatList() {
   });
   tbody.appendChild(frag);
   updateSelectAllCheckbox();
+}
+
+// ══ Vulnerability detail dialog ═══════════════════════════════════════════
+// Findings for one project, fetched live through the read-only DT proxy every
+// time the dialog opens (CLAUDE.md §8.3 — apiFetch is the only path to a
+// backend route, and DT calls go through it too). Nothing here is cached: a
+// second click re-fetches, so the dialog is never showing yesterday's triage.
+//
+// Q24: the query below is `violation-cache/lib/reports.js`'s
+// fetchAllFindings(), reproduced byte for byte — same endpoint, same filters,
+// same search-by-name-and-version shape — rather than the path-based
+// `/api/v1/finding/project/{uuid}` endpoint that would otherwise be the
+// obvious choice. That endpoint is unproven against whatever DependencyTrack
+// version an installation runs; this one is already shipping in the report
+// path today. Matching it exactly means the dialog inherits a proven query
+// instead of a second, untested way of asking DT the same question, and it
+// guarantees the dialog and the Excel report can never disagree about what
+// counts as an open finding — both hide suppressed and triaged-away findings
+// the same way, because it is the same request.
+const VULN_SEVERITY_ORDER = ['critical', 'high', 'medium', 'low', 'unassigned'];
+
+function vulnFindingsQuery(name, version, pageNumber) {
+  return [
+    'showInactive=false',
+    'showSuppressed=false',
+    'textSearchField=vulnerability_id,vulnerability_title,component_name,component_version,project_name',
+    `textSearchInput=${encodeURIComponent(`${name} ${version || ''}`)}`,
+    'severity=critical,high,medium,low,unassigned',
+    'analysisStatus=NOT_SET,EXPLOITABLE,IN_TRIAGE',
+    `pageSize=${CONFIG.VULN_PAGE_SIZE}`,
+    `pageNumber=${pageNumber}`,
+  ].join('&');
+}
+
+// CWE helpers mirror violation-cache/lib/cwe.js's cweIdsOf()/cweLabel(). The
+// browser cannot require() that module — there is no build step to share one
+// (§3) — so this is the same small duplication §8.8 already accepts for
+// password-validation mirroring. Keep the two in step by hand if DT's CWE
+// shape ever changes.
+function vulnCweIds(vulnerability) {
+  const list = (vulnerability && vulnerability.cwes) || [];
+  return list
+    .map(w => (w && w.cweId != null ? String(w.cweId).trim() : ''))
+    .map(id => id.replace(/^CWE-/i, ''))
+    .filter(Boolean);
+}
+function vulnCweLabel(vulnerability) {
+  return vulnCweIds(vulnerability).map(id => `CWE-${id}`).join(', ');
+}
+
+/** Worst severity first, then highest CVSS — so a capped list drops the least urgent rows first. */
+function sortFindingsBySeverity(findings) {
+  const rank = (f) => {
+    const i = VULN_SEVERITY_ORDER.indexOf((f.vulnerability?.severity || 'unassigned').toLowerCase());
+    return i === -1 ? VULN_SEVERITY_ORDER.length : i;
+  };
+  return [...findings].sort((a, b) =>
+    rank(a) - rank(b) ||
+    (b.vulnerability?.cvssV3BaseScore || 0) - (a.vulnerability?.cvssV3BaseScore || 0));
+}
+
+/** One <tr> for the dialog table. Pure — every field passes through escHtml(). */
+function vulnRowHtml(finding) {
+  const v = finding.vulnerability || {};
+  const c = finding.component || {};
+  const sevKey   = (v.severity || 'unassigned').toLowerCase();
+  const sevClass = LEVEL_CSS[sevKey] || 'unassigned';
+  const component = [c.name, c.group].filter(Boolean).join('-') || c.name || '';
+  const score = v.cvssV3BaseScore != null ? Number(v.cvssV3BaseScore).toFixed(1) : '—';
+  const cwe   = vulnCweLabel(v) || '—';
+  return `<tr>`
+    + `<td class="vuln-id">${escHtml(v.vulnId || '—')}</td>`
+    + `<td><span class="pill pill-${sevClass}">${escHtml(v.severity || 'Unassigned')}</span></td>`
+    + `<td>${escHtml(score)}</td>`
+    + `<td>${escHtml(cwe)}</td>`
+    + `<td class="vuln-component">${escHtml(component)}</td>`
+    + `<td>${escHtml(c.version || '—')}</td>`
+    + `<td>${escHtml(c.latestVersion || '—')}</td>`
+    + `</tr>`;
+}
+
+// Guards against a stale response landing after a newer click. The period
+// control on the trend panel has the identical problem for the same reason:
+// a slow first request can resolve after a fast second one already took over
+// what is on screen.
+let _vulnReqSeq = 0;
+
+async function openVulnDialog(uuid) {
+  const node = nodeMap.get(uuid);
+  if (!node) return;
+
+  document.getElementById('vulnDialogProject').textContent =
+    node.version ? `${node.name} v${node.version}` : node.name;
+  const statusEl = document.getElementById('vulnDialogStatus');
+  const wrapEl   = document.getElementById('vulnDialogTableWrap');
+  const rowsEl   = document.getElementById('vulnDialogRows');
+  const noteEl   = document.getElementById('vulnDialogNote');
+  wrapEl.hidden = true;
+  noteEl.hidden = true;
+  rowsEl.innerHTML = '';
+  statusEl.hidden = false;
+  statusEl.textContent = 'Loading…';
+  openModal('vulnDialog');
+
+  // No round trip for an account that has not connected DT yet — the icon can
+  // still show on mock data (CLAUDE.md §11.2's demo-data fallback), so this is
+  // a real case, not a defensive nicety.
+  if (!dtConfigured) {
+    statusEl.textContent = 'Connect DependencyTrack in ⚙ Settings to view vulnerability details.';
+    return;
+  }
+
+  const seq = ++_vulnReqSeq;
+  try {
+    const findings = await fetchProjectFindings(node.name, node.version || '', seq);
+    if (seq !== _vulnReqSeq) return; // superseded by a newer click
+
+    if (findings.length === 0) {
+      statusEl.textContent = 'No open vulnerabilities were found for this project.';
+      return;
+    }
+
+    const sorted = sortFindingsBySeverity(findings);
+    const shown  = sorted.slice(0, CONFIG.VULN_MAX_ROWS);
+    rowsEl.innerHTML = shown.map(vulnRowHtml).join('');
+    statusEl.hidden = true;
+    wrapEl.hidden = false;
+    if (sorted.length > shown.length) {
+      noteEl.hidden = false;
+      noteEl.textContent = `Showing the ${shown.length} most severe of ${sorted.length} findings.`;
+    }
+  } catch (err) {
+    if (seq !== _vulnReqSeq) return;
+    statusEl.textContent = `Could not load vulnerabilities: ${err.message}`;
+  }
+}
+
+/**
+ * Page through DT's finding search for one project. Bounded at
+ * CONFIG.VULN_MAX_ROWS so a click against a portfolio project with thousands
+ * of findings cannot turn into an unbounded fetch loop — the same reasoning
+ * as the snapshot crawl's page ceiling in violation-cache/lib/violation-cache.js.
+ */
+async function fetchProjectFindings(name, version, seq) {
+  const all = [];
+  let page = 1;
+  while (true) {
+    if (seq !== _vulnReqSeq) return all; // superseded — stop fetching, not just stop rendering
+    const qs  = vulnFindingsQuery(name, version, page);
+    const res = await apiFetch(`${DT_PROXY}/api/v1/finding?${qs}`);
+    if (!res.ok) {
+      const detail = await res.json().catch(() => ({}));
+      throw new Error(detail.error || `HTTP ${res.status}`);
+    }
+    const batch = await res.json();
+    all.push(...(Array.isArray(batch) ? batch : []));
+    const total = parseInt(res.headers.get('X-Total-Count') || '0', 10);
+    if ((total > 0 && all.length >= total) || (Array.isArray(batch) && batch.length < CONFIG.VULN_PAGE_SIZE)) break;
+    if (all.length >= CONFIG.VULN_MAX_ROWS) break;
+    page++;
+  }
+  return all;
 }
 
 // ══ Risk trend panel ═══════════════════════════════════════════════════════
@@ -4781,6 +5014,25 @@ function pillFor(n, level) {
   if (n === 0) return '<span class="pill pill-zero">—</span>';
   const cls = LEVEL_CSS[level] ?? level;
   return `<span class="pill pill-${cls}">${n}</span>`;
+}
+
+// ── Vulnerability eye icon ──────────────────────────────────────────────────
+// True when a leaf project's embedded security metrics carry at least one
+// finding of any severity, unassigned included — that is exactly what the
+// dialog behind the icon will show, so the icon's presence and the dialog
+// having rows to display are the same test by construction.
+function hasVulnerabilities(node) {
+  const s = (node && node.security) || {};
+  return (s.critical||0) + (s.high||0) + (s.medium||0) + (s.low||0) + (s.unassigned||0) > 0;
+}
+
+// Only for leaf rows — a group row aggregates its descendants' counts but has
+// no DependencyTrack project of its own to ask for findings, so there is
+// nothing behind the icon to open (§8.6: parent rows are synthetic).
+function vulnEyeIconHtml(node, isGroup) {
+  if (isGroup || !hasVulnerabilities(node)) return '';
+  return `<button type="button" class="vuln-eye-btn" onclick="event.stopPropagation();openVulnDialog('${node.uuid}')" `
+       + `title="View vulnerabilities for ${escHtml(node.name)}" aria-label="View vulnerabilities">👁</button>`;
 }
 
 // ── Column headers ─────────────────────────────────────────────────────────
@@ -5989,6 +6241,7 @@ window.saveProfile          = saveProfile;
 window.deleteAccount        = deleteAccount;
 window.openModal            = openModal;
 window.closeModal           = closeModal;
+window.openVulnDialog       = openVulnDialog;
 window.refreshData          = refreshData;
 window.triggerCacheRefresh  = triggerCacheRefresh;
 // Exposed so an end-to-end test can drive one watch tick instead of waiting out

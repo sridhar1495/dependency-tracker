@@ -213,7 +213,7 @@ Inline comments use lettered prefixes to trace design decisions:
 - **O-numbers** — observability notes (`// O3: JSON log format for log aggregators`)
 - **S-numbers** — security rationale (`// S2: token hashed before storage`) — **new in revision 2**
 
-Highest numbers currently in use: **Q22, P20, O5, S34**. When adding logic with a
+Highest numbers currently in use: **Q24, P20, O5, S34**. When adding logic with a
 non-obvious trade-off, add the next number in the appropriate series. Check the
 current maximum before assigning — parallel branches can claim the same number.
 
@@ -895,6 +895,30 @@ Four rules the panel must keep:
   hex in an SVG attribute is precisely where that mistake hides from a CSS
   review, so a test forbids one in `TREND_LEVELS`.
 
+**The vulnerability detail dialog is an icon on the row, not a column.** A 👁
+button sits inside the existing project-name `<td>`, before the tree toggle, on
+any leaf row `hasVulnerabilities()` says is nonzero — never on a group row,
+which has no DependencyTrack project of its own to query. Three rules govern it:
+
+- **Q24: it mirrors `lib/reports.js`'s finding query byte for byte**, not the
+  cleaner-looking `/api/v1/finding/project/{uuid}` path endpoint. The report's
+  query is proven in production against real DependencyTrack installations;
+  the path endpoint is not, and there is no live instance in this repository
+  to validate it against. Matching the report's filters exactly also means the
+  dialog and a generated report can never disagree about what counts as an
+  open finding — both hide suppressed and triaged-away findings the same way,
+  because it is the same request.
+- **The CWE cell duplicates `lib/cwe.js` by hand**, the same trade-off §8.8
+  already accepts for password validation: there is no build step to
+  `require()` a server module from the browser. A test reads `lib/cwe.js`'s
+  real source and asserts the two produce identical output.
+- **The fetch is bounded at `CONFIG.VULN_MAX_ROWS`**, worst-severity-first, so a
+  project with an unusually large number of findings cannot turn a click into
+  an unbounded fetch loop — the same reasoning as the snapshot crawl's page
+  ceiling. A `_vulnReqSeq` guard (the same pattern `_trendReqSeq` uses) stops a
+  superseded click's response from landing in a dialog the user has since
+  closed or reopened for a different project.
+
 Adding a page needs no nginx change: `try_files` serves a real file before the
 SPA fallback is considered.
 
@@ -1126,6 +1150,9 @@ The frontend never performs uniqueness checks — those are backend-only, via
 | `trendNiceCeil(max)` | frontend | Round axis ceiling; never 0, because every y divides by it |
 | `trendCarry(rows)` | frontend | Carry the last reading over unrefreshed days; flags which positions were inherited |
 | `trendLinePath` / `trendAreaPath` | frontend | SVG paths that break at `null` — what lets the solid overlay reveal the dashed bridge |
+| `hasVulnerabilities(node)` / `vulnEyeIconHtml(node, isGroup)` | frontend | Gate and render the 👁 icon on a leaf row |
+| `vulnFindingsQuery(name, version, page)` | frontend | The finding-search query, mirroring `lib/reports.js`'s `fetchAllFindings()` (Q24) |
+| `sortFindingsBySeverity(findings)` | frontend | Worst severity, then highest CVSS, first |
 | `query(sql, params)` / `tx(fn)` | server | All database access |
 | `makeSemaphore(limit)` | server | Promise concurrency limit |
 | `sleep(ms)` | server | Promise delay |
