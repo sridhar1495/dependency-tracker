@@ -489,17 +489,42 @@ describe('Dockerfile and .dockerignore agree', () => {
       '.dockerignore must not exclude the lock file that `npm ci` reads');
   });
 
+  // Directories that must NOT reach the image. Enumerated rather than pattern-
+  // matched, so adding one is a decision somebody makes in a diff — the same
+  // reasoning as the administration allow-list in §7.6.
+  //
+  //   node_modules  installed by `npm ci` inside the build, not copied in
+  //   data, pgdata   bind mounts, runtime state
+  //   e2e            the end-to-end harness. It is test code: it spawns
+  //                  server.js, drives a browser and stubs DependencyTrack.
+  //                  Shipping it would put a fake DT and an SMTP server that
+  //                  accepts anything into a production container.
+  const NOT_IN_IMAGE = ['node_modules', 'data', 'pgdata', 'e2e'];
+
   test('every backend directory in the repository is COPYed into the image', () => {
     // A new directory that nobody adds a COPY for is silently missing at
     // runtime rather than failing the build (CLAUDE.md §9.3).
     const backendDirs = fs.readdirSync(svcDir, { withFileTypes: true })
       .filter(e => e.isDirectory())
       .map(e => e.name)
-      .filter(n => !['node_modules', 'data', 'pgdata'].includes(n));
+      .filter(n => !NOT_IN_IMAGE.includes(n));
     for (const dir of backendDirs) {
       assert.ok(copiedPaths.includes(`${dir}/`) || copiedPaths.includes(dir),
         `violation-cache/${dir} exists but the Dockerfile never COPYs it`);
     }
+  });
+
+  test('the test harness is kept out of the image', () => {
+    // The other half of the exception above. Without this, "e2e is excluded"
+    // would be a line in a filter that nothing checks, and a stray
+    // `COPY e2e/ ./e2e/` would ship a stub DependencyTrack and an SMTP server
+    // that accepts anything into production.
+    for (const dir of ['e2e']) {
+      assert.equal(copiedPaths.includes(`${dir}/`) || copiedPaths.includes(dir), false,
+        `${dir}/ is test-only and must never be COPYed into the image`);
+    }
+    assert.ok(fs.existsSync(path.join(svcDir, 'e2e')),
+      'the e2e harness is missing — the exclusion above would be silently vacuous');
   });
 });
 

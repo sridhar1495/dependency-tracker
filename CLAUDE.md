@@ -115,9 +115,14 @@ dependency-tracker/
 │   ├── routes/                 # auth.js profile.js admin.js dt-proxy.js config.js reports.js schedule.js cache.js branding.js
 │   ├── package.json            # Dependencies: exceljs, nodemailer, pg
 │   ├── Dockerfile
+│   ├── e2e/                    # End-to-end harness — see e2e/README.md
+│   │   ├── stack.js            # Boots the assembled product and tears it down
+│   │   ├── dt-stub.js smtp-stub.js web-proxy.js
+│   │   └── client.js           # Request helpers + the Playwright resolver
 │   ├── server.test.js          # Unit + route tests for server helpers
 │   ├── dashboard.test.js       # Unit tests for dashboard helpers
 │   ├── db.test.js              # DB integration tier (opt-in)  [phase 1]
+│   ├── e2e.test.js             # End-to-end tier (opt-in)
 │   └── installer.test.js       # install.sh uninstall contract  [phase 8]
 ├── docs/
 │   ├── PERFORMANCE.md          # Query plans and load evidence  [phase 10]
@@ -1246,6 +1251,9 @@ node --test violation-cache/installer.test.js
 
 # opt-in database tier
 TEST_DATABASE_URL=postgres://… node --test violation-cache/db.test.js
+
+# opt-in end-to-end tier — boots the product; DESTROYS that database
+TEST_DATABASE_URL=postgres://… node --test violation-cache/e2e.test.js
 ```
 
 No npm test script is defined. The default run must stay offline: it requires no
@@ -1261,6 +1269,7 @@ the database tier against a `postgres:16-alpine` service container
 | Route / authorisation | `server.test.js` | Always runs, with a stubbed data layer. |
 | Installer | `installer.test.js` | Always runs. Executes `install.sh` in a temp copy with a stub `docker`. |
 | Database integration | `db.test.js` | Skipped unless `TEST_DATABASE_URL` is set. |
+| End-to-end | `e2e.test.js` | Skipped unless `TEST_DATABASE_URL` is set. Boots the real `server.js`, a real database and the real pages; stubs only DependencyTrack and SMTP. Its browser section skips again unless Playwright resolves. |
 
 `docs/perf-check.js` is **not** a test tier: it seeds tens of thousands of rows,
 which no test may do. It is run by hand before a release and its output lives in
@@ -1276,6 +1285,7 @@ it is bespoke — it runs the same commands listed in §10.1.
 |---|---|---|
 | `offline` | `server.test.js`, `dashboard.test.js`, `installer.test.js`, `bash -n install.sh` | Needs no database, no Docker, no network. Keeping it its own job is what proves that tier really is offline: if someone adds a hidden dependency on a database, this job fails while the others pass. |
 | `database` | `db.test.js` against a `postgres:16-alpine` **service container** | The opt-in tier. Migrations, the partial indexes, cascade deletes, `SKIP LOCKED` and chunked byte round-trips can only be checked against a real PostgreSQL. |
+| `e2e` | `e2e.test.js` against a `postgres:16-alpine` service container, with Playwright installed `--no-save` | The assembled product. It is the only job that would notice a change that is correct in every unit and wrong once the layers are joined up — a recipient merge that never reaches `RCPT TO`, a chart that contradicts the card above it, a route that decrypts a secret it has no use for. Playwright is installed here rather than depended on, so §3's three-package cap holds. |
 | `audit` | `npm ls --omit=dev`, `npm audit --omit=dev` | Recorded, `continue-on-error`. Deliberately does not fail the build — see below. |
 
 **Why the audit job does not gate merges.** One advisory has no non-destructive
@@ -1285,8 +1295,9 @@ advisory covers v3/v5/v6 with a caller-supplied buffer, so it is not reachable
 here. A red X nobody can clear teaches people to ignore red X's. The output stays
 in the log, and §3 still requires it in the description of any dependency change.
 
-**Current scope.** Correctness and isolation. It does not build the Docker image,
-does not deploy, and does not run `docs/perf-check.js`.
+**Current scope.** Correctness and isolation, from the unit up to the assembled
+product in a browser. It does not build the Docker image, does not deploy, and
+does not run `docs/perf-check.js`.
 
 **Known gap, and how it is covered.** Because CI never builds the image, a
 Dockerfile that cannot build is not caught by running it — that is exactly how
@@ -1299,11 +1310,11 @@ redundant.
 **Future scope**, in the order it is worth doing:
 
 1. A `docker build` job, replacing the static Dockerfile check with the real thing.
-2. Running the browser checks headless, so frontend regressions are caught in CI
-   rather than by hand.
-3. A release job that runs `docs/perf-check.js` and fails on a query plan
+2. A release job that runs `docs/perf-check.js` and fails on a query plan
    regression — the harness already exits non-zero for that.
-4. Publishing the built image to a registry on a tag.
+3. Publishing the built image to a registry on a tag.
+
+Running the browser checks in CI was on this list and is now the `e2e` job.
 
 ### 10.4 Conventions
 
@@ -1317,6 +1328,17 @@ redundant.
 - Mock HTTP request streams with `Readable` from `node:stream`.
 - Integration tests create their own schema via the migration runner and drop it
   afterwards. They never assume pre-existing data.
+- **The end-to-end tier runs `server.js` as a child process**, for the same
+  reason the others may not import it, and because that is what the container
+  does. Everything else it needs — the DependencyTrack stub, the SMTP stub, the
+  nginx-equivalent — runs in-process: they are a few dozen lines each, so
+  spawning them would buy nothing and cost port files, orphan processes and
+  flakiness. Its ports are assigned by the OS, never hard-coded, so a run cannot
+  collide with a developer's stack or a parallel CI job.
+- **A test earns the end-to-end tier only if it needs the layers joined up.**
+  "Does the merge produce the right recipient list" is `server.test.js`; "do
+  those addresses reach `RCPT TO`" is `e2e.test.js`. Anything provable with a
+  stub belongs in the offline tier, which runs in two seconds and needs nothing.
 
 ### 10.5 What to test
 
