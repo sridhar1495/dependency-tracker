@@ -66,7 +66,44 @@ function buildPortfolio() {
       }
     }
   }
-  return { roots, children, violations };
+  // Security findings, keyed to the same leaf projects the metrics already
+  // claim have vulnerabilities — makeProject()'s formula gives project i+100
+  // metrics.critical = i % 4, so leaf 101 (i=1) is guaranteed at least one.
+  // Shaped exactly like a real DT finding: {vulnerability, component}, the
+  // same object the report path and the vulnerability dialog both consume.
+  const findings = [];
+  const SEV_CWE = {
+    CRITICAL: { severity: 'CRITICAL', cvss: 9.8, cwe: 89 },
+    HIGH:     { severity: 'HIGH',     cvss: 7.5, cwe: 79 },
+    MEDIUM:   { severity: 'MEDIUM',   cvss: 5.3, cwe: 400 },
+    LOW:      { severity: 'LOW',      cvss: 2.1, cwe: null },
+  };
+  for (const leaf of Object.values(children).flat()) {
+    const m = leaf.metrics;
+    const counts = [['CRITICAL', m.critical], ['HIGH', m.high], ['MEDIUM', m.medium], ['LOW', m.low]];
+    let seq = 0;
+    for (const [level, count] of counts) {
+      for (let k = 0; k < count; k++) {
+        seq++;
+        const shape = SEV_CWE[level];
+        findings.push({
+          vulnerability: {
+            vulnId: `CVE-2024-${leaf.uuid.slice(0, 4)}${String(seq).padStart(2, '0')}`,
+            severity: shape.severity,
+            cvssV3BaseScore: shape.cvss,
+            cwes: shape.cwe ? [{ cweId: shape.cwe, name: 'stub weakness' }] : [],
+            analysisStatus: 'NOT_SET',
+          },
+          component: {
+            name: `dep-${leaf.name}-${seq}`, group: '', version: '1.0.0', latestVersion: '2.0.0',
+            projectName: leaf.name, projectVersion: leaf.version,
+          },
+        });
+      }
+    }
+  }
+
+  return { roots, children, violations, findings };
 }
 
 /**
@@ -118,10 +155,23 @@ async function start(opts = {}) {
       return send(200, list, { 'X-Total-Count': String(list.length) });
     }
 
-    // Findings drive the report workbook. An empty set is enough: the report
-    // tier asserts that a workbook is produced, not what a CVE row looks like.
-    if (u.pathname.startsWith('/api/v1/finding')) {
-      return send(200, [], { 'X-Total-Count': '0' });
+    // Findings drive both the report workbook and the vulnerability dialog.
+    // Both callers send textSearchInput=`${name} ${version}` (violation-cache/
+    // lib/reports.js's fetchAllFindings and the dashboard's vulnFindingsQuery
+    // deliberately match it), so the stub recovers the project by splitting on
+    // the last space rather than reimplementing DT's fuzzy full-text search —
+    // it only has to give the app data shaped correctly, not BE DependencyTrack.
+    if (u.pathname === '/api/v1/finding') {
+      const input = u.searchParams.get('textSearchInput') || '';
+      const sepAt = input.lastIndexOf(' ');
+      const name  = sepAt === -1 ? input : input.slice(0, sepAt);
+      const list  = portfolio.findings.filter(f => f.component.projectName === name);
+
+      const pageSize   = parseInt(u.searchParams.get('pageSize') || '300', 10);
+      const pageNumber = parseInt(u.searchParams.get('pageNumber') || '1', 10);
+      const start = (pageNumber - 1) * pageSize;
+      const page  = list.slice(start, start + pageSize);
+      return send(200, page, { 'X-Total-Count': String(list.length) });
     }
 
     send(404, { error: 'Not found' });

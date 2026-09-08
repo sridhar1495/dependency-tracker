@@ -902,6 +902,56 @@ describe('e2e — the dashboard in a real browser', { skip: BROWSER_SKIP }, () =
       'table controls should be enabled once there is a table (§8.5)');
   }, { timeout: 60_000 });
 
+  test('the vulnerability dialog opens from the eye icon and lists real findings', async () => {
+    // The eye icon only appears on a leaf row with at least one finding
+    // (CLAUDE.md §8.1 vulnerability dialog rules) — the dt-stub portfolio
+    // guarantees leaf 101 has one, but this scans for whichever row actually
+    // has the icon rather than assuming a project name or position.
+    const eyeBtn = page.locator('.vuln-eye-btn').first();
+    await eyeBtn.waitFor({ state: 'visible', timeout: 10_000 });
+    const projectTitle = await eyeBtn.getAttribute('title');
+    await eyeBtn.click();
+    await page.waitForTimeout(1200);
+
+    assert.equal(await page.locator('#vulnDialog').evaluate(e => e.classList.contains('open')), true,
+      'the dialog should be open');
+    assert.match(await page.locator('#vulnDialogProject').textContent(), /\S/, 'the project name should be shown');
+
+    const rows = page.locator('#vulnDialogRows tr');
+    await rows.first().waitFor({ state: 'attached', timeout: 10_000 });
+    const rowCount = await rows.count();
+    assert.ok(rowCount > 0, 'the stub seeded findings for this project — the dialog must show them');
+    assert.equal(await page.locator('#vulnDialogTableWrap').isHidden(), false);
+
+    // Column order and content: Vulnerability, Severity, CVSS, CWE, Component,
+    // Current, Latest — matching the report workbook's own columns (§6.7).
+    const firstRow = await rows.first().locator('td').allTextContents();
+    assert.equal(firstRow.length, 7);
+    assert.match(firstRow[0], /^CVE-/, 'the vulnerability id column');
+    assert.ok(/CRITICAL|HIGH|MEDIUM|LOW/i.test(firstRow[1]), 'the severity pill column');
+
+    // Sorted worst-first: the first row's severity pill class must be at least
+    // as severe as the last row's, never the reverse.
+    const sevOf = t => ['critical', 'high', 'medium', 'low', 'unassigned'].indexOf(t.trim().toLowerCase());
+    const lastRow = await rows.last().locator('td').allTextContents();
+    assert.ok(sevOf(firstRow[1]) <= sevOf(lastRow[1]), 'rows should be worst-severity-first');
+
+    assert.doesNotMatch(projectTitle, /<|>/, 'the title attribute must be free of raw markup (escHtml)');
+
+    await page.locator('#vulnDialog .modal-close').click();
+    await page.waitForTimeout(400);
+    assert.equal(await page.locator('#vulnDialog').evaluate(e => e.classList.contains('open')), false);
+  }, { timeout: 60_000 });
+
+  test('a clean project (no findings) shows no eye icon at all', async () => {
+    // hasVulnerabilities() gates the icon — this is a structural guarantee,
+    // not just a visual one, so it is checked against the live rendered table
+    // rather than only against the pure helper in dashboard.test.js.
+    const iconCount = await page.locator('.vuln-eye-btn').count();
+    const rowCount = await page.locator('#tableBody tr').count();
+    assert.ok(iconCount < rowCount, 'at least one row (a group, or a clean leaf) must have no icon');
+  });
+
   test('the trend chart agrees with the KPI card above it', async () => {
     // The reason the default metric is the tile arithmetic: two different
     // numbers for "Critical" on one screen is a support ticket.

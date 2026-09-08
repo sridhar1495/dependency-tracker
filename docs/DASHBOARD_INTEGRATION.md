@@ -170,6 +170,38 @@ violation cache is.
 
 Set the **DT Frontend URL** in **⚙ Settings** to enable clickable project links. Each project name becomes a link to `<DT_FRONTEND_URL>/#/projects/<uuid>`.
 
+### Vulnerability Detail Dialog
+
+A 👁 icon appears next to the checkbox on any **leaf project row** that has at
+least one security finding — it is not a new table column, and a group
+(parent) row never carries it, because a group has no DependencyTrack project
+of its own to query.
+
+Clicking it opens a dialog listing that project's open findings, fetched live
+from `GET /violation-cache/dt/api/v1/finding` (the same authenticated DT proxy
+every other DependencyTrack call on the page uses — the browser never holds a
+DT API key). The columns match the `SV_Vulnerability Findings` sheet in the
+Excel report exactly, so the two never disagree about what a finding looks
+like:
+
+| Column | Source |
+|---|---|
+| Vulnerability | `vulnerability.vulnId` |
+| Severity | `vulnerability.severity`, rendered with the same pill classes the risk table uses |
+| CVSS | `vulnerability.cvssV3BaseScore`, one decimal place, or `—` if absent |
+| CWE | `vulnerability.cwes`, formatted the same way `lib/cwe.js` formats it server-side |
+| Component | `component.name` (and group, if set) |
+| Current | `component.version` |
+| Latest | `component.latestVersion` |
+
+Rows are sorted **worst severity first**, then by CVSS within a severity.
+Suppressed and triaged-away findings are excluded — the same filter the report
+applies — so the dialog and a generated report never disagree about what counts
+as an open finding. A project with an unusually large number of findings is
+capped at the 900 most severe, with a note saying so; DependencyTrack's own SBOM
+model has no per-file path, so the dialog identifies a finding by its component
+(package) only, the same granularity the report already uses.
+
 ---
 
 ## 3. Connecting to Live Data

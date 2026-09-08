@@ -3845,3 +3845,206 @@ describe('trend — carrying a reading across unrefreshed days (Q23)', () => {
       'the legend must say what the shading means now that lines are continuous');
   });
 });
+
+// ── Vulnerability detail dialog ─────────────────────────────────────────────
+// The eye icon and the dialog behind it. Extracted from index.html's own
+// source rather than copied, so a test cannot pass against a version of the
+// code the page no longer contains (CLAUDE.md §10.5).
+
+const VULN_FN_NAMES = [
+  'hasVulnerabilities', 'vulnEyeIconHtml', 'vulnFindingsQuery',
+  'vulnCweIds', 'vulnCweLabel', 'sortFindingsBySeverity', 'vulnRowHtml',
+];
+const vuln = new Function(
+  INDEX_HTML.match(/const CONFIG = \{[\s\S]*?\n\};/)[0] + '\n'
+  + INDEX_HTML.match(/const LEVEL_CSS = \{[\s\S]*?\n\};/)[0] + '\n'
+  + INDEX_HTML.match(/const VULN_SEVERITY_ORDER = \[[\s\S]*?\];/)[0] + '\n'
+  + extractFunction(INDEX_HTML, 'escHtml') + '\n'
+  + VULN_FN_NAMES.map(n => extractFunction(INDEX_HTML, n)).join('\n')
+  + `\nreturn { ${VULN_FN_NAMES.join(', ')} };`
+)();
+
+describe('vulnerability dialog — the eye icon', () => {
+  const leaf  = (sec) => ({ uuid: 'leaf-1', name: 'svc', children: [], security: sec });
+  const group = (sec) => ({ uuid: 'grp-1', name: 'grp', children: [{}], security: sec });
+
+  test('hasVulnerabilities is true when any severity, unassigned included, is nonzero', () => {
+    assert.equal(vuln.hasVulnerabilities({ security: { critical: 1 } }), true);
+    assert.equal(vuln.hasVulnerabilities({ security: { unassigned: 1 } }), true, 'unassigned still counts');
+    assert.equal(vuln.hasVulnerabilities({ security: { critical: 0, high: 0, medium: 0, low: 0, unassigned: 0 } }), false);
+    assert.equal(vuln.hasVulnerabilities({ security: {} }), false);
+    assert.equal(vuln.hasVulnerabilities({}), false, 'a node with no security object at all must not throw');
+  });
+
+  test('the icon renders only for a leaf with at least one finding', () => {
+    assert.notEqual(vuln.vulnEyeIconHtml(leaf({ critical: 1 }), false), '');
+    assert.equal(vuln.vulnEyeIconHtml(leaf({ critical: 0, high: 0, medium: 0, low: 0, unassigned: 0 }), false), '',
+      'a clean leaf gets no icon');
+  });
+
+  test('a group row never gets the icon, even carrying nonzero aggregated counts', () => {
+    // A parent's security numbers are its descendants' rolled up (§8.7); it has
+    // no DependencyTrack project of its own to ask for findings.
+    assert.equal(vuln.vulnEyeIconHtml(group({ critical: 5 }), true), '');
+  });
+
+  test('the icon carries the project uuid and calls openVulnDialog', () => {
+    const html = vuln.vulnEyeIconHtml(leaf({ critical: 1 }), false);
+    assert.match(html, /openVulnDialog\('leaf-1'\)/);
+  });
+
+  test('the click is guarded so it cannot also toggle the row or the checkbox', () => {
+    assert.match(vuln.vulnEyeIconHtml(leaf({ critical: 1 }), false), /event\.stopPropagation\(\)/);
+  });
+
+  test('the project name reaches the title through escHtml', () => {
+    const html = vuln.vulnEyeIconHtml(leaf({ critical: 1 }) && { ...leaf({ critical: 1 }), name: '<script>' }, false);
+    assert.doesNotMatch(html, /<script>/, 'an unescaped name would be a stored XSS via the title attribute');
+    assert.match(html, /&lt;script&gt;/);
+  });
+
+  test('the icon sits inside the existing cells — index.html adds no new <td>', () => {
+    // "Next to the checkbox, not a new column" is a structural claim, not just
+    // a visual one: colspan="20" on the empty-state row must still be correct.
+    const treeRow = extractFunction(INDEX_HTML, 'renderTree');
+    assert.match(treeRow, /\$\{vulnIcon\}\$\{toggle\}/,
+      'the icon must be emitted inside the project-name <td>, before the tree toggle');
+    const flatRow = extractFunction(INDEX_HTML, 'renderFlatList');
+    assert.match(flatRow, /\$\{vulnIcon\}<span class="tree-indent">/);
+  });
+});
+
+describe('vulnerability dialog — the DependencyTrack query', () => {
+  test('mirrors reports.js\'s fetchAllFindings() exactly, not the project/{uuid} endpoint', () => {
+    // A deliberate choice, not an oversight — see the comment above
+    // vulnFindingsQuery in index.html. Pinned here so nobody "simplifies" it
+    // to the path-based endpoint without making that decision again.
+    const qs = vuln.vulnFindingsQuery('svc', '1.2.0', 1);
+    assert.match(qs, /showSuppressed=false/);
+    assert.match(qs, /analysisStatus=NOT_SET,EXPLOITABLE,IN_TRIAGE/);
+    assert.match(qs, /textSearchInput=svc%201.2.0/);
+    assert.match(qs, /pageSize=300/);
+    assert.match(qs, /pageNumber=1/);
+  });
+
+  test('the reports.js filter string and the dialog\'s are the same, byte for byte', () => {
+    // The report and the dialog must never disagree about what counts as an
+    // open finding. Reading reports.js's own source is what makes this a real
+    // cross-file check rather than two copies that can drift unnoticed.
+    const reportsSrc = fs.readFileSync(
+      path.join(__dirname, 'lib', 'reports.js'), 'utf8');
+    const reportQs = reportsSrc.match(/const baseQs = \[([\s\S]*?)\]\.join/)[1];
+    for (const clause of ['showInactive=false', 'showSuppressed=false',
+      'severity=critical,high,medium,low,unassigned', 'analysisStatus=NOT_SET,EXPLOITABLE,IN_TRIAGE']) {
+      assert.ok(reportQs.includes(`'${clause}'`), `reports.js no longer sends ${clause}`);
+      assert.ok(vuln.vulnFindingsQuery('x', '1', 1).includes(clause),
+        `the dialog's query dropped ${clause} that reports.js still sends`);
+    }
+  });
+
+  test('an empty version does not produce a stray parameter, just a trailing space in the search text', () => {
+    const qs = vuln.vulnFindingsQuery('Group 1', '', 1);
+    assert.match(qs, /textSearchInput=Group%201%20/);
+  });
+});
+
+describe('vulnerability dialog — CWE labelling stays in step with lib/cwe.js', () => {
+  test('cweIdsOf and cweLabel produce the identical output to the server module', () => {
+    const cweSrc = fs.readFileSync(path.join(__dirname, 'lib', 'cwe.js'), 'utf8');
+    // eslint-disable-next-line no-eval
+    const serverFns = (new Function('module', 'exports', cweSrc + '\nreturn module.exports;'))({ exports: {} }, {});
+
+    const cases = [
+      { cwes: [{ cweId: 79 }] },
+      { cwes: [{ cweId: '89' }] },
+      { cwes: [{ cweId: 'CWE-20' }] },
+      { cwes: [] },
+      {},
+      { cwes: [{ cweId: 79 }, { cweId: 89 }] },
+    ];
+    for (const v of cases) {
+      assert.deepEqual(vuln.vulnCweIds(v), serverFns.cweIdsOf(v), JSON.stringify(v));
+      assert.equal(vuln.vulnCweLabel(v), serverFns.cweLabel(v), JSON.stringify(v));
+    }
+  });
+});
+
+describe('vulnerability dialog — sorting and rendering', () => {
+  const f = (severity, cvss) => ({ vulnerability: { vulnId: `V-${severity}-${cvss}`, severity, cvssV3BaseScore: cvss } });
+
+  test('worst severity sorts first, then highest CVSS within a severity', () => {
+    const sorted = vuln.sortFindingsBySeverity([
+      f('LOW', 3.0), f('CRITICAL', 5.0), f('CRITICAL', 9.8), f('MEDIUM', 6.0), f('UNASSIGNED', 0),
+    ]);
+    assert.deepEqual(sorted.map(x => x.vulnerability.vulnId), [
+      'V-CRITICAL-9.8', 'V-CRITICAL-5', 'V-MEDIUM-6', 'V-LOW-3', 'V-UNASSIGNED-0',
+    ]);
+  });
+
+  test('a finding with no severity at all sorts last, not first', () => {
+    const sorted = vuln.sortFindingsBySeverity([{ vulnerability: { vulnId: 'bare' } }, f('LOW', 1)]);
+    assert.equal(sorted[sorted.length - 1].vulnerability.vulnId, 'bare');
+  });
+
+  test('every field in a row passes through escHtml', () => {
+    const row = vuln.vulnRowHtml({
+      vulnerability: { vulnId: '<x>', severity: '<y>', cvssV3BaseScore: 9.8, cwes: [{ cweId: 79 }] },
+      component: { name: '<z>', version: '<v>', latestVersion: '<w>' },
+    });
+    assert.doesNotMatch(row, /<x>|<y>|<z>|<v>|<w>/);
+    assert.match(row, /&lt;x&gt;/);
+  });
+
+  test('a missing CVSS score renders as an em dash, never blank or "null"', () => {
+    const row = vuln.vulnRowHtml({ vulnerability: { vulnId: 'V' }, component: {} });
+    assert.match(row, /<td>—<\/td>/);
+    assert.doesNotMatch(row, /null|undefined|NaN/);
+  });
+
+  test('the severity cell reuses the existing pill classes, not a new colour system', () => {
+    // §8.10: no colour hex, no parallel badge component — the same
+    // pill-critical/pill-high/… classes the risk table already uses.
+    const row = vuln.vulnRowHtml({ vulnerability: { vulnId: 'V', severity: 'CRITICAL' }, component: {} });
+    assert.match(row, /class="pill pill-critical"/);
+  });
+});
+
+describe('vulnerability dialog — structure in the page', () => {
+  test('the dialog markup exists with the ids the JS drives', () => {
+    for (const id of ['vulnDialog', 'vulnDialogProject', 'vulnDialogStatus',
+                       'vulnDialogTableWrap', 'vulnDialogRows', 'vulnDialogNote']) {
+      assert.match(INDEX_HTML, new RegExp(`id="${id}"`), `#${id} is missing`);
+    }
+  });
+
+  test('openVulnDialog is window-exported, or the onclick handler fails silently (§8.2)', () => {
+    assert.match(INDEX_HTML, /window\.openVulnDialog\s*=\s*openVulnDialog/);
+  });
+
+  test('an unconfigured account is told to connect, without a network round trip', () => {
+    const fn = extractFunction(INDEX_HTML, 'openVulnDialog');
+    assert.match(fn, /if \(!dtConfigured\)/);
+    // The early return must come before fetchProjectFindings is ever called.
+    const guardAt  = fn.indexOf('if (!dtConfigured)');
+    const fetchAt  = fn.indexOf('fetchProjectFindings(');
+    assert.ok(guardAt !== -1 && fetchAt !== -1 && guardAt < fetchAt);
+  });
+
+  test('a superseded click cannot land its response in a dialog the user has moved on from', () => {
+    const fn = extractFunction(INDEX_HTML, 'openVulnDialog');
+    assert.match(fn, /_vulnReqSeq/);
+    const fetchFn = extractFunction(INDEX_HTML, 'fetchProjectFindings');
+    assert.match(fetchFn, /seq !== _vulnReqSeq/);
+  });
+
+  test('the fetch loop is bounded, so a huge project cannot spin forever', () => {
+    const fn = extractFunction(INDEX_HTML, 'fetchProjectFindings');
+    assert.match(fn, /VULN_MAX_ROWS/);
+  });
+
+  test('the CSS uses theme variables, never a literal colour', () => {
+    const css = INDEX_HTML.slice(
+      INDEX_HTML.indexOf('.vuln-eye-btn'), INDEX_HTML.indexOf('/* ── Pills'));
+    assert.ok(!/#[0-9a-fA-F]{3,8}/.test(css), 'a literal hex colour crept into the dialog styling');
+  });
+});
