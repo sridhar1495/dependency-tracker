@@ -3339,6 +3339,7 @@ const TREND_FN_NAMES = [
   'trendValues', 'trendNiceCeil', 'trendTicks', 'trendGeometry',
   'trendLinePath', 'trendAreaPath', 'trendStack', 'trendPeak',
   'trendDayLabel', 'trendLabelIndices', 'trendLabelCapacity',
+  'trendCarry', 'trendGapRuns',
 ];
 const trend = new Function(
   // TREND_LEVELS and TREND_GEOM are const declarations the helpers close over.
@@ -3513,6 +3514,19 @@ describe('trend — paths break at gaps rather than bridging them', () => {
 
   test('an all-gap series draws nothing at all', () => {
     assert.equal(trend.trendLinePath([null, null, null], g), '');
+  });
+
+  test('the solid overlay still breaks, which is what reveals the dashed bridge', () => {
+    // Q23 changed what is drawn, not what these helpers do. The bridge is drawn
+    // from the carried series (continuous) and the solid stroke from the
+    // measured one (broken), so the dashes show through exactly across the
+    // stretch nobody refreshed. If the measured path stopped breaking, the
+    // solid line would cover the dashes and the inference would become
+    // invisible.
+    const carried  = trend.trendLinePath([10, 10, 40], g);
+    const measured = trend.trendLinePath([10, null, 40], g);
+    assert.equal((carried.match(/M/g) || []).length, 1, 'the bridge is continuous');
+    assert.equal((measured.match(/M/g) || []).length, 2, 'the overlay still breaks');
   });
 
   test('a stacked band closes one shape per run', () => {
@@ -3695,5 +3709,139 @@ describe('trend — the panel in the page', () => {
     const decl = INDEX_HTML.match(/let _trendView = \{[\s\S]*?\n\};/)[0];
     assert.match(decl, /metric: 'total'/);
     assert.match(decl, /period: 'week'/, 'the plan specified a one-week default');
+  });
+});
+
+describe('trend — carrying a reading across unrefreshed days (Q23)', () => {
+  const A = { critical: 10, high: 1, medium: 1, low: 1 };
+  const B = { critical: 40, high: 2, medium: 2, low: 2 };
+
+  test('a gap inherits the previous reading, and is flagged as inherited', () => {
+    // The chart must be continuous — a broken line reads as "the tool stopped
+    // working" — but a carried number must never be mistakable for a measured
+    // one, which is what `carried` drives: no dot, a dashed bridge, a shaded
+    // span and an attributed tooltip.
+    const { values, carried, measured } = trend.trendCarry([A, null, null, B]);
+    assert.deepEqual(values, [A, A, A, B]);
+    assert.deepEqual(carried, [false, true, true, false]);
+    assert.deepEqual(measured, [A, null, null, B], 'the real readings stay separable');
+  });
+
+  test('days before the first reading stay empty rather than inventing a past', () => {
+    // On the day this ships, a "last year" view has 364 days with nothing
+    // behind them. Extending the first value backwards across them would be
+    // invention, not inference.
+    const { values, carried } = trend.trendCarry([null, null, A, null]);
+    assert.deepEqual(values, [null, null, A, A]);
+    assert.deepEqual(carried, [false, false, false, true],
+      'a leading blank is not a carried value');
+  });
+
+  test('a series with no readings at all carries nothing', () => {
+    const { values, carried } = trend.trendCarry([null, null, null]);
+    assert.deepEqual(values, [null, null, null]);
+    assert.ok(carried.every(c => c === false));
+  });
+
+  test('an unbroken series is returned unchanged and nothing is flagged', () => {
+    const { values, carried, measured } = trend.trendCarry([A, B, A]);
+    assert.deepEqual(values, [A, B, A]);
+    assert.deepEqual(measured, [A, B, A]);
+    assert.ok(carried.every(c => c === false));
+  });
+
+  test('the carried value is the last reading, never an interpolation', () => {
+    // Interpolating would be worse than carrying: a sloping line between two
+    // readings asserts a trajectory through days nobody looked at.
+    const { values } = trend.trendCarry([A, null, B]);
+    assert.equal(values[1].critical, A.critical);
+    assert.notEqual(values[1].critical, (A.critical + B.critical) / 2);
+  });
+
+  test('gap runs are grouped, not emitted one rectangle per day', () => {
+    // Adjacent rectangles with shared edges render as visible seams, and the
+    // thing being marked is the stretch rather than each day in it.
+    assert.deepEqual(trend.trendGapRuns([false, true, true, false, true, false]),
+      [{ start: 1, end: 2 }, { start: 4, end: 4 }]);
+  });
+
+  test('a run reaching the end of the window is closed', () => {
+    assert.deepEqual(trend.trendGapRuns([false, true, true]), [{ start: 1, end: 2 }]);
+    assert.deepEqual(trend.trendGapRuns([true]), [{ start: 0, end: 0 }]);
+  });
+
+  test('no gaps means no bands', () => {
+    assert.deepEqual(trend.trendGapRuns([false, false, false]), []);
+    assert.deepEqual(trend.trendGapRuns([]), []);
+  });
+
+  test('a carried day is never given a data marker', () => {
+    // A dot asserts "a reading was taken here". That is what keeps every
+    // plotted point quotable.
+    const fn = extractFunction(INDEX_HTML, 'trendCellHtml');
+    const dots = fn.slice(fn.indexOf('Markers for every captured reading'));
+    assert.match(dots, /carry\.carried\[i\]\) continue/,
+      'the marker loop must skip carried positions');
+  });
+
+  test('the line is drawn twice — a dashed bridge under a solid measured stroke', () => {
+    const fn = extractFunction(INDEX_HTML, 'trendCellHtml');
+    assert.match(fn, /stroke-dasharray="4 4"/, 'the bridging stroke must be dashed');
+    assert.match(fn, /trendLinePath\(pick\(drawn\), g\)/,  'the bridge comes from the carried series');
+    assert.match(fn, /trendLinePath\(pick\(carry\.measured\), g\)/,
+      'the solid stroke comes from the measured series, so it breaks at gaps');
+    assert.ok(fn.indexOf('const bridge') < fn.indexOf('const solid'),
+      'the dashed path must be drawn first, or it covers the solid one');
+  });
+
+  test('the shading is drawn over the data, not under it', () => {
+    // Underneath, a stacked area covers it almost completely — and the stacked
+    // view is the one with no dashed stroke to fall back on, so the band is its
+    // only signal that a stretch was not measured.
+    const fn = extractFunction(INDEX_HTML, 'trendCellHtml');
+    const band = fn.indexOf('trend-gap-band');
+    const area = fn.indexOf('trendAreaPath');
+    const line = fn.indexOf('const bridge');
+    assert.ok(band > area && band > line,
+      'the band must be emitted after the series, or the fill hides it');
+  });
+
+  test('the shaded span has a crisp edge as well as a wash', () => {
+    // A translucent fill over saturated colour is easy to miss; a hard boundary
+    // says precisely where the measured data stops and starts again.
+    const fn = extractFunction(INDEX_HTML, 'trendCellHtml');
+    assert.match(fn, /trend-gap-edge/);
+    const css = INDEX_HTML.match(/\.trend-gap-edge \{[^}]*\}/)[0];
+    assert.match(css, /stroke-dasharray/);
+    assert.ok(!/#[0-9a-fA-F]{3,8}/.test(css));
+  });
+
+  test('the shaded span is a theme variable, not a literal', () => {
+    const css = INDEX_HTML.match(/\.trend-gap-band \{[^}]*\}/)[0];
+    assert.ok(!/#[0-9a-fA-F]{3,8}/.test(css), 'a literal colour would not follow the theme');
+    assert.match(css, /var\(--/);
+  });
+
+  test('the tooltip names the day a carried number came from', () => {
+    // "No refresh that day" alone leaves the reader unable to tell which
+    // measurement they are looking at.
+    const fn = extractFunction(INDEX_HTML, 'showTrendTip');
+    assert.match(fn, /No refresh that day — showing/);
+    assert.match(fn, /carry\.measured\[k\] !== null/,
+      'it must scan back to the nearest measured day, not assume the previous one');
+  });
+
+  test('the header still reports how many days were actually recorded', () => {
+    // Carrying forward makes the chart continuous, so this count is now the
+    // only place the raw honesty lives. It must not be dropped.
+    const fn = extractFunction(INDEX_HTML, 'renderTrend');
+    assert.match(fn, /of \$\{points\.length\} day/);
+    assert.match(fn, /captured = points\.filter\(p => p\.captured\)\.length/);
+  });
+
+  test('the legend explains the shading rather than calling it a gap', () => {
+    const fn = extractFunction(INDEX_HTML, 'renderTrend');
+    assert.match(fn, /carried forward/,
+      'the legend must say what the shading means now that lines are continuous');
   });
 });
