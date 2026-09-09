@@ -1375,16 +1375,18 @@
             <option value="transitive">Transitive</option>
           </select>
         </label>
-        <!-- item 1: which chain root a Transitive row is reached through — a
-             third, purely local filter, shown only once there is something
-             transitive to group (renderVulnRows() gates it: paths showing,
-             at least one Transitive row, Origin not set to Direct). Its
-             options are rebuilt on every render from whatever chains have
-             actually resolved, never a static list. -->
+        <!-- item 1/Q32: which chain root a Transitive row is reached
+             through — a third, purely local filter, shown only once there
+             is something transitive to group (renderVulnRows() gates it:
+             paths showing, at least one Transitive row, Origin not set to
+             Direct). Its options — All (default, no narrowing), N/A
+             (Direct rows, only when one is actually visible), then every
+             resolved root — are rebuilt on every render, never a static
+             list. -->
         <label id="vulnParentFilterWrap" hidden>
           <span>Parent</span>
           <select class="filter-select" id="vulnParentFilter" onchange="onVulnParentFilterChange()">
-            <option value="">N/A</option>
+            <option value="ALL">All</option>
           </select>
         </label>
       </div>
@@ -4205,7 +4207,7 @@ let _vulnShownFindings   = [];   // security findings — the rendered slice, ke
 let _vulnShownLicense    = null; // LicenseViolation[] | null while the license view has not been fetched this dialog session
 let _vulnViewType        = 'security'; // 'security' | 'license' — which table onVulnViewTypeChange() has selected
 let _vulnOriginFilterMode = 'both';    // 'both' | 'direct' | 'transitive' — local, no refetch (CLAUDE.md §8.1)
-let _vulnParentFilter    = ''; // '' (N/A) | a chain root name — item 1, local, rebuilt every render (Q32)
+let _vulnParentFilter    = 'ALL'; // 'ALL' | '' (N/A) | a chain root name — item 1, local, rebuilt every render (Q32)
 let _vulnDirectKeys      = null; // Set<componentKey> | null while Tier 1 has not returned yet
 let _depPathStatus       = 'none';
 let _depPathStale        = false;
@@ -4246,7 +4248,12 @@ function renderVulnRows() {
   // transitive to group, and Origin has not already narrowed the table to
   // rows that can never have a parent chain.
   const parentFilterActive = showPaths && hasTransitive && _vulnOriginFilterMode !== 'direct';
-  renderParentFilterOptions(parentFilterActive ? vulnParentOptions(source, showPaths) : []);
+  if (parentFilterActive) {
+    const { hasDirect, roots } = vulnParentOptions(source, showPaths, _vulnOriginFilterMode);
+    renderParentFilterOptions(hasDirect, roots);
+  } else {
+    renderParentFilterOptions(false, []);
+  }
   document.getElementById('vulnParentFilterWrap').hidden = !parentFilterActive;
 
   let matched = 0;
@@ -4322,65 +4329,88 @@ function vulnOriginFor(finding, showPaths) {
 }
 
 /**
- * Q32/item 1.4: the Parent dropdown's own option list — every distinct chain
- * root (chain[0], the direct dependency a chain starts from) across every
- * Transitive row in `source`, deduped and alphabetised. A component reached
- * from more than one direct dependency (Q27's one-chain-per-root walk)
- * contributes one name per chain here, not one — that is what lets it appear
- * under every root that actually reaches it once a specific one is chosen.
- * Empty while paths are not being shown at all, which is what makes
- * renderVulnRows()'s gating a plain rebuild rather than a special case.
+ * Q32/item 1.4, 2.1-2.5: the Parent dropdown's own N/A and named-root
+ * options, both scoped to `originMode` — the same Both/Direct/Transitive
+ * split `renderVulnRows()` applies to the table itself, not the raw
+ * `source`. That scoping is what makes N/A disappear under Origin =
+ * Transitive without a separate rule: a Direct row is excluded from view
+ * there exactly as the table excludes it, so `hasDirect` is false by
+ * construction rather than by a special case (§8.1 "N/A meaning" note).
+ * `originMode` is never `'direct'` in practice — the whole control is
+ * hidden before this runs (item 1.3/1.4) — so only `'both'` and
+ * `'transitive'` need handling here.
+ *
+ * `roots` is every distinct chain root (chain[0]) across every Transitive
+ * row's resolved chains, deduped and alphabetised. A component reached from
+ * more than one direct dependency (Q27's one-chain-per-root walk)
+ * contributes one name per chain here, not one — that is what lets it
+ * appear under every root that actually reaches it once a specific one is
+ * chosen. Both come back empty while paths are not being shown at all,
+ * which is what makes renderVulnRows()'s gating a plain rebuild rather than
+ * a special case.
  */
-function vulnParentOptions(source, showPaths) {
-  if (!showPaths) return [];
+function vulnParentOptions(source, showPaths, originMode) {
+  if (!showPaths) return { hasDirect: false, roots: [] };
+  let hasDirect = false;
   const names = new Set();
   for (const item of source) {
     const origin = vulnOriginFor(item, showPaths);
-    if (!origin || origin.direct || !origin.chains) continue;
+    if (!origin) continue;
+    if (origin.direct) {
+      if (originMode === 'both') hasDirect = true;
+      continue;
+    }
+    if (!origin.chains) continue;
     for (const chain of origin.chains) {
       if (chain && chain.length) names.add(chain[0]);
     }
   }
-  return [...names].sort((a, b) => a.localeCompare(b));
+  return { hasDirect, roots: [...names].sort((a, b) => a.localeCompare(b)) };
 }
 
 /**
- * Q32/item 1.4.1-1.4.2: '' (N/A, the default) is a real bucket, not "no
- * filter" — it groups every row that cannot be claimed by a specific root:
- * Direct rows (which have no chain at all) and Transitive rows with no
- * resolved chain yet, whether because the walk has not finished
- * (!pathsReady) or DependencyTrack genuinely recorded none (chains empty).
- * A real parent name matches a row if ANY of its chains starts there, the
- * same "any root" reasoning vulnParentOptions above already applies —
- * excluding a component from a root's filtered view just because a
- * different root was discovered first would contradict what the Origin
- * badge itself already shows it reachable from.
+ * Q32/item 1, 3: three kinds of value, in the order they are checked.
+ * 'ALL' — the default whenever the control is shown at all — matches
+ * everything, the same as the control not being active. '' (N/A) now means
+ * strictly "this row IS a direct dependency, not reached through one" — a
+ * Transitive row with no resolved chain yet belongs to neither N/A nor any
+ * named root, so it is visible only under All, never singled out on its
+ * own (that used to be N/A's job before All existed to cover it). A real
+ * root name matches a row if ANY of its chains starts there — a shared
+ * component stays reachable from every root that actually reaches it
+ * (Q27), not just the first one discovered.
  */
 function vulnParentMatches(origin, parentFilter) {
-  if (!parentFilter) {
-    if (origin.direct) return true;
-    if (!origin.pathsReady) return true;
-    return !(origin.chains && origin.chains.length);
-  }
+  if (parentFilter === 'ALL') return true;
+  if (!parentFilter) return Boolean(origin.direct);
   if (origin.direct || !origin.chains) return false;
   return origin.chains.some(chain => chain && chain[0] === parentFilter);
 }
 
 /**
- * Rebuilds #vulnParentFilter's <option>s from the current root list,
- * preserving the selection if it is still one of them. A previously chosen
- * root disappearing — a view switch, or a narrower re-walk — falls back to
- * N/A rather than silently keeping a selection no row can match any more.
+ * Rebuilds #vulnParentFilter's <option>s: All always first, N/A only when
+ * `hasDirect` says this view actually has a direct dependency to name, then
+ * every resolved root, alphabetised. Preserves the current selection if it
+ * is still one of these options — an Origin or view-type switch that still
+ * resolves to a valid choice leaves it alone — and falls back to All
+ * otherwise. A genuinely new walk result forcing the selection back to All
+ * (item 3.3) is done explicitly at the two call sites where that happens
+ * (startDepPathPoll, onVulnDepPathToggle's already-ready fast path), not
+ * here, so this function itself never has to tell "new data" apart from
+ * "the same data, rendered again."
  */
-function renderParentFilterOptions(names) {
+function renderParentFilterOptions(hasDirect, roots) {
   const el = document.getElementById('vulnParentFilter');
-  el.innerHTML = '<option value="">N/A</option>'
-    + names.map(n => `<option value="${escHtml(n)}">${escHtml(n)}</option>`).join('');
-  if (names.includes(_vulnParentFilter)) {
+  const values = ['ALL', ...(hasDirect ? [''] : []), ...roots];
+  el.innerHTML = values.map(v => {
+    const label = v === 'ALL' ? 'All' : (v === '' ? 'N/A' : v);
+    return `<option value="${escHtml(v)}">${escHtml(label)}</option>`;
+  }).join('');
+  if (values.includes(_vulnParentFilter)) {
     el.value = _vulnParentFilter;
   } else {
-    _vulnParentFilter = '';
-    el.value = '';
+    _vulnParentFilter = 'ALL';
+    el.value = 'ALL';
   }
 }
 
@@ -4442,6 +4472,11 @@ function startDepPathPoll(projectUuid, seq) {
       if (data.status === 'ready') {
         statusEl.hidden = !_depPathStale;
         if (_depPathStale) statusEl.textContent = 'A newer BOM has been imported — these paths may be outdated.';
+        // Q32/item 3.3: a genuinely new walk result resets the Parent filter
+        // back to All, even if the previously chosen root would still be
+        // valid — full visibility on what just resolved beats silently
+        // keeping a narrower view the user picked before this data existed.
+        _vulnParentFilter = 'ALL';
         renderVulnRows();
       } else {
         statusEl.hidden = false;
@@ -4488,6 +4523,10 @@ async function onVulnDepPathToggle() {
   if (_depPathStatus === 'ready' && targets.every(t => t in _depPathPaths)) {
     // Already resolved — from this same GET on dialog open, or a previous
     // toggle this session. Render immediately; no walk needed.
+    // Q32/item 3.3: this is still the moment paths become visible for this
+    // toggle-on, even though the data itself is not new — reset to All the
+    // same way a freshly completed walk does.
+    _vulnParentFilter = 'ALL';
     renderVulnRows();
     if (_depPathStale) {
       statusEl.hidden = false;
@@ -4616,7 +4655,7 @@ async function openVulnDialog(uuid) {
   _vulnShownLicense     = null;
   _vulnViewType         = 'security';
   _vulnOriginFilterMode = 'both';
-  _vulnParentFilter     = '';
+  _vulnParentFilter     = 'ALL';
   _vulnDirectKeys       = null;
   _depPathStatus        = 'none';
   _depPathStale         = false;
@@ -4628,7 +4667,7 @@ async function openVulnDialog(uuid) {
   viewTypeEl.value    = 'security';
   originFiltEl.value  = 'both';
   parentFiltWrap.hidden = true;
-  parentFiltEl.innerHTML = '<option value="">N/A</option>';
+  parentFiltEl.innerHTML = '<option value="ALL">All</option>';
   renderVulnTableHead();
 
   openModal('vulnDialog');

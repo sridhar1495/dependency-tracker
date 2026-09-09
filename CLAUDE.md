@@ -556,43 +556,63 @@ message always renders exactly where the table it is about is going to
 appear, and the toggle row stays visually fixed above both regardless of
 which view is loading.
 
-**Q32: the Parent dropdown groups by chain root, and N/A is a real bucket, not
-"no filter."** The Origin filter says whether a row is Direct or Transitive;
-once "Show full dependency paths" has something transitive to show, a second
-dropdown (`#vulnParentFilterWrap`, `dashboard/index.html`) narrows further by
-*which* direct dependency's chain reaches it — useful once a project pulls in
-the same low-level package from several different roots and a release
-engineer needs to see just one root's exposure. Four things make this work:
+**Q32: the Parent dropdown groups by chain root; N/A and All are both real
+values, not "no filter."** The Origin filter says whether a row is Direct or
+Transitive; once "Show full dependency paths" has something transitive to
+show, a second dropdown (`#vulnParentFilterWrap`, `dashboard/index.html`)
+narrows further by *which* direct dependency's chain reaches it — useful once
+a project pulls in the same low-level package from several different roots
+and a release engineer needs to see just one root's exposure. Five things
+make this work:
 
-- **Gating is the conjunction of three conditions, evaluated fresh every
-  render**: `showPaths && hasTransitive && _vulnOriginFilterMode !== 'direct'`.
-  Direct rows have no chain to group by (Origin = Direct hides the control
-  entirely), and a project with nothing transitive in scope has nothing to
-  group (`hasTransitive`, the same `transitiveTargets().length > 0` check the
-  refetch button already uses). Nothing here starts a walk on its own — the
-  control only reflects whatever the toggle already resolved.
-- **The option list is every distinct chain root, not one option per row.**
-  `vulnParentOptions()` walks `vulnOriginFor()` for the current `source` and
-  collects `chain[0]` from every chain of every Transitive row — a component
-  reachable from three direct dependencies (Q27) contributes three options,
-  because filtering to any one of those roots should still show it. Rebuilt
-  on every `renderVulnRows()` call; a previously selected root that stops
-  appearing (a view switch, a narrower re-walk) falls back to N/A rather than
-  silently pointing at a value nothing can match any more
-  (`renderParentFilterOptions()`).
-- **N/A is the default, and it is a real filter value, not an unset state.**
-  It groups every row that cannot be claimed by a specific root: Direct rows,
-  and Transitive rows with no resolved chain — whether the walk has not
-  finished (`!pathsReady`) or DependencyTrack genuinely recorded none (`chains`
-  empty). Selecting a specific root excludes both of those groups the same way
-  the Origin filter's Direct/Transitive split already does; a component
-  matches if *any* of its chains starts there, the identical "any root"
-  reasoning `vulnParentOptions()` uses to list it in the first place
-  (`vulnParentMatches()`).
-- **It composes with the Origin filter by plain AND, not a special case.**
-  Direct rows can never satisfy "has a chain rooted at X" for a real `X`, so
-  choosing a specific root already excludes them even under Origin = Both —
-  no extra branch was needed to make that true.
+- **Gating the control's visibility is the conjunction of three conditions,
+  evaluated fresh every render**: `showPaths && hasTransitive &&
+  _vulnOriginFilterMode !== 'direct'`. Direct rows have no chain to group by
+  (Origin = Direct hides the control entirely), and a project with nothing
+  transitive in scope has nothing to group (`hasTransitive`, the same
+  `transitiveTargets().length > 0` check the refetch button already uses).
+  Nothing here starts a walk on its own — the control only reflects whatever
+  the toggle already resolved.
+- **The option list's own two computed halves are both scoped to the current
+  Origin mode, not the raw `source`.** `vulnParentOptions(source, showPaths,
+  originMode)` returns `{ hasDirect, roots }`: `hasDirect` is true only when a
+  Direct row would actually be visible under this Origin mode — under Origin =
+  Transitive it is always `false`, because the table itself already excludes
+  Direct rows there, not because of a special case written for that mode.
+  `roots` is every distinct chain root (`chain[0]`) across every Transitive
+  row's resolved chains, deduped and alphabetised — a component reachable
+  from three direct dependencies (Q27) contributes three roots, because
+  filtering to any one of them should still show it. Both are recomputed on
+  every `renderVulnRows()` call.
+- **All is the default, and it means exactly "no parent filter."**
+  `renderParentFilterOptions()` always lists it first; selecting it makes
+  `vulnParentMatches()` return `true` unconditionally, so a Transitive row
+  with no resolved chain yet — which belongs to neither N/A nor any named
+  root — is visible under All and nowhere else. A previously chosen value
+  that stops appearing (a view switch, a narrower re-walk) falls back to All,
+  the same "still valid, else the default" logic the Origin dropdown does not
+  need because it never runs out of options.
+- **N/A now means strictly "this row *is* a direct dependency."** It is
+  offered only when `hasDirect` is true, and `vulnParentMatches()` matches it
+  against nothing else — an unresolved-chain Transitive row used to share
+  this bucket before All existed to cover it; splitting the two apart is what
+  gives N/A and every named root an unambiguous meaning apiece. A component
+  matches a specific root if *any* of its chains starts there, the identical
+  "any root" reasoning `vulnParentOptions()` uses to list it in the first
+  place.
+- **A freshly resolved walk resets the selection to All even when the prior
+  choice is still technically valid — item 3.3.** This is *not* the same
+  event as `renderParentFilterOptions()`'s own "still valid" fallback above,
+  which only fires when a selection stops existing; a re-walk of the same
+  project can easily reproduce the same root the user had chosen before, and
+  that case still has to reset. The reset is therefore explicit, at the two
+  places a walk's result actually becomes visible — `startDepPathPoll()`'s
+  `'ready'` branch, and `onVulnDepPathToggle()`'s already-ready fast path
+  (reusing a walk resolved earlier this session, or by another user) — never
+  inferred from "did the options change." Switching Origin or the Security/
+  License view deliberately does **not** trigger this: those are not a
+  "dependency path change," so a still-valid selection survives them, and
+  only an actually stale one falls through to the ordinary fallback above.
 
 **Bounded the same way the snapshot crawl is** (§6.3): `MAX_GRAPH_NODES`
 caps how many components one walk will ever discover, so a toggle click cannot
@@ -1483,8 +1503,8 @@ The frontend never performs uniqueness checks — those are backend-only, via
 | `vulnOriginCellHtml(origin)` / `vulnOriginFor(finding, showPaths)` | frontend | Render and compute a row's Direct/Transitive badge — takes either finding type, since origin is a component property |
 | `vulnDepPathRowHtml(origin)` | frontend | The full-width path detail row; its `colspan` follows `VULN_TABLE_COLS[_vulnViewType]` (Q28) |
 | `transitiveTargets()` | frontend | The union of both tables' transitive components, so a walk never loses coverage when the view switches (Q28) |
-| `vulnParentOptions(source, showPaths)` | frontend | The Parent dropdown's own option list — every distinct chain root across the current view's Transitive rows (Q32) |
-| `vulnParentMatches(origin, parentFilter)` | frontend | Whether a row belongs to the N/A bucket or a specific chain root (Q32) |
+| `vulnParentOptions(source, showPaths, originMode)` | frontend | `{ hasDirect, roots }` — whether N/A applies and the distinct chain roots, both scoped to the current Origin mode (Q32) |
+| `vulnParentMatches(origin, parentFilter)` | frontend | Whether a row belongs to All, the N/A (Direct-only) bucket, or a specific chain root (Q32) |
 | `query(sql, params)` / `tx(fn)` | server | All database access |
 | `makeSemaphore(limit)` | server | Promise concurrency limit |
 | `sleep(ms)` | server | Promise delay |
