@@ -3854,7 +3854,7 @@ describe('trend — carrying a reading across unrefreshed days (Q23)', () => {
 const VULN_FN_NAMES = [
   'hasVulnerabilities', 'vulnEyeIconHtml', 'vulnFindingsQuery',
   'vulnCweIds', 'vulnCweLabel', 'sortFindingsBySeverity', 'vulnRowHtml',
-  'componentKeyOf', 'vulnOriginCellHtml',
+  'componentKeyOf', 'vulnOriginCellHtml', 'vulnDepPathRowHtml',
 ];
 const vuln = new Function(
   INDEX_HTML.match(/const CONFIG = \{[\s\S]*?\n\};/)[0] + '\n'
@@ -4093,35 +4093,53 @@ describe('dependency paths — the Origin cell', () => {
     assert.match(html, /class="pill pill-high">Direct</);
   });
 
-  test('Transitive with the toggle off shows the badge alone, no chain', () => {
-    const html = vuln.vulnOriginCellHtml({ direct: false });
+  test('Transitive shows the badge alone — the chain, if any, is a separate row (see vulnDepPathRowHtml)', () => {
+    // §8.10: a fixed-width column cannot flex to fit a chain, so the cell
+    // itself never carries one, regardless of toggle or resolution state.
+    const html = vuln.vulnOriginCellHtml({ direct: false, pathsReady: true, chains: [['a', 'x']] });
     assert.match(html, /class="pill pill-low">Transitive</);
     assert.doesNotMatch(html, /dep-path-chain/);
   });
+});
 
-  test('Transitive with the toggle on but the walk not ready yet shows no chain either', () => {
-    const html = vuln.vulnOriginCellHtml({ direct: false, pathsReady: false });
-    assert.doesNotMatch(html, /dep-path-chain/);
+describe('dependency paths — the path detail row (Q27: one chain per root, no "+more")', () => {
+  test('a Direct origin gets no detail row at all', () => {
+    assert.equal(vuln.vulnDepPathRowHtml({ direct: true }), '');
   });
 
-  test('a resolved chain renders escaped, arrow-joined, from a direct dependency', () => {
-    const html = vuln.vulnOriginCellHtml({
-      direct: false, pathsReady: true, chain: ['<carrier>', 'target'], multiple: false,
+  test('an unresolved origin gets no detail row', () => {
+    assert.equal(vuln.vulnDepPathRowHtml(null), '');
+  });
+
+  test('Transitive with the toggle off gets no detail row', () => {
+    assert.equal(vuln.vulnDepPathRowHtml({ direct: false }), '');
+  });
+
+  test('Transitive with the toggle on but the walk not ready yet gets no detail row', () => {
+    assert.equal(vuln.vulnDepPathRowHtml({ direct: false, pathsReady: false }), '');
+  });
+
+  test('a single resolved chain renders escaped, arrow-joined, spanning every column', () => {
+    const html = vuln.vulnDepPathRowHtml({
+      direct: false, pathsReady: true, chains: [['<carrier>', 'target']],
     });
     assert.doesNotMatch(html, /<carrier>/, 'an unescaped component name would be a stored XSS');
     assert.match(html, /&lt;carrier&gt;/);
-    assert.doesNotMatch(html, /more routes/);
+    assert.match(html, /colspan="8"/, 'the detail row must span every column, not just the Origin one');
+    assert.match(html, /class="dep-path-row"/);
   });
 
-  test('a component reachable from more than one direct dependency says so', () => {
-    const html = vuln.vulnOriginCellHtml({
-      direct: false, pathsReady: true, chain: ['a', 'x'], multiple: true,
+  test('a component reachable from more than one root gets one line per root, not a "+more" flag', () => {
+    const html = vuln.vulnDepPathRowHtml({
+      direct: false, pathsReady: true, chains: [['a', 'x'], ['b', 'x']],
     });
-    assert.match(html, /more routes/i);
+    const lines = (html.match(/class="dep-path-chain"/g) || []).length;
+    assert.equal(lines, 2, 'one dep-path-chain line per distinct root, not a collapsed count');
+    assert.doesNotMatch(html, /more routes/i, 'every root is shown directly — no "+more" flag (Q27)');
   });
 
-  test('a resolved walk that never reached this component says so plainly, not a blank cell', () => {
-    const html = vuln.vulnOriginCellHtml({ direct: false, pathsReady: true, chain: null });
+  test('a resolved walk that never reached this component says so plainly, not a blank row', () => {
+    const html = vuln.vulnDepPathRowHtml({ direct: false, pathsReady: true, chains: null });
     assert.match(html, /No path recorded/i);
   });
 });
@@ -4155,9 +4173,9 @@ describe('dependency paths — vulnOriginFor (which badge a row gets)', () => {
 
   test('a component outside the direct set is Transitive, toggle off, no path lookup happens', () => {
     const out = originSandbox.vulnOriginFor(finding('pkg:npm/y@1'), false, new Set(), 'ready',
-      { 'pkg:npm/y@1': { chain: ['a', 'y'], multiple: false } });
+      { 'pkg:npm/y@1': { chains: [['a', 'y']] } });
     assert.equal(out.direct, false);
-    assert.equal(out.pathsReady, undefined, 'the chain must not be attached when the toggle is off');
+    assert.equal(out.pathsReady, undefined, 'the chains must not be attached when the toggle is off');
   });
 
   test('toggle on but the walk has not resolved yet reports pathsReady:false', () => {
@@ -4166,19 +4184,18 @@ describe('dependency paths — vulnOriginFor (which badge a row gets)', () => {
     assert.equal(out.pathsReady, false);
   });
 
-  test('toggle on and ready attaches the resolved chain for this exact component', () => {
+  test('toggle on and ready attaches every resolved chain for this exact component', () => {
     const out = originSandbox.vulnOriginFor(finding('pkg:npm/y@1'), true, new Set(), 'ready',
-      { 'pkg:npm/y@1': { chain: ['a', 'y'], multiple: true } });
+      { 'pkg:npm/y@1': { chains: [['a', 'y'], ['b', 'y']] } });
     assert.equal(out.pathsReady, true);
-    assert.deepEqual(out.chain, ['a', 'y']);
-    assert.equal(out.multiple, true);
+    assert.deepEqual(out.chains, [['a', 'y'], ['b', 'y']]);
   });
 
-  test('toggle on, ready, but this component has no entry — chain is null, not a stale one from another row', () => {
+  test('toggle on, ready, but this component has no entry — chains is null, not a stale one from another row', () => {
     const out = originSandbox.vulnOriginFor(finding('pkg:npm/never-declared@1'), true, new Set(), 'ready',
-      { 'pkg:npm/y@1': { chain: ['a', 'y'], multiple: false } });
+      { 'pkg:npm/y@1': { chains: [['a', 'y']] } });
     assert.equal(out.pathsReady, true);
-    assert.equal(out.chain, null);
+    assert.equal(out.chains, null);
   });
 });
 

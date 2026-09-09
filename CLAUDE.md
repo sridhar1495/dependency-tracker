@@ -214,7 +214,7 @@ Inline comments use lettered prefixes to trace design decisions:
 - **O-numbers** — observability notes (`// O3: JSON log format for log aggregators`)
 - **S-numbers** — security rationale (`// S2: token hashed before storage`) — **new in revision 2**
 
-Highest numbers currently in use: **Q26, P20, O5, S34**. When adding logic with a
+Highest numbers currently in use: **Q27, P20, O5, S34**. When adding logic with a
 non-obvious trade-off, add the next number in the appropriate series. Check the
 current maximum before assigning — parallel branches can claim the same number.
 
@@ -466,14 +466,24 @@ is Direct — it does not call `POST` at all, because a flat, manifest-built
 SBOM (below) can legitimately leave nothing transitive to resolve, and a walk
 that completes with nothing to show reads as broken rather than as correct.
 
-**A component reached from more than one direct dependency is flagged, not
-enumerated.** The walk keeps one shortest chain per transitive component and a
-`multiple: true` flag when a second, different direct-dependency branch also
-reaches it (a shared low-level package is the common case) — never every
-distinct route. Storing all of them would let a dense graph's diamond
-dependencies blow up the row; the flag is enough to tell an engineer more than
-one path exists, and DependencyTrack's own graph view is one click away for
-anyone who wants to see them all.
+**Q27: a component reached from more than one direct dependency gets one
+chain per root, not a single chain plus a flag.** The walk keeps
+`rootsReaching`/`parentByRoot` maps (`lib/dependency-paths.js`) instead of a
+single `parent`, so a shared low-level package reachable from three direct
+dependencies gets three chains — `paths[key] = { chains: [...] }` — each the
+shortest route from its own root. This replaced an earlier `multiple: true`
+flag that told an engineer more routes existed without saying what they were;
+showing the first occurrence of each root's route directly is more useful and
+still bounded, because the number of *roots* reaching a component is the
+project's own direct-dependency count, not the combinatorial number of routes
+through the graph. What is still deliberately not built: enumerating every
+route *within* one root's own branch (a diamond nested inside a diamond) —
+that is the genuinely combinatorial case, and it stays one shortest chain per
+root, with no count of how many more exist inside it. `MAX_ROOTS_PER_COMPONENT`
+(8) caps how many roots one component keeps regardless — a component reachable
+from dozens of direct dependencies is realistic (a common logging library,
+say), and past the cap the extra roots are silently dropped, not counted;
+exact "+N more" reporting was deliberately deferred rather than built now.
 
 **A component the walk never reaches is not an error.** A flat, manifest-built
 SBOM is the ordinary case, not an edge case — see the design note above
@@ -1026,7 +1036,14 @@ class as the CWE helpers above; a cross-file test asserts the two agree.
   findings render and a toggle click re-render through it, reading
   `_vulnDirectKeys`/`_depPathStatus`/`_depPathPaths` fresh each time, so the
   table can never show one row's badge computed against a different project's
-  data.
+  data. A Transitive finding with a resolved chain draws as **two** `<tr>`s —
+  the finding row from `vulnRowHtml()`, immediately followed by a full-width
+  `colspan="8"` detail row from `vulnDepPathRowHtml()` — never squeezed into
+  the Origin cell itself. `.vuln-table` is `table-layout: fixed` with widths
+  declared once on the header cells (§8.10) specifically so that appearing,
+  changing, or disappearing detail row can never resize the other seven
+  columns — before this, checking the toggle visibly reflowed the whole table
+  on every render.
 - **A cache hit skips the network entirely.** `loadVulnOrigins()`'s single GET
   already returns whatever the cached walk currently knows, so if `status` is
   already `'ready'` — because another user resolved this project's paths, or
@@ -1253,6 +1270,12 @@ The frontend never performs uniqueness checks — those are backend-only, via
   views carry `.cfg-view` with the same column gap; a test asserts the two
   numbers still match, because a wrapper introduced later is exactly how this
   recurs.
+- **A table whose row content varies needs `table-layout: fixed`, not auto.**
+  `.vuln-table` (§8.1) used to size its columns from content, so the
+  dependency-path toggle — which adds or removes a chain — visibly resized
+  every other column on each click. Fixed layout with widths declared once on
+  the header cells makes every row, including a `colspan`'d detail row, honour
+  the same geometry regardless of what it holds.
 
 ### 8.11 Utility helpers (do not duplicate)
 
@@ -1547,9 +1570,11 @@ Running the browser checks in CI was on this list and is now the `e2e` job.
   first reading into a year of history nobody recorded.
 - Dependency-path resolution (§6.3a): the walk's shortest-chain reconstruction
   against a diamond graph (one component reachable from two direct
-  dependencies gets `multiple: true`, everything downstream of it does not); a
-  component the walk never reaches has no path entry at all; the node ceiling
-  stops an unbounded upstream chain; the stall watchdog and heartbeat, raced
+  dependencies gets two chains, one per root — Q27 — and everything downstream
+  of it inherits both roots too); the `MAX_ROOTS_PER_COMPONENT` cap on a
+  widely shared component; a component the walk never reaches has no path
+  entry at all; the node ceiling stops an unbounded upstream chain; the stall
+  watchdog and heartbeat, raced
   against a shrunk `configure({stallMs})` window rather than the real fifteen
   minutes, the same technique the violation-cache watchdog tests already use.
   The database tier pins the job-status machine (`building` → `stalled` →

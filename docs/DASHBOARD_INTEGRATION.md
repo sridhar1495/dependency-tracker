@@ -221,11 +221,14 @@ dozens of calls for one project, so it only happens when the toggle is
 checked, and the result is cached (shared across everyone on the same
 DependencyTrack connection) so a second person — or a second click — does not
 pay for it twice. A status line shows progress while a walk that has not been
-resolved before is in flight. If a component is reachable from more than one
-direct dependency, the row says so ("+ more routes") rather than listing every
-route. A component the walk never reaches shows "No path recorded by
-DependencyTrack for this component" — expected for a flat, manifest-built SBOM,
-not a bug.
+resolved before is in flight. The chain renders as its own row directly under
+the finding, not inside the Origin column, so a long chain never squeezes a
+fixed-width column. If a component is reachable from more than one direct
+dependency, each root gets its own line — up to 8 (`MAX_ROOTS_PER_COMPONENT`)
+— rather than one chain plus a "+ more routes" flag; past that cap the extra
+roots are silently dropped rather than counted. A component the walk never
+reaches shows "No path recorded by DependencyTrack for this component" —
+expected for a flat, manifest-built SBOM, not a bug.
 
 The walk this toggle starts is scoped to the componentKeys the dialog is
 actually showing (`{ targets: [...] }` in the `POST` body), not the project's
