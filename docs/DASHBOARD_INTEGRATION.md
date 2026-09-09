@@ -170,19 +170,27 @@ violation cache is.
 
 Set the **DT Frontend URL** in **⚙ Settings** to enable clickable project links. Each project name becomes a link to `<DT_FRONTEND_URL>/#/projects/<uuid>`.
 
-### Vulnerability Detail Dialog
+### Findings Detail Dialog
 
 A 👁 icon appears next to the checkbox on any **leaf project row** that has at
-least one security finding — it is not a new table column, and a group
-(parent) row never carries it, because a group has no DependencyTrack project
-of its own to query.
+least one security finding **or** license violation — it is not a new table
+column, and a group (parent) row never carries it, because a group has no
+DependencyTrack project of its own to query.
 
-Clicking it opens a dialog listing that project's open findings, fetched live
-from `GET /violation-cache/dt/api/v1/finding` (the same authenticated DT proxy
-every other DependencyTrack call on the page uses — the browser never holds a
-DT API key). The columns match the `SV_Vulnerability Findings` sheet in the
-Excel report exactly, so the two never disagree about what a finding looks
-like:
+Clicking it opens one dialog with a **Show** dropdown at the top — **Security
+Violations** or **License Risk** — that switches which of two independent
+tables is displayed; they are never shown at once. Security is fetched the
+moment the dialog opens, from `GET /violation-cache/dt/api/v1/finding` (the
+same authenticated DT proxy every other DependencyTrack call on the page
+uses — the browser never holds a DT API key). License is fetched lazily, the
+first time the dropdown is switched to it, from
+`GET /violation-cache/dt/api/v1/violation` filtered to `riskType=LICENSE`; once
+fetched it is kept for the rest of the dialog session, so switching back and
+forth costs no further requests.
+
+The Security table's columns match the `SV_Vulnerability Findings` sheet in
+the Excel report exactly, so the two never disagree about what a finding
+looks like:
 
 | Column | Source |
 |---|---|
@@ -195,23 +203,41 @@ like:
 | Latest | `component.latestVersion` |
 | Origin | **Direct** or **Transitive** — see below |
 
-Rows are sorted **worst severity first**, then by CVSS within a severity.
-Suppressed and triaged-away findings are excluded — the same filter the report
-applies — so the dialog and a generated report never disagree about what counts
-as an open finding. A project with an unusually large number of findings is
-capped at the 900 most severe, with a note saying so; DependencyTrack's own SBOM
-model has no per-file path, so the dialog identifies a finding by its component
-(package) only, the same granularity the report already uses.
+The License table has its own, shorter column set:
+
+| Column | Source |
+|---|---|
+| Component | `component.name` (and group, if set) |
+| Current | `component.version` |
+| License | `component.resolvedLicense.name`, falling back to its `licenseId`, then to the raw policy-condition value, then `—` |
+| Policy | `policyCondition.policy.name` |
+| State | `policyCondition.policy.violationState` (FAIL/WARN/INFO), the same pill colours the risk table already uses for those three words |
+| Origin | **Direct** or **Transitive** — see below |
+
+Security rows are sorted **worst severity first**, then by CVSS within a
+severity, and are capped at the 900 most severe with a note saying so;
+DependencyTrack's own SBOM model has no per-file path, so both tables identify
+a finding by its component (package) only, the same granularity the report
+already uses. Suppressed and triaged-away security findings are excluded —
+the same filter the report applies — so the dialog and a generated report
+never disagree about what counts as an open finding.
+
+A second dropdown, **Origin — Both / Direct / Transitive**, filters whichever
+table is currently showing to just that origin. It is purely local: no
+request is made when it changes, and it never hides a row before that row's
+Direct/Transitive badge has actually resolved.
 
 #### Origin: Direct or Transitive
 
-Every row is tagged **Direct** (the component is declared straight on the
-project — a release-blocking finding) or **Transitive** (pulled in by
-something else — safe to route to the security SME's backlog). This is
-computed live every time the dialog opens, from
+Every row, in either table, is tagged **Direct** (the component is declared
+straight on the project — a release-blocking finding) or **Transitive**
+(pulled in by something else — safe to route to the security SME's backlog).
+This is computed live every time the dialog opens, from
 `GET /violation-cache/dependency-paths/:id`, and costs one DependencyTrack
 call — it is never cached, so the badge can never disagree with what
-DependencyTrack currently reports.
+DependencyTrack currently reports. The classification is a component
+property, not a finding-type one, so it and the toggle below apply equally to
+Security and License without a second lookup.
 
 A **"Show full dependency paths"** toggle above the table (off by default)
 resolves *how* a transitive component is reached — the intermediate component
@@ -234,10 +260,25 @@ The walk this toggle starts is scoped to the componentKeys the dialog is
 actually showing (`{ targets: [...] }` in the `POST` body), not the project's
 whole graph — a project can carry hundreds of components while a dialog shows
 a few dozen findings, and DependencyTrack has no reason to be asked about the
-rest. When every row the dialog shows is already Direct, the frontend does not
-call `POST` at all — there is nothing transitive to resolve a chain for, and
-the toggle says so directly instead of starting a walk that would complete
-with nothing to show.
+rest. That target list is the **union** of both tables' transitive
+components, not just whichever is on screen — switching from Security to
+License after an earlier walk extends coverage to License's components too
+rather than starting a narrower walk that would overwrite what was already
+resolved. When every row currently in scope is already Direct, the frontend
+does not call `POST` at all — there is nothing transitive to resolve a chain
+for, and the toggle says so directly instead of starting a walk that would
+complete with nothing to show.
+
+A cached walk can fall behind DependencyTrack — a new BOM import lands after
+the walk ran, or the result simply looks wrong — and a stale row is still
+served rather than hidden (flagged `stale: true`), which is enough to notice
+the gap but not to close it by itself. Once the toggle has something to show,
+a **"↻ Refetch paths"** button appears beside it; clicking it re-walks the
+graph regardless of what is currently cached, the same request the toggle
+sends but with `force: true` added. It is the manual complement to the
+automatic staleness flag, not a replacement for it, and it does not bypass
+the one-walk-at-a-time guard: if a walk for this project is already running,
+a refetch gets the same 409 an ordinary request would.
 
 ---
 
@@ -331,7 +372,7 @@ compact per-project count map in a JSON file, and serves only that file to the b
 | `/violation-cache/refresh` | POST | Trigger a background rebuild (409 if already running) |
 | `/violation-cache/risk-series` | GET | Daily risk history for your connection — see [Risk history](#risk-history) |
 | `/violation-cache/dependency-paths/:id` | GET | A project's direct-dependency set (live, never cached) plus whatever the cached graph walk currently knows — see [Vulnerability Detail Dialog](#vulnerability-detail-dialog) |
-| `/violation-cache/dependency-paths/:id` | POST | Resolve the dependency-graph walk for one project (409 if already running). Body: `{ targets?: string[] }` — componentKeys to resolve a path for; omitted walks the whole graph, an empty array walks nothing |
+| `/violation-cache/dependency-paths/:id` | POST | Resolve the dependency-graph walk for one project (409 if already running). Body: `{ targets?: string[], force?: boolean }` — `targets` are componentKeys to resolve a path for (omitted walks the whole graph, an empty array walks nothing); `force: true` re-walks even when a ready cache already covers every requested target, without bypassing the already-running guard |
 
 ### Risk history
 

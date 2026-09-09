@@ -253,13 +253,17 @@ async function walkGraph(
  * @param {string} projectUuid
  * @param {string[]|null} [targets] componentKeys the caller actually needs a
  *   path for (Q26) — omitted or empty walks the whole graph, as before.
+ * @param {boolean} [force] Q29: skip the "already covered by the cached
+ *   walk" short-circuit and re-walk regardless. Still refuses a second
+ *   concurrent walk — `_building` and the advisory lock are unaffected —
+ *   force means "don't trust a ready cache", not "cancel one in flight".
  */
-async function runJob(conn, projectUuid, targets = null) {
+async function runJob(conn, projectUuid, targets = null, force = false) {
   const { apiUrl, apiKey, fingerprint } = conn;
   const key = buildingKey(fingerprint, projectUuid);
   if (_building.has(key)) return { started: false, reason: 'already building in this process' };
 
-  if (targets && targets.length) {
+  if (!force && targets && targets.length) {
     const existing = await depCache.getMeta(fingerprint, projectUuid);
     if (existing && existing.status === 'ready') {
       const known = new Set(Object.keys(existing.paths || {}));

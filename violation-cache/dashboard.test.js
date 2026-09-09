@@ -3852,17 +3852,24 @@ describe('trend — carrying a reading across unrefreshed days (Q23)', () => {
 // code the page no longer contains (CLAUDE.md §10.5).
 
 const VULN_FN_NAMES = [
-  'hasVulnerabilities', 'vulnEyeIconHtml', 'vulnFindingsQuery',
-  'vulnCweIds', 'vulnCweLabel', 'sortFindingsBySeverity', 'vulnRowHtml',
+  'hasVulnerabilities', 'hasLicenseRisk', 'vulnEyeIconHtml',
+  'vulnFindingsQuery', 'vulnLicenseQuery',
+  'vulnCweIds', 'vulnCweLabel', 'sortFindingsBySeverity', 'vulnRowHtml', 'vulnLicenseRowHtml',
   'componentKeyOf', 'vulnOriginCellHtml', 'vulnDepPathRowHtml',
 ];
 const vuln = new Function(
   INDEX_HTML.match(/const CONFIG = \{[\s\S]*?\n\};/)[0] + '\n'
   + INDEX_HTML.match(/const LEVEL_CSS = \{[\s\S]*?\n\};/)[0] + '\n'
   + INDEX_HTML.match(/const VULN_SEVERITY_ORDER = \[[\s\S]*?\];/)[0] + '\n'
+  + INDEX_HTML.match(/const VULN_TABLE_COLS = \{[\s\S]*?\n\};/)[0] + '\n'
+  // vulnDepPathRowHtml reads _vulnViewType from module scope in the real
+  // page; the sandbox defaults it to 'security' (the dialog's own default)
+  // and exposes setViewType so a test can switch it, the same adapter
+  // pattern the vulnOriginFor/transitiveTargets sandboxes below use.
+  + `let _vulnViewType = 'security';\n`
   + extractFunction(INDEX_HTML, 'escHtml') + '\n'
   + VULN_FN_NAMES.map(n => extractFunction(INDEX_HTML, n)).join('\n')
-  + `\nreturn { ${VULN_FN_NAMES.join(', ')} };`
+  + `\nreturn { ${VULN_FN_NAMES.join(', ')}, setViewType: (t) => { _vulnViewType = t; } };`
 )();
 
 describe('vulnerability dialog — the eye icon', () => {
@@ -3887,6 +3894,30 @@ describe('vulnerability dialog — the eye icon', () => {
     // A parent's security numbers are its descendants' rolled up (§8.7); it has
     // no DependencyTrack project of its own to ask for findings.
     assert.equal(vuln.vulnEyeIconHtml(group({ critical: 5 }), true), '');
+  });
+
+  test('hasLicenseRisk mirrors hasVulnerabilities\'s shape against node.license', () => {
+    assert.equal(vuln.hasLicenseRisk({ license: { fail: 1 } }), true);
+    assert.equal(vuln.hasLicenseRisk({ license: { unassigned: 1 } }), true, 'unassigned still counts');
+    assert.equal(vuln.hasLicenseRisk({ license: { fail: 0, warn: 0, info: 0, unassigned: 0 } }), false);
+    assert.equal(vuln.hasLicenseRisk({}), false, 'a node with no license object at all must not throw');
+  });
+
+  test('a project clean on CVEs but failing license policy still gets the icon', () => {
+    // Once the dialog can show License risk too, gating the icon on
+    // vulnerabilities alone would leave no way to reach it from a project
+    // that has nothing but a license problem.
+    const cleanOnSecurity = { uuid: 'leaf-2', name: 'lib', children: [],
+      security: { critical: 0, high: 0, medium: 0, low: 0, unassigned: 0 },
+      license: { fail: 1, warn: 0, info: 0, unassigned: 0 } };
+    assert.notEqual(vuln.vulnEyeIconHtml(cleanOnSecurity, false), '');
+  });
+
+  test('clean on both gets no icon at all', () => {
+    const clean = { uuid: 'leaf-3', name: 'lib', children: [],
+      security: { critical: 0, high: 0, medium: 0, low: 0, unassigned: 0 },
+      license: { fail: 0, warn: 0, info: 0, unassigned: 0 } };
+    assert.equal(vuln.vulnEyeIconHtml(clean, false), '');
   });
 
   test('the icon carries the project uuid and calls openVulnDialog', () => {
@@ -3941,6 +3972,25 @@ describe('vulnerability dialog — the DependencyTrack query', () => {
       assert.ok(vuln.vulnFindingsQuery('x', '1', 1).includes(clause),
         `the dialog's query dropped ${clause} that reports.js still sends`);
     }
+  });
+
+  test('vulnLicenseQuery mirrors streamViolationsForProject\'s query, byte for byte, for the clauses that do not vary by risk type', () => {
+    // The report's per-project violation search is already proven in
+    // production (Q24's same reasoning) — read directly from that function's
+    // own source, not fetchAllFindings's, since both use a variable named
+    // baseQs and a plain regex would otherwise silently grab the wrong one.
+    const reportsSrc = fs.readFileSync(path.join(__dirname, 'lib', 'reports.js'), 'utf8');
+    const fnSrc = reportsSrc.slice(reportsSrc.indexOf('async function streamViolationsForProject'));
+    const reportQs = fnSrc.match(/const baseQs = \[([\s\S]*?)\]\.join/)[1];
+    for (const clause of ['showInactive=false', 'suppressed=false', 'textSearchField=project_name']) {
+      assert.ok(reportQs.includes(`'${clause}'`), `streamViolationsForProject no longer sends ${clause}`);
+      assert.ok(vuln.vulnLicenseQuery('x', 1).includes(clause),
+        `the dialog's license query dropped ${clause} that streamViolationsForProject still sends`);
+    }
+    assert.match(reportQs, /riskType=\$\{dtRiskType\}/,
+      'streamViolationsForProject computes riskType per call — license and operational share this function');
+    assert.match(vuln.vulnLicenseQuery('x', 1), /riskType=LICENSE/,
+      'the dialog is license-only by design — it hardcodes what the report parameterises');
   });
 
   test('an empty version does not produce a stray parameter, just a trailing space in the search text', () => {
@@ -4199,15 +4249,17 @@ describe('dependency paths — vulnOriginFor (which badge a row gets)', () => {
   });
 });
 
-describe('dependency paths — transitiveTargets (Q26 walk scoping)', () => {
-  // transitiveTargets reads the same two module-scoped variables vulnOriginFor
-  // does, wired the same way.
+describe('dependency paths — transitiveTargets (Q26 walk scoping, Q27 union across views)', () => {
+  // transitiveTargets reads the same module-scoped variables vulnOriginFor
+  // does, wired the same way. license defaults to null (not yet fetched this
+  // dialog session) unless a test passes one.
   const targetsSandbox = new Function(
-    'let _vulnDirectKeys, _vulnShownFindings;\n'
+    'let _vulnDirectKeys, _vulnShownFindings, _vulnShownLicense;\n'
     + extractFunction(INDEX_HTML, 'componentKeyOf') + '\n'
     + extractFunction(INDEX_HTML, 'transitiveTargets') + '\n'
-    + `return { transitiveTargets: function(directKeys, shownFindings) {
+    + `return { transitiveTargets: function(directKeys, shownFindings, shownLicense) {
          _vulnDirectKeys = directKeys; _vulnShownFindings = shownFindings;
+         _vulnShownLicense = shownLicense === undefined ? null : shownLicense;
          return transitiveTargets();
        } };`
   )();
@@ -4227,6 +4279,21 @@ describe('dependency paths — transitiveTargets (Q26 walk scoping)', () => {
     const direct = new Set(['pkg:npm/x@1']);
     const shown = [finding('pkg:npm/y@1'), finding('pkg:npm/x@1'), finding('pkg:npm/y@1')];
     assert.deepEqual(targetsSandbox.transitiveTargets(direct, shown), ['pkg:npm/y@1']);
+  });
+
+  test('license not yet fetched (null) is excluded from the union, not treated as empty', () => {
+    const direct = new Set(['pkg:npm/x@1']);
+    const shown = [finding('pkg:npm/y@1')];
+    assert.deepEqual(targetsSandbox.transitiveTargets(direct, shown, null), ['pkg:npm/y@1']);
+  });
+
+  test('once license has loaded, its transitive components join the security view\'s in one union', () => {
+    const direct = new Set(['pkg:npm/x@1']);
+    const shown   = [finding('pkg:npm/y@1')];
+    const license = [finding('pkg:npm/z@1'), finding('pkg:npm/y@1')]; // z is new, y overlaps
+    assert.deepEqual(
+      [...targetsSandbox.transitiveTargets(direct, shown, license)].sort(),
+      ['pkg:npm/y@1', 'pkg:npm/z@1']);
   });
 });
 
@@ -4264,6 +4331,17 @@ describe('dependency paths — the toggle and its polling', () => {
     assert.match(fn, /_vulnDirectKeys\s*=\s*null/);
     assert.match(fn, /_depPathStatus\s*=\s*'none'/);
     assert.match(fn, /toggleEl\.checked\s*=\s*false/);
+  });
+
+  test('a security fetch landing after the user already switched to License does not clobber its UI state', () => {
+    // The dropdowns are reachable the instant the dialog opens, before this
+    // fetch resolves — its own statusEl/wrapEl/noteEl writes must be guarded
+    // to the security view, or a fetch that lands late steals the screen back
+    // from whatever the user switched to in the meantime.
+    const fn = extractFunction(INDEX_HTML, 'openVulnDialog');
+    const afterFetch = fn.slice(fn.indexOf('const findings = await fetchProjectFindings'));
+    assert.match(afterFetch, /_vulnViewType === 'security'/,
+      'the UI-state writes after the fetch must be conditioned on still being on the security view');
   });
 
   test('the poll stops when the dialog closes, not just when the walk finishes', () => {
@@ -4314,5 +4392,215 @@ describe('dependency paths — the toggle and its polling', () => {
     // so it cannot be misread as a severity value.
     const html = vuln.vulnOriginCellHtml({ direct: true });
     assert.doesNotMatch(html, /CRITICAL|HIGH|MEDIUM|LOW/, 'Origin text must never look like a severity level');
+  });
+});
+
+describe('dependency paths — manual refetch (Q29)', () => {
+  test('the refetch button exists, starts hidden, and is not a form submit', () => {
+    assert.match(INDEX_HTML, /id="vulnDepPathRefetchBtn"/);
+    const btnAt = INDEX_HTML.indexOf('id="vulnDepPathRefetchBtn"');
+    const tagStart = INDEX_HTML.lastIndexOf('<button', btnAt);
+    const tagEnd = INDEX_HTML.indexOf('>', btnAt);
+    const tag = INDEX_HTML.slice(tagStart, tagEnd + 1);
+    assert.match(tag, /type="button"/);
+    assert.match(tag, /\bhidden\b/, 'the button must start hidden — nothing to doubt before a walk has ever run');
+    assert.match(tag, /onclick="onVulnDepPathRefetch\(\)"/);
+  });
+
+  test('onVulnDepPathRefetch is window-exported, or the button fails silently (§8.2)', () => {
+    assert.match(INDEX_HTML, /window\.onVulnDepPathRefetch\s*=\s*onVulnDepPathRefetch/);
+  });
+
+  test('a refetch always forces the walk and scopes it to the current transitive targets', () => {
+    const fn = extractFunction(INDEX_HTML, 'onVulnDepPathRefetch');
+    assert.match(fn, /const targets\s*=\s*transitiveTargets\(\)/);
+    assert.match(fn, /body:\s*JSON\.stringify\(\{\s*targets,\s*force:\s*true\s*\}\)/);
+    assert.match(fn, /'Content-Type':\s*'application\/json'/);
+    assert.match(fn, /method:\s*'POST'/);
+  });
+
+  test('a refetch clears the cached status and re-renders before the request lands, hiding stale chains', () => {
+    const fn = extractFunction(INDEX_HTML, 'onVulnDepPathRefetch');
+    const clearAt  = fn.indexOf("_depPathStatus = 'none'");
+    const renderAt = fn.indexOf('renderVulnRows();');
+    const fetchAt  = fn.indexOf('apiFetch(');
+    assert.ok(clearAt !== -1 && renderAt !== -1 && fetchAt !== -1);
+    assert.ok(clearAt < fetchAt, '_depPathStatus must be cleared before the network call, not after');
+    assert.ok(renderAt < fetchAt, 'the re-render must happen before the network call, not after');
+  });
+
+  test('a refetch shares _depPathReqSeq and startDepPathPoll with the toggle, so a superseded click is handled identically', () => {
+    const fn = extractFunction(INDEX_HTML, 'onVulnDepPathRefetch');
+    assert.match(fn, /const seq\s*=\s*\+\+_depPathReqSeq/);
+    assert.match(fn, /if \(seq !== _depPathReqSeq\) return;/);
+    assert.match(fn, /startDepPathPoll\(_vulnCurrentProject, seq\)/);
+  });
+
+  test('a refetch with no project open is a no-op', () => {
+    const fn = extractFunction(INDEX_HTML, 'onVulnDepPathRefetch');
+    assert.match(fn, /if \(!_vulnCurrentProject\) return;/);
+  });
+
+  test('renderVulnRows shows the refetch button only while paths are showing and a walk is ready to doubt', () => {
+    const fn = extractFunction(INDEX_HTML, 'renderVulnRows');
+    assert.match(fn,
+      /vulnDepPathRefetchBtn'\)\.hidden\s*=\s*!\(showPaths\s*&&\s*_depPathStatus === 'ready'\)/,
+      'the button must stay hidden unless the toggle is on and the walk actually has a ready result');
+  });
+
+  test('a fresh dialog open resets the refetch button back to hidden', () => {
+    const fn = extractFunction(INDEX_HTML, 'openVulnDialog');
+    assert.match(fn, /refetchBtnEl\.hidden\s*=\s*true/);
+  });
+});
+
+// ── License risk (PR1: one dialog, two view types) ─────────────────────────
+// The same dialog now shows either Security Violations or License Risk,
+// picked by a view-type dropdown, plus a second, purely local Direct/
+// Transitive/Both dropdown that applies to whichever table is showing.
+
+describe('license risk — vulnLicenseRowHtml', () => {
+  test('every field passes through escHtml', () => {
+    const row = vuln.vulnLicenseRowHtml({
+      component: { name: '<z>', version: '<v>', resolvedLicense: { name: '<lic>' } },
+      policyCondition: { policy: { name: '<pol>', violationState: 'FAIL' } },
+    }, { direct: true });
+    assert.doesNotMatch(row, /<z>|<v>|<lic>|<pol>/);
+    assert.match(row, /&lt;z&gt;/);
+  });
+
+  test('resolvedLicense.name wins over licenseId and the raw condition value', () => {
+    const row = vuln.vulnLicenseRowHtml({
+      component: { resolvedLicense: { name: 'MIT', licenseId: 'MIT-ID' } },
+      policyCondition: { value: 'GPL-3.0-only', policy: {} },
+    }, { direct: true });
+    assert.match(row, />MIT</);
+    assert.doesNotMatch(row, /MIT-ID|GPL-3\.0-only/);
+  });
+
+  test('licenseId is the fallback when there is no resolved name', () => {
+    const row = vuln.vulnLicenseRowHtml({
+      component: { resolvedLicense: { licenseId: 'Apache-2.0' } },
+      policyCondition: { value: 'ignored', policy: {} },
+    }, { direct: true });
+    assert.match(row, />Apache-2\.0</);
+  });
+
+  test('the raw policy-condition value is the last resort when DT resolved no license at all', () => {
+    const row = vuln.vulnLicenseRowHtml({
+      component: {},
+      policyCondition: { value: 'Unrecognised-License-1.0', policy: {} },
+    }, { direct: true });
+    assert.match(row, />Unrecognised-License-1\.0</);
+  });
+
+  test('an unresolvable license shows an em dash, never blank', () => {
+    const row = vuln.vulnLicenseRowHtml({ component: {}, policyCondition: {} }, { direct: true });
+    assert.match(row, />—</);
+  });
+
+  test('state reuses the same LEVEL_CSS mapping the risk table already uses for FAIL/WARN/INFO', () => {
+    // fail→critical, warn→medium, info→low (index.html's LEVEL_CSS) — not a
+    // second, parallel colour decision for the same three words.
+    const fail = vuln.vulnLicenseRowHtml(
+      { component: {}, policyCondition: { policy: { violationState: 'FAIL' } } }, { direct: true });
+    assert.match(fail, /class="pill pill-critical">FAIL</);
+    const info = vuln.vulnLicenseRowHtml(
+      { component: {}, policyCondition: { policy: { violationState: 'INFO' } } }, { direct: true });
+    assert.match(info, /class="pill pill-low">INFO</);
+  });
+
+  test('the row carries exactly six columns — Component, Current, License, Policy, State, Origin', () => {
+    const row = vuln.vulnLicenseRowHtml({ component: {}, policyCondition: {} }, { direct: true });
+    const cells = (row.match(/<td/g) || []).length;
+    assert.equal(cells, 6);
+  });
+});
+
+describe('license risk — the path detail row follows whichever table is showing', () => {
+  test('colspan is 6 for the license view, 8 for the security view', () => {
+    try {
+      vuln.setViewType('license');
+      const licenseHtml = vuln.vulnDepPathRowHtml({ direct: false, pathsReady: true, chains: [['a', 'x']] });
+      assert.match(licenseHtml, /colspan="6"/);
+
+      vuln.setViewType('security');
+      const securityHtml = vuln.vulnDepPathRowHtml({ direct: false, pathsReady: true, chains: [['a', 'x']] });
+      assert.match(securityHtml, /colspan="8"/);
+    } finally {
+      vuln.setViewType('security'); // restore the default so later tests are unaffected
+    }
+  });
+});
+
+describe('license risk — dialog markup', () => {
+  test('the two dropdowns and the dynamic table/head exist in the markup', () => {
+    for (const id of ['vulnViewType', 'vulnOriginFilter', 'vulnDialogHead', 'vulnDialogTable']) {
+      assert.match(INDEX_HTML, new RegExp(`id="${id}"`), `#${id} is missing`);
+    }
+    assert.match(INDEX_HTML, /<option value="security">Security Violations<\/option>/);
+    assert.match(INDEX_HTML, /<option value="license">License Risk<\/option>/);
+    assert.match(INDEX_HTML, /<option value="both"[^>]*>Both<\/option>/);
+    assert.match(INDEX_HTML, /<option value="direct">Direct<\/option>/);
+    assert.match(INDEX_HTML, /<option value="transitive">Transitive<\/option>/);
+  });
+
+  test('the title stays one generic word regardless of which view is open (item 9)', () => {
+    assert.match(INDEX_HTML, /<h2>🔎 Findings — <span id="vulnDialogProject"/);
+    assert.doesNotMatch(INDEX_HTML, /<h2>🔎 Vulnerabilities —/);
+  });
+
+  test('onVulnViewTypeChange and onVulnOriginFilterChange are window-exported (§8.2)', () => {
+    assert.match(INDEX_HTML, /window\.onVulnViewTypeChange\s*=\s*onVulnViewTypeChange/);
+    assert.match(INDEX_HTML, /window\.onVulnOriginFilterChange\s*=\s*onVulnOriginFilterChange/);
+  });
+
+  test('the thead is populated from VULN_TABLE_HEAD, not hard-coded per view in the markup', () => {
+    // A static <thead> would be stuck showing whichever view was written into
+    // the HTML; the head has to follow the dropdown the same way the body does.
+    assert.match(INDEX_HTML, /<thead id="vulnDialogHead"><\/thead>/);
+  });
+});
+
+describe('license risk — dialog state resets and orchestration', () => {
+  test('a fresh dialog open resets the view type and origin filter, in state and in the controls', () => {
+    const fn = extractFunction(INDEX_HTML, 'openVulnDialog');
+    assert.match(fn, /_vulnViewType\s*=\s*'security'/);
+    assert.match(fn, /_vulnOriginFilterMode\s*=\s*'both'/);
+    assert.match(fn, /_vulnShownLicense\s*=\s*null/);
+    assert.match(fn, /viewTypeEl\.value\s*=\s*'security'/);
+    assert.match(fn, /originFiltEl\.value\s*=\s*'both'/);
+  });
+
+  test('License is fetched once per dialog session, not on every switch back to it', () => {
+    const fn = extractFunction(INDEX_HTML, 'onVulnViewTypeChange');
+    assert.match(fn, /_vulnShownLicense\s*!==\s*null/,
+      'a second switch to License must recognise it already has data and skip the fetch');
+  });
+
+  test('switching to License re-checks dependency-path coverage when the toggle is already on', () => {
+    // Tier 2 is per-project, not per-view, but a walk resolved before License
+    // ever loaded cannot have covered components only License's table needs —
+    // onVulnDepPathToggle()'s own targets-coverage check (not a blind skip)
+    // is what decides whether anything new actually needs walking.
+    const fn = extractFunction(INDEX_HTML, 'onVulnViewTypeChange');
+    assert.match(fn, /vulnDepPathToggle'\)\.checked\)\s*onVulnDepPathToggle\(\)/);
+  });
+
+  test('renderVulnRows dispatches on the view type and applies the origin filter locally, never refetching', () => {
+    const fn = extractFunction(INDEX_HTML, 'renderVulnRows');
+    assert.match(fn, /_vulnViewType === 'license'/);
+    assert.match(fn, /vulnLicenseRowHtml/);
+    assert.match(fn, /_vulnOriginFilterMode/);
+    assert.doesNotMatch(fn, /apiFetch|fetch\(/, 'the filter must be local — no network call in the render path');
+  });
+
+  test('the origin filter never hides a row before Tier 1 has classified it', () => {
+    // vulnOriginFor already refuses to guess a badge before Tier 1 resolves
+    // (origin === null); the filter must respect that instead of treating an
+    // unresolved row as excluded.
+    const fn = extractFunction(INDEX_HTML, 'renderVulnRows');
+    assert.match(fn, /_vulnOriginFilterMode !== 'both' && origin\)/,
+      'the filter condition must require a resolved origin before it can exclude a row');
   });
 });

@@ -214,7 +214,7 @@ Inline comments use lettered prefixes to trace design decisions:
 - **O-numbers** — observability notes (`// O3: JSON log format for log aggregators`)
 - **S-numbers** — security rationale (`// S2: token hashed before storage`) — **new in revision 2**
 
-Highest numbers currently in use: **Q27, P20, O5, S34**. When adding logic with a
+Highest numbers currently in use: **Q29, P20, O5, S34**. When adding logic with a
 non-obvious trade-off, add the next number in the appropriate series. Check the
 current maximum before assigning — parallel branches can claim the same number.
 
@@ -500,6 +500,27 @@ component moves nothing in the tree — so the cache is keyed to
 call that fetches the direct set. A row built against an older import is still
 served (something to verify beats nothing while a re-walk has not been asked
 for) but flagged `stale: true`.
+
+**Q29: a manual refetch is the same walk, asked to stop trusting the cache.**
+`runJob(conn, projectUuid, targets, force)`'s fourth parameter skips exactly
+one thing — the "already covered by the cached walk" short-circuit above —
+and nothing else: `force` never touches `_building`, the advisory lock, or
+the route's "already building" 409 check, because a build already running is
+still the same build whether or not the new request asked to force one.
+`POST /violation-cache/dependency-paths/:id` accepts `{ targets?, force? }`
+for exactly this reason — the dialog's "↻ Refetch paths" button (`dashboard/
+index.html`, next to the toggle) always sends `force: true` alongside its own
+`transitiveTargets()`, for when a user suspects the cache and DependencyTrack
+have diverged (a BOM landed after the walk ran and the automatic `stale`
+flag has not yet caught up, or the result simply looks wrong) and does not
+want to wait for the next natural cause of a re-walk. The button is shown
+only once there is something to doubt — `renderVulnRows()` hides it unless
+the toggle is checked *and* `_depPathStatus === 'ready'` — and a click clears
+`_depPathStatus` and re-renders before the request even lands, so stale
+chains and the button itself disappear immediately rather than sitting on
+screen through the round trip. It shares `_depPathReqSeq` and
+`startDepPathPoll` with the toggle, so a superseded refetch (the dialog
+closed, or the toggle unchecked, mid-request) is handled the identical way.
 
 **Bounded the same way the snapshot crawl is** (§6.3): `MAX_GRAPH_NODES`
 caps how many components one walk will ever discover, so a toggle click cannot
@@ -998,10 +1019,12 @@ Four rules the panel must keep:
   hex in an SVG attribute is precisely where that mistake hides from a CSS
   review, so a test forbids one in `TREND_LEVELS`.
 
-**The vulnerability detail dialog is an icon on the row, not a column.** A 👁
-button sits inside the existing project-name `<td>`, before the tree toggle, on
-any leaf row `hasVulnerabilities()` says is nonzero — never on a group row,
-which has no DependencyTrack project of its own to query. Three rules govern it:
+**The findings dialog is an icon on the row, not a column.** A 👁 button sits
+inside the existing project-name `<td>`, before the tree toggle, on any leaf
+row `hasVulnerabilities()` **or** `hasLicenseRisk()` says is nonzero — never on
+a group row, which has no DependencyTrack project of its own to query. A
+project clean on CVEs but failing a license policy still gets the icon; one
+clean on both gets none. Three rules govern the security half of it:
 
 - **Q24: it mirrors `lib/reports.js`'s finding query byte for byte**, not the
   cleaner-looking `/api/v1/finding/project/{uuid}` path endpoint. The report's
@@ -1037,13 +1060,13 @@ class as the CWE helpers above; a cross-file test asserts the two agree.
   `_vulnDirectKeys`/`_depPathStatus`/`_depPathPaths` fresh each time, so the
   table can never show one row's badge computed against a different project's
   data. A Transitive finding with a resolved chain draws as **two** `<tr>`s —
-  the finding row from `vulnRowHtml()`, immediately followed by a full-width
-  `colspan="8"` detail row from `vulnDepPathRowHtml()` — never squeezed into
-  the Origin cell itself. `.vuln-table` is `table-layout: fixed` with widths
-  declared once on the header cells (§8.10) specifically so that appearing,
-  changing, or disappearing detail row can never resize the other seven
-  columns — before this, checking the toggle visibly reflowed the whole table
-  on every render.
+  the finding row (`vulnRowHtml()` or `vulnLicenseRowHtml()`, whichever view
+  is showing), immediately followed by a full-width detail row from
+  `vulnDepPathRowHtml()` — never squeezed into the Origin cell itself.
+  `.vuln-table` is `table-layout: fixed` with widths declared once on the
+  header cells (§8.10) specifically so that an appearing, changing, or
+  disappearing detail row can never resize the other columns — before this,
+  checking the toggle visibly reflowed the whole table on every render.
 - **A cache hit skips the network entirely.** `loadVulnOrigins()`'s single GET
   already returns whatever the cached walk currently knows, so if `status` is
   already `'ready'` — because another user resolved this project's paths, or
@@ -1055,6 +1078,54 @@ class as the CWE helpers above; a cross-file test asserts the two agree.
   whatever the previous poll was waiting on without disturbing an
   already-rendered findings table. `closeModal('vulnDialog')` stops the poll
   outright, the same way it already stops the reports modal's.
+
+**Q28: one dialog, two independent tables, picked by a dropdown — not two
+dialogs, and not one table with mixed rows.** `#vulnViewType` selects Security
+Violations or License Risk; `#vulnOriginFilter` (Both/Direct/Transitive) is a
+second, purely local dropdown that filters whichever table is showing, with no
+network call — it is applied inside `renderVulnRows()` itself, and it never
+excludes a row before Tier 1 has classified it (`origin === null` passes
+through unfiltered, the same "never guess a badge" rule `vulnOriginFor()`
+already follows). The title stays one generic word — "🔎 Findings —", not
+"Vulnerabilities" or "License Risk" — regardless of which table is open, so
+the project name/version (`.vuln-dialog-project-tag`, accent-coloured) carries
+its own visual weight instead of relying on a type-specific heading next to it.
+
+- **Security is fetched eagerly on open; License is fetched lazily, once,
+  the first time the dropdown reaches it.** `_vulnShownLicense` stays `null`
+  until then and is never reset back to `null` for the rest of the dialog
+  session, so flipping the dropdown back and forth after that first fetch is
+  free — the same "no network call for a local control" rule the origin
+  filter follows. `vulnLicenseQuery()` mirrors `lib/reports.js`'s
+  `streamViolationsForProject()` (`riskType=LICENSE`) byte for byte, the same
+  Q24 reasoning as `vulnFindingsQuery()` — DT's `project={uuid}` filter is
+  silently ignored on some versions, so both search by project name and
+  filter the response by exact uuid match afterwards.
+- **The colspan a Transitive row's path detail spans follows the view
+  type — `VULN_TABLE_COLS[_vulnViewType]`, not a number hard-coded to one
+  table.** Security has eight columns, License has six (Component, Current,
+  License, Policy, State, Origin); the `<thead>` itself is populated from
+  `VULN_TABLE_HEAD[_vulnViewType]` for the same reason, rather than being
+  static markup that would freeze on whichever view happened to be first.
+- **`transitiveTargets()` is the union of both tables' components, not just
+  the one currently showing.** Tier 2 is cached per project (§6.3a), not per
+  view, so a walk that already covers the Security view's transitive
+  components should not be thrown away just because License also needs a
+  couple more — `runJob`'s `storeResult` **overwrites** the stored `paths`
+  with exactly what it was asked for, so asking for a narrower set on a
+  second walk would silently lose the first one's results. `_vulnShownLicense`
+  being `null` (not yet fetched) simply drops out of the union rather than
+  being treated as "known to need nothing."
+- **The toggle's own "already ready" fast path checks target coverage, not
+  just status.** `onVulnDepPathToggle()` used to trust a `_depPathStatus ===
+  'ready'` flag on its own; switching to License after an earlier walk can
+  enlarge `transitiveTargets()` with components that walk was never asked
+  about, and a stale-but-locally-`'ready'` status would otherwise skip
+  straight to rendering "no path recorded" for them. The fast path now also
+  requires `targets.every(t => t in _depPathPaths)` — which is also what
+  makes it safe for `onVulnViewTypeChange()` to simply call
+  `onVulnDepPathToggle()` again when License finishes loading and the toggle
+  is already checked, rather than duplicating its walk-starting logic.
 
 Adding a page needs no nginx change: `try_files` serves a real file before the
 SPA fallback is considered.
@@ -1293,11 +1364,15 @@ The frontend never performs uniqueness checks — those are backend-only, via
 | `trendNiceCeil(max)` | frontend | Round axis ceiling; never 0, because every y divides by it |
 | `trendCarry(rows)` | frontend | Carry the last reading over unrefreshed days; flags which positions were inherited |
 | `trendLinePath` / `trendAreaPath` | frontend | SVG paths that break at `null` — what lets the solid overlay reveal the dashed bridge |
-| `hasVulnerabilities(node)` / `vulnEyeIconHtml(node, isGroup)` | frontend | Gate and render the 👁 icon on a leaf row |
+| `hasVulnerabilities(node)` / `hasLicenseRisk(node)` / `vulnEyeIconHtml(node, isGroup)` | frontend | Gate (on either finding type) and render the 👁 icon on a leaf row |
 | `vulnFindingsQuery(name, version, page)` | frontend | The finding-search query, mirroring `lib/reports.js`'s `fetchAllFindings()` (Q24) |
+| `vulnLicenseQuery(name, page)` | frontend | The license-violation search query, mirroring `lib/reports.js`'s `streamViolationsForProject()` (Q24, Q28) |
 | `sortFindingsBySeverity(findings)` | frontend | Worst severity, then highest CVSS, first |
 | `componentKeyOf(c)` | frontend | Component identity: purl, or group/name/version — mirrors `lib/dependency-paths.js`'s `componentKey()` |
-| `vulnOriginCellHtml(origin)` / `vulnOriginFor(finding, showPaths)` | frontend | Render and compute a row's Direct/Transitive badge and, once resolved, its chain |
+| `vulnRowHtml(finding, origin)` / `vulnLicenseRowHtml(violation, origin)` | frontend | One `<tr>` for a Security or License row, each with its own column set |
+| `vulnOriginCellHtml(origin)` / `vulnOriginFor(finding, showPaths)` | frontend | Render and compute a row's Direct/Transitive badge — takes either finding type, since origin is a component property |
+| `vulnDepPathRowHtml(origin)` | frontend | The full-width path detail row; its `colspan` follows `VULN_TABLE_COLS[_vulnViewType]` (Q28) |
+| `transitiveTargets()` | frontend | The union of both tables' transitive components, so a walk never loses coverage when the view switches (Q28) |
 | `query(sql, params)` / `tx(fn)` | server | All database access |
 | `makeSemaphore(limit)` | server | Promise concurrency limit |
 | `sleep(ms)` | server | Promise delay |
@@ -1587,6 +1662,17 @@ Running the browser checks in CI was on this list and is now the `e2e` job.
   that module pulls in other `lib/` modules at load time, unlike `lib/cwe.js`,
   so it needs a real `require()` rather than a `new Function()` sandbox with
   no resolver.
+- License risk (Q28, §8.1): `vulnLicenseQuery()` checked against
+  `streamViolationsForProject()`'s own source the same way `vulnFindingsQuery()`
+  is checked against `fetchAllFindings()`'s — sliced to that function
+  specifically, since both functions in `lib/reports.js` name their query
+  array `baseQs` and a plain regex would otherwise silently grab the wrong
+  one; `vulnLicenseRowHtml()`'s license-name precedence (resolved name →
+  license id → the raw policy-condition value → an em dash, never blank);
+  `vulnDepPathRowHtml()`'s colspan following `_vulnViewType`; `renderVulnRows()`
+  never excluding a row via the origin filter before Tier 1 has classified it;
+  `transitiveTargets()`'s union across both tables, including that a
+  not-yet-fetched License view is excluded rather than treated as empty.
 - **Authorisation:** every route rejects a missing or invalid token with 401;
   cross-user access returns 404; the profile endpoint ignores login ID and email.
 - Do **not** write tests that require a live DT API.

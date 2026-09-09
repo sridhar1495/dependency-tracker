@@ -580,6 +580,21 @@
     .vuln-eye-btn:hover { color: var(--accent); background: var(--surface2); }
 
     /* ── Vulnerability detail dialog ─────────────────────────────────────── */
+    /* One dialog, two independent findings tables (security, license) — the
+       view-type dropdown picks which is fetched/shown, the origin filter is a
+       second, purely local dropdown that applies to whichever is on screen. */
+    .vuln-dialog-controls {
+      display: flex; gap: 14px; flex-wrap: wrap; margin-bottom: 4px;
+    }
+    .vuln-dialog-controls label {
+      display: flex; align-items: center; gap: 6px;
+      font-size: 12px; color: var(--text-muted);
+    }
+    /* The title stays one generic word regardless of which table is open
+       (item 9) — "Findings", not "Vulnerabilities" or "License Risk" — so
+       the project/version needs to carry its own visual weight rather than
+       relying on being paired with a type-specific heading. */
+    .vuln-dialog-project-tag { font-weight: 700; color: var(--accent); }
     .vuln-table-wrap { max-height: 480px; overflow-y: auto; margin-top: 10px; }
     /* table-layout: fixed — a Transitive row's chain used to live inline in
        the Origin cell, so checking the toggle grew that column and reflowed
@@ -603,7 +618,25 @@
     .vuln-table th:nth-child(6) { width: 10%; } /* Current */
     .vuln-table th:nth-child(7) { width: 10%; } /* Latest */
     .vuln-table th:nth-child(8) { width: 10%; } /* Origin */
+    /* License view has a different, shorter column set — six, not eight — so
+       it gets its own widths behind a modifier class rather than trying to
+       make one set of nth-child rules fit both tables (§8.1: the security
+       and license tables are rendered by two different row functions, joined
+       only by the shared Origin/dependency-path columns). */
+    .vuln-table.vuln-table--license th:nth-child(1) { width: 28%; } /* Component */
+    .vuln-table.vuln-table--license th:nth-child(2) { width: 12%; } /* Current */
+    .vuln-table.vuln-table--license th:nth-child(3) { width: 20%; } /* License */
+    .vuln-table.vuln-table--license th:nth-child(4) { width: 20%; } /* Policy */
+    .vuln-table.vuln-table--license th:nth-child(5) { width: 10%; } /* State */
+    .vuln-table.vuln-table--license th:nth-child(6) { width: 10%; } /* Origin */
     .vuln-table td {
+      /* The page's bare `td { text-align: center }` rule (for the main risk
+         table's numeric cells) has no class scope, so without an explicit
+         override here it leaks into every vuln-table cell too — invisible on
+         a narrow column, but glaring on the full-width colspan'd path row,
+         which centres a short chain in the middle of the whole table instead
+         of the left edge its header already uses. */
+      text-align: left;
       padding: 8px 10px; border-bottom: 1px solid var(--border); vertical-align: top;
       overflow-wrap: break-word;
     }
@@ -1287,35 +1320,58 @@
   </div>
 </div>
 
-<!-- ── Vulnerability detail dialog ─────────────────────────────────────────
-     Opened from the 👁 icon on a project row. Findings are fetched live from
-     DependencyTrack through the existing read proxy every time it opens — the
-     data is never cached client-side, so it is always current with whatever
-     the last refetch (or DT itself) knows. -->
+<!-- ── Findings detail dialog ───────────────────────────────────────────────
+     Opened from the 👁 icon on a project row. One dialog, two independent
+     tables — Security Violations and License Risk — picked by the view-type
+     dropdown; both are fetched live from DependencyTrack through the existing
+     read proxy, never cached beyond one dialog session. -->
 <div class="modal-overlay" id="vulnDialog">
   <div class="modal" style="width:980px;max-width:96vw">
     <button class="modal-close" onclick="closeModal('vulnDialog')">&times;</button>
-    <h2>🔎 Vulnerabilities — <span id="vulnDialogProject"></span></h2>
+    <h2>🔎 Findings — <span id="vulnDialogProject" class="vuln-dialog-project-tag"></span></h2>
     <div id="vulnDialogBody">
+      <div class="vuln-dialog-controls">
+        <label>
+          <span>Show</span>
+          <select class="filter-select" id="vulnViewType" onchange="onVulnViewTypeChange()">
+            <option value="security">Security Violations</option>
+            <option value="license">License Risk</option>
+          </select>
+        </label>
+        <label>
+          <span>Origin</span>
+          <select class="filter-select" id="vulnOriginFilter" onchange="onVulnOriginFilterChange()">
+            <option value="both" selected>Both</option>
+            <option value="direct">Direct</option>
+            <option value="transitive">Transitive</option>
+          </select>
+        </label>
+      </div>
       <div class="vuln-dialog-status" id="vulnDialogStatus"></div>
       <!-- Off by default: the Direct/Transitive badge is always live and free,
            but the path behind a Transitive tag costs a graph walk, so showing
-           it is a deliberate click, not a side effect of opening the dialog. -->
+           it is a deliberate click, not a side effect of opening the dialog.
+           Shared by both tables — origin is a component property, not a
+           finding-type one. -->
       <div class="dep-path-toggle-row" id="vulnDepPathToggleWrap" hidden>
         <label class="cfg-inline-toggle" title="Resolve how each transitive finding reaches this project">
           <input type="checkbox" id="vulnDepPathToggle" onchange="onVulnDepPathToggle()">
           <span>Show full dependency paths (may take a moment)</span>
         </label>
+        <!-- Q29: a cached walk can disagree with DependencyTrack's current
+             state (a new BOM landed, or the cache simply looks wrong) — this
+             re-walks regardless of what is already stored, rather than
+             waiting for the toggle's own "already ready" fast path to trust
+             it. Shown only once there is something to doubt. -->
+        <button type="button" class="btn-xs" id="vulnDepPathRefetchBtn"
+                onclick="onVulnDepPathRefetch()" title="Re-walk DependencyTrack now, ignoring the cached result" hidden>
+          ↻ Refetch paths
+        </button>
         <p class="dep-path-status" id="vulnDepPathStatus" hidden></p>
       </div>
       <div class="vuln-table-wrap" id="vulnDialogTableWrap" hidden>
-        <table class="vuln-table">
-          <thead>
-            <tr>
-              <th>Vulnerability</th><th>Severity</th><th>CVSS</th><th>CWE</th>
-              <th>Component</th><th>Current</th><th>Latest</th><th>Origin</th>
-            </tr>
-          </thead>
+        <table class="vuln-table" id="vulnDialogTable">
+          <thead id="vulnDialogHead"></thead>
           <tbody id="vulnDialogRows"></tbody>
         </table>
       </div>
@@ -3904,6 +3960,26 @@ function vulnFindingsQuery(name, version, pageNumber) {
   ].join('&');
 }
 
+/**
+ * Mirrors violation-cache/lib/reports.js's streamViolationsForProject() query
+ * for riskType=license, byte for byte — the same Q24 reasoning as
+ * vulnFindingsQuery above: DT's project={uuid} filter is silently ignored on
+ * some versions, so the report path (already proven in production) searches
+ * by project name and the caller filters by exact uuid match afterwards,
+ * rather than trusting a second, untested filter for the dialog alone.
+ */
+function vulnLicenseQuery(name, pageNumber) {
+  return [
+    'showInactive=false',
+    'suppressed=false',
+    'riskType=LICENSE',
+    'textSearchField=project_name',
+    `textSearchInput=${encodeURIComponent(name)}`,
+    `pageSize=${CONFIG.VULN_PAGE_SIZE}`,
+    `pageNumber=${pageNumber}`,
+  ].join('&');
+}
+
 // CWE helpers mirror violation-cache/lib/cwe.js's cweIdsOf()/cweLabel(). The
 // browser cannot require() that module — there is no build step to share one
 // (§3) — so this is the same small duplication §8.8 already accepts for
@@ -3964,7 +4040,16 @@ function vulnOriginCellHtml(origin) {
  * found, never a single chain plus a "+more" flag — see lib/dependency-
  * paths.js's walkGraph. Empty string when there is nothing to show yet, so
  * the caller renders no row at all rather than an empty one.
+ *
+ * Shared by both tables — origin is a component property, not a
+ * finding-type one — so its colspan follows whichever is currently showing
+ * (VULN_TABLE_COLS), not a number hard-coded to one table's column count.
  */
+const VULN_TABLE_COLS = {
+  security: 8,
+  license:  6,
+};
+
 function vulnDepPathRowHtml(origin) {
   if (!origin || origin.direct) return '';
   let body;
@@ -3977,7 +4062,8 @@ function vulnDepPathRowHtml(origin) {
   } else {
     return '';
   }
-  return `<tr class="dep-path-row"><td colspan="8">${body}</td></tr>`;
+  const cols = VULN_TABLE_COLS[_vulnViewType] || 8;
+  return `<tr class="dep-path-row"><td colspan="${cols}">${body}</td></tr>`;
 }
 
 /** One <tr> for the dialog table. Pure — every field passes through escHtml(). */
@@ -4001,6 +4087,32 @@ function vulnRowHtml(finding, origin) {
     + `</tr>`;
 }
 
+/**
+ * One <tr> for a license-risk row — the same duplication-by-necessity as
+ * vulnRowHtml, just against violation-cache/lib/reports.js's license
+ * violation shape instead of a finding's. Pure — every field passes through
+ * escHtml(). `resolvedLicense` wins over the raw policy-condition value
+ * because it is what DependencyTrack itself resolved the component to; the
+ * condition value is what is left when DT could not resolve one at all.
+ */
+function vulnLicenseRowHtml(violation, origin) {
+  const c   = violation.component || {};
+  const pc  = violation.policyCondition || {};
+  const pol = pc.policy || {};
+  const state    = (pol.violationState || 'INFO').toUpperCase();
+  const stClass  = LEVEL_CSS[state.toLowerCase()] || 'unassigned';
+  const component = [c.name, c.group].filter(Boolean).join('-') || c.name || '';
+  const license = (c.resolvedLicense && (c.resolvedLicense.name || c.resolvedLicense.licenseId)) || pc.value || '—';
+  return `<tr>`
+    + `<td class="vuln-component">${escHtml(component)}</td>`
+    + `<td>${escHtml(c.version || '—')}</td>`
+    + `<td>${escHtml(license)}</td>`
+    + `<td>${escHtml(pol.name || '—')}</td>`
+    + `<td><span class="pill pill-${stClass}">${escHtml(state)}</span></td>`
+    + `<td class="vuln-origin">${vulnOriginCellHtml(origin)}</td>`
+    + `</tr>`;
+}
+
 // Guards against a stale response landing after a newer click. The period
 // control on the trend panel has the identical problem for the same reason:
 // a slow first request can resolve after a fast second one already took over
@@ -4011,23 +4123,49 @@ let _vulnReqSeq          = 0;
 let _depPathReqSeq       = 0;
 let _depPathPollTimer    = null;
 let _vulnCurrentProject  = null; // the DT project uuid the open dialog is showing
-let _vulnShownFindings   = [];   // the rendered slice, kept so a toggle can re-render without refetching
+let _vulnShownFindings   = [];   // security findings — the rendered slice, kept so a toggle can re-render without refetching
+let _vulnShownLicense    = null; // LicenseViolation[] | null while the license view has not been fetched this dialog session
+let _vulnViewType        = 'security'; // 'security' | 'license' — which table onVulnViewTypeChange() has selected
+let _vulnOriginFilterMode = 'both';    // 'both' | 'direct' | 'transitive' — local, no refetch (CLAUDE.md §8.1)
 let _vulnDirectKeys      = null; // Set<componentKey> | null while Tier 1 has not returned yet
 let _depPathStatus       = 'none';
 let _depPathStale        = false;
 let _depPathPaths        = {};
 
-/** Rebuilds the table body from what is already known — never refetches. */
+/**
+ * Rebuilds the table body from what is already known — never refetches.
+ * Branches on the view-type dropdown (security/license) for which array and
+ * row renderer to use, then applies the origin-filter dropdown (Both/Direct/
+ * Transitive) locally. The filter passes everything through while Tier 1 has
+ * not resolved yet (origin === null) rather than guessing a row's origin to
+ * decide whether to hide it — the same "never guess" rule vulnOriginFor
+ * itself already follows; it narrows once Tier 1 answers.
+ */
 function renderVulnRows() {
   const rowsEl = document.getElementById('vulnDialogRows');
   const toggle = document.getElementById('vulnDepPathToggle');
-  const showPaths = toggle && toggle.checked;
-  rowsEl.innerHTML = _vulnShownFindings
-    .map(f => {
-      const origin = vulnOriginFor(f, showPaths);
-      return vulnRowHtml(f, origin) + vulnDepPathRowHtml(origin);
+  const showPaths  = toggle && toggle.checked;
+  const isLicense  = _vulnViewType === 'license';
+  const source     = isLicense ? (_vulnShownLicense || []) : _vulnShownFindings;
+  const rowHtmlFor = isLicense ? vulnLicenseRowHtml : vulnRowHtml;
+
+  rowsEl.innerHTML = source
+    .map(item => {
+      const origin = vulnOriginFor(item, showPaths);
+      if (_vulnOriginFilterMode !== 'both' && origin) {
+        const wantDirect = _vulnOriginFilterMode === 'direct';
+        if (Boolean(origin.direct) !== wantDirect) return '';
+      }
+      return rowHtmlFor(item, origin) + vulnDepPathRowHtml(origin);
     })
     .join('');
+
+  // Q29: this is the one place dep-path state is already known reliably
+  // fresh — same reasoning as setCacheBuilding() disabling the toolbar's own
+  // refresh control alongside its banner. Nothing to refetch while the paths
+  // are not even being shown, or while there is not yet a resolved walk to
+  // doubt.
+  document.getElementById('vulnDepPathRefetchBtn').hidden = !(showPaths && _depPathStatus === 'ready');
 }
 
 /**
@@ -4038,14 +4176,27 @@ function renderVulnRows() {
  * `null` while Tier 1 has not resolved yet asks the backend for its safe
  * default (a full walk) rather than "walk nothing" — that case does not
  * arise in practice because the toggle stays hidden until Tier 1 returns.
+ *
+ * The union of both tables, not just whichever is currently showing: Tier 2
+ * is cached per project, not per view, so a walk started from the Security
+ * view already covers the License view's components too where the two
+ * overlap, and switching views must not throw away that coverage by asking
+ * for a narrower set on the next walk (runJob's storeResult overwrites the
+ * stored paths with exactly what it was asked for — see
+ * ensureDepPathsCoverCurrentTargets()). _vulnShownLicense is null before its
+ * first fetch and is simply excluded from the union until then.
  */
 function transitiveTargets() {
   if (!_vulnDirectKeys) return null;
   const keys = new Set();
-  for (const f of _vulnShownFindings) {
-    const key = componentKeyOf(f.component || {});
-    if (!_vulnDirectKeys.has(key)) keys.add(key);
-  }
+  const addFrom = (list) => {
+    for (const item of list) {
+      const key = componentKeyOf(item.component || {});
+      if (!_vulnDirectKeys.has(key)) keys.add(key);
+    }
+  };
+  addFrom(_vulnShownFindings);
+  if (_vulnShownLicense) addFrom(_vulnShownLicense);
   return [...keys];
 }
 
@@ -4158,7 +4309,12 @@ async function onVulnDepPathToggle() {
     return;
   }
 
-  if (_depPathStatus === 'ready') {
+  // Ready is only a fast path when it is ready for THESE targets. Switching
+  // to the License view after an earlier walk can enlarge transitiveTargets()
+  // with components the prior walk was never asked about — trusting a stale
+  // 'ready' here would skip straight to rendering "no path recorded" for
+  // them instead of asking the backend to extend coverage.
+  if (_depPathStatus === 'ready' && targets.every(t => t in _depPathPaths)) {
     // Already resolved — from this same GET on dialog open, or a previous
     // toggle this session. Render immediately; no walk needed.
     renderVulnRows();
@@ -4193,6 +4349,66 @@ async function onVulnDepPathToggle() {
   startDepPathPoll(_vulnCurrentProject, seq);
 }
 
+/**
+ * Q29: re-walk regardless of what is currently cached — for when a user
+ * suspects the cached result and DependencyTrack's own state have diverged
+ * (a newer BOM landed after the walk ran, say, or the cache just looks
+ * wrong). Shares `_depPathReqSeq`/`startDepPathPoll` with the toggle so a
+ * superseded click (unchecking the toggle, or closing the dialog, mid-
+ * refetch) is handled the identical way.
+ */
+async function onVulnDepPathRefetch() {
+  if (!_vulnCurrentProject) return;
+  const statusEl = document.getElementById('vulnDepPathStatus');
+  const seq      = ++_depPathReqSeq;
+  const targets  = transitiveTargets();
+
+  statusEl.hidden = false;
+  statusEl.textContent = 'Refetching dependency paths…';
+  // The point of asking is not to trust what is cached — clearing status
+  // before the request even lands hides the refetch button and any now-
+  // suspect chains immediately, through the same render path the toggle uses.
+  _depPathStatus = 'none';
+  renderVulnRows();
+
+  try {
+    const opts = {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ targets, force: true }),
+    };
+    const r = await apiFetch(
+      `/violation-cache/dependency-paths/${encodeURIComponent(_vulnCurrentProject)}`, opts);
+    if (seq !== _depPathReqSeq) return;
+    if (!r.ok && r.status !== 409) {
+      const detail = await r.json().catch(() => ({}));
+      statusEl.textContent = `Could not start refetch: ${detail.error || r.status}`;
+      return;
+    }
+  } catch (err) {
+    if (seq !== _depPathReqSeq) return;
+    statusEl.textContent = `Could not start refetch: ${err.message}`;
+    return;
+  }
+  startDepPathPoll(_vulnCurrentProject, seq);
+}
+
+// Which <thead> to show for the current view — declared once, reused by
+// renderVulnTableHead() and vulnDepPathRowHtml()'s VULN_TABLE_COLS colspan
+// above so the two can never disagree about how many columns a view has.
+const VULN_TABLE_HEAD = {
+  security: '<tr><th>Vulnerability</th><th>Severity</th><th>CVSS</th><th>CWE</th>'
+          + '<th>Component</th><th>Current</th><th>Latest</th><th>Origin</th></tr>',
+  license: '<tr><th>Component</th><th>Current</th><th>License</th><th>Policy</th>'
+         + '<th>State</th><th>Origin</th></tr>',
+};
+
+function renderVulnTableHead() {
+  document.getElementById('vulnDialogHead').innerHTML = VULN_TABLE_HEAD[_vulnViewType];
+  document.getElementById('vulnDialogTable')
+    .classList.toggle('vuln-table--license', _vulnViewType === 'license');
+}
+
 async function openVulnDialog(uuid) {
   const node = nodeMap.get(uuid);
   if (!node) return;
@@ -4206,6 +4422,9 @@ async function openVulnDialog(uuid) {
   const toggleWrapEl = document.getElementById('vulnDepPathToggleWrap');
   const toggleEl     = document.getElementById('vulnDepPathToggle');
   const depStatusEl  = document.getElementById('vulnDepPathStatus');
+  const refetchBtnEl = document.getElementById('vulnDepPathRefetchBtn');
+  const viewTypeEl   = document.getElementById('vulnViewType');
+  const originFiltEl = document.getElementById('vulnOriginFilter');
   wrapEl.hidden = true;
   noteEl.hidden = true;
   rowsEl.innerHTML = '';
@@ -4213,19 +4432,26 @@ async function openVulnDialog(uuid) {
   statusEl.textContent = 'Loading…';
 
   // A fresh project resets every piece of origin state — a stale toggle,
-  // status line or cached path from whatever was open before must not bleed
-  // into the new one.
+  // status line, cached path or dropdown selection from whatever was open
+  // before must not bleed into the new one.
   stopDepPathPoll();
   ++_depPathReqSeq;
-  _vulnCurrentProject = uuid;
-  _vulnShownFindings  = [];
-  _vulnDirectKeys     = null;
-  _depPathStatus      = 'none';
-  _depPathStale       = false;
-  _depPathPaths       = {};
+  _vulnCurrentProject   = uuid;
+  _vulnShownFindings    = [];
+  _vulnShownLicense     = null;
+  _vulnViewType         = 'security';
+  _vulnOriginFilterMode = 'both';
+  _vulnDirectKeys       = null;
+  _depPathStatus        = 'none';
+  _depPathStale         = false;
+  _depPathPaths         = {};
   toggleWrapEl.hidden = true;
   toggleEl.checked    = false;
   depStatusEl.hidden  = true;
+  refetchBtnEl.hidden = true;
+  viewTypeEl.value    = 'security';
+  originFiltEl.value  = 'both';
+  renderVulnTableHead();
 
   openModal('vulnDialog');
 
@@ -4242,8 +4468,15 @@ async function openVulnDialog(uuid) {
     const findings = await fetchProjectFindings(node.name, node.version || '', seq);
     if (seq !== _vulnReqSeq) return; // superseded by a newer click
 
+    // The dropdowns are reachable the instant the dialog opens, before this
+    // fetch resolves — a user who switches to License while Security is
+    // still loading must not have that switch's own "Loading…"/table state
+    // clobbered by this fetch landing afterwards. The data is still worth
+    // keeping either way, so _vulnShownFindings and renderVulnRows() (which
+    // reads _vulnViewType itself and so stays correct either way) always run;
+    // only the status/wrap/note UI is guarded to the view that asked for it.
     if (findings.length === 0) {
-      statusEl.textContent = 'No open vulnerabilities were found for this project.';
+      if (_vulnViewType === 'security') statusEl.textContent = 'No open vulnerabilities were found for this project.';
       return;
     }
 
@@ -4251,11 +4484,13 @@ async function openVulnDialog(uuid) {
     const shown  = sorted.slice(0, CONFIG.VULN_MAX_ROWS);
     _vulnShownFindings = shown;
     renderVulnRows();
-    statusEl.hidden = true;
-    wrapEl.hidden = false;
-    if (sorted.length > shown.length) {
-      noteEl.hidden = false;
-      noteEl.textContent = `Showing the ${shown.length} most severe of ${sorted.length} findings.`;
+    if (_vulnViewType === 'security') {
+      statusEl.hidden = true;
+      wrapEl.hidden = false;
+      if (sorted.length > shown.length) {
+        noteEl.hidden = false;
+        noteEl.textContent = `Showing the ${shown.length} most severe of ${sorted.length} findings.`;
+      }
     }
 
     // Fire-and-forget: the findings the user came for are already on screen.
@@ -4291,6 +4526,112 @@ async function fetchProjectFindings(name, version, seq) {
     page++;
   }
   return all;
+}
+
+/**
+ * Page through DT's license-violation search for one project, the same
+ * pagination boundary violation-cache/lib/reports.js's
+ * streamViolationsForProject() uses (fetched vs. filtered counted
+ * separately — X-Total-Count reflects the unfiltered text-search match,
+ * which can include partial-name matches from other projects). Bounded at
+ * CONFIG.VULN_MAX_ROWS for the same reason fetchProjectFindings is.
+ */
+async function fetchProjectLicenseViolations(name, uuid, seq) {
+  const all = [];
+  let fetched = 0;
+  let page = 1;
+  while (true) {
+    if (seq !== _vulnReqSeq) return all; // superseded — stop fetching, not just stop rendering
+    const qs  = vulnLicenseQuery(name, page);
+    const res = await apiFetch(`${DT_PROXY}/api/v1/violation?${qs}`);
+    if (!res.ok) {
+      const detail = await res.json().catch(() => ({}));
+      throw new Error(detail.error || `HTTP ${res.status}`);
+    }
+    const batch = await res.json();
+    const arr = Array.isArray(batch) ? batch : [];
+    // DT's project={uuid} filter is silently ignored on some versions (the
+    // same reason streamViolationsForProject text-searches by name) — keep
+    // only violations whose project uuid matches exactly.
+    for (const v of arr) {
+      if (v.project && v.project.uuid === uuid) all.push(v);
+    }
+    fetched += arr.length;
+    const total = parseInt(res.headers.get('X-Total-Count') || '0', 10);
+    if (arr.length < CONFIG.VULN_PAGE_SIZE || (total > 0 && fetched >= total)) break;
+    if (all.length >= CONFIG.VULN_MAX_ROWS) break;
+    page++;
+  }
+  return all;
+}
+
+/**
+ * Switches which table is showing. Security findings are always fetched on
+ * open; License risk is fetched lazily, the first time this dropdown reaches
+ * it, and kept for the rest of the dialog session (_vulnShownLicense stays
+ * an array, never reset back to null, so flipping the dropdown back and
+ * forth never refetches — CLAUDE.md §8.1's "no network call for either
+ * dropdown" applies to the view switch too once the first fetch is done).
+ */
+async function onVulnViewTypeChange() {
+  _vulnViewType = document.getElementById('vulnViewType').value;
+  renderVulnTableHead();
+
+  const node = nodeMap.get(_vulnCurrentProject);
+  const statusEl  = document.getElementById('vulnDialogStatus');
+  const wrapEl    = document.getElementById('vulnDialogTableWrap');
+  const noteEl    = document.getElementById('vulnDialogNote');
+  const isLicense = _vulnViewType === 'license';
+
+  if (!isLicense || _vulnShownLicense !== null || !node) {
+    // Security is always already loaded by the time this dropdown exists;
+    // license already loaded too — just re-render from what is in hand.
+    const source = isLicense ? (_vulnShownLicense || []) : _vulnShownFindings;
+    const empty  = source.length === 0;
+    wrapEl.hidden   = empty;
+    statusEl.hidden = !empty;
+    if (empty) {
+      statusEl.textContent = isLicense
+        ? 'No license violations were found for this project.'
+        : 'No open vulnerabilities were found for this project.';
+    }
+    // The truncation note only ever describes the initial security fetch —
+    // hide it for License; leave it as openVulnDialog set it for Security.
+    if (isLicense) noteEl.hidden = true;
+    renderVulnRows();
+    return;
+  }
+
+  wrapEl.hidden = true;
+  statusEl.hidden = false;
+  statusEl.textContent = 'Loading…';
+  const seq = _vulnReqSeq; // this dialog session's fetch guard — not bumped, license shares the security fetch's session
+  try {
+    const violations = await fetchProjectLicenseViolations(node.name, _vulnCurrentProject, seq);
+    if (seq !== _vulnReqSeq || _vulnViewType !== 'license') return; // superseded by a newer click or another view switch
+    _vulnShownLicense = violations;
+
+    if (violations.length === 0) {
+      statusEl.textContent = 'No license violations were found for this project.';
+      return;
+    }
+    statusEl.hidden = true;
+    wrapEl.hidden = false;
+    renderVulnRows();
+
+    // A walk already resolved for the Security view may not cover this
+    // view's transitive components yet — extend it if the toggle is on.
+    if (document.getElementById('vulnDepPathToggle').checked) onVulnDepPathToggle();
+  } catch (err) {
+    if (seq !== _vulnReqSeq || _vulnViewType !== 'license') return;
+    statusEl.textContent = `Could not load license violations: ${err.message}`;
+  }
+}
+
+/** Both/Direct/Transitive — a local filter over whichever table is showing, never a refetch. */
+function onVulnOriginFilterChange() {
+  _vulnOriginFilterMode = document.getElementById('vulnOriginFilter').value;
+  renderVulnRows();
 }
 
 // ══ Risk trend panel ═══════════════════════════════════════════════════════
@@ -5330,13 +5671,23 @@ function hasVulnerabilities(node) {
   return (s.critical||0) + (s.high||0) + (s.medium||0) + (s.low||0) + (s.unassigned||0) > 0;
 }
 
+// True when a leaf project's embedded license metrics carry at least one
+// violation of any state — the same shape as hasVulnerabilities(), against
+// node.license instead of node.security (§8.6).
+function hasLicenseRisk(node) {
+  const l = (node && node.license) || {};
+  return (l.fail||0) + (l.warn||0) + (l.info||0) + (l.unassigned||0) > 0;
+}
+
 // Only for leaf rows — a group row aggregates its descendants' counts but has
 // no DependencyTrack project of its own to ask for findings, so there is
-// nothing behind the icon to open (§8.6: parent rows are synthetic).
+// nothing behind the icon to open (§8.6: parent rows are synthetic). The icon
+// shows for either finding type: a project clean on CVEs but failing license
+// policy still has something the dialog behind this icon can show.
 function vulnEyeIconHtml(node, isGroup) {
-  if (isGroup || !hasVulnerabilities(node)) return '';
+  if (isGroup || (!hasVulnerabilities(node) && !hasLicenseRisk(node))) return '';
   return `<button type="button" class="vuln-eye-btn" onclick="event.stopPropagation();openVulnDialog('${node.uuid}')" `
-       + `title="View vulnerabilities for ${escHtml(node.name)}" aria-label="View vulnerabilities">👁</button>`;
+       + `title="View findings for ${escHtml(node.name)}" aria-label="View findings">👁</button>`;
 }
 
 // ── Column headers ─────────────────────────────────────────────────────────
@@ -6551,6 +6902,9 @@ window.openModal            = openModal;
 window.closeModal           = closeModal;
 window.openVulnDialog       = openVulnDialog;
 window.onVulnDepPathToggle  = onVulnDepPathToggle;
+window.onVulnDepPathRefetch = onVulnDepPathRefetch;
+window.onVulnViewTypeChange     = onVulnViewTypeChange;
+window.onVulnOriginFilterChange = onVulnOriginFilterChange;
 window.refreshData          = refreshData;
 window.triggerCacheRefresh  = triggerCacheRefresh;
 // Exposed so an end-to-end test can drive one watch tick instead of waiting out
