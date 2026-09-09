@@ -73,6 +73,7 @@ const { migrate } = require('./db/migrate');
 const cryptoLib     = require('./lib/crypto');
 const cache         = require('./lib/violation-cache');
 const caches        = require('./lib/caches');
+const depPathCache  = require('./lib/dependency-path-cache');
 const snapshots     = require('./lib/snapshots');
 const reports       = require('./lib/reports');
 const reportsDb     = require('./lib/reports-db');
@@ -94,6 +95,7 @@ const routeModules = [
   require('./routes/config'),
   require('./routes/reports'),
   require('./routes/schedule'),
+  require('./routes/dependency-paths'),
 ];
 
 // ── Route authentication policy ───────────────────────────────────────────────
@@ -271,9 +273,12 @@ async function housekeeping() {
     // row is a 24-hour artefact and this history is a year of measurements, so
     // the two must not share a lifetime (migration 012).
     const snaps = await snapshots.sweep(cfg.snapshotRetentionDays);
-    if (runs || swept || snaps) {
+    // dependency_paths has no time-based expiry (migration 013) — only rows for
+    // connections nobody points at any more are ever swept.
+    const depSwept = await depPathCache.sweepOrphaned();
+    if (runs || swept || snaps || depSwept) {
       log('info', 'Housekeeping complete', {
-        scheduleRuns: runs, caches: swept, riskSnapshots: snaps,
+        scheduleRuns: runs, caches: swept, riskSnapshots: snaps, dependencyPaths: depSwept,
       });
     }
   } catch (e) {
@@ -315,6 +320,7 @@ async function boot() {
   // in flight: anything still marked running belongs to the process that died.
   await reportsDb.failOrphaned();
   await caches.failOrphanedBuilds();
+  await depPathCache.failOrphanedBuilds();
   await scheduler.start();
   housekeepingTimer = setInterval(() => { housekeeping(); }, HOUSEKEEPING_INTERVAL_MS);
   if (housekeepingTimer.unref) housekeepingTimer.unref();

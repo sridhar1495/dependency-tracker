@@ -3854,6 +3854,7 @@ describe('trend — carrying a reading across unrefreshed days (Q23)', () => {
 const VULN_FN_NAMES = [
   'hasVulnerabilities', 'vulnEyeIconHtml', 'vulnFindingsQuery',
   'vulnCweIds', 'vulnCweLabel', 'sortFindingsBySeverity', 'vulnRowHtml',
+  'componentKeyOf', 'vulnOriginCellHtml',
 ];
 const vuln = new Function(
   INDEX_HTML.match(/const CONFIG = \{[\s\S]*?\n\};/)[0] + '\n'
@@ -4046,5 +4047,205 @@ describe('vulnerability dialog — structure in the page', () => {
     const css = INDEX_HTML.slice(
       INDEX_HTML.indexOf('.vuln-eye-btn'), INDEX_HTML.indexOf('/* ── Pills'));
     assert.ok(!/#[0-9a-fA-F]{3,8}/.test(css), 'a literal hex colour crept into the dialog styling');
+  });
+});
+
+// ── Dependency-path origin (Direct/Transitive) ──────────────────────────────
+// Answers the release-engineer question the vulnerability dialog exists for:
+// does this finding block the release (direct), or can it wait for the
+// security SME's backlog (transitive)? See lib/dependency-paths.js and
+// CLAUDE.md's dependency-paths convention note for the design.
+
+describe('dependency paths — component identity (frontend)', () => {
+  test('mirrors lib/dependency-paths.js\'s componentKey() exactly', () => {
+    // lib/dependency-paths.js requires other lib/ modules at load time, unlike
+    // lib/cwe.js — a sandboxed new Function() load has no require() to resolve
+    // them, so this reads it the way CLAUDE.md §10.4 already prefers for a
+    // pure helper with no I/O at require time: an ordinary require().
+    const serverComponentKey = require('./lib/dependency-paths').componentKey;
+
+    const cases = [
+      { purl: 'pkg:npm/x@1', name: 'x', group: 'g', version: '1' },
+      { name: 'x', group: 'g', version: '1' },
+      { name: 'x', version: '1' },
+      {},
+      null,
+    ];
+    for (const c of cases) {
+      assert.equal(vuln.componentKeyOf(c), serverComponentKey(c), JSON.stringify(c));
+    }
+  });
+
+  test('purl wins when present; group/name/version otherwise', () => {
+    assert.equal(vuln.componentKeyOf({ purl: 'pkg:npm/x@1' }), 'pkg:npm/x@1');
+    assert.equal(vuln.componentKeyOf({ name: 'x', group: 'g', version: '1' }), 'g::x::1');
+  });
+});
+
+describe('dependency paths — the Origin cell', () => {
+  test('an unresolved origin (Tier 1 not back yet) shows a neutral placeholder, not a wrong answer', () => {
+    const html = vuln.vulnOriginCellHtml(null);
+    assert.doesNotMatch(html, /Direct|Transitive/);
+  });
+
+  test('Direct reuses the existing pill system, not a new colour', () => {
+    const html = vuln.vulnOriginCellHtml({ direct: true });
+    assert.match(html, /class="pill pill-high">Direct</);
+  });
+
+  test('Transitive with the toggle off shows the badge alone, no chain', () => {
+    const html = vuln.vulnOriginCellHtml({ direct: false });
+    assert.match(html, /class="pill pill-low">Transitive</);
+    assert.doesNotMatch(html, /dep-path-chain/);
+  });
+
+  test('Transitive with the toggle on but the walk not ready yet shows no chain either', () => {
+    const html = vuln.vulnOriginCellHtml({ direct: false, pathsReady: false });
+    assert.doesNotMatch(html, /dep-path-chain/);
+  });
+
+  test('a resolved chain renders escaped, arrow-joined, from a direct dependency', () => {
+    const html = vuln.vulnOriginCellHtml({
+      direct: false, pathsReady: true, chain: ['<carrier>', 'target'], multiple: false,
+    });
+    assert.doesNotMatch(html, /<carrier>/, 'an unescaped component name would be a stored XSS');
+    assert.match(html, /&lt;carrier&gt;/);
+    assert.doesNotMatch(html, /more routes/);
+  });
+
+  test('a component reachable from more than one direct dependency says so', () => {
+    const html = vuln.vulnOriginCellHtml({
+      direct: false, pathsReady: true, chain: ['a', 'x'], multiple: true,
+    });
+    assert.match(html, /more routes/i);
+  });
+
+  test('a resolved walk that never reached this component says so plainly, not a blank cell', () => {
+    const html = vuln.vulnOriginCellHtml({ direct: false, pathsReady: true, chain: null });
+    assert.match(html, /No path recorded/i);
+  });
+});
+
+describe('dependency paths — vulnOriginFor (which badge a row gets)', () => {
+  // vulnOriginFor reads three module-scoped variables the real page keeps
+  // updated as Tier 1 and Tier 2 resolve. The sandbox wires them the same way
+  // the eye-icon suite wires CONFIG/LEVEL_CSS — declared alongside the
+  // extracted function, then set per call through a small test-only adapter.
+  const originSandbox = new Function(
+    'let _vulnDirectKeys, _depPathStatus, _depPathPaths;\n'
+    + extractFunction(INDEX_HTML, 'componentKeyOf') + '\n'
+    + extractFunction(INDEX_HTML, 'vulnOriginFor') + '\n'
+    + `return { vulnOriginFor: function(finding, showPaths, directKeys, status, paths) {
+         _vulnDirectKeys = directKeys; _depPathStatus = status; _depPathPaths = paths;
+         return vulnOriginFor(finding, showPaths);
+       } };`
+  )();
+
+  const finding = (purl) => ({ component: { purl } });
+
+  test('no Tier 1 yet returns null — never guesses a badge', () => {
+    assert.equal(originSandbox.vulnOriginFor(finding('pkg:npm/x@1'), false, null, 'none', {}), null);
+  });
+
+  test('a component in the direct set is Direct, regardless of the toggle', () => {
+    const direct = new Set(['pkg:npm/x@1']);
+    const out = originSandbox.vulnOriginFor(finding('pkg:npm/x@1'), false, direct, 'none', {});
+    assert.deepEqual(out, { direct: true });
+  });
+
+  test('a component outside the direct set is Transitive, toggle off, no path lookup happens', () => {
+    const out = originSandbox.vulnOriginFor(finding('pkg:npm/y@1'), false, new Set(), 'ready',
+      { 'pkg:npm/y@1': { chain: ['a', 'y'], multiple: false } });
+    assert.equal(out.direct, false);
+    assert.equal(out.pathsReady, undefined, 'the chain must not be attached when the toggle is off');
+  });
+
+  test('toggle on but the walk has not resolved yet reports pathsReady:false', () => {
+    const out = originSandbox.vulnOriginFor(finding('pkg:npm/y@1'), true, new Set(), 'building', {});
+    assert.equal(out.direct, false);
+    assert.equal(out.pathsReady, false);
+  });
+
+  test('toggle on and ready attaches the resolved chain for this exact component', () => {
+    const out = originSandbox.vulnOriginFor(finding('pkg:npm/y@1'), true, new Set(), 'ready',
+      { 'pkg:npm/y@1': { chain: ['a', 'y'], multiple: true } });
+    assert.equal(out.pathsReady, true);
+    assert.deepEqual(out.chain, ['a', 'y']);
+    assert.equal(out.multiple, true);
+  });
+
+  test('toggle on, ready, but this component has no entry — chain is null, not a stale one from another row', () => {
+    const out = originSandbox.vulnOriginFor(finding('pkg:npm/never-declared@1'), true, new Set(), 'ready',
+      { 'pkg:npm/y@1': { chain: ['a', 'y'], multiple: false } });
+    assert.equal(out.pathsReady, true);
+    assert.equal(out.chain, null);
+  });
+});
+
+describe('dependency paths — the table gains an Origin column', () => {
+  test('the header row and every rendered row carry Origin as the eighth column', () => {
+    assert.match(INDEX_HTML, /<th>Latest<\/th><th>Origin<\/th>/);
+    const row = vuln.vulnRowHtml(
+      { vulnerability: { vulnId: 'V' }, component: {} }, { direct: true });
+    const cells = (row.match(/<td/g) || []).length;
+    assert.equal(cells, 8, 'the row must gain exactly one column, not silently duplicate an old one');
+    assert.match(row, /class="vuln-origin"/);
+  });
+
+  test('an omitted origin (Tier 1 still pending) does not crash row rendering', () => {
+    assert.doesNotThrow(() => vuln.vulnRowHtml({ vulnerability: { vulnId: 'V' }, component: {} }));
+  });
+});
+
+describe('dependency paths — the toggle and its polling', () => {
+  test('the toggle, its status line, and the Origin header all exist in the markup', () => {
+    for (const id of ['vulnDepPathToggleWrap', 'vulnDepPathToggle', 'vulnDepPathStatus']) {
+      assert.match(INDEX_HTML, new RegExp(`id="${id}"`), `#${id} is missing`);
+    }
+  });
+
+  test('onVulnDepPathToggle is window-exported, or the checkbox fails silently (§8.2)', () => {
+    assert.match(INDEX_HTML, /window\.onVulnDepPathToggle\s*=\s*onVulnDepPathToggle/);
+  });
+
+  test('a fresh dialog open resets every piece of dependency-path state', () => {
+    // A stale toggle, chain or status line from whatever project was open
+    // before must never bleed into the next one.
+    const fn = extractFunction(INDEX_HTML, 'openVulnDialog');
+    assert.match(fn, /stopDepPathPoll\(\)/);
+    assert.match(fn, /_vulnDirectKeys\s*=\s*null/);
+    assert.match(fn, /_depPathStatus\s*=\s*'none'/);
+    assert.match(fn, /toggleEl\.checked\s*=\s*false/);
+  });
+
+  test('the poll stops when the dialog closes, not just when the walk finishes', () => {
+    const fn = extractFunction(INDEX_HTML, 'closeModal');
+    assert.match(fn, /id === 'vulnDialog'/);
+    assert.match(fn, /stopDepPathPoll\(\)/);
+  });
+
+  test('a cache hit (already ready) renders immediately — no POST, no poll', () => {
+    const fn = extractFunction(INDEX_HTML, 'onVulnDepPathToggle');
+    assert.match(fn, /_depPathStatus === 'ready'/);
+    const readyBranch = fn.slice(fn.indexOf("_depPathStatus === 'ready'"));
+    const postAt = readyBranch.indexOf("method: 'POST'");
+    const returnAt = readyBranch.indexOf('return;');
+    assert.ok(returnAt !== -1 && (postAt === -1 || returnAt < postAt),
+      'the ready branch must return before ever reaching the POST call');
+  });
+
+  test('a superseded toggle sequence cannot land its poll response after the user moved on', () => {
+    const toggleFn = extractFunction(INDEX_HTML, 'onVulnDepPathToggle');
+    assert.match(toggleFn, /_depPathReqSeq/);
+    const pollFn = extractFunction(INDEX_HTML, 'startDepPathPoll');
+    assert.match(pollFn, /seq !== _depPathReqSeq/);
+  });
+
+  test('the Origin badge and the security-severity pills are visually distinct systems', () => {
+    // Direct/Transitive reuses pill-high/pill-low so it never needs a new
+    // colour (§8.10) — but the word, not the colour, must carry the meaning,
+    // so it cannot be misread as a severity value.
+    const html = vuln.vulnOriginCellHtml({ direct: true });
+    assert.doesNotMatch(html, /CRITICAL|HIGH|MEDIUM|LOW/, 'Origin text must never look like a severity level');
   });
 });

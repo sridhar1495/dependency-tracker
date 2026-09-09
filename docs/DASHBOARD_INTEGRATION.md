@@ -193,6 +193,7 @@ like:
 | Component | `component.name` (and group, if set) |
 | Current | `component.version` |
 | Latest | `component.latestVersion` |
+| Origin | **Direct** or **Transitive** — see below |
 
 Rows are sorted **worst severity first**, then by CVSS within a severity.
 Suppressed and triaged-away findings are excluded — the same filter the report
@@ -201,6 +202,30 @@ as an open finding. A project with an unusually large number of findings is
 capped at the 900 most severe, with a note saying so; DependencyTrack's own SBOM
 model has no per-file path, so the dialog identifies a finding by its component
 (package) only, the same granularity the report already uses.
+
+#### Origin: Direct or Transitive
+
+Every row is tagged **Direct** (the component is declared straight on the
+project — a release-blocking finding) or **Transitive** (pulled in by
+something else — safe to route to the security SME's backlog). This is
+computed live every time the dialog opens, from
+`GET /violation-cache/dependency-paths/:id`, and costs one DependencyTrack
+call — it is never cached, so the badge can never disagree with what
+DependencyTrack currently reports.
+
+A **"Show full dependency paths"** toggle above the table (off by default)
+resolves *how* a transitive component is reached — the intermediate component
+it comes through, e.g. `spring-boot-starter-web → jackson-databind`. Finding
+that chain means walking DependencyTrack's dependency graph, which can be
+dozens of calls for one project, so it only happens when the toggle is
+checked, and the result is cached (shared across everyone on the same
+DependencyTrack connection) so a second person — or a second click — does not
+pay for it twice. A status line shows progress while a walk that has not been
+resolved before is in flight. If a component is reachable from more than one
+direct dependency, the row says so ("+ more routes") rather than listing every
+route. A component the walk never reaches shows "No path recorded by
+DependencyTrack for this component" — expected for a flat, manifest-built SBOM,
+not a bug.
 
 ---
 
@@ -293,6 +318,8 @@ compact per-project count map in a JSON file, and serves only that file to the b
 | `/violation-cache/data` | GET | The cached map `{uuid: {ops, lic, secpolicy}}`, served gzipped. Build metadata comes from `/status` |
 | `/violation-cache/refresh` | POST | Trigger a background rebuild (409 if already running) |
 | `/violation-cache/risk-series` | GET | Daily risk history for your connection — see [Risk history](#risk-history) |
+| `/violation-cache/dependency-paths/:id` | GET | A project's direct-dependency set (live, never cached) plus whatever the cached graph walk currently knows — see [Vulnerability Detail Dialog](#vulnerability-detail-dialog) |
+| `/violation-cache/dependency-paths/:id` | POST | Resolve the full dependency-graph walk for one project (409 if already running) |
 
 ### Risk history
 
