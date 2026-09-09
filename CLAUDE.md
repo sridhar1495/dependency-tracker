@@ -214,7 +214,7 @@ Inline comments use lettered prefixes to trace design decisions:
 - **O-numbers** — observability notes (`// O3: JSON log format for log aggregators`)
 - **S-numbers** — security rationale (`// S2: token hashed before storage`) — **new in revision 2**
 
-Highest numbers currently in use: **Q29, P20, O5, S34**. When adding logic with a
+Highest numbers currently in use: **Q31, P20, O5, S34**. When adding logic with a
 non-obvious trade-off, add the next number in the appropriate series. Check the
 current maximum before assigning — parallel branches can claim the same number.
 
@@ -515,12 +515,46 @@ have diverged (a BOM landed after the walk ran and the automatic `stale`
 flag has not yet caught up, or the result simply looks wrong) and does not
 want to wait for the next natural cause of a re-walk. The button is shown
 only once there is something to doubt — `renderVulnRows()` hides it unless
-the toggle is checked *and* `_depPathStatus === 'ready'` — and a click clears
-`_depPathStatus` and re-renders before the request even lands, so stale
-chains and the button itself disappear immediately rather than sitting on
-screen through the round trip. It shares `_depPathReqSeq` and
-`startDepPathPoll` with the toggle, so a superseded refetch (the dialog
-closed, or the toggle unchecked, mid-request) is handled the identical way.
+the toggle is checked, `_depPathStatus === 'ready'`, *and* `transitiveTargets()`
+is non-empty. That third condition is not optional: a project whose shown
+findings are all Direct has nothing a re-walk could possibly change, the same
+reasoning `onVulnDepPathToggle()` already uses to skip the `POST` in the first
+place — offering "Refetch paths" there would just be a button that does
+nothing. A click clears `_depPathStatus` and re-renders before the request
+even lands, so stale chains and the button itself disappear immediately
+rather than sitting on screen through the round trip. It shares
+`_depPathReqSeq` and `startDepPathPoll` with the toggle, so a superseded
+refetch (the dialog closed, or the toggle unchecked, mid-request) is handled
+the identical way.
+
+**Q30: a filter that empties the table is not the same "nothing to show" as
+a table that started empty.** `openVulnDialog()`/`onVulnViewTypeChange()`
+already show `#vulnDialogStatus` and never unhide the table at all when the
+fetch itself returned zero rows — that case was always handled. What was not:
+the Origin filter (Both/Direct/Transitive) is applied locally, inside
+`renderVulnRows()`, and can filter every row away on its own — a project
+whose findings are all Direct, say, with Transitive selected — leaving a
+visible table with headers and a blank body, which reads as broken rather
+than as a deliberate zero-match result. `#vulnEmptyState`, inside
+`#vulnDialogTableWrap`, is what `renderVulnRows()` shows instead, gated on
+`source.length > 0 && html === ''` specifically so it can never also fire for
+the already-handled case above — `source.length === 0` leaves it hidden, and
+the two messages never stack.
+
+**Q31: the status line's place in the markup decides what it reads as
+"above."** `#vulnDialogStatus` carries "Loading…" and every "no data" message
+for whichever table is about to render, but nothing about its own position
+in the DOM tied it to the table — it used to sit above the dependency-path
+toggle row (`#vulnDepPathToggleWrap`), which `onVulnViewTypeChange()` never
+touches when switching views. Switching to License after Security's Tier 1
+had already unhidden the toggle row meant the "Loading…" text appeared above
+a checkbox and button that had nothing to do with License's own load, with
+the eventual table rendering only below both. The status line now sits
+between the toggle row and `#vulnDialogTableWrap` — after the persistent
+controls, immediately above the content it describes — so a loading or empty
+message always renders exactly where the table it is about is going to
+appear, and the toggle row stays visually fixed above both regardless of
+which view is loading.
 
 **Bounded the same way the snapshot crawl is** (§6.3): `MAX_GRAPH_NODES`
 caps how many components one walk will ever discover, so a toggle click cannot
@@ -1101,6 +1135,15 @@ its own visual weight instead of relying on a type-specific heading next to it.
   Q24 reasoning as `vulnFindingsQuery()` — DT's `project={uuid}` filter is
   silently ignored on some versions, so both search by project name and
   filter the response by exact uuid match afterwards.
+- **License Risk sorts FAIL, then WARN, then INFO — the same worst-first
+  convention Security's `sortFindingsBySeverity()` already gives its own
+  table.** DT's license-violation search has no severity ordering of its
+  own, so `_vulnShownLicense` arrived in whatever order the page came back
+  in until `sortLicenseByState()` (`LICENSE_STATE_ORDER`, mirroring
+  `VULN_SEVERITY_ORDER`'s shape) sorted it at the same point
+  `onVulnViewTypeChange()` stores the fetch, before it is ever rendered — so
+  a re-render from the origin filter or the toggle never has to re-sort, and
+  the two tables read consistently regardless of which one is open.
 - **The colspan a Transitive row's path detail spans follows the view
   type — `VULN_TABLE_COLS[_vulnViewType]`, not a number hard-coded to one
   table.** Security has eight columns, License has six (Component, Current,
@@ -1347,6 +1390,18 @@ The frontend never performs uniqueness checks — those are backend-only, via
   every other column on each click. Fixed layout with widths declared once on
   the header cells makes every row, including a `colspan`'d detail row, honour
   the same geometry regardless of what it holds.
+- **A reused component's own class can still lose a specificity fight inside
+  a new container.** `.modal label { display: block; ... }` (§8.1's findings
+  dialog) has specificity `(0,1,1)` — one class, one element — against
+  `.cfg-inline-toggle`'s bare `(0,1,0)`, so the toggle row's label silently
+  fell back to a full-width block the moment it was reused inside `.modal`,
+  pushing its next sibling (the "↻ Refetch paths" button) onto its own line
+  underneath instead of beside it — a bug specificity math predicts and a
+  glance at source order does not, since `.cfg-inline-toggle` is declared
+  later in the file. `.dep-path-toggle-row .cfg-inline-toggle { display:
+  inline-flex; }` restores it at equal specificity, scoped to this row so it
+  does not reopen the same collision for a `.cfg-inline-toggle` that actually
+  wants a bare label's block layout elsewhere.
 
 ### 8.11 Utility helpers (do not duplicate)
 
@@ -1368,6 +1423,7 @@ The frontend never performs uniqueness checks — those are backend-only, via
 | `vulnFindingsQuery(name, version, page)` | frontend | The finding-search query, mirroring `lib/reports.js`'s `fetchAllFindings()` (Q24) |
 | `vulnLicenseQuery(name, page)` | frontend | The license-violation search query, mirroring `lib/reports.js`'s `streamViolationsForProject()` (Q24, Q28) |
 | `sortFindingsBySeverity(findings)` | frontend | Worst severity, then highest CVSS, first |
+| `sortLicenseByState(violations)` | frontend | FAIL, then WARN, then INFO — License Risk's equivalent of `sortFindingsBySeverity` |
 | `componentKeyOf(c)` | frontend | Component identity: purl, or group/name/version — mirrors `lib/dependency-paths.js`'s `componentKey()` |
 | `vulnRowHtml(finding, origin)` / `vulnLicenseRowHtml(violation, origin)` | frontend | One `<tr>` for a Security or License row, each with its own column set |
 | `vulnOriginCellHtml(origin)` / `vulnOriginFor(finding, showPaths)` | frontend | Render and compute a row's Direct/Transitive badge — takes either finding type, since origin is a component property |

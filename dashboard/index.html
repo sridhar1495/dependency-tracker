@@ -650,6 +650,12 @@
     .vuln-dialog-status {
       padding: 32px 16px; text-align: center; color: var(--text-muted); font-size: 13px;
     }
+    /* A single line, not the bigger centred block .vuln-dialog-status uses —
+       this sits below a visible table header, which already tells the viewer
+       what was searched for, so it only needs to name the empty result. */
+    .vuln-empty-state {
+      padding: 14px 10px; text-align: center; color: var(--text-muted); font-size: 13px;
+    }
     .vuln-dialog-note {
       margin-top: 10px; font-size: 11px; color: var(--text-muted); text-align: center;
     }
@@ -658,6 +664,15 @@
        Reuses .cfg-inline-toggle rather than a new switch component — same
        control, same theming, one fewer thing to keep visually consistent. */
     .dep-path-toggle-row { margin-top: 10px; }
+    /* `.modal label { display: block; ... }` (below) beats bare .cfg-inline-toggle
+       on specificity (0,1,1) > (0,1,0) regardless of source order, so inside a
+       modal the toggle's own label silently lost its inline-flex layout and
+       became a full-width block — pushing the refetch button (an ordinary
+       inline sibling) onto its own line underneath instead of beside it. This
+       reasserts inline-flex at equal specificity to that rule, scoped to this
+       row so it does not reopen the same collision for .cfg-inline-toggle uses
+       elsewhere in the app that actually want the block layout of a bare label. */
+    .dep-path-toggle-row .cfg-inline-toggle { display: inline-flex; }
     .dep-path-status {
       margin-top: 6px; font-size: 11px; color: var(--text-muted);
     }
@@ -1347,12 +1362,15 @@
           </select>
         </label>
       </div>
-      <div class="vuln-dialog-status" id="vulnDialogStatus"></div>
       <!-- Off by default: the Direct/Transitive badge is always live and free,
            but the path behind a Transitive tag costs a graph walk, so showing
            it is a deliberate click, not a side effect of opening the dialog.
            Shared by both tables — origin is a component property, not a
-           finding-type one. -->
+           finding-type one. Q31: placed above #vulnDialogStatus so that
+           switching between Security and License — which re-shows the status
+           line while the new view's data loads — never moves this row: the
+           loading/empty message always renders directly above the table it
+           describes instead of above this persistent control. -->
       <div class="dep-path-toggle-row" id="vulnDepPathToggleWrap" hidden>
         <label class="cfg-inline-toggle" title="Resolve how each transitive finding reaches this project">
           <input type="checkbox" id="vulnDepPathToggle" onchange="onVulnDepPathToggle()">
@@ -1369,11 +1387,19 @@
         </button>
         <p class="dep-path-status" id="vulnDepPathStatus" hidden></p>
       </div>
+      <div class="vuln-dialog-status" id="vulnDialogStatus"></div>
       <div class="vuln-table-wrap" id="vulnDialogTableWrap" hidden>
         <table class="vuln-table" id="vulnDialogTable">
           <thead id="vulnDialogHead"></thead>
           <tbody id="vulnDialogRows"></tbody>
         </table>
+        <!-- The Origin filter (Direct/Transitive), unlike the Show dropdown,
+             is applied locally inside renderVulnRows() — it can filter every
+             row away on its own (every finding here is Direct, say, with
+             Transitive selected) without the table itself ever having been
+             empty. Left unhandled that reads as a broken table, not a
+             deliberate zero-match result. -->
+        <div class="vuln-empty-state" id="vulnEmptyState" hidden>No findings match the current filters.</div>
       </div>
       <p class="vuln-dialog-note" id="vulnDialogNote" hidden></p>
     </div>
@@ -3947,6 +3973,11 @@ function renderFlatList() {
 // the same way, because it is the same request.
 const VULN_SEVERITY_ORDER = ['critical', 'high', 'medium', 'low', 'unassigned'];
 
+// FAIL is what blocks a release, WARN is worth a look, INFO is background —
+// the same worst-first ordering VULN_SEVERITY_ORDER gives Security, so License
+// Risk reads the same way instead of arriving in whatever order DT paged it in.
+const LICENSE_STATE_ORDER = ['fail', 'warn', 'info'];
+
 function vulnFindingsQuery(name, version, pageNumber) {
   return [
     'showInactive=false',
@@ -4005,6 +4036,23 @@ function sortFindingsBySeverity(findings) {
   return [...findings].sort((a, b) =>
     rank(a) - rank(b) ||
     (b.vulnerability?.cvssV3BaseScore || 0) - (a.vulnerability?.cvssV3BaseScore || 0));
+}
+
+/**
+ * FAIL, then WARN, then INFO — item 5: License Risk arrived in whatever order
+ * DT's search returned it, unsorted, while Security was always worst-first
+ * (sortFindingsBySeverity above). Same state reader vulnLicenseRowHtml itself
+ * uses (policyCondition.policy.violationState, defaulting to INFO), so a
+ * violation neither table agrees was FAIL cannot rank as one here either.
+ */
+function sortLicenseByState(violations) {
+  const rank = (v) => {
+    const state = ((v.policyCondition && v.policyCondition.policy && v.policyCondition.policy.violationState) || 'INFO')
+      .toLowerCase();
+    const i = LICENSE_STATE_ORDER.indexOf(state);
+    return i === -1 ? LICENSE_STATE_ORDER.length : i;
+  };
+  return [...violations].sort((a, b) => rank(a) - rank(b));
 }
 
 // ── Origin (Direct / Transitive) ────────────────────────────────────────────
@@ -4142,14 +4190,15 @@ let _depPathPaths        = {};
  * itself already follows; it narrows once Tier 1 answers.
  */
 function renderVulnRows() {
-  const rowsEl = document.getElementById('vulnDialogRows');
+  const rowsEl  = document.getElementById('vulnDialogRows');
+  const emptyEl = document.getElementById('vulnEmptyState');
   const toggle = document.getElementById('vulnDepPathToggle');
   const showPaths  = toggle && toggle.checked;
   const isLicense  = _vulnViewType === 'license';
   const source     = isLicense ? (_vulnShownLicense || []) : _vulnShownFindings;
   const rowHtmlFor = isLicense ? vulnLicenseRowHtml : vulnRowHtml;
 
-  rowsEl.innerHTML = source
+  const html = source
     .map(item => {
       const origin = vulnOriginFor(item, showPaths);
       if (_vulnOriginFilterMode !== 'both' && origin) {
@@ -4159,13 +4208,25 @@ function renderVulnRows() {
       return rowHtmlFor(item, origin) + vulnDepPathRowHtml(origin);
     })
     .join('');
+  rowsEl.innerHTML = html;
+
+  // Q30: source.length > 0 means there was data to show and the Origin
+  // filter is what removed every row — source.length === 0 is a different,
+  // already-handled case (openVulnDialog/onVulnViewTypeChange show
+  // #vulnDialogStatus and never unhide the table at all), so this must not
+  // fire for it too or the two messages would stack.
+  emptyEl.hidden = !(source.length > 0 && html === '');
 
   // Q29: this is the one place dep-path state is already known reliably
   // fresh — same reasoning as setCacheBuilding() disabling the toolbar's own
   // refresh control alongside its banner. Nothing to refetch while the paths
-  // are not even being shown, or while there is not yet a resolved walk to
-  // doubt.
-  document.getElementById('vulnDepPathRefetchBtn').hidden = !(showPaths && _depPathStatus === 'ready');
+  // are not even being shown, while there is not yet a resolved walk to
+  // doubt, or while every row in scope is Direct — a walk with nothing
+  // transitive to resolve has nothing a re-walk could possibly change, the
+  // same reasoning onVulnDepPathToggle() already uses to skip the POST.
+  const hasTransitive = (transitiveTargets() || []).length > 0;
+  document.getElementById('vulnDepPathRefetchBtn').hidden =
+    !(showPaths && _depPathStatus === 'ready' && hasTransitive);
 }
 
 /**
@@ -4425,8 +4486,10 @@ async function openVulnDialog(uuid) {
   const refetchBtnEl = document.getElementById('vulnDepPathRefetchBtn');
   const viewTypeEl   = document.getElementById('vulnViewType');
   const originFiltEl = document.getElementById('vulnOriginFilter');
+  const emptyEl      = document.getElementById('vulnEmptyState');
   wrapEl.hidden = true;
   noteEl.hidden = true;
+  emptyEl.hidden = true;
   rowsEl.innerHTML = '';
   statusEl.hidden = false;
   statusEl.textContent = 'Loading…';
@@ -4609,7 +4672,7 @@ async function onVulnViewTypeChange() {
   try {
     const violations = await fetchProjectLicenseViolations(node.name, _vulnCurrentProject, seq);
     if (seq !== _vulnReqSeq || _vulnViewType !== 'license') return; // superseded by a newer click or another view switch
-    _vulnShownLicense = violations;
+    _vulnShownLicense = sortLicenseByState(violations);
 
     if (violations.length === 0) {
       statusEl.textContent = 'No license violations were found for this project.';

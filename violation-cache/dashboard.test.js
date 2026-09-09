@@ -3854,13 +3854,15 @@ describe('trend — carrying a reading across unrefreshed days (Q23)', () => {
 const VULN_FN_NAMES = [
   'hasVulnerabilities', 'hasLicenseRisk', 'vulnEyeIconHtml',
   'vulnFindingsQuery', 'vulnLicenseQuery',
-  'vulnCweIds', 'vulnCweLabel', 'sortFindingsBySeverity', 'vulnRowHtml', 'vulnLicenseRowHtml',
+  'vulnCweIds', 'vulnCweLabel', 'sortFindingsBySeverity', 'sortLicenseByState',
+  'vulnRowHtml', 'vulnLicenseRowHtml',
   'componentKeyOf', 'vulnOriginCellHtml', 'vulnDepPathRowHtml',
 ];
 const vuln = new Function(
   INDEX_HTML.match(/const CONFIG = \{[\s\S]*?\n\};/)[0] + '\n'
   + INDEX_HTML.match(/const LEVEL_CSS = \{[\s\S]*?\n\};/)[0] + '\n'
   + INDEX_HTML.match(/const VULN_SEVERITY_ORDER = \[[\s\S]*?\];/)[0] + '\n'
+  + INDEX_HTML.match(/const LICENSE_STATE_ORDER = \[[\s\S]*?\];/)[0] + '\n'
   + INDEX_HTML.match(/const VULN_TABLE_COLS = \{[\s\S]*?\n\};/)[0] + '\n'
   // vulnDepPathRowHtml reads _vulnViewType from module scope in the real
   // page; the sandbox defaults it to 'security' (the dialog's own default)
@@ -4035,6 +4037,27 @@ describe('vulnerability dialog — sorting and rendering', () => {
   test('a finding with no severity at all sorts last, not first', () => {
     const sorted = vuln.sortFindingsBySeverity([{ vulnerability: { vulnId: 'bare' } }, f('LOW', 1)]);
     assert.equal(sorted[sorted.length - 1].vulnerability.vulnId, 'bare');
+  });
+
+  // item 5: License Risk arrived in whatever order DT's search returned it,
+  // unsorted, while Security was always worst-first via sortFindingsBySeverity
+  // above — sortLicenseByState gives License the same FAIL/WARN/INFO ordering.
+  const lic = (id, state) => ({ policyCondition: { policy: { name: id, violationState: state } } });
+
+  test('FAIL sorts before WARN, which sorts before INFO', () => {
+    const sorted = vuln.sortLicenseByState([lic('c', 'INFO'), lic('a', 'FAIL'), lic('b', 'WARN')]);
+    assert.deepEqual(sorted.map(v => v.policyCondition.policy.name), ['a', 'b', 'c']);
+  });
+
+  test('state is read case-insensitively, the same way vulnLicenseRowHtml renders it', () => {
+    const sorted = vuln.sortLicenseByState([lic('warn', 'warn'), lic('fail', 'fail')]);
+    assert.deepEqual(sorted.map(v => v.policyCondition.policy.name), ['fail', 'warn']);
+  });
+
+  test('a violation with no state at all defaults to INFO and sorts last, not first', () => {
+    const bare = { policyCondition: {} };
+    const sorted = vuln.sortLicenseByState([bare, lic('fail', 'FAIL')]);
+    assert.equal(sorted[sorted.length - 1], bare);
   });
 
   test('every field in a row passes through escHtml', () => {
@@ -4411,6 +4434,16 @@ describe('dependency paths — manual refetch (Q29)', () => {
     assert.match(INDEX_HTML, /window\.onVulnDepPathRefetch\s*=\s*onVulnDepPathRefetch/);
   });
 
+  test('item 1: the toggle label keeps inline-flex inside .modal, so the button sits beside it, not below', () => {
+    // `.modal label { display: block; ... }` has higher specificity than a
+    // bare `.cfg-inline-toggle` — (0,1,1) beats (0,1,0) regardless of source
+    // order — so without this override the toggle's own label silently lost
+    // its inline-flex layout inside this modal and became a full-width
+    // block, pushing the refetch button (an ordinary inline sibling) onto
+    // its own line underneath instead of beside it.
+    assert.match(INDEX_HTML, /\.dep-path-toggle-row \.cfg-inline-toggle\s*\{\s*display:\s*inline-flex;\s*\}/);
+  });
+
   test('a refetch always forces the walk and scopes it to the current transitive targets', () => {
     const fn = extractFunction(INDEX_HTML, 'onVulnDepPathRefetch');
     assert.match(fn, /const targets\s*=\s*transitiveTargets\(\)/);
@@ -4441,16 +4474,70 @@ describe('dependency paths — manual refetch (Q29)', () => {
     assert.match(fn, /if \(!_vulnCurrentProject\) return;/);
   });
 
-  test('renderVulnRows shows the refetch button only while paths are showing and a walk is ready to doubt', () => {
+  test('renderVulnRows shows the refetch button only while paths are showing, a walk is ready, and something is actually transitive', () => {
+    // item 2: a ready walk with nothing transitive in scope (every shown row
+    // is Direct) has nothing a re-walk could change — the same reasoning
+    // onVulnDepPathToggle() already uses to skip the POST in the first place.
     const fn = extractFunction(INDEX_HTML, 'renderVulnRows');
+    assert.match(fn, /const hasTransitive\s*=\s*\(transitiveTargets\(\)\s*\|\|\s*\[\]\)\.length > 0/);
     assert.match(fn,
-      /vulnDepPathRefetchBtn'\)\.hidden\s*=\s*!\(showPaths\s*&&\s*_depPathStatus === 'ready'\)/,
-      'the button must stay hidden unless the toggle is on and the walk actually has a ready result');
+      /vulnDepPathRefetchBtn'\)\.hidden\s*=\s*!\(showPaths\s*&&\s*_depPathStatus === 'ready'\s*&&\s*hasTransitive\)/,
+      'the button must stay hidden unless the toggle is on, the walk is ready, and there is a transitive target');
   });
 
   test('a fresh dialog open resets the refetch button back to hidden', () => {
     const fn = extractFunction(INDEX_HTML, 'openVulnDialog');
     assert.match(fn, /refetchBtnEl\.hidden\s*=\s*true/);
+  });
+});
+
+describe('item 4 (Q31): the loading/empty status line sits where the table renders, not above the toggle row', () => {
+  test('#vulnDepPathToggleWrap precedes #vulnDialogStatus in the markup', () => {
+    // Switching views (onVulnViewTypeChange) re-shows #vulnDialogStatus while
+    // the new view's data loads but never touches #vulnDepPathToggleWrap — so
+    // whichever one is physically first is what the "Loading…" text appears
+    // above. Before this fix the status line sat above the toggle row, so a
+    // view switch's loading message rendered far from the table it actually
+    // describes, with the untouched checkbox/refetch controls sitting
+    // between the two.
+    const toggleAt = INDEX_HTML.indexOf('id="vulnDepPathToggleWrap"');
+    const statusAt = INDEX_HTML.indexOf('id="vulnDialogStatus"');
+    assert.ok(toggleAt !== -1 && statusAt !== -1);
+    assert.ok(toggleAt < statusAt,
+      'the toggle row must come before the status line, so status/loading text renders directly above the table');
+  });
+
+  test('#vulnDialogStatus precedes #vulnDialogTableWrap in the markup', () => {
+    const statusAt = INDEX_HTML.indexOf('id="vulnDialogStatus"');
+    const wrapAt   = INDEX_HTML.indexOf('id="vulnDialogTableWrap"');
+    assert.ok(statusAt !== -1 && wrapAt !== -1);
+    assert.ok(statusAt < wrapAt, 'the status line must sit immediately above the table it describes');
+  });
+});
+
+describe('item 3 (Q30): an empty-state placeholder for a filter that matches nothing', () => {
+  test('the placeholder element exists inside the table wrap, starts hidden, and is a single line', () => {
+    assert.match(INDEX_HTML, /id="vulnEmptyState"/);
+    const wrapAt  = INDEX_HTML.indexOf('id="vulnDialogTableWrap"');
+    const emptyAt = INDEX_HTML.indexOf('id="vulnEmptyState"');
+    const wrapEnd = INDEX_HTML.indexOf('</div>', emptyAt);
+    assert.ok(wrapAt !== -1 && emptyAt > wrapAt, 'the placeholder must live inside #vulnDialogTableWrap');
+    const tagStart = INDEX_HTML.lastIndexOf('<div', emptyAt);
+    const tag = INDEX_HTML.slice(tagStart, INDEX_HTML.indexOf('>', emptyAt) + 1);
+    assert.match(tag, /\bhidden\b/, 'must start hidden — nothing to show before a filter has actually emptied the table');
+    assert.doesNotMatch(wrapEnd === -1 ? '' : INDEX_HTML.slice(emptyAt, wrapEnd), /<tr|<td/,
+      'a single line, not a table row squeezed into the layout');
+  });
+
+  test('renderVulnRows shows the placeholder only when the filter emptied a non-empty source', () => {
+    const fn = extractFunction(INDEX_HTML, 'renderVulnRows');
+    assert.match(fn, /emptyEl\.hidden\s*=\s*!\(source\.length > 0 && html === ''\)/,
+      'source.length === 0 must not also trigger this placeholder — that case already has its own message via #vulnDialogStatus');
+  });
+
+  test('a fresh dialog open resets the placeholder back to hidden', () => {
+    const fn = extractFunction(INDEX_HTML, 'openVulnDialog');
+    assert.match(fn, /emptyEl\.hidden\s*=\s*true/);
   });
 });
 
@@ -4576,6 +4663,11 @@ describe('license risk — dialog state resets and orchestration', () => {
     const fn = extractFunction(INDEX_HTML, 'onVulnViewTypeChange');
     assert.match(fn, /_vulnShownLicense\s*!==\s*null/,
       'a second switch to License must recognise it already has data and skip the fetch');
+  });
+
+  test('item 5: the License fetch is sorted FAIL-WARN-INFO before it is stored, the same as Security', () => {
+    const fn = extractFunction(INDEX_HTML, 'onVulnViewTypeChange');
+    assert.match(fn, /_vulnShownLicense\s*=\s*sortLicenseByState\(violations\)/);
   });
 
   test('switching to License re-checks dependency-path coverage when the toggle is already on', () => {
