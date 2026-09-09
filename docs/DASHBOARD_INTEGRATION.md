@@ -265,16 +265,28 @@ expected for a flat, manifest-built SBOM, not a bug.
 
 A third dropdown, **Parent**, appears once the toggle has something
 transitive to group — hidden again if Origin is set to Direct, since a
-Direct row has no chain to group by. Its options are every distinct root a
-resolved chain starts from (deduplicated; a component reachable from more
-than one direct dependency lists under each of them), plus a default
-**N/A**, which is a real filter value rather than "show everything": N/A
-groups Direct rows together with any Transitive row whose chain has not
-resolved yet (or that DependencyTrack recorded no path for at all).
-Choosing a specific root narrows the table to just the Transitive rows
-reachable from it. Like Origin, it is purely local — no request is made —
-and a filter that empties the table shows the same "no findings match"
-line as the Origin filter does.
+Direct row has no chain to group by. Its options are **All** (the default —
+every row currently shown, no narrowing at all), **N/A** (shown only when a
+Direct row is actually visible under the current Origin selection — under
+Origin = Transitive it never appears, because Origin already hides Direct
+rows itself), and every distinct root a resolved chain starts from
+(deduplicated; a component reachable from more than one direct dependency
+lists under each of them). N/A means strictly "this row *is* a direct
+dependency" — a Transitive row whose chain has not resolved yet (or that
+DependencyTrack recorded no path for at all) belongs to neither N/A nor any
+named root, so it is visible only under All. Choosing a specific root
+narrows the table to just the Transitive rows reachable from it. Like
+Origin, it is purely local — no request is made — and a filter that empties
+the table shows the same "no findings match" line as the Origin filter does.
+
+A completed dependency-path resolution — a poll finishing, or the toggle
+finding an already-resolved walk to reuse — resets this dropdown back to
+**All**, even if whatever was previously selected would still be valid: full
+visibility on what just resolved takes priority over quietly keeping a
+narrower view chosen before that data existed. Switching the Origin filter
+or the Security/License view does not do this on its own; a selection that
+is still meaningful there survives, and only falls back to All if it no
+longer matches anything.
 
 The walk this toggle starts is scoped to the componentKeys the dialog is
 actually showing (`{ targets: [...] }` in the `POST` body), not the project's

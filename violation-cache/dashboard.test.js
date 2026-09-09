@@ -4320,7 +4320,7 @@ describe('dependency paths — transitiveTargets (Q26 walk scoping, Q27 union ac
   });
 });
 
-describe('Q32/item 1.4: vulnParentOptions (the Parent dropdown\'s own option list)', () => {
+describe('Q32/item 1.4, 2.1-2.5: vulnParentOptions (hasDirect + the root list, both scoped to Origin mode)', () => {
   // Same adapter pattern as the vulnOriginFor sandbox above — vulnParentOptions
   // calls vulnOriginFor internally, so it needs the identical module state wired.
   const parentOptSandbox = new Function(
@@ -4328,61 +4328,94 @@ describe('Q32/item 1.4: vulnParentOptions (the Parent dropdown\'s own option lis
     + extractFunction(INDEX_HTML, 'componentKeyOf') + '\n'
     + extractFunction(INDEX_HTML, 'vulnOriginFor') + '\n'
     + extractFunction(INDEX_HTML, 'vulnParentOptions') + '\n'
-    + `return { vulnParentOptions: function(source, showPaths, directKeys, status, paths) {
+    + `return { vulnParentOptions: function(source, showPaths, originMode, directKeys, status, paths) {
          _vulnDirectKeys = directKeys; _depPathStatus = status; _depPathPaths = paths;
-         return vulnParentOptions(source, showPaths);
+         return vulnParentOptions(source, showPaths, originMode);
        } };`
   )();
 
   const finding = (purl) => ({ component: { purl } });
 
-  test('paths not showing at all returns no options', () => {
+  test('paths not showing at all returns neither hasDirect nor any roots', () => {
     assert.deepEqual(
-      parentOptSandbox.vulnParentOptions([finding('pkg:npm/y@1')], false, new Set(), 'ready', {}), []);
+      parentOptSandbox.vulnParentOptions([finding('pkg:npm/y@1')], false, 'both', new Set(), 'ready', {}),
+      { hasDirect: false, roots: [] });
   });
 
-  test('a Direct row contributes nothing — it has no chain to name a root from', () => {
+  test('item 1.1: Both mode with a Direct row present reports hasDirect', () => {
     const direct = new Set(['pkg:npm/x@1']);
-    assert.deepEqual(
-      parentOptSandbox.vulnParentOptions([finding('pkg:npm/x@1')], true, direct, 'ready', {}), []);
+    const out = parentOptSandbox.vulnParentOptions([finding('pkg:npm/x@1')], true, 'both', direct, 'ready', {});
+    assert.equal(out.hasDirect, true);
+    assert.deepEqual(out.roots, [], 'a Direct row has no chain to name a root from');
   });
 
-  test('the walk still building contributes nothing yet, not a premature empty-looking list', () => {
-    assert.deepEqual(
-      parentOptSandbox.vulnParentOptions([finding('pkg:npm/y@1')], true, new Set(), 'building', {}), []);
+  test('item 1.2: Both mode with no Direct row present does not report hasDirect', () => {
+    const out = parentOptSandbox.vulnParentOptions([finding('pkg:npm/y@1')], true, 'both', new Set(), 'ready', {});
+    assert.equal(out.hasDirect, false);
   });
 
-  test('a resolved chain contributes its root (chain[0]), deduplicated across rows', () => {
+  test('item 1 generalised: Transitive mode never reports hasDirect, even when a Direct row is in the raw source', () => {
+    // A Direct row is still present in `source` under Origin = Transitive
+    // (the table's own filter removes it, not the fetch) — hasDirect must
+    // key off what Origin actually leaves visible, or N/A would wrongly
+    // reappear under Transitive mode.
+    const direct = new Set(['pkg:npm/x@1']);
+    const shown = [finding('pkg:npm/x@1'), finding('pkg:npm/y@1')];
+    const out = parentOptSandbox.vulnParentOptions(shown, true, 'transitive', direct, 'ready', {});
+    assert.equal(out.hasDirect, false);
+  });
+
+  test('item 2.2/2.5: the walk still building contributes no roots yet, not a premature empty-looking list', () => {
+    assert.deepEqual(
+      parentOptSandbox.vulnParentOptions([finding('pkg:npm/y@1')], true, 'both', new Set(), 'building', {}).roots,
+      []);
+  });
+
+  test('item 2.1/2.4: a resolved chain contributes its root (chain[0]), deduplicated across rows', () => {
     const direct = new Set(['pkg:npm/x@1']);
     const shown = [finding('pkg:npm/y@1'), finding('pkg:npm/z@1')];
     const paths = {
       'pkg:npm/y@1': { chains: [['root-a', 'y']] },
       'pkg:npm/z@1': { chains: [['root-a', 'mid', 'z'], ['root-b', 'z']] },
     };
-    assert.deepEqual(
-      parentOptSandbox.vulnParentOptions(shown, true, direct, 'ready', paths), ['root-a', 'root-b']);
+    const out = parentOptSandbox.vulnParentOptions(shown, true, 'both', direct, 'ready', paths);
+    assert.deepEqual(out.roots, ['root-a', 'root-b']);
   });
 
-  test('options are alphabetised, not left in discovery order', () => {
+  test('roots are alphabetised, not left in discovery order', () => {
     const shown = [finding('pkg:npm/y@1')];
     const paths = { 'pkg:npm/y@1': { chains: [['zebra', 'y'], ['alpha', 'y']] } };
-    assert.deepEqual(
-      parentOptSandbox.vulnParentOptions(shown, true, new Set(), 'ready', paths), ['alpha', 'zebra']);
+    const out = parentOptSandbox.vulnParentOptions(shown, true, 'both', new Set(), 'ready', paths);
+    assert.deepEqual(out.roots, ['alpha', 'zebra']);
+  });
+
+  test('item 2.4: Transitive mode still computes roots the same way as Both', () => {
+    const shown = [finding('pkg:npm/y@1')];
+    const paths = { 'pkg:npm/y@1': { chains: [['root-a', 'y']] } };
+    const out = parentOptSandbox.vulnParentOptions(shown, true, 'transitive', new Set(), 'ready', paths);
+    assert.deepEqual(out.roots, ['root-a']);
   });
 });
 
-describe('Q32/item 1.4.1-1.4.2: vulnParentMatches (N/A bucket vs a specific root)', () => {
-  test('N/A matches a Direct row', () => {
+describe('Q32/item 1, 3: vulnParentMatches (All vs N/A vs a specific root)', () => {
+  test('All matches everything — a Direct row, an unresolved Transitive row, and a resolved one', () => {
+    assert.equal(vuln.vulnParentMatches({ direct: true }, 'ALL'), true);
+    assert.equal(vuln.vulnParentMatches({ direct: false, pathsReady: false }, 'ALL'), true);
+    assert.equal(
+      vuln.vulnParentMatches({ direct: false, pathsReady: true, chains: [['root-a', 'y']] }, 'ALL'), true);
+  });
+
+  test('N/A matches a Direct row only', () => {
     assert.equal(vuln.vulnParentMatches({ direct: true }, ''), true);
   });
 
-  test('N/A matches a Transitive row whose walk has not resolved yet', () => {
-    assert.equal(vuln.vulnParentMatches({ direct: false, pathsReady: false }, ''), true);
+  test('N/A does not match a Transitive row whose walk has not resolved yet — that row is only visible under All now', () => {
+    assert.equal(vuln.vulnParentMatches({ direct: false, pathsReady: false }, ''), false);
   });
 
-  test('N/A matches a Transitive row DependencyTrack recorded no path for', () => {
-    assert.equal(vuln.vulnParentMatches({ direct: false, pathsReady: true, chains: null }, ''), true);
-    assert.equal(vuln.vulnParentMatches({ direct: false, pathsReady: true, chains: [] }, ''), true);
+  test('N/A does not match a Transitive row DependencyTrack recorded no path for', () => {
+    assert.equal(vuln.vulnParentMatches({ direct: false, pathsReady: true, chains: null }, ''), false);
+    assert.equal(vuln.vulnParentMatches({ direct: false, pathsReady: true, chains: [] }, ''), false);
   });
 
   test('N/A does not match a Transitive row that already has a resolved chain', () => {
@@ -4392,6 +4425,10 @@ describe('Q32/item 1.4.1-1.4.2: vulnParentMatches (N/A bucket vs a specific root
 
   test('a specific root never matches a Direct row', () => {
     assert.equal(vuln.vulnParentMatches({ direct: true }, 'root-a'), false);
+  });
+
+  test('a specific root never matches an unresolved Transitive row — only All shows it', () => {
+    assert.equal(vuln.vulnParentMatches({ direct: false, pathsReady: false }, 'root-a'), false);
   });
 
   test('a specific root matches whenever ANY chain starts there — Q27\'s multi-root components stay reachable from every root, not just the first', () => {
@@ -4624,14 +4661,14 @@ describe('item 3 (Q30): an empty-state placeholder for a filter that matches not
 });
 
 describe('item 1 (Q32): the Parent (component path) filter', () => {
-  test('the dropdown exists in the controls row, starts hidden, with N/A as its only built-in option', () => {
+  test('the dropdown exists in the controls row, starts hidden, with All as its only built-in option', () => {
     assert.match(INDEX_HTML, /id="vulnParentFilterWrap"/);
     const wrapAt = INDEX_HTML.indexOf('id="vulnParentFilterWrap"');
     const tagStart = INDEX_HTML.lastIndexOf('<label', wrapAt);
     const tag = INDEX_HTML.slice(tagStart, INDEX_HTML.indexOf('>', wrapAt) + 1);
     assert.match(tag, /\bhidden\b/, '1.1/1.3: nothing to group by parent before there is a resolved transitive row');
     assert.match(INDEX_HTML, /id="vulnParentFilter" onchange="onVulnParentFilterChange\(\)"/);
-    assert.match(INDEX_HTML, /<option value="">N\/A<\/option>/);
+    assert.match(INDEX_HTML, /<option value="ALL">All<\/option>/);
   });
 
   test('onVulnParentFilterChange is window-exported, or the dropdown fails silently (§8.2)', () => {
@@ -4652,10 +4689,11 @@ describe('item 1 (Q32): the Parent (component path) filter', () => {
     assert.match(fn, /vulnParentFilterWrap'\)\.hidden\s*=\s*!parentFilterActive/);
   });
 
-  test('1.4: renderVulnRows calls renderParentFilterOptions with a real list only while active, [] otherwise', () => {
+  test('1, 2: renderVulnRows passes vulnParentOptions the current Origin mode and calls renderParentFilterOptions with its result only while active', () => {
     const fn = extractFunction(INDEX_HTML, 'renderVulnRows');
-    assert.match(fn,
-      /renderParentFilterOptions\(parentFilterActive \? vulnParentOptions\(source, showPaths\) : \[\]\)/);
+    assert.match(fn, /vulnParentOptions\(source, showPaths, _vulnOriginFilterMode\)/);
+    assert.match(fn, /renderParentFilterOptions\(hasDirect, roots\)/);
+    assert.match(fn, /renderParentFilterOptions\(false, \[\]\)/, 'inactive must clear back to just All, not leave a stale list');
   });
 
   test('1.4.1/1.4.2: the row filter applies vulnParentMatches only while the control is active, passing an unresolved origin through', () => {
@@ -4664,22 +4702,53 @@ describe('item 1 (Q32): the Parent (component path) filter', () => {
       /if \(parentFilterActive && origin && !vulnParentMatches\(origin, _vulnParentFilter\)\) return '';/);
   });
 
-  test('renderParentFilterOptions preserves the current selection when it still exists, resets to N/A otherwise', () => {
+  test('renderParentFilterOptions puts All first, N/A only when hasDirect, then the roots', () => {
     const fn = extractFunction(INDEX_HTML, 'renderParentFilterOptions');
-    assert.match(fn, /if \(names\.includes\(_vulnParentFilter\)\)/);
-    assert.match(fn, /_vulnParentFilter\s*=\s*'';/, 'falling back to N/A must also reset the state variable, not just the control');
+    assert.match(fn, /const values\s*=\s*\['ALL', \.\.\.\(hasDirect \? \[''\] : \[\]\), \.\.\.roots\]/);
+  });
+
+  test('renderParentFilterOptions preserves the current selection when it still exists, resets to All otherwise', () => {
+    const fn = extractFunction(INDEX_HTML, 'renderParentFilterOptions');
+    assert.match(fn, /if \(values\.includes\(_vulnParentFilter\)\)/);
+    assert.match(fn, /_vulnParentFilter\s*=\s*'ALL';/,
+      'falling back must reset the state variable to All, not just the control');
   });
 
   test('renderParentFilterOptions escapes option text and values before interpolating them (§12)', () => {
     const fn = extractFunction(INDEX_HTML, 'renderParentFilterOptions');
-    assert.match(fn, /escHtml\(n\)/);
+    assert.match(fn, /escHtml\(v\)/);
   });
 
-  test('a fresh dialog open resets the filter state, hides the control, and clears its options back to just N/A', () => {
+  test('item 3.3: a freshly completed walk resets the selection to All, even if the prior choice is still valid', () => {
+    // Both call sites where a walk's data becomes visible to the user must
+    // force the reset themselves — renderParentFilterOptions's own "still
+    // valid" preserve logic must NOT be the only thing standing between a
+    // stale narrow selection and a fresh result.
+    const pollFn = extractFunction(INDEX_HTML, 'startDepPathPoll');
+    const readyBranch = pollFn.slice(pollFn.indexOf("data.status === 'ready'"));
+    assert.match(readyBranch.slice(0, readyBranch.indexOf('} else')),
+      /_vulnParentFilter\s*=\s*'ALL';[\s\S]*renderVulnRows\(\);/);
+
+    const toggleFn = extractFunction(INDEX_HTML, 'onVulnDepPathToggle');
+    const fastPathAt = toggleFn.indexOf('targets.every(t => t in _depPathPaths)');
+    const fastPathBranch = toggleFn.slice(fastPathAt, toggleFn.indexOf('return;', fastPathAt));
+    assert.match(fastPathBranch, /_vulnParentFilter\s*=\s*'ALL';[\s\S]*renderVulnRows\(\);/);
+  });
+
+  test('an Origin or view-type switch does not itself force a reset — only renderParentFilterOptions\'s own fallback can change the selection there', () => {
+    const viewChangeFn = extractFunction(INDEX_HTML, 'onVulnViewTypeChange');
+    assert.doesNotMatch(viewChangeFn, /_vulnParentFilter\s*=\s*'ALL'/,
+      'switching Security/License must preserve a still-valid selection, not force All');
+    const originChangeFn = extractFunction(INDEX_HTML, 'onVulnOriginFilterChange');
+    assert.doesNotMatch(originChangeFn, /_vulnParentFilter/,
+      'the Origin dropdown must not touch the Parent selection directly at all');
+  });
+
+  test('a fresh dialog open resets the filter state to All, hides the control, and clears its options back to just All', () => {
     const fn = extractFunction(INDEX_HTML, 'openVulnDialog');
-    assert.match(fn, /_vulnParentFilter\s*=\s*'';/);
+    assert.match(fn, /_vulnParentFilter\s*=\s*'ALL';/);
     assert.match(fn, /parentFiltWrap\.hidden\s*=\s*true;/);
-    assert.match(fn, /parentFiltEl\.innerHTML\s*=\s*'<option value="">N\/A<\/option>';/);
+    assert.match(fn, /parentFiltEl\.innerHTML\s*=\s*'<option value="ALL">All<\/option>';/);
   });
 });
 
