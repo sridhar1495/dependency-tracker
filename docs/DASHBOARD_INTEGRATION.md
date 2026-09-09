@@ -220,12 +220,17 @@ DependencyTrack's own SBOM model has no per-file path, so both tables identify
 a finding by its component (package) only, the same granularity the report
 already uses. Suppressed and triaged-away security findings are excluded —
 the same filter the report applies — so the dialog and a generated report
-never disagree about what counts as an open finding.
+never disagree about what counts as an open finding. License rows are sorted
+**FAIL, then WARN, then INFO** — the same worst-first convention, applied to
+the three policy states instead of a severity scale.
 
 A second dropdown, **Origin — Both / Direct / Transitive**, filters whichever
 table is currently showing to just that origin. It is purely local: no
 request is made when it changes, and it never hides a row before that row's
-Direct/Transitive badge has actually resolved.
+Direct/Transitive badge has actually resolved. If the filter leaves nothing
+to show — every finding here is Direct, say, with Transitive selected — the
+table shows a single line saying so instead of a blank body under the header
+row.
 
 #### Origin: Direct or Transitive
 
@@ -272,13 +277,15 @@ complete with nothing to show.
 A cached walk can fall behind DependencyTrack — a new BOM import lands after
 the walk ran, or the result simply looks wrong — and a stale row is still
 served rather than hidden (flagged `stale: true`), which is enough to notice
-the gap but not to close it by itself. Once the toggle has something to show,
-a **"↻ Refetch paths"** button appears beside it; clicking it re-walks the
+the gap but not to close it by itself. Once the toggle has resolved a walk
+**and** at least one shown row is Transitive, a **"↻ Refetch paths"** button
+appears beside it (same line as the checkbox); clicking it re-walks the
 graph regardless of what is currently cached, the same request the toggle
 sends but with `force: true` added. It is the manual complement to the
 automatic staleness flag, not a replacement for it, and it does not bypass
 the one-walk-at-a-time guard: if a walk for this project is already running,
-a refetch gets the same 409 an ordinary request would.
+a refetch gets the same 409 an ordinary request would. If every shown row is
+Direct, the button stays hidden — there is nothing a re-walk could change.
 
 ---
 
