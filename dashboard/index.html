@@ -647,14 +647,28 @@
        the finding, not the Origin cell itself (§8.10, fixed columns above).
        Indented so it still reads as belonging to the row above it. */
     .vuln-table .dep-path-row td { padding: 2px 10px 10px 34px; background: var(--surface2); }
+    /* item 2: an unbordered block of centred text read as a layout mistake,
+       not a message — framing it as a card (the same border/radius/surface
+       combination messages elsewhere in the app already use, e.g. the finding
+       row's own path-detail background) is what makes it read as content. */
     .vuln-dialog-status {
       padding: 32px 16px; text-align: center; color: var(--text-muted); font-size: 13px;
+      border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface2);
     }
     /* A single line, not the bigger centred block .vuln-dialog-status uses —
        this sits below a visible table header, which already tells the viewer
-       what was searched for, so it only needs to name the empty result. */
+       what was searched for, so it only needs to name the empty result. Same
+       card treatment as .vuln-dialog-status (item 2) for the same reason. */
     .vuln-empty-state {
       padding: 14px 10px; text-align: center; color: var(--text-muted); font-size: 13px;
+      border: 1px solid var(--border); border-radius: var(--radius); background: var(--surface2);
+      margin-top: 8px;
+    }
+    /* item 3: reflects the Origin and Parent filters together, so it sits
+       directly above the table those filters act on rather than beside the
+       dropdowns that set them. */
+    .vuln-result-count {
+      font-size: 11px; color: var(--text-muted); margin-bottom: 6px;
     }
     .vuln-dialog-note {
       margin-top: 10px; font-size: 11px; color: var(--text-muted); text-align: center;
@@ -1361,6 +1375,18 @@
             <option value="transitive">Transitive</option>
           </select>
         </label>
+        <!-- item 1: which chain root a Transitive row is reached through — a
+             third, purely local filter, shown only once there is something
+             transitive to group (renderVulnRows() gates it: paths showing,
+             at least one Transitive row, Origin not set to Direct). Its
+             options are rebuilt on every render from whatever chains have
+             actually resolved, never a static list. -->
+        <label id="vulnParentFilterWrap" hidden>
+          <span>Parent</span>
+          <select class="filter-select" id="vulnParentFilter" onchange="onVulnParentFilterChange()">
+            <option value="">N/A</option>
+          </select>
+        </label>
       </div>
       <!-- Off by default: the Direct/Transitive badge is always live and free,
            but the path behind a Transitive tag costs a graph walk, so showing
@@ -1389,6 +1415,10 @@
       </div>
       <div class="vuln-dialog-status" id="vulnDialogStatus"></div>
       <div class="vuln-table-wrap" id="vulnDialogTableWrap" hidden>
+        <!-- item 3: reflects both local filters (Origin, Parent) against the
+             currently loaded set, not just the initial fetch total — every
+             renderVulnRows() call recomputes it alongside the rows. -->
+        <p class="vuln-result-count" id="vulnResultCount"></p>
         <table class="vuln-table" id="vulnDialogTable">
           <thead id="vulnDialogHead"></thead>
           <tbody id="vulnDialogRows"></tbody>
@@ -4175,6 +4205,7 @@ let _vulnShownFindings   = [];   // security findings — the rendered slice, ke
 let _vulnShownLicense    = null; // LicenseViolation[] | null while the license view has not been fetched this dialog session
 let _vulnViewType        = 'security'; // 'security' | 'license' — which table onVulnViewTypeChange() has selected
 let _vulnOriginFilterMode = 'both';    // 'both' | 'direct' | 'transitive' — local, no refetch (CLAUDE.md §8.1)
+let _vulnParentFilter    = ''; // '' (N/A) | a chain root name — item 1, local, rebuilt every render (Q32)
 let _vulnDirectKeys      = null; // Set<componentKey> | null while Tier 1 has not returned yet
 let _depPathStatus       = 'none';
 let _depPathStale        = false;
@@ -4184,20 +4215,41 @@ let _depPathPaths        = {};
  * Rebuilds the table body from what is already known — never refetches.
  * Branches on the view-type dropdown (security/license) for which array and
  * row renderer to use, then applies the origin-filter dropdown (Both/Direct/
- * Transitive) locally. The filter passes everything through while Tier 1 has
- * not resolved yet (origin === null) rather than guessing a row's origin to
- * decide whether to hide it — the same "never guess" rule vulnOriginFor
- * itself already follows; it narrows once Tier 1 answers.
+ * Transitive) and the Parent dropdown (Q32/item 1) locally, in that order.
+ * Both pass everything through while Tier 1 has not resolved yet (origin ===
+ * null) rather than guessing a row's origin to decide whether to hide it —
+ * the same "never guess" rule vulnOriginFor itself already follows; they
+ * narrow once Tier 1 answers.
  */
 function renderVulnRows() {
   const rowsEl  = document.getElementById('vulnDialogRows');
   const emptyEl = document.getElementById('vulnEmptyState');
+  const countEl = document.getElementById('vulnResultCount');
   const toggle = document.getElementById('vulnDepPathToggle');
   const showPaths  = toggle && toggle.checked;
   const isLicense  = _vulnViewType === 'license';
   const source     = isLicense ? (_vulnShownLicense || []) : _vulnShownFindings;
   const rowHtmlFor = isLicense ? vulnLicenseRowHtml : vulnRowHtml;
 
+  // Q29: this is the one place dep-path state is already known reliably
+  // fresh — same reasoning as setCacheBuilding() disabling the toolbar's own
+  // refresh control alongside its banner. Nothing to refetch (or, below, to
+  // group by parent) while the paths are not even being shown, or while
+  // every row in scope is Direct — a walk with nothing transitive to resolve
+  // has nothing a re-walk could possibly change, the same reasoning
+  // onVulnDepPathToggle() already uses to skip the POST.
+  const hasTransitive = (transitiveTargets() || []).length > 0;
+  document.getElementById('vulnDepPathRefetchBtn').hidden =
+    !(showPaths && _depPathStatus === 'ready' && hasTransitive);
+
+  // Q32/item 1.1, 1.3: shown only once paths are on, there is something
+  // transitive to group, and Origin has not already narrowed the table to
+  // rows that can never have a parent chain.
+  const parentFilterActive = showPaths && hasTransitive && _vulnOriginFilterMode !== 'direct';
+  renderParentFilterOptions(parentFilterActive ? vulnParentOptions(source, showPaths) : []);
+  document.getElementById('vulnParentFilterWrap').hidden = !parentFilterActive;
+
+  let matched = 0;
   const html = source
     .map(item => {
       const origin = vulnOriginFor(item, showPaths);
@@ -4205,28 +4257,23 @@ function renderVulnRows() {
         const wantDirect = _vulnOriginFilterMode === 'direct';
         if (Boolean(origin.direct) !== wantDirect) return '';
       }
+      if (parentFilterActive && origin && !vulnParentMatches(origin, _vulnParentFilter)) return '';
+      matched++;
       return rowHtmlFor(item, origin) + vulnDepPathRowHtml(origin);
     })
     .join('');
   rowsEl.innerHTML = html;
 
-  // Q30: source.length > 0 means there was data to show and the Origin
-  // filter is what removed every row — source.length === 0 is a different,
-  // already-handled case (openVulnDialog/onVulnViewTypeChange show
-  // #vulnDialogStatus and never unhide the table at all), so this must not
-  // fire for it too or the two messages would stack.
+  // Q30: source.length > 0 means there was data to show and a filter is what
+  // removed every row — source.length === 0 is a different, already-handled
+  // case (openVulnDialog/onVulnViewTypeChange show #vulnDialogStatus and
+  // never unhide the table at all), so this must not fire for it too or the
+  // two messages would stack.
   emptyEl.hidden = !(source.length > 0 && html === '');
 
-  // Q29: this is the one place dep-path state is already known reliably
-  // fresh — same reasoning as setCacheBuilding() disabling the toolbar's own
-  // refresh control alongside its banner. Nothing to refetch while the paths
-  // are not even being shown, while there is not yet a resolved walk to
-  // doubt, or while every row in scope is Direct — a walk with nothing
-  // transitive to resolve has nothing a re-walk could possibly change, the
-  // same reasoning onVulnDepPathToggle() already uses to skip the POST.
-  const hasTransitive = (transitiveTargets() || []).length > 0;
-  document.getElementById('vulnDepPathRefetchBtn').hidden =
-    !(showPaths && _depPathStatus === 'ready' && hasTransitive);
+  // item 3: reflects both local filters together, not just the Origin one —
+  // matched is exactly the count of rows that made it into `html` above.
+  countEl.textContent = `Showing ${matched} of ${source.length}`;
 }
 
 /**
@@ -4272,6 +4319,69 @@ function vulnOriginFor(finding, showPaths) {
     direct: false, pathsReady: true,
     chains: entry ? entry.chains : null,
   };
+}
+
+/**
+ * Q32/item 1.4: the Parent dropdown's own option list — every distinct chain
+ * root (chain[0], the direct dependency a chain starts from) across every
+ * Transitive row in `source`, deduped and alphabetised. A component reached
+ * from more than one direct dependency (Q27's one-chain-per-root walk)
+ * contributes one name per chain here, not one — that is what lets it appear
+ * under every root that actually reaches it once a specific one is chosen.
+ * Empty while paths are not being shown at all, which is what makes
+ * renderVulnRows()'s gating a plain rebuild rather than a special case.
+ */
+function vulnParentOptions(source, showPaths) {
+  if (!showPaths) return [];
+  const names = new Set();
+  for (const item of source) {
+    const origin = vulnOriginFor(item, showPaths);
+    if (!origin || origin.direct || !origin.chains) continue;
+    for (const chain of origin.chains) {
+      if (chain && chain.length) names.add(chain[0]);
+    }
+  }
+  return [...names].sort((a, b) => a.localeCompare(b));
+}
+
+/**
+ * Q32/item 1.4.1-1.4.2: '' (N/A, the default) is a real bucket, not "no
+ * filter" — it groups every row that cannot be claimed by a specific root:
+ * Direct rows (which have no chain at all) and Transitive rows with no
+ * resolved chain yet, whether because the walk has not finished
+ * (!pathsReady) or DependencyTrack genuinely recorded none (chains empty).
+ * A real parent name matches a row if ANY of its chains starts there, the
+ * same "any root" reasoning vulnParentOptions above already applies —
+ * excluding a component from a root's filtered view just because a
+ * different root was discovered first would contradict what the Origin
+ * badge itself already shows it reachable from.
+ */
+function vulnParentMatches(origin, parentFilter) {
+  if (!parentFilter) {
+    if (origin.direct) return true;
+    if (!origin.pathsReady) return true;
+    return !(origin.chains && origin.chains.length);
+  }
+  if (origin.direct || !origin.chains) return false;
+  return origin.chains.some(chain => chain && chain[0] === parentFilter);
+}
+
+/**
+ * Rebuilds #vulnParentFilter's <option>s from the current root list,
+ * preserving the selection if it is still one of them. A previously chosen
+ * root disappearing — a view switch, or a narrower re-walk — falls back to
+ * N/A rather than silently keeping a selection no row can match any more.
+ */
+function renderParentFilterOptions(names) {
+  const el = document.getElementById('vulnParentFilter');
+  el.innerHTML = '<option value="">N/A</option>'
+    + names.map(n => `<option value="${escHtml(n)}">${escHtml(n)}</option>`).join('');
+  if (names.includes(_vulnParentFilter)) {
+    el.value = _vulnParentFilter;
+  } else {
+    _vulnParentFilter = '';
+    el.value = '';
+  }
 }
 
 /**
@@ -4484,9 +4594,11 @@ async function openVulnDialog(uuid) {
   const toggleEl     = document.getElementById('vulnDepPathToggle');
   const depStatusEl  = document.getElementById('vulnDepPathStatus');
   const refetchBtnEl = document.getElementById('vulnDepPathRefetchBtn');
-  const viewTypeEl   = document.getElementById('vulnViewType');
-  const originFiltEl = document.getElementById('vulnOriginFilter');
-  const emptyEl      = document.getElementById('vulnEmptyState');
+  const viewTypeEl     = document.getElementById('vulnViewType');
+  const originFiltEl   = document.getElementById('vulnOriginFilter');
+  const parentFiltWrap = document.getElementById('vulnParentFilterWrap');
+  const parentFiltEl   = document.getElementById('vulnParentFilter');
+  const emptyEl        = document.getElementById('vulnEmptyState');
   wrapEl.hidden = true;
   noteEl.hidden = true;
   emptyEl.hidden = true;
@@ -4504,6 +4616,7 @@ async function openVulnDialog(uuid) {
   _vulnShownLicense     = null;
   _vulnViewType         = 'security';
   _vulnOriginFilterMode = 'both';
+  _vulnParentFilter     = '';
   _vulnDirectKeys       = null;
   _depPathStatus        = 'none';
   _depPathStale         = false;
@@ -4514,6 +4627,8 @@ async function openVulnDialog(uuid) {
   refetchBtnEl.hidden = true;
   viewTypeEl.value    = 'security';
   originFiltEl.value  = 'both';
+  parentFiltWrap.hidden = true;
+  parentFiltEl.innerHTML = '<option value="">N/A</option>';
   renderVulnTableHead();
 
   openModal('vulnDialog');
@@ -4694,6 +4809,12 @@ async function onVulnViewTypeChange() {
 /** Both/Direct/Transitive — a local filter over whichever table is showing, never a refetch. */
 function onVulnOriginFilterChange() {
   _vulnOriginFilterMode = document.getElementById('vulnOriginFilter').value;
+  renderVulnRows();
+}
+
+/** Q32/item 1.4.1-1.4.2: which chain root to isolate — a local filter, the same "no network call" rule the origin filter above already follows. */
+function onVulnParentFilterChange() {
+  _vulnParentFilter = document.getElementById('vulnParentFilter').value;
   renderVulnRows();
 }
 
@@ -6968,6 +7089,7 @@ window.onVulnDepPathToggle  = onVulnDepPathToggle;
 window.onVulnDepPathRefetch = onVulnDepPathRefetch;
 window.onVulnViewTypeChange     = onVulnViewTypeChange;
 window.onVulnOriginFilterChange = onVulnOriginFilterChange;
+window.onVulnParentFilterChange = onVulnParentFilterChange;
 window.refreshData          = refreshData;
 window.triggerCacheRefresh  = triggerCacheRefresh;
 // Exposed so an end-to-end test can drive one watch tick instead of waiting out
