@@ -1358,6 +1358,15 @@
           <input type="checkbox" id="vulnDepPathToggle" onchange="onVulnDepPathToggle()">
           <span>Show full dependency paths (may take a moment)</span>
         </label>
+        <!-- Q29: a cached walk can disagree with DependencyTrack's current
+             state (a new BOM landed, or the cache simply looks wrong) — this
+             re-walks regardless of what is already stored, rather than
+             waiting for the toggle's own "already ready" fast path to trust
+             it. Shown only once there is something to doubt. -->
+        <button type="button" class="btn-xs" id="vulnDepPathRefetchBtn"
+                onclick="onVulnDepPathRefetch()" title="Re-walk DependencyTrack now, ignoring the cached result" hidden>
+          ↻ Refetch paths
+        </button>
         <p class="dep-path-status" id="vulnDepPathStatus" hidden></p>
       </div>
       <div class="vuln-table-wrap" id="vulnDialogTableWrap" hidden>
@@ -4150,6 +4159,13 @@ function renderVulnRows() {
       return rowHtmlFor(item, origin) + vulnDepPathRowHtml(origin);
     })
     .join('');
+
+  // Q29: this is the one place dep-path state is already known reliably
+  // fresh — same reasoning as setCacheBuilding() disabling the toolbar's own
+  // refresh control alongside its banner. Nothing to refetch while the paths
+  // are not even being shown, or while there is not yet a resolved walk to
+  // doubt.
+  document.getElementById('vulnDepPathRefetchBtn').hidden = !(showPaths && _depPathStatus === 'ready');
 }
 
 /**
@@ -4333,6 +4349,50 @@ async function onVulnDepPathToggle() {
   startDepPathPoll(_vulnCurrentProject, seq);
 }
 
+/**
+ * Q29: re-walk regardless of what is currently cached — for when a user
+ * suspects the cached result and DependencyTrack's own state have diverged
+ * (a newer BOM landed after the walk ran, say, or the cache just looks
+ * wrong). Shares `_depPathReqSeq`/`startDepPathPoll` with the toggle so a
+ * superseded click (unchecking the toggle, or closing the dialog, mid-
+ * refetch) is handled the identical way.
+ */
+async function onVulnDepPathRefetch() {
+  if (!_vulnCurrentProject) return;
+  const statusEl = document.getElementById('vulnDepPathStatus');
+  const seq      = ++_depPathReqSeq;
+  const targets  = transitiveTargets();
+
+  statusEl.hidden = false;
+  statusEl.textContent = 'Refetching dependency paths…';
+  // The point of asking is not to trust what is cached — clearing status
+  // before the request even lands hides the refetch button and any now-
+  // suspect chains immediately, through the same render path the toggle uses.
+  _depPathStatus = 'none';
+  renderVulnRows();
+
+  try {
+    const opts = {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ targets, force: true }),
+    };
+    const r = await apiFetch(
+      `/violation-cache/dependency-paths/${encodeURIComponent(_vulnCurrentProject)}`, opts);
+    if (seq !== _depPathReqSeq) return;
+    if (!r.ok && r.status !== 409) {
+      const detail = await r.json().catch(() => ({}));
+      statusEl.textContent = `Could not start refetch: ${detail.error || r.status}`;
+      return;
+    }
+  } catch (err) {
+    if (seq !== _depPathReqSeq) return;
+    statusEl.textContent = `Could not start refetch: ${err.message}`;
+    return;
+  }
+  startDepPathPoll(_vulnCurrentProject, seq);
+}
+
 // Which <thead> to show for the current view — declared once, reused by
 // renderVulnTableHead() and vulnDepPathRowHtml()'s VULN_TABLE_COLS colspan
 // above so the two can never disagree about how many columns a view has.
@@ -4362,6 +4422,7 @@ async function openVulnDialog(uuid) {
   const toggleWrapEl = document.getElementById('vulnDepPathToggleWrap');
   const toggleEl     = document.getElementById('vulnDepPathToggle');
   const depStatusEl  = document.getElementById('vulnDepPathStatus');
+  const refetchBtnEl = document.getElementById('vulnDepPathRefetchBtn');
   const viewTypeEl   = document.getElementById('vulnViewType');
   const originFiltEl = document.getElementById('vulnOriginFilter');
   wrapEl.hidden = true;
@@ -4387,6 +4448,7 @@ async function openVulnDialog(uuid) {
   toggleWrapEl.hidden = true;
   toggleEl.checked    = false;
   depStatusEl.hidden  = true;
+  refetchBtnEl.hidden = true;
   viewTypeEl.value    = 'security';
   originFiltEl.value  = 'both';
   renderVulnTableHead();
@@ -6840,6 +6902,7 @@ window.openModal            = openModal;
 window.closeModal           = closeModal;
 window.openVulnDialog       = openVulnDialog;
 window.onVulnDepPathToggle  = onVulnDepPathToggle;
+window.onVulnDepPathRefetch = onVulnDepPathRefetch;
 window.onVulnViewTypeChange     = onVulnViewTypeChange;
 window.onVulnOriginFilterChange = onVulnOriginFilterChange;
 window.refreshData          = refreshData;

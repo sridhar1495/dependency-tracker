@@ -4,7 +4,7 @@
 
 // ── Dependency-path endpoints ─────────────────────────────────────────────────
 //   GET  /violation-cache/dependency-paths/:projectUuid   direct set (live) + cached walk state
-//   POST /violation-cache/dependency-paths/:projectUuid   ask for a walk — body: { targets?: string[] }
+//   POST /violation-cache/dependency-paths/:projectUuid   ask for a walk — body: { targets?: string[], force?: boolean }
 //
 // The direct-dependency set is fetched live on every GET — one DependencyTrack
 // call, never cached, so the Direct/Transitive badge can never lag behind what
@@ -15,6 +15,12 @@
 // `targets` (Q26) scopes that walk to the componentKeys the dialog actually
 // needs a path for, rather than the project's entire graph — a 200-component
 // project with 40 open findings has no reason to resolve the other 160.
+//
+// `force` (Q29) skips runJob's "already covered by the cached walk"
+// short-circuit — the dialog's manual "Refetch paths" control, for when a
+// user suspects the cached result and DependencyTrack's own state have
+// diverged. It never bypasses the in-progress guard just below: a build
+// already running is still the same build, forced or not.
 
 const { log } = require('../lib/log');
 const { jsonReply, readJson, requireUser } = require('../lib/http-util');
@@ -115,16 +121,19 @@ async function handle({ method, path: parsedPath, req, res, principal }) {
     const body = await readJson(req, res);
     if (body === null) return true; // readJson already replied 400
     const targets = parseTargets(body);
+    const force = body.force === true;
 
     // Only a build that is genuinely alive blocks a new one — a row left
     // 'building' by a process that died reads as 'stalled' and falls through,
     // matching /violation-cache/refresh's recovery behaviour (CLAUDE.md §6.3).
+    // A forced request is refused here exactly like an ordinary one — force
+    // means "don't trust a ready cache", not "cancel a build in progress".
     const meta = await depCache.getMeta(conn.fingerprint, projectUuid);
     if (depCache.deriveStatus(meta, depCache.stallWindowMs()) === 'building') {
       jsonReply(res, 409, { status: 'building', message: 'A walk is already in progress.' });
       return true;
     }
-    depPaths.runJob(conn, projectUuid, targets).catch(err =>
+    depPaths.runJob(conn, projectUuid, targets, force).catch(err =>
       log('error', `Dependency-path walk error: ${err.message}`, { userId, projectUuid }));
     jsonReply(res, 202, { status: 'building', message: 'Walk started' });
     return true;

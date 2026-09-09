@@ -214,7 +214,7 @@ Inline comments use lettered prefixes to trace design decisions:
 - **O-numbers** — observability notes (`// O3: JSON log format for log aggregators`)
 - **S-numbers** — security rationale (`// S2: token hashed before storage`) — **new in revision 2**
 
-Highest numbers currently in use: **Q28, P20, O5, S34**. When adding logic with a
+Highest numbers currently in use: **Q29, P20, O5, S34**. When adding logic with a
 non-obvious trade-off, add the next number in the appropriate series. Check the
 current maximum before assigning — parallel branches can claim the same number.
 
@@ -500,6 +500,27 @@ component moves nothing in the tree — so the cache is keyed to
 call that fetches the direct set. A row built against an older import is still
 served (something to verify beats nothing while a re-walk has not been asked
 for) but flagged `stale: true`.
+
+**Q29: a manual refetch is the same walk, asked to stop trusting the cache.**
+`runJob(conn, projectUuid, targets, force)`'s fourth parameter skips exactly
+one thing — the "already covered by the cached walk" short-circuit above —
+and nothing else: `force` never touches `_building`, the advisory lock, or
+the route's "already building" 409 check, because a build already running is
+still the same build whether or not the new request asked to force one.
+`POST /violation-cache/dependency-paths/:id` accepts `{ targets?, force? }`
+for exactly this reason — the dialog's "↻ Refetch paths" button (`dashboard/
+index.html`, next to the toggle) always sends `force: true` alongside its own
+`transitiveTargets()`, for when a user suspects the cache and DependencyTrack
+have diverged (a BOM landed after the walk ran and the automatic `stale`
+flag has not yet caught up, or the result simply looks wrong) and does not
+want to wait for the next natural cause of a re-walk. The button is shown
+only once there is something to doubt — `renderVulnRows()` hides it unless
+the toggle is checked *and* `_depPathStatus === 'ready'` — and a click clears
+`_depPathStatus` and re-renders before the request even lands, so stale
+chains and the button itself disappear immediately rather than sitting on
+screen through the round trip. It shares `_depPathReqSeq` and
+`startDepPathPoll` with the toggle, so a superseded refetch (the dialog
+closed, or the toggle unchecked, mid-request) is handled the identical way.
 
 **Bounded the same way the snapshot crawl is** (§6.3): `MAX_GRAPH_NODES`
 caps how many components one walk will ever discover, so a toggle click cannot

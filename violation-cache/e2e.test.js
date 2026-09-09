@@ -963,8 +963,13 @@ describe('e2e — the dashboard in a real browser', { skip: BROWSER_SKIP }, () =
     assert.ok(!(await page.locator('.dep-path-chain').count()), 'no chain is shown before the toggle is used');
 
     // Toggling on triggers the walk and shows a chain per Transitive row.
+    // 30s, not 15s: observed flaky under CI resource contention at the
+    // tighter margin — the walk itself is fast (Q26 scopes it to exactly
+    // this dialog's targets), but a loaded runner's Postgres/HTTP round
+    // trips can still eat the difference. Matches the timeout the rest of
+    // this describe block's individual steps already use.
     await page.locator('#vulnDepPathToggle').click();
-    await page.waitForSelector('.dep-path-chain', { timeout: 15_000 });
+    await page.waitForSelector('.dep-path-chain', { timeout: 30_000 });
     const chains = await page.locator('.dep-path-chain').allTextContents();
     assert.ok(chains.length > 0);
     for (const chain of chains) {
@@ -983,6 +988,73 @@ describe('e2e — the dashboard in a real browser', { skip: BROWSER_SKIP }, () =
     await page.locator('#vulnDepPathToggle').click();
     await page.waitForSelector('.dep-path-chain', { timeout: 3000 });
     assert.ok(Date.now() - t0 < 3000, 'a resolved walk must render immediately on re-toggle, not re-poll');
+
+    await page.locator('#vulnDialog .modal-close').click();
+    await page.waitForTimeout(400);
+  }, { timeout: 60_000 });
+
+  test('License Risk shows real violations, filters by origin locally, and shares the dependency-path cache with Security', async () => {
+    // dt-stub.js seeds each leaf with two license violations reusing that
+    // leaf's own finding components — one direct (FAIL), one transitive via
+    // the carrier (WARN) — the same components the previous test's walk
+    // already resolved, so this proves the cache really is shared by
+    // component (CLAUDE.md §8.1 Q28), not duplicated per finding type.
+    const eyeBtn = page.locator('.vuln-eye-btn').first();
+    await eyeBtn.waitFor({ state: 'visible', timeout: 10_000 });
+    await eyeBtn.click();
+    await page.waitForTimeout(1200);
+
+    // Switch to License Risk — fetched lazily, the first time this dropdown reaches it.
+    await page.selectOption('#vulnViewType', 'license');
+    await page.waitForSelector('#vulnDialogRows tr', { timeout: 15_000 });
+
+    assert.equal(
+      await page.locator('#vulnDialogTable').evaluate(e => e.classList.contains('vuln-table--license')), true,
+      'the table must switch to the license column set');
+
+    const rowTexts = await page.locator('#vulnDialogRows tr').allTextContents();
+    assert.equal(rowTexts.length, 2, 'exactly the two seeded license violations for this project');
+    assert.ok(rowTexts.some(t => /GPL-3\.0-only/.test(t)), 'the resolved license name must render');
+    assert.ok(rowTexts.some(t => /Copyleft licences prohibited/.test(t)), 'the policy name must render');
+    assert.ok(rowTexts.some(t => /FAIL/.test(t)), 'the direct violation\'s state must render');
+    assert.ok(rowTexts.some(t => /WARN/.test(t)), 'the transitive violation\'s state must render');
+
+    const originTexts = await page.locator('#vulnDialogRows .vuln-origin').allTextContents();
+    assert.ok(originTexts.some(t => /Direct/.test(t)), 'the FAIL violation\'s component is direct');
+    assert.ok(originTexts.some(t => /Transitive/.test(t)), 'the WARN violation\'s component is transitive');
+
+    // The origin filter is local — narrows without a network round trip.
+    await page.selectOption('#vulnOriginFilter', 'direct');
+    await page.waitForTimeout(200);
+    assert.equal(await page.locator('#vulnDialogRows tr').count(), 1, 'Direct-only shows exactly the direct violation');
+
+    await page.selectOption('#vulnOriginFilter', 'transitive');
+    await page.waitForTimeout(200);
+    assert.equal(await page.locator('#vulnDialogRows tr').count(), 1, 'Transitive-only shows exactly the transitive violation');
+
+    await page.selectOption('#vulnOriginFilter', 'both');
+    await page.waitForTimeout(200);
+    assert.equal(await page.locator('#vulnDialogRows tr').count(), 2, 'Both restores every row');
+
+    // The toggle and its cache are shared with Security — the transitive
+    // component here is the very same one the earlier test already walked,
+    // so this must resolve, never read "no path recorded".
+    await page.locator('#vulnDepPathToggle').click();
+    await page.waitForSelector('.dep-path-chain', { timeout: 30_000 });
+    const chains = await page.locator('.dep-path-chain').allTextContents();
+    assert.ok(chains.length > 0);
+    assert.ok(!chains.some(t => /No path recorded/.test(t)),
+      'a component Security already resolved must never read as unresolved from License');
+    for (const chain of chains) {
+      assert.match(chain, /carrier-for-/, 'the chain must name the intermediate component');
+    }
+
+    // Switching back to Security must not have lost its own data or state.
+    await page.selectOption('#vulnViewType', 'security');
+    await page.waitForTimeout(300);
+    assert.equal(
+      await page.locator('#vulnDialogTable').evaluate(e => e.classList.contains('vuln-table--license')), false);
+    assert.ok((await page.locator('#vulnDialogRows tr').count()) > 0, 'security rows must still be there');
 
     await page.locator('#vulnDialog .modal-close').click();
     await page.waitForTimeout(400);

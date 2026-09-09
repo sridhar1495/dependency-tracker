@@ -5789,6 +5789,59 @@ describe('dependency paths — runJob orchestration', () => {
       assert.deepEqual(stored.meta.paths, {});
     } finally { restoreCache(); restoreFetch(); }
   });
+
+  test('Q29: force skips the cache-trust short-circuit and actually contends for the lock', async () => {
+    let lockCalled = false;
+    const restoreCache = stub(depPathCacheMod, {
+      getMeta: async () => ({
+        status: 'ready', paths: { 'pkg:t/y@1': { chains: [['a', 'y']] } },
+      }),
+      acquireBuildLock: async () => { lockCalled = true; return { acquired: true, release: async () => {} }; },
+      markBuilding: async () => {},
+      setProgress:  async () => {},
+      touchBuild:   async () => true,
+      storeResult:  async () => {},
+      markFailed:   async () => {},
+    });
+    const restoreFetch = stub(dtFetchMod, {
+      dtGetWithRetry: async (url) => {
+        if (!url.includes('dependencyGraph')) {
+          return { json: { directDependencies: JSON.stringify([{ uuid: 'a', name: 'a', purl: 'pkg:t/a@1' }]) } };
+        }
+        return { json: { a: { name: 'a', uuid: 'a' } } };
+      },
+    });
+    try {
+      const r = await depPathsMod.runJob(CONN, 'proj-force', ['pkg:t/y@1'], true);
+      assert.equal(lockCalled, true,
+        'force must bypass "already covered by the cached walk" and actually contend for the lock');
+      assert.equal(r.started, true);
+    } finally { restoreCache(); restoreFetch(); }
+  });
+
+  test('Q29: force does not bypass the advisory lock — a build already running is still the same build', async () => {
+    const restoreCache = stub(depPathCacheMod, {
+      getMeta: async () => ({ status: 'ready', paths: { 'pkg:t/y@1': { chains: [['a', 'y']] } } }),
+      acquireBuildLock: async () => ({ acquired: false, release: async () => {} }),
+    });
+    try {
+      const r = await depPathsMod.runJob(CONN, 'proj-force-locked', ['pkg:t/y@1'], true);
+      assert.equal(r.started, false, 'losing the lock still refuses a second concurrent walk, forced or not');
+    } finally { restoreCache(); }
+  });
+
+  test('Q29: force is false by default — omitting it keeps the Q26 cache-trust short-circuit', async () => {
+    let lockCalled = false;
+    const restoreCache = stub(depPathCacheMod, {
+      getMeta: async () => ({ status: 'ready', paths: { 'pkg:t/y@1': { chains: [['a', 'y']] } } }),
+      acquireBuildLock: async () => { lockCalled = true; return { acquired: true, release: async () => {} }; },
+    });
+    try {
+      const r = await depPathsMod.runJob(CONN, 'proj-no-force', ['pkg:t/y@1']);
+      assert.equal(r.started, false);
+      assert.equal(lockCalled, false, 'the default must still be "trust a ready cache"');
+    } finally { restoreCache(); }
+  });
 });
 
 describe('routes — dependency-paths', () => {
@@ -5986,6 +6039,66 @@ describe('routes — dependency-paths', () => {
       });
       assert.equal(res.statusCode, 202);
       assert.equal(seen.length, 900, 'the target list must be capped at the dialog\'s own row ceiling');
+    } finally { restoreConn(); restoreCache(); restoreDep(); }
+  });
+
+  test('Q29: force:true in the body reaches runJob\'s fourth argument', async () => {
+    const restoreConn = stub(dtConnectionsMod, { getResolved: async () => CONN });
+    const restoreCache = stub(depPathCacheMod, { getMeta: async () => null });
+    let seenForce = 'not called';
+    const restoreDep = stub(depPathsMod, {
+      runJob: async (_conn, _proj, _targets, force) => { seenForce = force; return { started: true, completed: true }; },
+    });
+    try {
+      const res = makeRes();
+      await routeDepPaths.handle({
+        method: 'POST', path: `/violation-cache/dependency-paths/${PROJECT}`,
+        url: `/violation-cache/dependency-paths/${PROJECT}`,
+        req: Readable.from([JSON.stringify({ targets: ['pkg:t/y@1'], force: true })]),
+        res, principal: asUser(USER_ID),
+      });
+      assert.equal(res.statusCode, 202);
+      assert.equal(seenForce, true);
+    } finally { restoreConn(); restoreCache(); restoreDep(); }
+  });
+
+  test('Q29: an absent force field passes false through, not undefined or truthy', async () => {
+    const restoreConn = stub(dtConnectionsMod, { getResolved: async () => CONN });
+    const restoreCache = stub(depPathCacheMod, { getMeta: async () => null });
+    let seenForce = 'not called';
+    const restoreDep = stub(depPathsMod, {
+      runJob: async (_conn, _proj, _targets, force) => { seenForce = force; return { started: true, completed: true }; },
+    });
+    try {
+      const res = makeRes();
+      await routeDepPaths.handle({
+        method: 'POST', path: `/violation-cache/dependency-paths/${PROJECT}`,
+        url: `/violation-cache/dependency-paths/${PROJECT}`,
+        req: Readable.from([JSON.stringify({ targets: ['pkg:t/y@1'] })]),
+        res, principal: asUser(USER_ID),
+      });
+      assert.equal(res.statusCode, 202);
+      assert.equal(seenForce, false, 'a missing force field must not be treated as truthy');
+    } finally { restoreConn(); restoreCache(); restoreDep(); }
+  });
+
+  test('Q29: a forced POST while already building still answers 409, not a second walk', async () => {
+    const restoreConn = stub(dtConnectionsMod, { getResolved: async () => CONN });
+    const restoreCache = stub(depPathCacheMod, {
+      getMeta: async () => ({ status: 'building', updatedAt: new Date().toISOString() }),
+    });
+    const restoreDep = stub(depPathsMod, {
+      runJob: async () => { throw new Error('must not be called'); },
+    });
+    try {
+      const res = makeRes();
+      await routeDepPaths.handle({
+        method: 'POST', path: `/violation-cache/dependency-paths/${PROJECT}`,
+        url: `/violation-cache/dependency-paths/${PROJECT}`,
+        req: Readable.from([JSON.stringify({ force: true })]),
+        res, principal: asUser(USER_ID),
+      });
+      assert.equal(res.statusCode, 409, 'force never bypasses the in-progress guard');
     } finally { restoreConn(); restoreCache(); restoreDep(); }
   });
 });

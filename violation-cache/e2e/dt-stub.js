@@ -149,7 +149,45 @@ function buildPortfolio() {
     graphByLeaf[leaf.uuid] = graph;
   }
 
-  return { roots, children, violations, findings, directDepsByLeaf, graphByLeaf };
+  // ── License-risk violations, per project ──────────────────────────────
+  // Separate from the bare {riskType, violationState, project} objects
+  // `violations` uses for the risk table's global counts — the License Risk
+  // dialog view needs real component/policyCondition/resolvedLicense shapes
+  // to render, and a per-project search to find them the way
+  // vulnLicenseQuery() (mirroring lib/reports.js's streamViolationsForProject())
+  // actually asks. Reuses two of the leaf's own findings' components — one
+  // direct, one transitive via the carrier (the dependency-graph fixture
+  // above already split them that way) — so the License view's Origin badge
+  // exercises both states through the exact same dependency-path cache
+  // Security already built, proving the cache really is shared by component,
+  // not by finding type.
+  const licenseViolations = [];
+  for (const leaf of Object.values(children).flat()) {
+    const leafFindings = findings.filter(f => f.component.projectName === leaf.name);
+    const direct      = leafFindings.find((f, idx) => idx % 2 === 0);
+    const transitive  = leafFindings.find((f, idx) => idx % 2 === 1);
+    for (const [f, state, license] of [
+      [direct, 'FAIL', 'GPL-3.0-only'],
+      [transitive, 'WARN', 'LGPL-2.1-only'],
+    ]) {
+      if (!f) continue;
+      licenseViolations.push({
+        project: { uuid: leaf.uuid },
+        component: {
+          name: f.component.name, group: f.component.group, version: f.component.version,
+          uuid: f.component.uuid, purl: f.component.purl,
+          projectName: leaf.name, // stub-only convenience, mirrors findings' own field — not a real DT field
+          resolvedLicense: { name: license, licenseId: license },
+        },
+        policyCondition: {
+          value: license,
+          policy: { name: 'Copyleft licences prohibited', violationState: state },
+        },
+      });
+    }
+  }
+
+  return { roots, children, violations, findings, directDepsByLeaf, graphByLeaf, licenseViolations };
 }
 
 /**
@@ -222,6 +260,22 @@ async function start(opts = {}) {
     }
 
     if (u.pathname === '/api/v1/violation') {
+      // Two different callers share this one endpoint. The risk-table crawl
+      // (violation-cache.js) asks by riskType + violationState, paging the
+      // whole portfolio. The License Risk dialog (vulnLicenseQuery(), mirroring
+      // lib/reports.js's streamViolationsForProject()) asks by riskType +
+      // textSearchField=project_name, scoped to one project — the same
+      // real-DT quirk fetchAllFindings/vulnFindingsQuery already work around,
+      // where the project={uuid} filter is silently ignored.
+      if (u.searchParams.get('textSearchField') === 'project_name') {
+        const input = u.searchParams.get('textSearchInput') || '';
+        const list  = portfolio.licenseViolations.filter(v => v.component.projectName === input);
+        const pageSize   = parseInt(u.searchParams.get('pageSize') || '300', 10);
+        const pageNumber = parseInt(u.searchParams.get('pageNumber') || '1', 10);
+        const start = (pageNumber - 1) * pageSize;
+        const page  = list.slice(start, start + pageSize);
+        return send(200, page, { 'X-Total-Count': String(list.length) });
+      }
       const rt = u.searchParams.get('riskType');
       const st = u.searchParams.get('violationState');
       const list = portfolio.violations.filter(v => v.riskType === rt && v.violationState === st);

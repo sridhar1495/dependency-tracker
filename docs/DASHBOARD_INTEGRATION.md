@@ -269,6 +269,17 @@ does not call `POST` at all — there is nothing transitive to resolve a chain
 for, and the toggle says so directly instead of starting a walk that would
 complete with nothing to show.
 
+A cached walk can fall behind DependencyTrack — a new BOM import lands after
+the walk ran, or the result simply looks wrong — and a stale row is still
+served rather than hidden (flagged `stale: true`), which is enough to notice
+the gap but not to close it by itself. Once the toggle has something to show,
+a **"↻ Refetch paths"** button appears beside it; clicking it re-walks the
+graph regardless of what is currently cached, the same request the toggle
+sends but with `force: true` added. It is the manual complement to the
+automatic staleness flag, not a replacement for it, and it does not bypass
+the one-walk-at-a-time guard: if a walk for this project is already running,
+a refetch gets the same 409 an ordinary request would.
+
 ---
 
 ## 3. Connecting to Live Data
@@ -361,7 +372,7 @@ compact per-project count map in a JSON file, and serves only that file to the b
 | `/violation-cache/refresh` | POST | Trigger a background rebuild (409 if already running) |
 | `/violation-cache/risk-series` | GET | Daily risk history for your connection — see [Risk history](#risk-history) |
 | `/violation-cache/dependency-paths/:id` | GET | A project's direct-dependency set (live, never cached) plus whatever the cached graph walk currently knows — see [Vulnerability Detail Dialog](#vulnerability-detail-dialog) |
-| `/violation-cache/dependency-paths/:id` | POST | Resolve the dependency-graph walk for one project (409 if already running). Body: `{ targets?: string[] }` — componentKeys to resolve a path for; omitted walks the whole graph, an empty array walks nothing |
+| `/violation-cache/dependency-paths/:id` | POST | Resolve the dependency-graph walk for one project (409 if already running). Body: `{ targets?: string[], force?: boolean }` — `targets` are componentKeys to resolve a path for (omitted walks the whole graph, an empty array walks nothing); `force: true` re-walks even when a ready cache already covers every requested target, without bypassing the already-running guard |
 
 ### Risk history
 

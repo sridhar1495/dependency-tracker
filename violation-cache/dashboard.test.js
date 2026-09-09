@@ -4395,6 +4395,65 @@ describe('dependency paths — the toggle and its polling', () => {
   });
 });
 
+describe('dependency paths — manual refetch (Q29)', () => {
+  test('the refetch button exists, starts hidden, and is not a form submit', () => {
+    assert.match(INDEX_HTML, /id="vulnDepPathRefetchBtn"/);
+    const btnAt = INDEX_HTML.indexOf('id="vulnDepPathRefetchBtn"');
+    const tagStart = INDEX_HTML.lastIndexOf('<button', btnAt);
+    const tagEnd = INDEX_HTML.indexOf('>', btnAt);
+    const tag = INDEX_HTML.slice(tagStart, tagEnd + 1);
+    assert.match(tag, /type="button"/);
+    assert.match(tag, /\bhidden\b/, 'the button must start hidden — nothing to doubt before a walk has ever run');
+    assert.match(tag, /onclick="onVulnDepPathRefetch\(\)"/);
+  });
+
+  test('onVulnDepPathRefetch is window-exported, or the button fails silently (§8.2)', () => {
+    assert.match(INDEX_HTML, /window\.onVulnDepPathRefetch\s*=\s*onVulnDepPathRefetch/);
+  });
+
+  test('a refetch always forces the walk and scopes it to the current transitive targets', () => {
+    const fn = extractFunction(INDEX_HTML, 'onVulnDepPathRefetch');
+    assert.match(fn, /const targets\s*=\s*transitiveTargets\(\)/);
+    assert.match(fn, /body:\s*JSON\.stringify\(\{\s*targets,\s*force:\s*true\s*\}\)/);
+    assert.match(fn, /'Content-Type':\s*'application\/json'/);
+    assert.match(fn, /method:\s*'POST'/);
+  });
+
+  test('a refetch clears the cached status and re-renders before the request lands, hiding stale chains', () => {
+    const fn = extractFunction(INDEX_HTML, 'onVulnDepPathRefetch');
+    const clearAt  = fn.indexOf("_depPathStatus = 'none'");
+    const renderAt = fn.indexOf('renderVulnRows();');
+    const fetchAt  = fn.indexOf('apiFetch(');
+    assert.ok(clearAt !== -1 && renderAt !== -1 && fetchAt !== -1);
+    assert.ok(clearAt < fetchAt, '_depPathStatus must be cleared before the network call, not after');
+    assert.ok(renderAt < fetchAt, 'the re-render must happen before the network call, not after');
+  });
+
+  test('a refetch shares _depPathReqSeq and startDepPathPoll with the toggle, so a superseded click is handled identically', () => {
+    const fn = extractFunction(INDEX_HTML, 'onVulnDepPathRefetch');
+    assert.match(fn, /const seq\s*=\s*\+\+_depPathReqSeq/);
+    assert.match(fn, /if \(seq !== _depPathReqSeq\) return;/);
+    assert.match(fn, /startDepPathPoll\(_vulnCurrentProject, seq\)/);
+  });
+
+  test('a refetch with no project open is a no-op', () => {
+    const fn = extractFunction(INDEX_HTML, 'onVulnDepPathRefetch');
+    assert.match(fn, /if \(!_vulnCurrentProject\) return;/);
+  });
+
+  test('renderVulnRows shows the refetch button only while paths are showing and a walk is ready to doubt', () => {
+    const fn = extractFunction(INDEX_HTML, 'renderVulnRows');
+    assert.match(fn,
+      /vulnDepPathRefetchBtn'\)\.hidden\s*=\s*!\(showPaths\s*&&\s*_depPathStatus === 'ready'\)/,
+      'the button must stay hidden unless the toggle is on and the walk actually has a ready result');
+  });
+
+  test('a fresh dialog open resets the refetch button back to hidden', () => {
+    const fn = extractFunction(INDEX_HTML, 'openVulnDialog');
+    assert.match(fn, /refetchBtnEl\.hidden\s*=\s*true/);
+  });
+});
+
 // ── License risk (PR1: one dialog, two view types) ─────────────────────────
 // The same dialog now shows either Security Violations or License Risk,
 // picked by a view-type dropdown, plus a second, purely local Direct/
