@@ -101,8 +101,19 @@ async function getDirectDependencies(apiUrl, apiKey, projectUuid) {
  * recorded no edge to it, which is the ordinary case for an SBOM built from a
  * manifest rather than a scanned artefact. It has no entry in the returned
  * paths map; the caller shows that plainly rather than inventing a chain.
+ *
+ * Q26: when `targets` (componentKeys) is given, the walk stops as soon as
+ * every one of them is settled — reached transitively, or found to already
+ * be a direct dependency — rather than discovering the rest of the project's
+ * graph regardless of whether anything needs it. Only the finding rows a
+ * dialog actually displays ever need a path; a 200-component project with 40
+ * open findings walking to all 200 is real, measured DependencyTrack load for
+ * work nobody asked for (CLAUDE.md §13). `targets` omitted or empty walks
+ * exhaustively, as before — the shape a full-graph caller still wants.
  */
-async function walkGraph(apiUrl, apiKey, projectUuid, directDeps, onProgress = () => {}, shouldStop = () => false) {
+async function walkGraph(
+  apiUrl, apiKey, projectUuid, directDeps, onProgress = () => {}, shouldStop = () => false, targets = null
+) {
   const nodes    = new Map(); // uuid -> {name, version, purl, group, ...}
   const parent   = new Map(); // uuid -> the uuid that first discovered it
   const rootOf   = new Map(); // uuid -> the direct-dependency uuid whose branch first reached it
@@ -112,17 +123,37 @@ async function walkGraph(apiUrl, apiKey, projectUuid, directDeps, onProgress = (
   const directUuids = [...new Set(directDeps.map(d => d && d.uuid).filter(Boolean))];
   for (const d of directDeps) if (d && d.uuid) nodes.set(d.uuid, d);
   for (const uuid of directUuids) rootOf.set(uuid, uuid);
+  const directSet = new Set(directUuids);
+
+  // null/undefined means "walk everything" (unchanged default behaviour); an
+  // array — even an empty one, meaning every requested target already turned
+  // out to be direct — means "walk only these", so an empty array must stop
+  // immediately rather than silently falling back to an exhaustive walk.
+  const targetSet = targets ? new Set(targets) : null;
+  const settled = new Set();
+  const isDone = () => targetSet !== null && settled.size >= targetSet.size;
+  // A target is settled once its path is knowable — direct (trivial) or it
+  // has a parent link (a chain exists) — never merely because its name has
+  // been seen; a component can appear as metadata before it is reachable.
+  const checkSettled = (uuid) => {
+    if (!targetSet || !(directSet.has(uuid) || parent.has(uuid))) return;
+    const info = nodes.get(uuid);
+    if (!info) return;
+    const key = componentKey(info);
+    if (targetSet.has(key)) settled.add(key);
+  };
+  for (const uuid of directUuids) checkSettled(uuid);
 
   const sem = makeSemaphore(WALK_CONCURRENCY);
   let queue = directUuids;
   let resolvedCalls = 0;
 
-  while (queue.length && nodes.size < MAX_GRAPH_NODES && !shouldStop()) {
+  while (queue.length && nodes.size < MAX_GRAPH_NODES && !shouldStop() && !isDone()) {
     const batch = queue;
     const nextQueue = [];
 
     await Promise.all(batch.map(uuid => sem(async () => {
-      if (expanded.has(uuid) || shouldStop()) return;
+      if (expanded.has(uuid) || shouldStop() || isDone()) return;
       expanded.add(uuid);
       let graph;
       try {
@@ -138,6 +169,7 @@ async function walkGraph(apiUrl, apiKey, projectUuid, directDeps, onProgress = (
 
       for (const [nodeUuid, info] of Object.entries(graph || {})) {
         if (!nodes.has(nodeUuid)) nodes.set(nodeUuid, info);
+        checkSettled(nodeUuid);
         const kids = Array.isArray(info && info.dependencyGraph) ? info.dependencyGraph : null;
         if (!kids) continue;
 
@@ -147,6 +179,7 @@ async function walkGraph(apiUrl, apiKey, projectUuid, directDeps, onProgress = (
           if (!rootOf.has(kidUuid)) {
             rootOf.set(kidUuid, myRoot);
             parent.set(kidUuid, nodeUuid);
+            checkSettled(kidUuid);
           } else if (myRoot && rootOf.get(kidUuid) !== myRoot) {
             multiple.add(kidUuid);
           }
@@ -155,12 +188,11 @@ async function walkGraph(apiUrl, apiKey, projectUuid, directDeps, onProgress = (
       }
     })));
 
-    queue = [...new Set(nextQueue)];
+    queue = isDone() ? [] : [...new Set(nextQueue)];
   }
   onProgress(nodes.size, resolvedCalls);
 
   // ── Reconstruct one shortest chain per transitive component ─────────────
-  const directSet = new Set(directUuids);
   const paths = {};
   for (const [uuid, info] of nodes) {
     if (directSet.has(uuid) || !parent.has(uuid)) continue; // direct, or never reached
@@ -183,15 +215,30 @@ async function walkGraph(apiUrl, apiKey, projectUuid, directDeps, onProgress = (
  * Build (or rebuild) the cached walk for one project.
  *
  * Returns `{ started: false }` when another builder already holds the lock —
- * the shared-cache behaviour working, not an error (CLAUDE.md §7.5).
+ * the shared-cache behaviour working, not an error (CLAUDE.md §7.5) — or when
+ * every requested target is already a key in the stored `paths` from a
+ * previous walk, which is what keeps a re-toggle instant for the common case
+ * of reopening a dialog whose findings have not changed.
  *
  * @param {{apiUrl: string, apiKey: string, fingerprint: string}} conn
  * @param {string} projectUuid
+ * @param {string[]|null} [targets] componentKeys the caller actually needs a
+ *   path for (Q26) — omitted or empty walks the whole graph, as before.
  */
-async function runJob(conn, projectUuid) {
+async function runJob(conn, projectUuid, targets = null) {
   const { apiUrl, apiKey, fingerprint } = conn;
   const key = buildingKey(fingerprint, projectUuid);
   if (_building.has(key)) return { started: false, reason: 'already building in this process' };
+
+  if (targets && targets.length) {
+    const existing = await depCache.getMeta(fingerprint, projectUuid);
+    if (existing && existing.status === 'ready') {
+      const known = new Set(Object.keys(existing.paths || {}));
+      if (targets.every(t => known.has(t))) {
+        return { started: false, reason: 'already covered by the cached walk' };
+      }
+    }
+  }
 
   const lock = await depCache.acquireBuildLock(fingerprint, projectUuid);
   if (!lock.acquired) {
@@ -241,10 +288,17 @@ async function runJob(conn, projectUuid) {
   try {
     const { direct, lastBomImport } = await getDirectDependencies(apiUrl, apiKey, projectUuid);
 
+    // A requested target that turns out to already be direct needs no walk at
+    // all — defensive against a caller's list going stale between its own
+    // Tier-1 read and this POST; the frontend already excludes these itself.
+    const directKeys = new Set(direct.map(componentKey));
+    const scopedTargets = targets ? targets.filter(t => !directKeys.has(t)) : null;
+
     const { paths, totalComponents } = await walkGraph(
       apiUrl, apiKey, projectUuid, direct,
       (total, resolved) => { state.total = total; state.resolved = resolved; publish(); },
-      () => timedOut
+      () => timedOut,
+      scopedTargets
     );
 
     if (timedOut) {

@@ -5547,6 +5547,54 @@ describe('dependency paths — the walk (Tier 2)', () => {
       assert.ok(totalComponents >= 2, 'X\'s own successful expansion must still count');
     } finally { restoreFetch(); }
   });
+
+  // Q26: a `targets` list stops the walk once every requested componentKey is
+  // settled, instead of discovering the whole project graph. A pure linear
+  // chain — each node's response reveals only the next hop — makes an early
+  // stop visible as a call count, the same fixture 'the walk is bounded' uses.
+  test('Q26: a target list stops the walk once every target is settled, not at the node ceiling', async () => {
+    let calls = 0;
+    const restoreFetch = stub(dtFetchMod, {
+      dtGetWithRetry: async (url) => {
+        calls++;
+        const uuid = url.split('/').pop();
+        const next = String(Number(uuid) + 1);
+        return { json: { [uuid]: { name: `n${uuid}`, uuid, purl: `pkg:t/n${uuid}@1`, dependencyGraph: [next] } } };
+      },
+    });
+    try {
+      const direct = [{ uuid: '0', name: 'root', purl: 'pkg:t/root@1' }];
+      const { paths } = await depPathsMod.walkGraph(
+        'http://dt', 'k', 'proj', direct, () => {}, () => false, ['pkg:t/n2@1']);
+      assert.ok(paths['pkg:t/n2@1'], 'the requested target must still be resolved');
+      assert.ok(calls < 10, `scoping must stop once the target settles, not run to the node ceiling (${calls} calls)`);
+    } finally { restoreFetch(); }
+  });
+
+  test('Q26: an empty target array walks nothing — a real instruction, not "walk everything"', async () => {
+    let calls = 0;
+    const restoreFetch = stub(dtFetchMod, { dtGetWithRetry: async () => { calls++; return { json: {} }; } });
+    try {
+      const direct = [{ uuid: 'A', name: 'A', purl: 'pkg:t/A@1' }];
+      const { paths, totalComponents } = await depPathsMod.walkGraph(
+        'http://dt', 'k', 'proj', direct, () => {}, () => false, []);
+      assert.equal(calls, 0, 'nothing was asked for — no dependencyGraph call is justified');
+      assert.deepEqual(paths, {});
+      assert.equal(totalComponents, 1, 'the direct dependency itself is still counted');
+    } finally { restoreFetch(); }
+  });
+
+  test('Q26: targets omitted keeps the exhaustive walk — unchanged default behaviour', async () => {
+    const restoreFetch = stub(dtFetchMod, { dtGetWithRetry: diamondFetch() });
+    const direct = [
+      { uuid: 'A', name: 'A', purl: 'pkg:t/A@1' },
+      { uuid: 'B', name: 'B', purl: 'pkg:t/B@1' },
+    ];
+    try {
+      const { paths } = await depPathsMod.walkGraph('http://dt', 'k', 'proj', direct);
+      assert.ok(paths['pkg:t/Y@1'] && paths['pkg:t/Z@1'], 'no target list must still discover the whole graph');
+    } finally { restoreFetch(); }
+  });
 });
 
 describe('dependency paths — the stall watchdog', () => {
@@ -5667,6 +5715,56 @@ describe('dependency paths — runJob orchestration', () => {
       assert.equal(r.started, false);
     } finally { restoreCache(); }
   });
+
+  test('Q26: every requested target already covered by a ready cache — no lock, no DT call', async () => {
+    let lockCalled = false;
+    let fetchCalled = false;
+    const restoreCache = stub(depPathCacheMod, {
+      getMeta: async () => ({
+        status: 'ready', paths: { 'pkg:t/y@1': { chain: ['a', 'y'], multiple: false } },
+      }),
+      acquireBuildLock: async () => { lockCalled = true; return { acquired: true, release: async () => {} }; },
+    });
+    const restoreFetch = stub(dtFetchMod, { dtGetWithRetry: async () => { fetchCalled = true; return { json: {} }; } });
+    try {
+      const r = await depPathsMod.runJob(CONN, 'proj-cached', ['pkg:t/y@1']);
+      assert.equal(r.started, false);
+      assert.equal(lockCalled, false, 'a cache hit must not contend for the advisory lock');
+      assert.equal(fetchCalled, false, 'a cache hit must not touch DependencyTrack at all');
+    } finally { restoreCache(); restoreFetch(); }
+  });
+
+  test('Q26: a target the direct set already covers is dropped before the walk, not chased', async () => {
+    const stored = {};
+    const restoreCache = stub(depPathCacheMod, {
+      getMeta: async () => null,
+      acquireBuildLock: async () => ({ acquired: true, release: async () => {} }),
+      markBuilding: async () => {},
+      setProgress:  async () => {},
+      touchBuild:   async () => true,
+      storeResult:  async (fp, proj, meta) => { stored.meta = meta; },
+      markFailed:   async () => {},
+    });
+    let graphCalls = 0;
+    const restoreFetch = stub(dtFetchMod, {
+      dtGetWithRetry: async (url) => {
+        if (!url.includes('dependencyGraph')) {
+          return { json: { directDependencies: JSON.stringify([{ uuid: 'a', name: 'a', purl: 'pkg:t/a@1' }]) } };
+        }
+        graphCalls++;
+        return { json: { a: { name: 'a', uuid: 'a' } } };
+      },
+    });
+    try {
+      // The requested target is already a direct dependency — the frontend
+      // normally excludes these itself, so this proves the server-side
+      // re-filter that guards a caller whose list went stale.
+      const r = await depPathsMod.runJob(CONN, 'proj-direct-target', ['pkg:t/a@1']);
+      assert.equal(r.completed, true);
+      assert.equal(graphCalls, 0, 'a target already known to be direct needs no graph expansion at all');
+      assert.deepEqual(stored.meta.paths, {});
+    } finally { restoreCache(); restoreFetch(); }
+  });
 });
 
 describe('routes — dependency-paths', () => {
@@ -5773,7 +5871,8 @@ describe('routes — dependency-paths', () => {
       const res = makeRes();
       await routeDepPaths.handle({
         method: 'POST', path: `/violation-cache/dependency-paths/${PROJECT}`,
-        url: `/violation-cache/dependency-paths/${PROJECT}`, req: {}, res, principal: asUser(USER_ID),
+        url: `/violation-cache/dependency-paths/${PROJECT}`, req: Readable.from(['']), res,
+        principal: asUser(USER_ID),
       });
       assert.equal(res.statusCode, 409);
     } finally { restoreConn(); restoreCache(); restoreDep(); }
@@ -5796,10 +5895,73 @@ describe('routes — dependency-paths', () => {
       const res = makeRes();
       await routeDepPaths.handle({
         method: 'POST', path: `/violation-cache/dependency-paths/${PROJECT}`,
-        url: `/violation-cache/dependency-paths/${PROJECT}`, req: {}, res, principal: asUser(USER_ID),
+        url: `/violation-cache/dependency-paths/${PROJECT}`, req: Readable.from(['']), res,
+        principal: asUser(USER_ID),
       });
       assert.equal(res.statusCode, 202);
       assert.equal(started, true);
+    } finally { restoreConn(); restoreCache(); restoreDep(); }
+  });
+
+  test('Q26: a posted target list reaches runJob unchanged', async () => {
+    const restoreConn = stub(dtConnectionsMod, { getResolved: async () => CONN });
+    const restoreCache = stub(depPathCacheMod, { getMeta: async () => null });
+    let seen = 'not called';
+    const restoreDep = stub(depPathsMod, {
+      runJob: async (_conn, _proj, targets) => { seen = targets; return { started: true, completed: true }; },
+    });
+    try {
+      const res = makeRes();
+      await routeDepPaths.handle({
+        method: 'POST', path: `/violation-cache/dependency-paths/${PROJECT}`,
+        url: `/violation-cache/dependency-paths/${PROJECT}`,
+        req: Readable.from([JSON.stringify({ targets: ['pkg:t/y@1', 'pkg:t/z@1'] })]),
+        res, principal: asUser(USER_ID),
+      });
+      assert.equal(res.statusCode, 202);
+      assert.deepEqual(seen, ['pkg:t/y@1', 'pkg:t/z@1']);
+    } finally { restoreConn(); restoreCache(); restoreDep(); }
+  });
+
+  test('Q26: an absent targets field passes null through — the full-walk default', async () => {
+    const restoreConn = stub(dtConnectionsMod, { getResolved: async () => CONN });
+    const restoreCache = stub(depPathCacheMod, { getMeta: async () => null });
+    let seen = 'not called';
+    const restoreDep = stub(depPathsMod, {
+      runJob: async (_conn, _proj, targets) => { seen = targets; return { started: true, completed: true }; },
+    });
+    try {
+      const res = makeRes();
+      await routeDepPaths.handle({
+        method: 'POST', path: `/violation-cache/dependency-paths/${PROJECT}`,
+        url: `/violation-cache/dependency-paths/${PROJECT}`, req: Readable.from(['']), res,
+        principal: asUser(USER_ID),
+      });
+      assert.equal(res.statusCode, 202);
+      assert.equal(seen, null, 'no targets field must mean "walk everything", not "walk nothing"');
+    } finally { restoreConn(); restoreCache(); restoreDep(); }
+  });
+
+  test('Q26: an oversized target list is capped, not rejected outright', async () => {
+    const restoreConn = stub(dtConnectionsMod, { getResolved: async () => CONN });
+    const restoreCache = stub(depPathCacheMod, { getMeta: async () => null });
+    let seen = 'not called';
+    const restoreDep = stub(depPathsMod, {
+      runJob: async (_conn, _proj, targets) => { seen = targets; return { started: true, completed: true }; },
+    });
+    // Short of readJson's own 64 KB body ceiling — this test is about the
+    // route's MAX_TARGETS cap, not the shared body-size limit.
+    const oversized = Array.from({ length: 2000 }, (_, i) => `pkg:t/n${i}@1`);
+    try {
+      const res = makeRes();
+      await routeDepPaths.handle({
+        method: 'POST', path: `/violation-cache/dependency-paths/${PROJECT}`,
+        url: `/violation-cache/dependency-paths/${PROJECT}`,
+        req: Readable.from([JSON.stringify({ targets: oversized })]),
+        res, principal: asUser(USER_ID),
+      });
+      assert.equal(res.statusCode, 202);
+      assert.equal(seen.length, 900, 'the target list must be capped at the dialog\'s own row ceiling');
     } finally { restoreConn(); restoreCache(); restoreDep(); }
   });
 });

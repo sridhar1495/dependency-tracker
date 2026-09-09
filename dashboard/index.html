@@ -3997,6 +3997,25 @@ function renderVulnRows() {
     .join('');
 }
 
+/**
+ * Q26: componentKeys the open dialog actually needs a path for — the
+ * transitive slice of what is rendered, never the whole project graph. A
+ * project can carry hundreds of components while a dialog shows a few dozen
+ * findings, and the backend has no way to know which ones without being told.
+ * `null` while Tier 1 has not resolved yet asks the backend for its safe
+ * default (a full walk) rather than "walk nothing" — that case does not
+ * arise in practice because the toggle stays hidden until Tier 1 returns.
+ */
+function transitiveTargets() {
+  if (!_vulnDirectKeys) return null;
+  const keys = new Set();
+  for (const f of _vulnShownFindings) {
+    const key = componentKeyOf(f.component || {});
+    if (!_vulnDirectKeys.has(key)) keys.add(key);
+  }
+  return [...keys];
+}
+
 function vulnOriginFor(finding, showPaths) {
   if (!_vulnDirectKeys) return null; // Tier 1 has not returned yet
   const key = componentKeyOf(finding.component || {});
@@ -4092,6 +4111,20 @@ async function onVulnDepPathToggle() {
   }
   if (!_vulnCurrentProject) return;
 
+  const targets = transitiveTargets();
+  if (targets && targets.length === 0) {
+    // Every row this dialog shows is a direct dependency — Tier 1 already
+    // knows there is nothing transitive to resolve a chain for, so no walk
+    // is worth starting. Without this, a portfolio built from a flat,
+    // manifest-driven SBOM (CLAUDE.md §6.3a) toggles the switch, waits for a
+    // walk that completes correctly, and sees no path — which reads as
+    // broken rather than as "there is nothing to show."
+    statusEl.hidden = false;
+    statusEl.textContent = 'Every finding shown here is a direct dependency — there is no transitive chain to display.';
+    renderVulnRows();
+    return;
+  }
+
   if (_depPathStatus === 'ready') {
     // Already resolved — from this same GET on dialog open, or a previous
     // toggle this session. Render immediately; no walk needed.
@@ -4106,8 +4139,13 @@ async function onVulnDepPathToggle() {
   statusEl.hidden = false;
   statusEl.textContent = 'Resolving dependency paths…';
   try {
+    const opts = { method: 'POST' };
+    if (targets !== null) {
+      opts.headers = { 'Content-Type': 'application/json' };
+      opts.body = JSON.stringify({ targets });
+    }
     const r = await apiFetch(
-      `/violation-cache/dependency-paths/${encodeURIComponent(_vulnCurrentProject)}`, { method: 'POST' });
+      `/violation-cache/dependency-paths/${encodeURIComponent(_vulnCurrentProject)}`, opts);
     if (seq !== _depPathReqSeq) return;
     if (!r.ok && r.status !== 409) {
       const detail = await r.json().catch(() => ({}));

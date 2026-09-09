@@ -4,21 +4,41 @@
 
 // ── Dependency-path endpoints ─────────────────────────────────────────────────
 //   GET  /violation-cache/dependency-paths/:projectUuid   direct set (live) + cached walk state
-//   POST /violation-cache/dependency-paths/:projectUuid   ask for a walk
+//   POST /violation-cache/dependency-paths/:projectUuid   ask for a walk — body: { targets?: string[] }
 //
 // The direct-dependency set is fetched live on every GET — one DependencyTrack
 // call, never cached, so the Direct/Transitive badge can never lag behind what
 // DependencyTrack currently reports. The full graph walk is the expensive,
 // opt-in half, shared by fingerprint and cached in dependency_paths (migration
 // 013) exactly the way the violation cache is (CLAUDE.md §7.5, §13).
+//
+// `targets` (Q26) scopes that walk to the componentKeys the dialog actually
+// needs a path for, rather than the project's entire graph — a 200-component
+// project with 40 open findings has no reason to resolve the other 160.
 
 const { log } = require('../lib/log');
-const { jsonReply, requireUser } = require('../lib/http-util');
+const { jsonReply, readJson, requireUser } = require('../lib/http-util');
 const depPaths      = require('../lib/dependency-paths');
 const depCache      = require('../lib/dependency-path-cache');
 const dtConnections = require('../lib/dt-connections');
 
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+// Same ceiling the dialog itself caps rendered findings at (CONFIG.VULN_MAX_ROWS
+// in index.html) — a target list cannot legitimately be longer than that.
+const MAX_TARGETS = 900;
+
+/**
+ * `targets` (Q26): componentKeys the caller actually needs a path for, so the
+ * walk resolves only what a dialog will show rather than a project's whole
+ * graph. The field being absent (not merely empty) is what falls back to
+ * "walk everything" — an explicitly empty array is a real instruction
+ * ("nothing to resolve") and must not silently balloon into a full walk.
+ */
+function parseTargets(body) {
+  if (!body || !Array.isArray(body.targets)) return null;
+  return body.targets.filter(t => typeof t === 'string' && t).slice(0, MAX_TARGETS);
+}
 
 /** Resolve the caller's connection, replying itself on the failure paths — same shape routes/cache.js uses. */
 async function connectionFor(userId, res) {
@@ -42,7 +62,7 @@ async function connectionFor(userId, res) {
   return conn;
 }
 
-async function handle({ method, path: parsedPath, res, principal }) {
+async function handle({ method, path: parsedPath, req, res, principal }) {
   const m = parsedPath.match(/^\/violation-cache\/dependency-paths\/([^/]+)$/);
   if (!m || (method !== 'GET' && method !== 'POST')) return false;
 
@@ -92,6 +112,10 @@ async function handle({ method, path: parsedPath, res, principal }) {
     }
 
     // ── POST: ask for a walk ────────────────────────────────────────────────
+    const body = await readJson(req, res);
+    if (body === null) return true; // readJson already replied 400
+    const targets = parseTargets(body);
+
     // Only a build that is genuinely alive blocks a new one — a row left
     // 'building' by a process that died reads as 'stalled' and falls through,
     // matching /violation-cache/refresh's recovery behaviour (CLAUDE.md §6.3).
@@ -100,7 +124,7 @@ async function handle({ method, path: parsedPath, res, principal }) {
       jsonReply(res, 409, { status: 'building', message: 'A walk is already in progress.' });
       return true;
     }
-    depPaths.runJob(conn, projectUuid).catch(err =>
+    depPaths.runJob(conn, projectUuid, targets).catch(err =>
       log('error', `Dependency-path walk error: ${err.message}`, { userId, projectUuid }));
     jsonReply(res, 202, { status: 'building', message: 'Walk started' });
     return true;

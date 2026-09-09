@@ -4182,6 +4182,37 @@ describe('dependency paths — vulnOriginFor (which badge a row gets)', () => {
   });
 });
 
+describe('dependency paths — transitiveTargets (Q26 walk scoping)', () => {
+  // transitiveTargets reads the same two module-scoped variables vulnOriginFor
+  // does, wired the same way.
+  const targetsSandbox = new Function(
+    'let _vulnDirectKeys, _vulnShownFindings;\n'
+    + extractFunction(INDEX_HTML, 'componentKeyOf') + '\n'
+    + extractFunction(INDEX_HTML, 'transitiveTargets') + '\n'
+    + `return { transitiveTargets: function(directKeys, shownFindings) {
+         _vulnDirectKeys = directKeys; _vulnShownFindings = shownFindings;
+         return transitiveTargets();
+       } };`
+  )();
+
+  const finding = (purl) => ({ component: { purl } });
+
+  test('Tier 1 not resolved yet returns null — asks the backend for its full-walk default', () => {
+    assert.equal(targetsSandbox.transitiveTargets(null, [finding('pkg:npm/x@1')]), null);
+  });
+
+  test('every shown row is direct — returns an empty array, not null', () => {
+    const direct = new Set(['pkg:npm/x@1']);
+    assert.deepEqual(targetsSandbox.transitiveTargets(direct, [finding('pkg:npm/x@1')]), []);
+  });
+
+  test('only the transitive rows are included, deduplicated', () => {
+    const direct = new Set(['pkg:npm/x@1']);
+    const shown = [finding('pkg:npm/y@1'), finding('pkg:npm/x@1'), finding('pkg:npm/y@1')];
+    assert.deepEqual(targetsSandbox.transitiveTargets(direct, shown), ['pkg:npm/y@1']);
+  });
+});
+
 describe('dependency paths — the table gains an Origin column', () => {
   test('the header row and every rendered row carry Origin as the eighth column', () => {
     assert.match(INDEX_HTML, /<th>Latest<\/th><th>Origin<\/th>/);
@@ -4239,6 +4270,25 @@ describe('dependency paths — the toggle and its polling', () => {
     assert.match(toggleFn, /_depPathReqSeq/);
     const pollFn = extractFunction(INDEX_HTML, 'startDepPathPoll');
     assert.match(pollFn, /seq !== _depPathReqSeq/);
+  });
+
+  test('every shown finding being direct short-circuits before any POST or poll', () => {
+    // A flat, manifest-built SBOM (CLAUDE.md §6.3a) can legitimately have zero
+    // transitive rows in a given dialog — walking for a chain that cannot
+    // exist would just be a slower way to render nothing.
+    const fn = extractFunction(INDEX_HTML, 'onVulnDepPathToggle');
+    assert.match(fn, /targets\.length === 0/);
+    const branch = fn.slice(fn.indexOf('targets.length === 0'));
+    const postAt = branch.indexOf("method: 'POST'");
+    const returnAt = branch.indexOf('return;');
+    assert.ok(returnAt !== -1 && (postAt === -1 || returnAt < postAt),
+      'the empty-targets branch must return before ever reaching the POST call');
+  });
+
+  test('a walk request carries the transitive-only target list as a JSON body', () => {
+    const fn = extractFunction(INDEX_HTML, 'onVulnDepPathToggle');
+    assert.match(fn, /body\s*=\s*JSON\.stringify\(\{\s*targets\s*\}\)/);
+    assert.match(fn, /'Content-Type':\s*'application\/json'/);
   });
 
   test('the Origin badge and the security-severity pills are visually distinct systems', () => {
