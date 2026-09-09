@@ -581,25 +581,45 @@
 
     /* ── Vulnerability detail dialog ─────────────────────────────────────── */
     .vuln-table-wrap { max-height: 480px; overflow-y: auto; margin-top: 10px; }
-    .vuln-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+    /* table-layout: fixed — a Transitive row's chain used to live inline in
+       the Origin cell, so checking the toggle grew that column and reflowed
+       every other one on every render. The chain now renders in its own
+       full-width row (see .dep-path-row below); fixed columns are what keep
+       the table geometrically stable regardless of what any single cell or
+       row holds. Widths are declared once, on the header cells, and apply to
+       every row including a colspan'd .dep-path-row. */
+    .vuln-table { width: 100%; border-collapse: collapse; font-size: 12px; table-layout: fixed; }
     .vuln-table th {
       position: sticky; top: 0; background: var(--surface);
       text-align: left; padding: 8px 10px; border-bottom: 2px solid var(--border);
       color: var(--text-muted); font-weight: 600; white-space: nowrap;
+      overflow: hidden; text-overflow: ellipsis;
     }
+    .vuln-table th:nth-child(1) { width: 15%; } /* Vulnerability */
+    .vuln-table th:nth-child(2) { width: 9%; }  /* Severity */
+    .vuln-table th:nth-child(3) { width: 7%; }  /* CVSS */
+    .vuln-table th:nth-child(4) { width: 12%; } /* CWE */
+    .vuln-table th:nth-child(5) { width: 27%; } /* Component */
+    .vuln-table th:nth-child(6) { width: 10%; } /* Current */
+    .vuln-table th:nth-child(7) { width: 10%; } /* Latest */
+    .vuln-table th:nth-child(8) { width: 10%; } /* Origin */
     .vuln-table td {
       padding: 8px 10px; border-bottom: 1px solid var(--border); vertical-align: top;
+      overflow-wrap: break-word;
     }
     .vuln-table tr:last-child td { border-bottom: none; }
     .vuln-table .vuln-id { font-weight: 600; }
     .vuln-table .vuln-component { color: var(--text-muted); }
+    /* The chain(s) behind a Transitive tag — a full-width row directly under
+       the finding, not the Origin cell itself (§8.10, fixed columns above).
+       Indented so it still reads as belonging to the row above it. */
+    .vuln-table .dep-path-row td { padding: 2px 10px 10px 34px; background: var(--surface2); }
     .vuln-dialog-status {
       padding: 32px 16px; text-align: center; color: var(--text-muted); font-size: 13px;
     }
     .vuln-dialog-note {
       margin-top: 10px; font-size: 11px; color: var(--text-muted); text-align: center;
     }
-    .vuln-table .vuln-origin { min-width: 140px; }
 
     /* ── Dependency-path toggle (Tier 2 — opt-in, so off by default) ────────
        Reuses .cfg-inline-toggle rather than a new switch component — same
@@ -612,9 +632,6 @@
       margin-top: 3px; font-size: 11px; color: var(--text-muted); line-height: 1.4;
     }
     .dep-path-chain.dep-path-none { font-style: italic; }
-    .dep-path-more {
-      color: var(--accent); cursor: help; margin-left: 2px;
-    }
 
     /* ── Pills ────────────────────────────────────────────────────────────── */
     .pill {
@@ -3933,21 +3950,34 @@ function componentKeyOf(c) {
   return `${(c && c.group) || ''}::${(c && c.name) || ''}::${(c && c.version) || ''}`;
 }
 
-/** Direct pill uses .pill-high and Transitive .pill-low — reusing the existing themed pill classes (§8.10), not new colours, with the word itself (not the colour) carrying the meaning so it cannot be misread as a severity. */
+/** Direct pill uses .pill-high and Transitive .pill-low — reusing the existing themed pill classes (§8.10), not new colours, with the word itself (not the colour) carrying the meaning so it cannot be misread as a severity. The chain behind a Transitive tag is never rendered here — see vulnDepPathRowHtml() — a fixed-width column (§8.10) cannot flex to fit it. */
 function vulnOriginCellHtml(origin) {
   if (!origin) return '<span class="pill pill-unassigned">…</span>';
   if (origin.direct) return '<span class="pill pill-high">Direct</span>';
+  return '<span class="pill pill-low">Transitive</span>';
+}
 
-  let html = '<span class="pill pill-low">Transitive</span>';
-  if (origin.chain && origin.chain.length) {
-    const more = origin.multiple
-      ? ` <span class="dep-path-more" title="More than one dependency route reaches this component">+ more routes</span>`
-      : '';
-    html += `<div class="dep-path-chain">${origin.chain.map(escHtml).join(' &rarr; ')}${more}</div>`;
+/**
+ * The path behind a Transitive tag, as a full-width row under the finding —
+ * never squeezed into the Origin cell, which the fixed-width table (§8.10)
+ * cannot grow to fit a chain. Q27: one line per distinct root the walk
+ * found, never a single chain plus a "+more" flag — see lib/dependency-
+ * paths.js's walkGraph. Empty string when there is nothing to show yet, so
+ * the caller renders no row at all rather than an empty one.
+ */
+function vulnDepPathRowHtml(origin) {
+  if (!origin || origin.direct) return '';
+  let body;
+  if (origin.chains && origin.chains.length) {
+    body = origin.chains
+      .map(chain => `<div class="dep-path-chain">${chain.map(escHtml).join(' &rarr; ')}</div>`)
+      .join('');
   } else if (origin.pathsReady) {
-    html += `<div class="dep-path-chain dep-path-none">No path recorded by DependencyTrack for this component.</div>`;
+    body = `<div class="dep-path-chain dep-path-none">No path recorded by DependencyTrack for this component.</div>`;
+  } else {
+    return '';
   }
-  return html;
+  return `<tr class="dep-path-row"><td colspan="8">${body}</td></tr>`;
 }
 
 /** One <tr> for the dialog table. Pure — every field passes through escHtml(). */
@@ -3993,7 +4023,10 @@ function renderVulnRows() {
   const toggle = document.getElementById('vulnDepPathToggle');
   const showPaths = toggle && toggle.checked;
   rowsEl.innerHTML = _vulnShownFindings
-    .map(f => vulnRowHtml(f, vulnOriginFor(f, showPaths)))
+    .map(f => {
+      const origin = vulnOriginFor(f, showPaths);
+      return vulnRowHtml(f, origin) + vulnDepPathRowHtml(origin);
+    })
     .join('');
 }
 
@@ -4025,7 +4058,7 @@ function vulnOriginFor(finding, showPaths) {
   const entry = _depPathPaths[key];
   return {
     direct: false, pathsReady: true,
-    chain: entry ? entry.chain : null, multiple: entry ? entry.multiple : false,
+    chains: entry ? entry.chains : null,
   };
 }
 

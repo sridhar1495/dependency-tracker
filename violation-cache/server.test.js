@@ -5445,7 +5445,7 @@ describe('dependency paths — the walk (Tier 2)', () => {
     return async () => ({ json: GRAPH });
   }
 
-  test('a transitive component gets one shortest chain, starting from a direct dependency', async () => {
+  test('a transitive component gets one shortest chain per root, starting from a direct dependency', async () => {
     const restoreFetch = stub(dtFetchMod, { dtGetWithRetry: diamondFetch() });
     const direct = [
       { uuid: 'A', name: 'A', purl: 'pkg:t/A@1' },
@@ -5457,10 +5457,13 @@ describe('dependency paths — the walk (Tier 2)', () => {
 
       const yPath = paths['pkg:t/Y@1'];
       assert.ok(yPath, 'Y is transitive and reachable — it must have a path entry');
-      assert.equal(yPath.chain[yPath.chain.length - 1], 'Y');
-      assert.ok(yPath.chain[0] === 'A' || yPath.chain[0] === 'B',
-        'the chain must start from one of the direct dependencies');
-      assert.ok(yPath.chain.includes('X'), 'the chain must pass through the diamond point');
+      assert.equal(yPath.chains.length, 2, 'Y is reachable through both A and B — one chain each (Q27)');
+      for (const chain of yPath.chains) {
+        assert.equal(chain[chain.length - 1], 'Y');
+        assert.ok(chain[0] === 'A' || chain[0] === 'B',
+          'each chain must start from one of the direct dependencies');
+        assert.ok(chain.includes('X'), 'the chain must pass through the diamond point');
+      }
 
       // Direct dependencies never get a path entry — the badge alone says enough.
       assert.equal(paths['pkg:t/A@1'], undefined);
@@ -5468,7 +5471,7 @@ describe('dependency paths — the walk (Tier 2)', () => {
     } finally { restoreFetch(); }
   });
 
-  test('a component reachable from more than one direct dependency is flagged, not duplicated', async () => {
+  test('a component reachable from more than one direct dependency gets one chain per root', async () => {
     const restoreFetch = stub(dtFetchMod, { dtGetWithRetry: diamondFetch() });
     const direct = [
       { uuid: 'A', name: 'A', purl: 'pkg:t/A@1' },
@@ -5476,9 +5479,30 @@ describe('dependency paths — the walk (Tier 2)', () => {
     ];
     try {
       const { paths } = await depPathsMod.walkGraph('http://dt', 'k', 'proj', direct);
-      assert.equal(paths['pkg:t/X@1'].multiple, true, 'X is reachable from both A and B');
-      assert.equal(paths['pkg:t/Y@1'].multiple, false,
-        'only the diamond point itself is flagged, not everything downstream of it');
+      assert.equal(paths['pkg:t/X@1'].chains.length, 2, 'X is reachable from both A and B');
+      const roots = paths['pkg:t/X@1'].chains.map(c => c[0]).sort();
+      assert.deepEqual(roots, ['A', 'B'], 'the first hop of each chain names the distinct root it came from');
+      assert.equal(paths['pkg:t/Y@1'].chains.length, 2,
+        'a component downstream of the diamond point inherits both roots too');
+    } finally { restoreFetch(); }
+  });
+
+  test('Q27: a component reached by more roots than the cap keeps only the first MAX_ROOTS_PER_COMPONENT', async () => {
+    const cap = depPathsMod.MAX_ROOTS_PER_COMPONENT;
+    const rootCount = cap + 3;
+    const GRAPH = {};
+    const direct = [];
+    for (let i = 0; i < rootCount; i++) {
+      const uuid = `root${i}`;
+      GRAPH[uuid] = { name: uuid, uuid, purl: `pkg:t/${uuid}@1`, dependencyGraph: ['shared'] };
+      direct.push({ uuid, name: uuid, purl: `pkg:t/${uuid}@1` });
+    }
+    GRAPH.shared = { name: 'shared', uuid: 'shared', purl: 'pkg:t/shared@1' };
+    const restoreFetch = stub(dtFetchMod, { dtGetWithRetry: async () => ({ json: GRAPH }) });
+    try {
+      const { paths } = await depPathsMod.walkGraph('http://dt', 'k', 'proj', direct);
+      assert.equal(paths['pkg:t/shared@1'].chains.length, cap,
+        `a widely shared component must be capped at ${cap} chains, not ${rootCount}`);
     } finally { restoreFetch(); }
   });
 
@@ -5818,7 +5842,7 @@ describe('routes — dependency-paths', () => {
     const restoreDep = stub(depPathCacheMod, {
       getMeta: async () => ({
         status: 'ready', bomImportAt: null, totalComponents: 3, resolvedComponents: 3,
-        paths: { 'pkg:t/b@1': { chain: ['a', 'b'], multiple: false } }, updatedAt: new Date().toISOString(),
+        paths: { 'pkg:t/b@1': { chains: [['a', 'b']] } }, updatedAt: new Date().toISOString(),
       }),
     });
     try {
