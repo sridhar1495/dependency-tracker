@@ -230,7 +230,9 @@ request is made when it changes, and it never hides a row before that row's
 Direct/Transitive badge has actually resolved. If the filter leaves nothing
 to show — every finding here is Direct, say, with Transitive selected — the
 table shows a single line saying so instead of a blank body under the header
-row.
+row. A small "Showing N of M" line above the table always reflects the
+current result — both this filter and the Parent filter below narrow it, and
+the count updates on the same render as the rows.
 
 #### Origin: Direct or Transitive
 
@@ -260,6 +262,19 @@ dependency, each root gets its own line — up to 8 (`MAX_ROOTS_PER_COMPONENT`)
 roots are silently dropped rather than counted. A component the walk never
 reaches shows "No path recorded by DependencyTrack for this component" —
 expected for a flat, manifest-built SBOM, not a bug.
+
+A third dropdown, **Parent**, appears once the toggle has something
+transitive to group — hidden again if Origin is set to Direct, since a
+Direct row has no chain to group by. Its options are every distinct root a
+resolved chain starts from (deduplicated; a component reachable from more
+than one direct dependency lists under each of them), plus a default
+**N/A**, which is a real filter value rather than "show everything": N/A
+groups Direct rows together with any Transitive row whose chain has not
+resolved yet (or that DependencyTrack recorded no path for at all).
+Choosing a specific root narrows the table to just the Transitive rows
+reachable from it. Like Origin, it is purely local — no request is made —
+and a filter that empties the table shows the same "no findings match"
+line as the Origin filter does.
 
 The walk this toggle starts is scoped to the componentKeys the dialog is
 actually showing (`{ targets: [...] }` in the `POST` body), not the project's

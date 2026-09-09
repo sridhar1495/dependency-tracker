@@ -214,7 +214,7 @@ Inline comments use lettered prefixes to trace design decisions:
 - **O-numbers** — observability notes (`// O3: JSON log format for log aggregators`)
 - **S-numbers** — security rationale (`// S2: token hashed before storage`) — **new in revision 2**
 
-Highest numbers currently in use: **Q31, P20, O5, S34**. When adding logic with a
+Highest numbers currently in use: **Q32, P20, O5, S34**. When adding logic with a
 non-obvious trade-off, add the next number in the appropriate series. Check the
 current maximum before assigning — parallel branches can claim the same number.
 
@@ -555,6 +555,44 @@ controls, immediately above the content it describes — so a loading or empty
 message always renders exactly where the table it is about is going to
 appear, and the toggle row stays visually fixed above both regardless of
 which view is loading.
+
+**Q32: the Parent dropdown groups by chain root, and N/A is a real bucket, not
+"no filter."** The Origin filter says whether a row is Direct or Transitive;
+once "Show full dependency paths" has something transitive to show, a second
+dropdown (`#vulnParentFilterWrap`, `dashboard/index.html`) narrows further by
+*which* direct dependency's chain reaches it — useful once a project pulls in
+the same low-level package from several different roots and a release
+engineer needs to see just one root's exposure. Four things make this work:
+
+- **Gating is the conjunction of three conditions, evaluated fresh every
+  render**: `showPaths && hasTransitive && _vulnOriginFilterMode !== 'direct'`.
+  Direct rows have no chain to group by (Origin = Direct hides the control
+  entirely), and a project with nothing transitive in scope has nothing to
+  group (`hasTransitive`, the same `transitiveTargets().length > 0` check the
+  refetch button already uses). Nothing here starts a walk on its own — the
+  control only reflects whatever the toggle already resolved.
+- **The option list is every distinct chain root, not one option per row.**
+  `vulnParentOptions()` walks `vulnOriginFor()` for the current `source` and
+  collects `chain[0]` from every chain of every Transitive row — a component
+  reachable from three direct dependencies (Q27) contributes three options,
+  because filtering to any one of those roots should still show it. Rebuilt
+  on every `renderVulnRows()` call; a previously selected root that stops
+  appearing (a view switch, a narrower re-walk) falls back to N/A rather than
+  silently pointing at a value nothing can match any more
+  (`renderParentFilterOptions()`).
+- **N/A is the default, and it is a real filter value, not an unset state.**
+  It groups every row that cannot be claimed by a specific root: Direct rows,
+  and Transitive rows with no resolved chain — whether the walk has not
+  finished (`!pathsReady`) or DependencyTrack genuinely recorded none (`chains`
+  empty). Selecting a specific root excludes both of those groups the same way
+  the Origin filter's Direct/Transitive split already does; a component
+  matches if *any* of its chains starts there, the identical "any root"
+  reasoning `vulnParentOptions()` uses to list it in the first place
+  (`vulnParentMatches()`).
+- **It composes with the Origin filter by plain AND, not a special case.**
+  Direct rows can never satisfy "has a chain rooted at X" for a real `X`, so
+  choosing a specific root already excludes them even under Origin = Both —
+  no extra branch was needed to make that true.
 
 **Bounded the same way the snapshot crawl is** (§6.3): `MAX_GRAPH_NODES`
 caps how many components one walk will ever discover, so a toggle click cannot
@@ -1169,6 +1207,15 @@ its own visual weight instead of relying on a type-specific heading next to it.
   makes it safe for `onVulnViewTypeChange()` to simply call
   `onVulnDepPathToggle()` again when License finishes loading and the toggle
   is already checked, rather than duplicating its walk-starting logic.
+- **`#vulnResultCount` ("Showing N of M") reflects both local filters, not
+  just the fetch total.** `renderVulnRows()` counts a row only after it has
+  survived both the Origin filter and the Parent filter (Q32) — `matched`
+  increments after both early-returns, never before — so narrowing either
+  dropdown updates the count the same render it updates the rows. `M` is
+  `source.length`, the currently loaded set for whichever view is open; the
+  separate truncation note (Q24, "Showing the 900 most severe of 1200
+  findings") already covers anything beyond that, so the two never compete
+  to explain the same number.
 
 Adding a page needs no nginx change: `try_files` serves a real file before the
 SPA fallback is considered.
@@ -1402,6 +1449,13 @@ The frontend never performs uniqueness checks — those are backend-only, via
   inline-flex; }` restores it at equal specificity, scoped to this row so it
   does not reopen the same collision for a `.cfg-inline-toggle` that actually
   wants a bare label's block layout elsewhere.
+- **A block of centred status text with no border reads as an unstyled
+  layout mistake, not a message.** `.vuln-dialog-status` (Loading…/no-data)
+  and `.vuln-empty-state` (a filter matching nothing, Q30) both carry
+  `border: 1px solid var(--border); border-radius: var(--radius); background:
+  var(--surface2);` for this reason — the same card treatment the finding
+  row's own path-detail background already uses, so a message reads as
+  content rather than as a gap in the page.
 
 ### 8.11 Utility helpers (do not duplicate)
 
@@ -1429,6 +1483,8 @@ The frontend never performs uniqueness checks — those are backend-only, via
 | `vulnOriginCellHtml(origin)` / `vulnOriginFor(finding, showPaths)` | frontend | Render and compute a row's Direct/Transitive badge — takes either finding type, since origin is a component property |
 | `vulnDepPathRowHtml(origin)` | frontend | The full-width path detail row; its `colspan` follows `VULN_TABLE_COLS[_vulnViewType]` (Q28) |
 | `transitiveTargets()` | frontend | The union of both tables' transitive components, so a walk never loses coverage when the view switches (Q28) |
+| `vulnParentOptions(source, showPaths)` | frontend | The Parent dropdown's own option list — every distinct chain root across the current view's Transitive rows (Q32) |
+| `vulnParentMatches(origin, parentFilter)` | frontend | Whether a row belongs to the N/A bucket or a specific chain root (Q32) |
 | `query(sql, params)` / `tx(fn)` | server | All database access |
 | `makeSemaphore(limit)` | server | Promise concurrency limit |
 | `sleep(ms)` | server | Promise delay |

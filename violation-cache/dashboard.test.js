@@ -3856,7 +3856,7 @@ const VULN_FN_NAMES = [
   'vulnFindingsQuery', 'vulnLicenseQuery',
   'vulnCweIds', 'vulnCweLabel', 'sortFindingsBySeverity', 'sortLicenseByState',
   'vulnRowHtml', 'vulnLicenseRowHtml',
-  'componentKeyOf', 'vulnOriginCellHtml', 'vulnDepPathRowHtml',
+  'componentKeyOf', 'vulnOriginCellHtml', 'vulnDepPathRowHtml', 'vulnParentMatches',
 ];
 const vuln = new Function(
   INDEX_HTML.match(/const CONFIG = \{[\s\S]*?\n\};/)[0] + '\n'
@@ -4320,6 +4320,88 @@ describe('dependency paths — transitiveTargets (Q26 walk scoping, Q27 union ac
   });
 });
 
+describe('Q32/item 1.4: vulnParentOptions (the Parent dropdown\'s own option list)', () => {
+  // Same adapter pattern as the vulnOriginFor sandbox above — vulnParentOptions
+  // calls vulnOriginFor internally, so it needs the identical module state wired.
+  const parentOptSandbox = new Function(
+    'let _vulnDirectKeys, _depPathStatus, _depPathPaths;\n'
+    + extractFunction(INDEX_HTML, 'componentKeyOf') + '\n'
+    + extractFunction(INDEX_HTML, 'vulnOriginFor') + '\n'
+    + extractFunction(INDEX_HTML, 'vulnParentOptions') + '\n'
+    + `return { vulnParentOptions: function(source, showPaths, directKeys, status, paths) {
+         _vulnDirectKeys = directKeys; _depPathStatus = status; _depPathPaths = paths;
+         return vulnParentOptions(source, showPaths);
+       } };`
+  )();
+
+  const finding = (purl) => ({ component: { purl } });
+
+  test('paths not showing at all returns no options', () => {
+    assert.deepEqual(
+      parentOptSandbox.vulnParentOptions([finding('pkg:npm/y@1')], false, new Set(), 'ready', {}), []);
+  });
+
+  test('a Direct row contributes nothing — it has no chain to name a root from', () => {
+    const direct = new Set(['pkg:npm/x@1']);
+    assert.deepEqual(
+      parentOptSandbox.vulnParentOptions([finding('pkg:npm/x@1')], true, direct, 'ready', {}), []);
+  });
+
+  test('the walk still building contributes nothing yet, not a premature empty-looking list', () => {
+    assert.deepEqual(
+      parentOptSandbox.vulnParentOptions([finding('pkg:npm/y@1')], true, new Set(), 'building', {}), []);
+  });
+
+  test('a resolved chain contributes its root (chain[0]), deduplicated across rows', () => {
+    const direct = new Set(['pkg:npm/x@1']);
+    const shown = [finding('pkg:npm/y@1'), finding('pkg:npm/z@1')];
+    const paths = {
+      'pkg:npm/y@1': { chains: [['root-a', 'y']] },
+      'pkg:npm/z@1': { chains: [['root-a', 'mid', 'z'], ['root-b', 'z']] },
+    };
+    assert.deepEqual(
+      parentOptSandbox.vulnParentOptions(shown, true, direct, 'ready', paths), ['root-a', 'root-b']);
+  });
+
+  test('options are alphabetised, not left in discovery order', () => {
+    const shown = [finding('pkg:npm/y@1')];
+    const paths = { 'pkg:npm/y@1': { chains: [['zebra', 'y'], ['alpha', 'y']] } };
+    assert.deepEqual(
+      parentOptSandbox.vulnParentOptions(shown, true, new Set(), 'ready', paths), ['alpha', 'zebra']);
+  });
+});
+
+describe('Q32/item 1.4.1-1.4.2: vulnParentMatches (N/A bucket vs a specific root)', () => {
+  test('N/A matches a Direct row', () => {
+    assert.equal(vuln.vulnParentMatches({ direct: true }, ''), true);
+  });
+
+  test('N/A matches a Transitive row whose walk has not resolved yet', () => {
+    assert.equal(vuln.vulnParentMatches({ direct: false, pathsReady: false }, ''), true);
+  });
+
+  test('N/A matches a Transitive row DependencyTrack recorded no path for', () => {
+    assert.equal(vuln.vulnParentMatches({ direct: false, pathsReady: true, chains: null }, ''), true);
+    assert.equal(vuln.vulnParentMatches({ direct: false, pathsReady: true, chains: [] }, ''), true);
+  });
+
+  test('N/A does not match a Transitive row that already has a resolved chain', () => {
+    assert.equal(
+      vuln.vulnParentMatches({ direct: false, pathsReady: true, chains: [['root-a', 'y']] }, ''), false);
+  });
+
+  test('a specific root never matches a Direct row', () => {
+    assert.equal(vuln.vulnParentMatches({ direct: true }, 'root-a'), false);
+  });
+
+  test('a specific root matches whenever ANY chain starts there — Q27\'s multi-root components stay reachable from every root, not just the first', () => {
+    const origin = { direct: false, pathsReady: true, chains: [['root-a', 'y'], ['root-b', 'y']] };
+    assert.equal(vuln.vulnParentMatches(origin, 'root-a'), true);
+    assert.equal(vuln.vulnParentMatches(origin, 'root-b'), true);
+    assert.equal(vuln.vulnParentMatches(origin, 'root-c'), false);
+  });
+});
+
 describe('dependency paths — the table gains an Origin column', () => {
   test('the header row and every rendered row carry Origin as the eighth column', () => {
     assert.match(INDEX_HTML, /<th>Latest<\/th><th>Origin<\/th>/);
@@ -4538,6 +4620,104 @@ describe('item 3 (Q30): an empty-state placeholder for a filter that matches not
   test('a fresh dialog open resets the placeholder back to hidden', () => {
     const fn = extractFunction(INDEX_HTML, 'openVulnDialog');
     assert.match(fn, /emptyEl\.hidden\s*=\s*true/);
+  });
+});
+
+describe('item 1 (Q32): the Parent (component path) filter', () => {
+  test('the dropdown exists in the controls row, starts hidden, with N/A as its only built-in option', () => {
+    assert.match(INDEX_HTML, /id="vulnParentFilterWrap"/);
+    const wrapAt = INDEX_HTML.indexOf('id="vulnParentFilterWrap"');
+    const tagStart = INDEX_HTML.lastIndexOf('<label', wrapAt);
+    const tag = INDEX_HTML.slice(tagStart, INDEX_HTML.indexOf('>', wrapAt) + 1);
+    assert.match(tag, /\bhidden\b/, '1.1/1.3: nothing to group by parent before there is a resolved transitive row');
+    assert.match(INDEX_HTML, /id="vulnParentFilter" onchange="onVulnParentFilterChange\(\)"/);
+    assert.match(INDEX_HTML, /<option value="">N\/A<\/option>/);
+  });
+
+  test('onVulnParentFilterChange is window-exported, or the dropdown fails silently (§8.2)', () => {
+    assert.match(INDEX_HTML, /window\.onVulnParentFilterChange\s*=\s*onVulnParentFilterChange/);
+  });
+
+  test('a change reads the select\'s value into _vulnParentFilter and re-renders locally, no network call', () => {
+    const fn = extractFunction(INDEX_HTML, 'onVulnParentFilterChange');
+    assert.match(fn, /_vulnParentFilter\s*=\s*document\.getElementById\('vulnParentFilter'\)\.value/);
+    assert.match(fn, /renderVulnRows\(\);/);
+    assert.doesNotMatch(fn, /apiFetch|fetch\(/, 'item 1.4.1/1.4.2: purely local, the same rule the Origin filter follows');
+  });
+
+  test('1.1/1.3: renderVulnRows gates visibility on paths showing, something transitive present, and Origin not set to Direct', () => {
+    const fn = extractFunction(INDEX_HTML, 'renderVulnRows');
+    assert.match(fn,
+      /const parentFilterActive\s*=\s*showPaths\s*&&\s*hasTransitive\s*&&\s*_vulnOriginFilterMode !== 'direct'/);
+    assert.match(fn, /vulnParentFilterWrap'\)\.hidden\s*=\s*!parentFilterActive/);
+  });
+
+  test('1.4: renderVulnRows calls renderParentFilterOptions with a real list only while active, [] otherwise', () => {
+    const fn = extractFunction(INDEX_HTML, 'renderVulnRows');
+    assert.match(fn,
+      /renderParentFilterOptions\(parentFilterActive \? vulnParentOptions\(source, showPaths\) : \[\]\)/);
+  });
+
+  test('1.4.1/1.4.2: the row filter applies vulnParentMatches only while the control is active, passing an unresolved origin through', () => {
+    const fn = extractFunction(INDEX_HTML, 'renderVulnRows');
+    assert.match(fn,
+      /if \(parentFilterActive && origin && !vulnParentMatches\(origin, _vulnParentFilter\)\) return '';/);
+  });
+
+  test('renderParentFilterOptions preserves the current selection when it still exists, resets to N/A otherwise', () => {
+    const fn = extractFunction(INDEX_HTML, 'renderParentFilterOptions');
+    assert.match(fn, /if \(names\.includes\(_vulnParentFilter\)\)/);
+    assert.match(fn, /_vulnParentFilter\s*=\s*'';/, 'falling back to N/A must also reset the state variable, not just the control');
+  });
+
+  test('renderParentFilterOptions escapes option text and values before interpolating them (§12)', () => {
+    const fn = extractFunction(INDEX_HTML, 'renderParentFilterOptions');
+    assert.match(fn, /escHtml\(n\)/);
+  });
+
+  test('a fresh dialog open resets the filter state, hides the control, and clears its options back to just N/A', () => {
+    const fn = extractFunction(INDEX_HTML, 'openVulnDialog');
+    assert.match(fn, /_vulnParentFilter\s*=\s*'';/);
+    assert.match(fn, /parentFiltWrap\.hidden\s*=\s*true;/);
+    assert.match(fn, /parentFiltEl\.innerHTML\s*=\s*'<option value="">N\/A<\/option>';/);
+  });
+});
+
+describe('item 2: the loading/empty panels read as a card, not a layout mistake', () => {
+  test('.vuln-dialog-status and .vuln-empty-state both carry a border, radius and background', () => {
+    const statusRule = INDEX_HTML.match(/\.vuln-dialog-status\s*\{[^}]*\}/)[0];
+    const emptyRule  = INDEX_HTML.match(/\.vuln-empty-state\s*\{[^}]*\}/)[0];
+    for (const rule of [statusRule, emptyRule]) {
+      assert.match(rule, /border:\s*1px solid var\(--border\)/);
+      assert.match(rule, /border-radius:\s*var\(--radius\)/);
+      assert.match(rule, /background:\s*var\(--surface2\)/);
+    }
+  });
+});
+
+describe('item 3: the result count reflects both local filters', () => {
+  test('the count element exists above the table, inside the table wrap', () => {
+    const wrapAt  = INDEX_HTML.indexOf('id="vulnDialogTableWrap"');
+    const countAt = INDEX_HTML.indexOf('id="vulnResultCount"');
+    const tableAt = INDEX_HTML.indexOf('<table', wrapAt);
+    assert.ok(wrapAt !== -1 && countAt > wrapAt && countAt < tableAt,
+      'the count must sit inside the table wrap, above the <table> itself');
+  });
+
+  test('renderVulnRows counts only rows that survive both the Origin and Parent filters', () => {
+    const fn = extractFunction(INDEX_HTML, 'renderVulnRows');
+    assert.match(fn, /let matched = 0;/);
+    const mapAt = fn.indexOf('.map(item => {');
+    const matchedIncAt = fn.indexOf('matched++;', mapAt);
+    const originReturnAt = fn.indexOf("if (Boolean(origin.direct) !== wantDirect) return '';");
+    const parentReturnAt = fn.indexOf("if (parentFilterActive && origin && !vulnParentMatches(origin, _vulnParentFilter)) return '';");
+    assert.ok(matchedIncAt > originReturnAt && matchedIncAt > parentReturnAt,
+      'matched++ must run after both filters\' early returns, or a filtered-out row would still be counted');
+  });
+
+  test('the count text names both the matched count and the total loaded for the current view', () => {
+    const fn = extractFunction(INDEX_HTML, 'renderVulnRows');
+    assert.match(fn, /countEl\.textContent\s*=\s*`Showing \$\{matched\} of \$\{source\.length\}`/);
   });
 });
 
