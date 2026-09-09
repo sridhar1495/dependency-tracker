@@ -214,7 +214,7 @@ Inline comments use lettered prefixes to trace design decisions:
 - **O-numbers** — observability notes (`// O3: JSON log format for log aggregators`)
 - **S-numbers** — security rationale (`// S2: token hashed before storage`) — **new in revision 2**
 
-Highest numbers currently in use: **Q25, P20, O5, S34**. When adding logic with a
+Highest numbers currently in use: **Q26, P20, O5, S34**. When adding logic with a
 non-obvious trade-off, add the next number in the appropriate series. Check the
 current maximum before assigning — parallel branches can claim the same number.
 
@@ -439,6 +439,32 @@ same-file bare call cannot be swapped out by a test — `runJob` calling
 could replace it without a real PostgreSQL, which `server.test.js` may not use
 (§10.2). Routes import both modules, exactly as `routes/cache.js` already
 imports both `cache` and `caches`.
+
+**Q26: the walk is scoped to what the dialog is actually showing, not the
+project's whole graph.** `POST /violation-cache/dependency-paths/:id` takes an
+optional `{ targets: string[] }` body — componentKeys the caller needs a path
+for — and `walkGraph` stops as soon as every one of them is settled (reached
+transitively, or found to already be direct) instead of discovering the rest
+of the project regardless of whether anything needs it. A project can carry
+hundreds of components while a dialog shows a few dozen open findings; walking
+to all of them for a fraction that matters is real, measured DependencyTrack
+load for work nobody asked for (§13) — this is what a production installation
+surfaced: 208 components resolved to explain 40 displayed rows. The field
+being **omitted** is what keeps the exhaustive walk (the shape a future
+full-graph caller still wants); an **empty array** is a real instruction
+("nothing to resolve") and must not silently fall back to a full walk — the
+three layers that carry `targets` (the route's `parseTargets`, `runJob`'s
+`scopedTargets`, `walkGraph`'s `targetSet`) all treat `null` and `[]`
+differently for exactly this reason. `runJob` also re-filters a requested
+target against the live direct-dependency set before walking — defensive
+against a caller's list going stale between its own Tier-1 read and this POST,
+though the frontend already excludes these itself — and skips the lock and
+every DT call outright when a ready cache already covers every requested
+target. The frontend computes its target list from `_vulnShownFindings` minus
+`_vulnDirectKeys`; when that difference is empty — every row the dialog shows
+is Direct — it does not call `POST` at all, because a flat, manifest-built
+SBOM (below) can legitimately leave nothing transitive to resolve, and a walk
+that completes with nothing to show reads as broken rather than as correct.
 
 **A component reached from more than one direct dependency is flagged, not
 enumerated.** The walk keeps one shortest chain per transitive component and a

@@ -227,6 +227,15 @@ route. A component the walk never reaches shows "No path recorded by
 DependencyTrack for this component" — expected for a flat, manifest-built SBOM,
 not a bug.
 
+The walk this toggle starts is scoped to the componentKeys the dialog is
+actually showing (`{ targets: [...] }` in the `POST` body), not the project's
+whole graph — a project can carry hundreds of components while a dialog shows
+a few dozen findings, and DependencyTrack has no reason to be asked about the
+rest. When every row the dialog shows is already Direct, the frontend does not
+call `POST` at all — there is nothing transitive to resolve a chain for, and
+the toggle says so directly instead of starting a walk that would complete
+with nothing to show.
+
 ---
 
 ## 3. Connecting to Live Data
@@ -319,7 +328,7 @@ compact per-project count map in a JSON file, and serves only that file to the b
 | `/violation-cache/refresh` | POST | Trigger a background rebuild (409 if already running) |
 | `/violation-cache/risk-series` | GET | Daily risk history for your connection — see [Risk history](#risk-history) |
 | `/violation-cache/dependency-paths/:id` | GET | A project's direct-dependency set (live, never cached) plus whatever the cached graph walk currently knows — see [Vulnerability Detail Dialog](#vulnerability-detail-dialog) |
-| `/violation-cache/dependency-paths/:id` | POST | Resolve the full dependency-graph walk for one project (409 if already running) |
+| `/violation-cache/dependency-paths/:id` | POST | Resolve the dependency-graph walk for one project (409 if already running). Body: `{ targets?: string[] }` — componentKeys to resolve a path for; omitted walks the whole graph, an empty array walks nothing |
 
 ### Risk history
 
