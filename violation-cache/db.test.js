@@ -2909,3 +2909,199 @@ describe('risk snapshots', { skip: !ENABLED && 'TEST_DATABASE_URL not set' }, ()
     assert.equal(none, 0);
   });
 });
+
+// ── Dependency-path cache (migration 013) ─────────────────────────────────────
+// The cached half of lib/dependency-paths.js — the graph walk behind a
+// Transitive tag's chain. The live Tier-1 direct-set fetch has no table to
+// test here; it never touches the database.
+describe('dependency-path cache', { skip: !ENABLED && 'TEST_DATABASE_URL not set' }, () => {
+  let pool, depCache, dtCrypto, dtConnections, users;
+  let alice;
+
+  const FP_A = 'd'.repeat(48) + '1111aaaa2222bbbb';
+  const FP_B = 'e'.repeat(48) + '3333cccc4444dddd';
+  const PROJ_1 = '11111111-1111-4111-8111-111111111111';
+  const PROJ_2 = '22222222-2222-4222-8222-222222222222';
+
+  before(async () => {
+    pool = require('./db/pool');
+    if (!pool.isReady()) {
+      const url = new URL(DB_URL);
+      process.env.POSTGRES_HOST     = url.hostname;
+      process.env.POSTGRES_PORT     = url.port || '5432';
+      process.env.POSTGRES_USER     = decodeURIComponent(url.username);
+      process.env.POSTGRES_PASSWORD = decodeURIComponent(url.password) || 'x';
+      process.env.POSTGRES_DB       = url.pathname.replace(/^\//, '');
+      const { parseConfig } = require('./lib/config');
+      pool.init(parseConfig(process.env).db);
+      await migrate({ pool: pool.getPool(), dir: MIGRATIONS_DIR });
+    }
+    depCache      = require('./lib/dependency-path-cache');
+    dtCrypto      = require('./lib/crypto');
+    dtConnections = require('./lib/dt-connections');
+    users         = require('./lib/users');
+
+    dtConnections.configure(dtCrypto.parseEncryptionKey(process.env.SECRET_ENCRYPTION_KEY));
+
+    await pool.query("DELETE FROM users WHERE login_id = 'zz_deppath_alice'");
+    const hash = await dtCrypto.hashPassword('password123');
+    alice = await users.create({
+      loginId: 'zz_deppath_alice', email: null, firstName: 'Alice', lastName: 'Ant', passwordHash: hash,
+    });
+  });
+
+  after(async () => {
+    if (pool && pool.isReady()) {
+      await pool.query('DELETE FROM dependency_paths WHERE fingerprint IN ($1, $2)', [FP_A, FP_B]);
+      await pool.query("DELETE FROM users WHERE login_id = 'zz_deppath_alice'");
+    }
+  });
+
+  test('the table, its key and its CHECK constraints all exist', async () => {
+    const pk = await pool.query(
+      `SELECT a.attname FROM pg_index i
+         JOIN pg_attribute a ON a.attrelid = i.indrelid AND a.attnum = ANY(i.indkey)
+        WHERE i.indrelid = 'dependency_paths'::regclass AND i.indisprimary
+        ORDER BY a.attname`);
+    assert.deepEqual(pk.rows.map(r => r.attname), ['fingerprint', 'project_uuid']);
+
+    for (const name of ['dependency_paths_fingerprint', 'dependency_paths_status', 'dependency_paths_nonneg']) {
+      const chk = await pool.query('SELECT conname FROM pg_constraint WHERE conname = $1', [name]);
+      assert.equal(chk.rows.length, 1, `missing constraint ${name}`);
+    }
+  });
+
+  test('the fingerprint is held to the same shape violation_caches and risk_snapshots hold it to', async () => {
+    await assert.rejects(
+      pool.query(
+        `INSERT INTO dependency_paths (fingerprint, project_uuid) VALUES ('too-short', $1)`, [PROJ_1]),
+      /dependency_paths_fingerprint/);
+  });
+
+  test('status is constrained to the three job states', async () => {
+    await assert.rejects(
+      pool.query(
+        `INSERT INTO dependency_paths (fingerprint, project_uuid, status) VALUES ($1, $2, 'bogus')`,
+        [FP_A, PROJ_1]),
+      /dependency_paths_status/);
+  });
+
+  test('the CHECK refuses negative component counts', async () => {
+    await assert.rejects(
+      pool.query(
+        `INSERT INTO dependency_paths (fingerprint, project_uuid, total_components)
+         VALUES ($1, $2, -1)`, [FP_A, PROJ_1]),
+      /dependency_paths_nonneg/);
+  });
+
+  test('markBuilding creates the row, and resets one that already exists', async () => {
+    await depCache.markBuilding(FP_A, PROJ_1);
+    let meta = await depCache.getMeta(FP_A, PROJ_1);
+    assert.equal(meta.status, 'building');
+    assert.equal(meta.totalComponents, 0);
+    assert.equal(meta.resolvedComponents, 0);
+
+    // A previous failure's error must not survive into the new attempt.
+    await depCache.markFailed(FP_A, PROJ_1, 'first attempt failed');
+    await depCache.markBuilding(FP_A, PROJ_1);
+    meta = await depCache.getMeta(FP_A, PROJ_1);
+    assert.equal(meta.status, 'building');
+    assert.equal(meta.error, null);
+  });
+
+  test('setProgress advances the counts a poller reads', async () => {
+    await depCache.markBuilding(FP_A, PROJ_1);
+    await depCache.setProgress(FP_A, PROJ_1, { total: 12, resolved: 5 });
+    const meta = await depCache.getMeta(FP_A, PROJ_1);
+    assert.equal(meta.totalComponents, 12);
+    assert.equal(meta.resolvedComponents, 5);
+  });
+
+  test('touchBuild only touches a row that is still building', async () => {
+    await depCache.markBuilding(FP_A, PROJ_1);
+    assert.equal(await depCache.touchBuild(FP_A, PROJ_1), true);
+
+    await depCache.storeResult(FP_A, PROJ_1, { paths: {}, totalComponents: 1, bomImportAt: null });
+    assert.equal(await depCache.touchBuild(FP_A, PROJ_1), false,
+      'a heartbeat racing the final store must not resurrect a finished row');
+
+    await depCache.markFailed(FP_A, PROJ_1, 'boom');
+    assert.equal(await depCache.touchBuild(FP_A, PROJ_1), false);
+  });
+
+  test('storeResult sets ready, the paths payload, and the BOM stamp it was walked against', async () => {
+    const bomAt = new Date('2026-05-01T00:00:00Z');
+    await depCache.markBuilding(FP_A, PROJ_1);
+    await depCache.storeResult(FP_A, PROJ_1, {
+      paths: { 'pkg:npm/x@1': { chain: ['a', 'x'], multiple: false } },
+      totalComponents: 4,
+      bomImportAt: bomAt,
+    });
+    const meta = await depCache.getMeta(FP_A, PROJ_1);
+    assert.equal(meta.status, 'ready');
+    assert.deepEqual(meta.paths, { 'pkg:npm/x@1': { chain: ['a', 'x'], multiple: false } });
+    assert.equal(meta.totalComponents, 4);
+    assert.equal(meta.resolvedComponents, 4, 'a finished walk has resolved everything it discovered');
+    assert.equal(new Date(meta.bomImportAt).getTime(), bomAt.getTime());
+  });
+
+  test('markFailed sets failed and records why, truncated at 500 characters', async () => {
+    await depCache.markBuilding(FP_A, PROJ_1);
+    await depCache.markFailed(FP_A, PROJ_1, 'x'.repeat(600));
+    const meta = await depCache.getMeta(FP_A, PROJ_1);
+    assert.equal(meta.status, 'failed');
+    assert.equal(meta.error.length, 500);
+  });
+
+  test('deriveStatus reads a stale heartbeat as stalled, a fresh one as building', async () => {
+    await depCache.markBuilding(FP_A, PROJ_1);
+    // No updated_at trigger fights this: every write above sets it explicitly.
+    await pool.query(
+      `UPDATE dependency_paths SET updated_at = now() - interval '40 minutes'
+        WHERE fingerprint = $1 AND project_uuid = $2`, [FP_A, PROJ_1]);
+    const meta = await depCache.getMeta(FP_A, PROJ_1);
+    assert.equal(depCache.deriveStatus(meta, 15 * 60_000), 'stalled');
+    assert.equal(depCache.deriveStatus(meta, 60 * 60_000), 'building',
+      'a longer stall window keeps trusting the same row — the window is the policy');
+    assert.equal(depCache.deriveStatus(null), 'none');
+  });
+
+  test('two projects on the same connection keep independent rows', async () => {
+    await depCache.markBuilding(FP_A, PROJ_1);
+    await depCache.storeResult(FP_A, PROJ_1, { paths: {}, totalComponents: 1, bomImportAt: null });
+    await depCache.markBuilding(FP_A, PROJ_2);
+
+    assert.equal((await depCache.getMeta(FP_A, PROJ_1)).status, 'ready');
+    assert.equal((await depCache.getMeta(FP_A, PROJ_2)).status, 'building');
+  });
+
+  test('a restart fails walks it orphaned, so the next visit rebuilds', async () => {
+    await depCache.markBuilding(FP_A, PROJ_1);
+    await depCache.markBuilding(FP_A, PROJ_2);
+    await depCache.storeResult(FP_A, PROJ_2, { paths: {}, totalComponents: 1, bomImportAt: null });
+
+    const count = await depCache.failOrphanedBuilds();
+    assert.ok(count >= 1);
+
+    assert.equal((await depCache.getMeta(FP_A, PROJ_1)).status, 'failed');
+    assert.match((await depCache.getMeta(FP_A, PROJ_1)).error, /service restarted/i);
+    assert.equal((await depCache.getMeta(FP_A, PROJ_2)).status, 'ready',
+      'a walk that completed before the restart must be left alone');
+
+    assert.equal(await depCache.failOrphanedBuilds(), 0, 'idempotent — nothing left to strand a second time');
+  });
+
+  test('walks nobody points at any more are swept away', async () => {
+    await depCache.markBuilding(FP_B, PROJ_1);
+    await depCache.sweepOrphaned();
+    assert.equal(await depCache.getMeta(FP_B, PROJ_1), null);
+
+    // A row for a connection that is still configured survives.
+    await dtConnections.save(alice.id, { apiUrl: 'http://dt.example', apiKey: 'k', frontendUrl: '' });
+    const conn = await dtConnections.getForClient(alice.id);
+    await depCache.markBuilding(conn.fingerprint, PROJ_1);
+    await depCache.sweepOrphaned();
+    assert.ok(await depCache.getMeta(conn.fingerprint, PROJ_1), 'a live connection keeps its walk');
+    await pool.query('DELETE FROM dependency_paths WHERE fingerprint = $1', [conn.fingerprint]);
+  });
+});

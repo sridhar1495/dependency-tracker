@@ -111,8 +111,9 @@ dependency-tracker/
 │   │   ├── disk.js             # Filesystem headroom and database size
 │   │   ├── reports-db.js caches.js snapshots.js schedules.js scheduler.js
 │   │   ├── dt-fetch.js excel.js cwe.js mail.js reports.js violation-cache.js
+│   │   ├── dependency-path-cache.js dependency-paths.js   # §6.3a — direct/transitive resolution
 │   │   └── branding.js image.js   # title + sign-in background
-│   ├── routes/                 # auth.js profile.js admin.js dt-proxy.js config.js reports.js schedule.js cache.js branding.js
+│   ├── routes/                 # auth.js profile.js admin.js dt-proxy.js config.js reports.js schedule.js cache.js branding.js dependency-paths.js
 │   ├── package.json            # Dependencies: exceljs, nodemailer, pg
 │   ├── Dockerfile
 │   ├── e2e/                    # End-to-end harness — see e2e/README.md
@@ -213,7 +214,7 @@ Inline comments use lettered prefixes to trace design decisions:
 - **O-numbers** — observability notes (`// O3: JSON log format for log aggregators`)
 - **S-numbers** — security rationale (`// S2: token hashed before storage`) — **new in revision 2**
 
-Highest numbers currently in use: **Q24, P20, O5, S34**. When adding logic with a
+Highest numbers currently in use: **Q25, P20, O5, S34**. When adding logic with a
 non-obvious trade-off, add the next number in the appropriate series. Check the
 current maximum before assigning — parallel branches can claim the same number.
 
@@ -297,6 +298,7 @@ await tx(async (client) => {
 | `reports`, `report_file_chunks` | Report metadata and file bytes |
 | `violation_caches` | Shared violation cache, keyed by connection fingerprint |
 | `risk_snapshots` | One row per connection per day, written when a violation-cache build completes; the history behind the trend view (migration 012). Keyed by fingerprint for the same reason the cache is, so accounts sharing a connection share one series. Stores the severity counts and the policy counts **separately** — "critical" means two different things in this product and a schema that accretes history must not decide which one a graph plots. **No foreign key to `violation_caches`**: a cache row is a 24-hour artefact that housekeeping deletes as a matter of routine, and a cascade would let that destroy a year of measurements |
+| `dependency_paths` | One row per connection per project, the cached result of walking that project's DependencyTrack dependency graph (migration 013) — see §6.3a. Keyed by `(fingerprint, project_uuid)` for the same sharing reason as every other cache here. Holds only the expensive, opt-in half (the graph walk); the cheap Direct/Transitive classification is never stored — see §6.3a for why |
 | `branding_assets` | The administrator's sign-in background. Bytes live here, **not** on `app_settings`, because the administration listing cross-joins that table |
 | `schema_migrations` | Migration ledger |
 
@@ -406,6 +408,71 @@ Three properties are load-bearing:
   numbers already carry its descendants'. Summing every project instead
   double-counts, and the graph would then contradict the cards on the same
   screen.
+
+### 6.3a Dependency-path resolution
+
+Answers a release-engineer question the vulnerability dialog's Origin column
+exists for: is a finding's component a **direct** dependency (blocks the
+release) or **transitive** (goes to the security SME's backlog)? Two tiers, at
+two very different costs:
+
+- **Direct or transitive — always live, never cached.** One DT call
+  (`GET /api/v1/project/{uuid}`, whose `directDependencies` field is a JSON
+  **string**, parsed twice) is cheap enough to make on every dialog open. The
+  badge must never lag behind what DependencyTrack currently reports, so
+  nothing about this half is stored — see `getDirectDependencies()` in
+  `lib/dependency-paths.js`.
+- **The path behind a Transitive tag — opt-in, expensive, cached.** Verifying
+  *how* a transitive component is reachable means walking
+  `GET /api/v1/component/project/{uuid}/dependencyGraph/{componentUuid}`
+  outward from the project's direct dependencies — potentially dozens of calls
+  for one project. This is the dialog's "Show full dependency paths" toggle,
+  off by default, and its result is what `dependency_paths` (migration 013)
+  caches, shared by fingerprint like every other cache in this schema (§7.5).
+
+**Q25: the two halves are split into two modules for the same reason
+`caches.js`/`violation-cache.js` are** (§2): `lib/dependency-path-cache.js`
+holds row CRUD, job status and the advisory lock; `lib/dependency-paths.js`
+holds the walk and calls the cache module through the imported reference. A
+same-file bare call cannot be swapped out by a test — `runJob` calling
+`acquireBuildLock` directly, in one early version of this code, meant no test
+could replace it without a real PostgreSQL, which `server.test.js` may not use
+(§10.2). Routes import both modules, exactly as `routes/cache.js` already
+imports both `cache` and `caches`.
+
+**A component reached from more than one direct dependency is flagged, not
+enumerated.** The walk keeps one shortest chain per transitive component and a
+`multiple: true` flag when a second, different direct-dependency branch also
+reaches it (a shared low-level package is the common case) — never every
+distinct route. Storing all of them would let a dense graph's diamond
+dependencies blow up the row; the flag is enough to tell an engineer more than
+one path exists, and DependencyTrack's own graph view is one click away for
+anyone who wants to see them all.
+
+**A component the walk never reaches is not an error.** A flat, manifest-built
+SBOM is the ordinary case, not an edge case — see the design note above
+`walkGraph` for what this project's own sampling of a real DependencyTrack
+instance found: Maven components sit at one hop with no further graph
+recorded, while a container's OS-package layer goes several levels deep,
+because that is what the SBOM generator that produced them actually captured.
+The dialog says "no path recorded" plainly instead of inventing a chain.
+
+**Staleness is a live comparison, not a stored state.** The graph's *shape*
+only changes when a new BOM is imported — a new CVE against an already-known
+component moves nothing in the tree — so the cache is keyed to
+`project.lastBomImport`, which the route already has in hand from the same
+call that fetches the direct set. A row built against an older import is still
+served (something to verify beats nothing while a re-walk has not been asked
+for) but flagged `stale: true`.
+
+**Bounded the same way the snapshot crawl is** (§6.3): `MAX_GRAPH_NODES`
+caps how many components one walk will ever discover, so a toggle click cannot
+become an unbounded fetch loop, and `WALK_CONCURRENCY` limits how many
+`dependencyGraph` calls run at once.
+
+This module is also what a future license-risk dialog reuses unchanged:
+`getDirectDependencies` takes a project, never a finding, so "is this
+component direct or transitive" does not depend on why the caller is asking.
 
 ### 6.4 Semaphore
 
@@ -919,6 +986,33 @@ which has no DependencyTrack project of its own to query. Three rules govern it:
   superseded click's response from landing in a dialog the user has since
   closed or reopened for a different project.
 
+**The Origin column (Direct/Transitive) is always on; the path behind it is
+opt-in.** Every row gets its badge the moment the dialog renders — one extra
+`GET /violation-cache/dependency-paths/:id` call, resolved via
+`loadVulnOrigins()` alongside the findings fetch, never gating the table on
+whether it comes back. "Show full dependency paths" is a separate toggle
+(`onVulnDepPathToggle()`) because the chain behind a Transitive tag is the
+expensive half — see §6.3a. `componentKeyOf()` mirrors
+`lib/dependency-paths.js`'s `componentKey()` by hand, the same duplication
+class as the CWE helpers above; a cross-file test asserts the two agree.
+
+- **`renderVulnRows()` is the only place a row is drawn.** Both the initial
+  findings render and a toggle click re-render through it, reading
+  `_vulnDirectKeys`/`_depPathStatus`/`_depPathPaths` fresh each time, so the
+  table can never show one row's badge computed against a different project's
+  data.
+- **A cache hit skips the network entirely.** `loadVulnOrigins()`'s single GET
+  already returns whatever the cached walk currently knows, so if `status` is
+  already `'ready'` — because another user resolved this project's paths, or
+  this one did earlier in the same dialog session — checking the toggle
+  renders instantly from what is already in hand; `onVulnDepPathToggle()` only
+  issues the `POST` that starts a walk when there is nothing to show yet.
+- **`_depPathReqSeq` guards the poll independently of `_vulnReqSeq`.** Opening
+  a new project, or unchecking then rechecking the toggle, must invalidate
+  whatever the previous poll was waiting on without disturbing an
+  already-rendered findings table. `closeModal('vulnDialog')` stops the poll
+  outright, the same way it already stops the reports modal's.
+
 Adding a page needs no nginx change: `try_files` serves a real file before the
 SPA fallback is considered.
 
@@ -1153,6 +1247,8 @@ The frontend never performs uniqueness checks — those are backend-only, via
 | `hasVulnerabilities(node)` / `vulnEyeIconHtml(node, isGroup)` | frontend | Gate and render the 👁 icon on a leaf row |
 | `vulnFindingsQuery(name, version, page)` | frontend | The finding-search query, mirroring `lib/reports.js`'s `fetchAllFindings()` (Q24) |
 | `sortFindingsBySeverity(findings)` | frontend | Worst severity, then highest CVSS, first |
+| `componentKeyOf(c)` | frontend | Component identity: purl, or group/name/version — mirrors `lib/dependency-paths.js`'s `componentKey()` |
+| `vulnOriginCellHtml(origin)` / `vulnOriginFor(finding, showPaths)` | frontend | Render and compute a row's Direct/Transitive badge and, once resolved, its chain |
 | `query(sql, params)` / `tx(fn)` | server | All database access |
 | `makeSemaphore(limit)` | server | Promise concurrency limit |
 | `sleep(ms)` | server | Promise delay |
@@ -1164,6 +1260,9 @@ The frontend never performs uniqueness checks — those are backend-only, via
 | `calcNextRun(schedule, now)` | server | Pure function: next fire time, in UTC |
 | `snapshots.summarise(projects, map)` | server | Pure fold of one day's risk totals |
 | `snapshots.series(fp, days)` | server | Dense daily history; a gap is `captured: false`, never carried forward |
+| `dependencyPaths.getDirectDependencies(url, key, uuid)` | server | Live, uncached Tier-1 direct-dependency set (§6.3a) |
+| `dependencyPaths.walkGraph(...)` / `.runJob(conn, uuid)` | server | The cached Tier-2 graph walk and its job orchestration |
+| `dependencyPathCache.getMeta` / `.deriveStatus` / `.acquireBuildLock` | server | Row CRUD and the advisory lock behind the walk — the pair split for the reason `caches.js`/`violation-cache.js` are (§6.3a) |
 | `collectReportData(...)` | server | Shared collection core for manual and scheduled reports |
 | `sendEmail(mailCfg, ...)` | server | Deliver report via nodemailer |
 
@@ -1420,6 +1519,23 @@ Running the browser checks in CI was on this list and is now the `e2e` job.
   stacked fill cannot hide it, and the tooltip scans back to name the day the
   number came from. A leading gap must stay empty rather than back-filling the
   first reading into a year of history nobody recorded.
+- Dependency-path resolution (§6.3a): the walk's shortest-chain reconstruction
+  against a diamond graph (one component reachable from two direct
+  dependencies gets `multiple: true`, everything downstream of it does not); a
+  component the walk never reaches has no path entry at all; the node ceiling
+  stops an unbounded upstream chain; the stall watchdog and heartbeat, raced
+  against a shrunk `configure({stallMs})` window rather than the real fifteen
+  minutes, the same technique the violation-cache watchdog tests already use.
+  The database tier pins the job-status machine (`building` → `stalled` →
+  rebuildable; a heartbeat cannot resurrect an already-finished row) and that
+  `sweepOrphaned()` leaves a still-configured connection's walk alone. The
+  frontend's Origin badge is tested by feeding `vulnOriginFor()` a sandboxed
+  `_vulnDirectKeys`/`_depPathStatus`/`_depPathPaths` rather than driving real
+  DOM state, and `componentKeyOf()` is checked against `lib/dependency-
+  paths.js`'s real `componentKey()` via `require()`, not a sandboxed re-load —
+  that module pulls in other `lib/` modules at load time, unlike `lib/cwe.js`,
+  so it needs a real `require()` rather than a `new Function()` sandbox with
+  no resolver.
 - **Authorisation:** every route rejects a missing or invalid token with 401;
   cross-user access returns 404; the profile endpoint ignores login ID and email.
 - Do **not** write tests that require a live DT API.

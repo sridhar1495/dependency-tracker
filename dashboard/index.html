@@ -599,6 +599,22 @@
     .vuln-dialog-note {
       margin-top: 10px; font-size: 11px; color: var(--text-muted); text-align: center;
     }
+    .vuln-table .vuln-origin { min-width: 140px; }
+
+    /* ── Dependency-path toggle (Tier 2 — opt-in, so off by default) ────────
+       Reuses .cfg-inline-toggle rather than a new switch component — same
+       control, same theming, one fewer thing to keep visually consistent. */
+    .dep-path-toggle-row { margin-top: 10px; }
+    .dep-path-status {
+      margin-top: 6px; font-size: 11px; color: var(--text-muted);
+    }
+    .dep-path-chain {
+      margin-top: 3px; font-size: 11px; color: var(--text-muted); line-height: 1.4;
+    }
+    .dep-path-chain.dep-path-none { font-style: italic; }
+    .dep-path-more {
+      color: var(--accent); cursor: help; margin-left: 2px;
+    }
 
     /* ── Pills ────────────────────────────────────────────────────────────── */
     .pill {
@@ -1260,17 +1276,27 @@
      data is never cached client-side, so it is always current with whatever
      the last refetch (or DT itself) knows. -->
 <div class="modal-overlay" id="vulnDialog">
-  <div class="modal" style="width:920px;max-width:96vw">
+  <div class="modal" style="width:980px;max-width:96vw">
     <button class="modal-close" onclick="closeModal('vulnDialog')">&times;</button>
     <h2>🔎 Vulnerabilities — <span id="vulnDialogProject"></span></h2>
     <div id="vulnDialogBody">
       <div class="vuln-dialog-status" id="vulnDialogStatus"></div>
+      <!-- Off by default: the Direct/Transitive badge is always live and free,
+           but the path behind a Transitive tag costs a graph walk, so showing
+           it is a deliberate click, not a side effect of opening the dialog. -->
+      <div class="dep-path-toggle-row" id="vulnDepPathToggleWrap" hidden>
+        <label class="cfg-inline-toggle" title="Resolve how each transitive finding reaches this project">
+          <input type="checkbox" id="vulnDepPathToggle" onchange="onVulnDepPathToggle()">
+          <span>Show full dependency paths (may take a moment)</span>
+        </label>
+        <p class="dep-path-status" id="vulnDepPathStatus" hidden></p>
+      </div>
       <div class="vuln-table-wrap" id="vulnDialogTableWrap" hidden>
         <table class="vuln-table">
           <thead>
             <tr>
               <th>Vulnerability</th><th>Severity</th><th>CVSS</th><th>CWE</th>
-              <th>Component</th><th>Current</th><th>Latest</th>
+              <th>Component</th><th>Current</th><th>Latest</th><th>Origin</th>
             </tr>
           </thead>
           <tbody id="vulnDialogRows"></tbody>
@@ -1594,6 +1620,8 @@ const CONFIG = {
   // click against a portfolio project with thousands of findings from turning
   // into an unbounded fetch loop; the note under the table says when it bites.
   VULN_MAX_ROWS:       900,
+  // How often the dialog polls while a dependency-path walk is building.
+  DEP_PATH_POLL_MS:    1500,
 };
 
 // ── Constants ─────────────────────────────────────────────────────────────
@@ -3886,8 +3914,44 @@ function sortFindingsBySeverity(findings) {
     (b.vulnerability?.cvssV3BaseScore || 0) - (a.vulnerability?.cvssV3BaseScore || 0));
 }
 
+// ── Origin (Direct / Transitive) ────────────────────────────────────────────
+// Answers the question a release engineer actually has: does this finding
+// block the release (a direct dependency), or can it go to the security SME's
+// backlog (transitive)? The classification itself is free and always live —
+// violation-cache/lib/dependency-paths.js's getDirectDependencies() is one DT
+// call, no caching, so the badge can never lag behind what DT currently
+// reports. The chain behind a Transitive tag is the expensive, opt-in half —
+// see the toggle below.
+
+// Mirrors lib/dependency-paths.js's componentKey() exactly: purl when present,
+// else group/name/version. The badge and the server's direct-dependency set
+// must derive a component's identity the identical way, or a component would
+// read as Transitive purely because the two sides disagreed on its name — the
+// same duplication class §8.8 already accepts for the CWE helpers above.
+function componentKeyOf(c) {
+  if (c && c.purl) return c.purl;
+  return `${(c && c.group) || ''}::${(c && c.name) || ''}::${(c && c.version) || ''}`;
+}
+
+/** Direct pill uses .pill-high and Transitive .pill-low — reusing the existing themed pill classes (§8.10), not new colours, with the word itself (not the colour) carrying the meaning so it cannot be misread as a severity. */
+function vulnOriginCellHtml(origin) {
+  if (!origin) return '<span class="pill pill-unassigned">…</span>';
+  if (origin.direct) return '<span class="pill pill-high">Direct</span>';
+
+  let html = '<span class="pill pill-low">Transitive</span>';
+  if (origin.chain && origin.chain.length) {
+    const more = origin.multiple
+      ? ` <span class="dep-path-more" title="More than one dependency route reaches this component">+ more routes</span>`
+      : '';
+    html += `<div class="dep-path-chain">${origin.chain.map(escHtml).join(' &rarr; ')}${more}</div>`;
+  } else if (origin.pathsReady) {
+    html += `<div class="dep-path-chain dep-path-none">No path recorded by DependencyTrack for this component.</div>`;
+  }
+  return html;
+}
+
 /** One <tr> for the dialog table. Pure — every field passes through escHtml(). */
-function vulnRowHtml(finding) {
+function vulnRowHtml(finding, origin) {
   const v = finding.vulnerability || {};
   const c = finding.component || {};
   const sevKey   = (v.severity || 'unassigned').toLowerCase();
@@ -3903,14 +3967,160 @@ function vulnRowHtml(finding) {
     + `<td class="vuln-component">${escHtml(component)}</td>`
     + `<td>${escHtml(c.version || '—')}</td>`
     + `<td>${escHtml(c.latestVersion || '—')}</td>`
+    + `<td class="vuln-origin">${vulnOriginCellHtml(origin)}</td>`
     + `</tr>`;
 }
 
 // Guards against a stale response landing after a newer click. The period
 // control on the trend panel has the identical problem for the same reason:
 // a slow first request can resolve after a fast second one already took over
-// what is on screen.
-let _vulnReqSeq = 0;
+// what is on screen. _depPathReqSeq guards the (independent) dependency-path
+// poll the same way — opening a new project, or unchecking then rechecking
+// the toggle, must invalidate whatever the previous one was waiting on.
+let _vulnReqSeq          = 0;
+let _depPathReqSeq       = 0;
+let _depPathPollTimer    = null;
+let _vulnCurrentProject  = null; // the DT project uuid the open dialog is showing
+let _vulnShownFindings   = [];   // the rendered slice, kept so a toggle can re-render without refetching
+let _vulnDirectKeys      = null; // Set<componentKey> | null while Tier 1 has not returned yet
+let _depPathStatus       = 'none';
+let _depPathStale        = false;
+let _depPathPaths        = {};
+
+/** Rebuilds the table body from what is already known — never refetches. */
+function renderVulnRows() {
+  const rowsEl = document.getElementById('vulnDialogRows');
+  const toggle = document.getElementById('vulnDepPathToggle');
+  const showPaths = toggle && toggle.checked;
+  rowsEl.innerHTML = _vulnShownFindings
+    .map(f => vulnRowHtml(f, vulnOriginFor(f, showPaths)))
+    .join('');
+}
+
+function vulnOriginFor(finding, showPaths) {
+  if (!_vulnDirectKeys) return null; // Tier 1 has not returned yet
+  const key = componentKeyOf(finding.component || {});
+  if (_vulnDirectKeys.has(key)) return { direct: true };
+  if (!showPaths) return { direct: false };
+  if (_depPathStatus !== 'ready') return { direct: false, pathsReady: false };
+  const entry = _depPathPaths[key];
+  return {
+    direct: false, pathsReady: true,
+    chain: entry ? entry.chain : null, multiple: entry ? entry.multiple : false,
+  };
+}
+
+/**
+ * Tier 1, always: one live DT call, never cached. Also carries whatever Tier
+ * 2 currently knows — a walk somebody else already built renders the instant
+ * the toggle is checked, with no poll needed.
+ */
+async function loadVulnOrigins(projectUuid, seq) {
+  try {
+    const r = await apiFetch(`/violation-cache/dependency-paths/${encodeURIComponent(projectUuid)}`);
+    if (seq !== _vulnReqSeq) return; // a newer dialog open superseded this project
+    if (!r.ok) { _vulnDirectKeys = new Set(); renderVulnRows(); return; }
+    const data = await r.json();
+    if (seq !== _vulnReqSeq) return;
+
+    _vulnDirectKeys = new Set((data.direct || []).map(componentKeyOf));
+    _depPathStatus  = data.status;
+    _depPathStale   = !!data.stale;
+    _depPathPaths   = data.paths || {};
+
+    document.getElementById('vulnDepPathToggleWrap').hidden = false;
+    renderVulnRows();
+  } catch (_) {
+    // Origin is a refinement on top of the findings list, which already
+    // rendered — its absence must not surface as an error to act on.
+    if (seq !== _vulnReqSeq) return;
+    _vulnDirectKeys = new Set();
+    renderVulnRows();
+  }
+}
+
+function stopDepPathPoll() {
+  if (_depPathPollTimer) { clearInterval(_depPathPollTimer); _depPathPollTimer = null; }
+}
+
+function startDepPathPoll(projectUuid, seq) {
+  stopDepPathPoll();
+  const statusEl = document.getElementById('vulnDepPathStatus');
+  const tick = async () => {
+    if (seq !== _depPathReqSeq) { stopDepPathPoll(); return; }
+    try {
+      const r = await apiFetch(`/violation-cache/dependency-paths/${encodeURIComponent(projectUuid)}`);
+      if (!r.ok) return; // transient — keep polling
+      const data = await r.json();
+      if (seq !== _depPathReqSeq) return;
+
+      if (data.status === 'building') {
+        statusEl.hidden = false;
+        statusEl.textContent = data.totalComponents > 0
+          ? `Resolving dependency paths — ${data.resolvedComponents} of ${data.totalComponents} components…`
+          : 'Resolving dependency paths…';
+        return;
+      }
+      stopDepPathPoll();
+      _depPathStatus = data.status;
+      _depPathStale  = !!data.stale;
+      _depPathPaths  = data.paths || {};
+      if (data.status === 'ready') {
+        statusEl.hidden = !_depPathStale;
+        if (_depPathStale) statusEl.textContent = 'A newer BOM has been imported — these paths may be outdated.';
+        renderVulnRows();
+      } else {
+        statusEl.hidden = false;
+        statusEl.textContent = `Could not resolve dependency paths${data.error ? ': ' + data.error : '.'}`;
+      }
+    } catch (_) { /* network hiccup — keep polling */ }
+  };
+  _depPathPollTimer = setInterval(tick, CONFIG.DEP_PATH_POLL_MS);
+  tick();
+}
+
+async function onVulnDepPathToggle() {
+  const checked  = document.getElementById('vulnDepPathToggle').checked;
+  const statusEl = document.getElementById('vulnDepPathStatus');
+  const seq      = ++_depPathReqSeq;
+
+  if (!checked) {
+    stopDepPathPoll();
+    statusEl.hidden = true;
+    renderVulnRows();
+    return;
+  }
+  if (!_vulnCurrentProject) return;
+
+  if (_depPathStatus === 'ready') {
+    // Already resolved — from this same GET on dialog open, or a previous
+    // toggle this session. Render immediately; no walk needed.
+    renderVulnRows();
+    if (_depPathStale) {
+      statusEl.hidden = false;
+      statusEl.textContent = 'A newer BOM has been imported — these paths may be outdated.';
+    }
+    return;
+  }
+
+  statusEl.hidden = false;
+  statusEl.textContent = 'Resolving dependency paths…';
+  try {
+    const r = await apiFetch(
+      `/violation-cache/dependency-paths/${encodeURIComponent(_vulnCurrentProject)}`, { method: 'POST' });
+    if (seq !== _depPathReqSeq) return;
+    if (!r.ok && r.status !== 409) {
+      const detail = await r.json().catch(() => ({}));
+      statusEl.textContent = `Could not start path resolution: ${detail.error || r.status}`;
+      return;
+    }
+  } catch (err) {
+    if (seq !== _depPathReqSeq) return;
+    statusEl.textContent = `Could not start path resolution: ${err.message}`;
+    return;
+  }
+  startDepPathPoll(_vulnCurrentProject, seq);
+}
 
 async function openVulnDialog(uuid) {
   const node = nodeMap.get(uuid);
@@ -3918,15 +4128,34 @@ async function openVulnDialog(uuid) {
 
   document.getElementById('vulnDialogProject').textContent =
     node.version ? `${node.name} v${node.version}` : node.name;
-  const statusEl = document.getElementById('vulnDialogStatus');
-  const wrapEl   = document.getElementById('vulnDialogTableWrap');
-  const rowsEl   = document.getElementById('vulnDialogRows');
-  const noteEl   = document.getElementById('vulnDialogNote');
+  const statusEl     = document.getElementById('vulnDialogStatus');
+  const wrapEl       = document.getElementById('vulnDialogTableWrap');
+  const rowsEl       = document.getElementById('vulnDialogRows');
+  const noteEl       = document.getElementById('vulnDialogNote');
+  const toggleWrapEl = document.getElementById('vulnDepPathToggleWrap');
+  const toggleEl     = document.getElementById('vulnDepPathToggle');
+  const depStatusEl  = document.getElementById('vulnDepPathStatus');
   wrapEl.hidden = true;
   noteEl.hidden = true;
   rowsEl.innerHTML = '';
   statusEl.hidden = false;
   statusEl.textContent = 'Loading…';
+
+  // A fresh project resets every piece of origin state — a stale toggle,
+  // status line or cached path from whatever was open before must not bleed
+  // into the new one.
+  stopDepPathPoll();
+  ++_depPathReqSeq;
+  _vulnCurrentProject = uuid;
+  _vulnShownFindings  = [];
+  _vulnDirectKeys     = null;
+  _depPathStatus      = 'none';
+  _depPathStale       = false;
+  _depPathPaths       = {};
+  toggleWrapEl.hidden = true;
+  toggleEl.checked    = false;
+  depStatusEl.hidden  = true;
+
   openModal('vulnDialog');
 
   // No round trip for an account that has not connected DT yet — the icon can
@@ -3949,13 +4178,17 @@ async function openVulnDialog(uuid) {
 
     const sorted = sortFindingsBySeverity(findings);
     const shown  = sorted.slice(0, CONFIG.VULN_MAX_ROWS);
-    rowsEl.innerHTML = shown.map(vulnRowHtml).join('');
+    _vulnShownFindings = shown;
+    renderVulnRows();
     statusEl.hidden = true;
     wrapEl.hidden = false;
     if (sorted.length > shown.length) {
       noteEl.hidden = false;
       noteEl.textContent = `Showing the ${shown.length} most severe of ${sorted.length} findings.`;
     }
+
+    // Fire-and-forget: the findings the user came for are already on screen.
+    loadVulnOrigins(uuid, seq);
   } catch (err) {
     if (seq !== _vulnReqSeq) return;
     statusEl.textContent = `Could not load vulnerabilities: ${err.message}`;
@@ -5624,6 +5857,10 @@ function closeModal(id) {
     clearInterval(_reportPollTimer);
     _reportPollTimer = null;
   }
+  if (id === 'vulnDialog') {
+    stopDepPathPoll();
+    ++_depPathReqSeq; // any in-flight poll's own comparison also stops it
+  }
 }
 
 document.querySelectorAll('.modal-overlay').forEach(el => {
@@ -6242,6 +6479,7 @@ window.deleteAccount        = deleteAccount;
 window.openModal            = openModal;
 window.closeModal           = closeModal;
 window.openVulnDialog       = openVulnDialog;
+window.onVulnDepPathToggle  = onVulnDepPathToggle;
 window.refreshData          = refreshData;
 window.triggerCacheRefresh  = triggerCacheRefresh;
 // Exposed so an end-to-end test can drive one watch tick instead of waiting out

@@ -924,11 +924,13 @@ describe('e2e — the dashboard in a real browser', { skip: BROWSER_SKIP }, () =
     assert.equal(await page.locator('#vulnDialogTableWrap').isHidden(), false);
 
     // Column order and content: Vulnerability, Severity, CVSS, CWE, Component,
-    // Current, Latest — matching the report workbook's own columns (§6.7).
+    // Current, Latest, Origin — the first seven matching the report workbook's
+    // own columns (§6.7), Origin added for the Direct/Transitive badge.
     const firstRow = await rows.first().locator('td').allTextContents();
-    assert.equal(firstRow.length, 7);
+    assert.equal(firstRow.length, 8);
     assert.match(firstRow[0], /^CVE-/, 'the vulnerability id column');
     assert.ok(/CRITICAL|HIGH|MEDIUM|LOW/i.test(firstRow[1]), 'the severity pill column');
+    assert.ok(/Direct|Transitive/.test(firstRow[7]), 'the origin column');
 
     // Sorted worst-first: the first row's severity pill class must be at least
     // as severe as the last row's, never the reverse.
@@ -941,6 +943,49 @@ describe('e2e — the dashboard in a real browser', { skip: BROWSER_SKIP }, () =
     await page.locator('#vulnDialog .modal-close').click();
     await page.waitForTimeout(400);
     assert.equal(await page.locator('#vulnDialog').evaluate(e => e.classList.contains('open')), false);
+  }, { timeout: 60_000 });
+
+  test('the dependency-path toggle resolves real Direct/Transitive chains, live and once cached', async () => {
+    // dt-stub.js seeds each leaf with a synthetic "carrier" component that is
+    // itself direct, with half the leaf's findings reachable only through it —
+    // a real, if small, transitive graph to walk end to end.
+    const eyeBtn = page.locator('.vuln-eye-btn').first();
+    await eyeBtn.waitFor({ state: 'visible', timeout: 10_000 });
+    await eyeBtn.click();
+    await page.waitForTimeout(1200);
+
+    // Tier 1: the Origin column is populated the instant the dialog renders,
+    // with no toggle touched — it is live and free, never gated.
+    const originTexts = await page.locator('#vulnDialogRows .vuln-origin').allTextContents();
+    assert.ok(originTexts.length > 0);
+    assert.ok(originTexts.some(t => /Direct/.test(t)), 'at least one finding must be Direct');
+    assert.ok(originTexts.some(t => /Transitive/.test(t)), 'at least one finding must be Transitive');
+    assert.ok(!(await page.locator('.dep-path-chain').count()), 'no chain is shown before the toggle is used');
+
+    // Toggling on triggers the walk and shows a chain per Transitive row.
+    await page.locator('#vulnDepPathToggle').click();
+    await page.waitForSelector('.dep-path-chain', { timeout: 15_000 });
+    const chains = await page.locator('.dep-path-chain').allTextContents();
+    assert.ok(chains.length > 0);
+    for (const chain of chains) {
+      assert.match(chain, /carrier-for-/, 'the chain must name the intermediate component, not just the target');
+    }
+
+    // Toggling off hides the chains without discarding the Direct/Transitive badges.
+    await page.locator('#vulnDepPathToggle').click();
+    await page.waitForTimeout(300);
+    assert.equal(await page.locator('.dep-path-chain').count(), 0);
+    assert.ok((await page.locator('#vulnDialogRows .vuln-origin').allTextContents())
+      .some(t => /Transitive/.test(t)), 'the badge itself survives toggling the paths off');
+
+    // Toggling back on is a cache hit — instant, no second walk needed.
+    const t0 = Date.now();
+    await page.locator('#vulnDepPathToggle').click();
+    await page.waitForSelector('.dep-path-chain', { timeout: 3000 });
+    assert.ok(Date.now() - t0 < 3000, 'a resolved walk must render immediately on re-toggle, not re-poll');
+
+    await page.locator('#vulnDialog .modal-close').click();
+    await page.waitForTimeout(400);
   }, { timeout: 60_000 });
 
   test('a clean project (no findings) shows no eye icon at all', async () => {

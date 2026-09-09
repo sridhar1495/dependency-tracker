@@ -5354,3 +5354,452 @@ describe('violation cache — the snapshot cannot fail the build', () => {
     } finally { restoreLog(); restoreFetch(); restoreSnaps(); }
   });
 });
+
+// ── Dependency-path resolution ────────────────────────────────────────────────
+// Direct/transitive classification (Tier 1, always live) and the cached graph
+// walk behind a Transitive tag's chain (Tier 2, opt-in) — see
+// lib/dependency-paths.js and routes/dependency-paths.js.
+
+const depPathsMod      = require('./lib/dependency-paths');
+const depPathCacheMod  = require('./lib/dependency-path-cache');
+const routeDepPaths    = require('./routes/dependency-paths');
+
+describe('dependency paths — component identity', () => {
+  test('purl wins when present', () => {
+    assert.equal(depPathsMod.componentKey({ purl: 'pkg:npm/x@1', name: 'x', group: 'g', version: '1' }),
+      'pkg:npm/x@1');
+  });
+
+  test('falls back to group/name/version when purl is absent', () => {
+    // The project's own root pseudo-component has no purl in practice — this
+    // is the ordinary case, not an edge case, so the fallback must agree with
+    // the frontend's componentKeyOf() byte for byte (see dashboard.test.js).
+    assert.equal(depPathsMod.componentKey({ name: 'x', group: 'g', version: '1' }), 'g::x::1');
+    assert.equal(depPathsMod.componentKey({ name: 'x', version: '1' }), '::x::1');
+    assert.equal(depPathsMod.componentKey({}), '::::');
+    assert.equal(depPathsMod.componentKey(null), '::::');
+  });
+});
+
+describe('dependency paths — direct dependencies (Tier 1, live, never cached)', () => {
+  test('directDependencies is parsed twice — it is a JSON string, not a nested object', async () => {
+    const restoreFetch = stub(dtFetchMod, {
+      dtGetWithRetry: async () => ({
+        json: {
+          directDependencies: JSON.stringify([{ uuid: 'a', name: 'a', purl: 'pkg:npm/a@1' }]),
+          lastBomImport: 1700000000000,
+        },
+      }),
+    });
+    try {
+      const { direct, lastBomImport } = await depPathsMod.getDirectDependencies('http://dt', 'k', 'proj-1');
+      assert.deepEqual(direct, [{ uuid: 'a', name: 'a', purl: 'pkg:npm/a@1' }]);
+      assert.equal(lastBomImport, 1700000000000);
+    } finally { restoreFetch(); }
+  });
+
+  test('a missing directDependencies field is an empty list, not a throw', async () => {
+    const restoreFetch = stub(dtFetchMod, { dtGetWithRetry: async () => ({ json: {} }) });
+    try {
+      const { direct, lastBomImport } = await depPathsMod.getDirectDependencies('http://dt', 'k', 'proj-1');
+      assert.deepEqual(direct, []);
+      assert.equal(lastBomImport, null);
+    } finally { restoreFetch(); }
+  });
+
+  test('a directDependencies string that is not valid JSON is swallowed, not thrown', async () => {
+    const restoreFetch = stub(dtFetchMod, {
+      dtGetWithRetry: async () => ({ json: { directDependencies: '{not json' } }),
+    });
+    try {
+      const { direct } = await depPathsMod.getDirectDependencies('http://dt', 'k', 'proj-1');
+      assert.deepEqual(direct, []);
+    } finally { restoreFetch(); }
+  });
+
+  test('a directDependencies value that parses but is not an array is discarded', async () => {
+    const restoreFetch = stub(dtFetchMod, {
+      dtGetWithRetry: async () => ({ json: { directDependencies: JSON.stringify({ not: 'a list' }) } }),
+    });
+    try {
+      const { direct } = await depPathsMod.getDirectDependencies('http://dt', 'k', 'proj-1');
+      assert.deepEqual(direct, []);
+    } finally { restoreFetch(); }
+  });
+});
+
+describe('dependency paths — the walk (Tier 2)', () => {
+  // A → X → Y → Z, and B → X too, so X is a diamond: reachable from two
+  // different direct dependencies. One dependencyGraph response always
+  // returns the WHOLE known graph, regardless of which uuid was asked for —
+  // matching what the real endpoint does in practice (see the design note
+  // above walkGraph in lib/dependency-paths.js).
+  function diamondFetch() {
+    const GRAPH = {
+      A: { name: 'A', uuid: 'A', purl: 'pkg:t/A@1', dependencyGraph: ['X'] },
+      B: { name: 'B', uuid: 'B', purl: 'pkg:t/B@1', dependencyGraph: ['X'] },
+      X: { name: 'X', uuid: 'X', purl: 'pkg:t/X@1', dependencyGraph: ['Y'] },
+      Y: { name: 'Y', uuid: 'Y', purl: 'pkg:t/Y@1', dependencyGraph: ['Z'] },
+      Z: { name: 'Z', uuid: 'Z', purl: 'pkg:t/Z@1' },
+    };
+    return async () => ({ json: GRAPH });
+  }
+
+  test('a transitive component gets one shortest chain, starting from a direct dependency', async () => {
+    const restoreFetch = stub(dtFetchMod, { dtGetWithRetry: diamondFetch() });
+    const direct = [
+      { uuid: 'A', name: 'A', purl: 'pkg:t/A@1' },
+      { uuid: 'B', name: 'B', purl: 'pkg:t/B@1' },
+    ];
+    try {
+      const { paths, totalComponents } = await depPathsMod.walkGraph('http://dt', 'k', 'proj', direct);
+      assert.ok(totalComponents >= 5);
+
+      const yPath = paths['pkg:t/Y@1'];
+      assert.ok(yPath, 'Y is transitive and reachable — it must have a path entry');
+      assert.equal(yPath.chain[yPath.chain.length - 1], 'Y');
+      assert.ok(yPath.chain[0] === 'A' || yPath.chain[0] === 'B',
+        'the chain must start from one of the direct dependencies');
+      assert.ok(yPath.chain.includes('X'), 'the chain must pass through the diamond point');
+
+      // Direct dependencies never get a path entry — the badge alone says enough.
+      assert.equal(paths['pkg:t/A@1'], undefined);
+      assert.equal(paths['pkg:t/B@1'], undefined);
+    } finally { restoreFetch(); }
+  });
+
+  test('a component reachable from more than one direct dependency is flagged, not duplicated', async () => {
+    const restoreFetch = stub(dtFetchMod, { dtGetWithRetry: diamondFetch() });
+    const direct = [
+      { uuid: 'A', name: 'A', purl: 'pkg:t/A@1' },
+      { uuid: 'B', name: 'B', purl: 'pkg:t/B@1' },
+    ];
+    try {
+      const { paths } = await depPathsMod.walkGraph('http://dt', 'k', 'proj', direct);
+      assert.equal(paths['pkg:t/X@1'].multiple, true, 'X is reachable from both A and B');
+      assert.equal(paths['pkg:t/Y@1'].multiple, false,
+        'only the diamond point itself is flagged, not everything downstream of it');
+    } finally { restoreFetch(); }
+  });
+
+  test('a component the walk never reaches has no path entry — not an invented one', async () => {
+    const restoreFetch = stub(dtFetchMod, { dtGetWithRetry: diamondFetch() });
+    const direct = [{ uuid: 'A', name: 'A', purl: 'pkg:t/A@1' }];
+    try {
+      const { paths } = await depPathsMod.walkGraph('http://dt', 'k', 'proj', direct);
+      assert.equal(paths['pkg:npm/never-declared@1'], undefined);
+    } finally { restoreFetch(); }
+  });
+
+  test('the walk is bounded, so an unbounded upstream chain cannot spin forever', async () => {
+    // node N's own response reveals only node N+1 — a pure linear chain with
+    // no natural end, the same shape an upstream bug or a malformed graph
+    // could produce.
+    const restoreFetch = stub(dtFetchMod, {
+      dtGetWithRetry: async (url) => {
+        const uuid = url.split('/').pop();
+        const next = String(Number(uuid) + 1);
+        return { json: { [uuid]: { name: `n${uuid}`, uuid, dependencyGraph: [next] } } };
+      },
+    });
+    try {
+      const direct = [{ uuid: '0', name: 'root', purl: 'pkg:t/root@1' }];
+      const { totalComponents } = await depPathsMod.walkGraph('http://dt', 'k', 'proj', direct);
+      assert.ok(totalComponents <= depPathsMod.MAX_GRAPH_NODES + 1,
+        `an infinite chain must stop at the ceiling, not spin forever (got ${totalComponents})`);
+    } finally { restoreFetch(); }
+  });
+
+  test('shouldStop halts the walk between rounds', async () => {
+    let calls = 0;
+    const restoreFetch = stub(dtFetchMod, {
+      dtGetWithRetry: async (url) => {
+        calls++;
+        const uuid = url.split('/').pop();
+        const next = String(Number(uuid) + 1);
+        return { json: { [uuid]: { name: `n${uuid}`, uuid, dependencyGraph: [next] } } };
+      },
+    });
+    try {
+      const direct = [{ uuid: '0', name: 'root', purl: 'pkg:t/root@1' }];
+      await depPathsMod.walkGraph('http://dt', 'k', 'proj', direct, () => {}, () => calls >= 3);
+      assert.ok(calls < 10, `a tripped shouldStop must halt promptly, not run to the node ceiling (${calls} calls)`);
+    } finally { restoreFetch(); }
+  });
+
+  test('a failed expansion for one node does not abort the rest of the walk', async () => {
+    const GRAPH = {
+      A: { name: 'A', uuid: 'A', purl: 'pkg:t/A@1', dependencyGraph: ['X'] },
+      X: { name: 'X', uuid: 'X', purl: 'pkg:t/X@1' },
+    };
+    const restoreFetch = stub(dtFetchMod, {
+      dtGetWithRetry: async (url) => {
+        if (url.endsWith('/A')) throw new Error('DT hiccup');
+        return { json: GRAPH };
+      },
+    });
+    try {
+      const direct = [
+        { uuid: 'A', name: 'A', purl: 'pkg:t/A@1' },
+        { uuid: 'X', name: 'X', purl: 'pkg:t/X@1' },
+      ];
+      const { totalComponents } = await depPathsMod.walkGraph('http://dt', 'k', 'proj', direct);
+      assert.ok(totalComponents >= 2, 'X\'s own successful expansion must still count');
+    } finally { restoreFetch(); }
+  });
+});
+
+describe('dependency paths — the stall watchdog', () => {
+  const CONN = { apiUrl: 'http://dt:8080', apiKey: 'k123', fingerprint: 'f'.repeat(64) };
+
+  function fakeCacheRow() {
+    const calls = { markBuilding: 0, touches: 0, stored: null, failed: null };
+    return {
+      calls,
+      patch: {
+        acquireBuildLock: async () => ({ acquired: true, release: async () => {} }),
+        markBuilding: async () => { calls.markBuilding++; },
+        setProgress:  async () => {},
+        touchBuild:   async () => { calls.touches++; return true; },
+        storeResult:  async (_fp, _proj, meta) => { calls.stored = meta; },
+        markFailed:   async (_fp, _proj, message) => { calls.failed = message; },
+      },
+    };
+  }
+
+  test('a slow walk that keeps advancing is allowed to finish', async () => {
+    const fake = fakeCacheRow();
+    const restoreCache = stub(depPathCacheMod, fake.patch);
+    const restoreFetch = stub(dtFetchMod, {
+      dtGetWithRetry: async (url) => {
+        if (!url.includes('dependencyGraph')) {
+          return { json: { directDependencies: JSON.stringify([{ uuid: '0', name: 'root', purl: 'pkg:t/0@1' }]) } };
+        }
+        await new Promise(r => setTimeout(r, 20)); // each hop is well under the stall window below
+        const uuid = url.split('/').pop();
+        const n = Number(uuid);
+        if (n >= 5) return { json: { [uuid]: { name: uuid, uuid } } };
+        return { json: { [uuid]: { name: uuid, uuid, dependencyGraph: [String(n + 1)] } } };
+      },
+    });
+    depPathCacheMod.configure({ stallMs: 150 });
+    try {
+      const r = await depPathsMod.runJob(CONN, 'proj-slow');
+      assert.equal(r.completed, true, 'steady progress must never trip the watchdog');
+      assert.ok(!r.stalled);
+      assert.equal(fake.calls.failed, null);
+      assert.ok(fake.calls.stored, 'the finished walk must be stored, not discarded');
+    } finally { restoreCache(); restoreFetch(); depPathCacheMod.configure(null); }
+  });
+
+  test('a walk that goes silent past the window is stopped', async () => {
+    const fake = fakeCacheRow();
+    const restoreCache = stub(depPathCacheMod, fake.patch);
+    const restoreFetch = stub(dtFetchMod, {
+      dtGetWithRetry: async (url) => {
+        if (!url.includes('dependencyGraph')) {
+          return { json: { directDependencies: JSON.stringify([{ uuid: '0', name: 'root', purl: 'pkg:t/0@1' }]) } };
+        }
+        // Hangs well past the stall window on every graph call.
+        await new Promise(r => setTimeout(r, 400));
+        return { json: { 0: { name: 'root', uuid: '0' } } };
+      },
+    });
+    depPathCacheMod.configure({ stallMs: 60 });
+    try {
+      const r = await depPathsMod.runJob(CONN, 'proj-stall');
+      assert.equal(r.stalled, true);
+      assert.equal(r.completed, false);
+      assert.match(fake.calls.failed, /no progress for/i);
+      assert.equal(fake.calls.stored, null);
+    } finally { restoreCache(); restoreFetch(); depPathCacheMod.configure(null); }
+  });
+
+  test('the configured window is used, not the hardcoded default', () => {
+    depPathCacheMod.configure({ stallMs: 7 * 60_000 });
+    assert.equal(depPathCacheMod.stallWindowMs(), 7 * 60_000);
+    depPathCacheMod.configure(null);
+    assert.equal(depPathCacheMod.stallWindowMs(), depPathCacheMod.DEFAULT_STALL_MS);
+  });
+});
+
+describe('dependency paths — runJob orchestration', () => {
+  const CONN = { apiUrl: 'http://dt:8080', apiKey: 'k123', fingerprint: 'f'.repeat(64) };
+
+  test('a completed walk stores its result and reports success', async () => {
+    const stored = {};
+    const restoreCache = stub(depPathCacheMod, {
+      acquireBuildLock: async () => ({ acquired: true, release: async () => {} }),
+      markBuilding: async () => {},
+      setProgress:  async () => {},
+      touchBuild:   async () => true,
+      storeResult:  async (fp, proj, meta) => { stored.fp = fp; stored.proj = proj; stored.meta = meta; },
+      markFailed:   async () => {},
+    });
+    const restoreFetch = stub(dtFetchMod, {
+      dtGetWithRetry: async (url) => {
+        if (!url.includes('dependencyGraph')) {
+          return {
+            json: {
+              directDependencies: JSON.stringify([{ uuid: 'a', name: 'a', purl: 'pkg:t/a@1' }]),
+              lastBomImport: 1700000000000,
+            },
+          };
+        }
+        return { json: { a: { name: 'a', uuid: 'a' } } };
+      },
+    });
+    try {
+      const r = await depPathsMod.runJob(CONN, 'proj-ok');
+      assert.equal(r.completed, true);
+      assert.equal(stored.fp, CONN.fingerprint);
+      assert.equal(stored.proj, 'proj-ok');
+      assert.deepEqual(stored.meta.bomImportAt, new Date(1700000000000));
+    } finally { restoreCache(); restoreFetch(); }
+  });
+
+  test('losing the advisory lock reports started:false, not an error', async () => {
+    const restoreCache = stub(depPathCacheMod, {
+      acquireBuildLock: async () => ({ acquired: false, release: async () => {} }),
+    });
+    try {
+      const r = await depPathsMod.runJob(CONN, 'proj-locked');
+      assert.equal(r.started, false);
+    } finally { restoreCache(); }
+  });
+});
+
+describe('routes — dependency-paths', () => {
+  const USER_ID = '44444444-4444-4444-8444-444444444444';
+  const PROJECT = '55555555-5555-4555-8555-555555555555';
+  const CONN = { apiUrl: 'http://dt:8080', apiKey: 'k', fingerprint: 'f'.repeat(64), isConfigured: true };
+
+  test('GET rejects a malformed project id before touching the database', async () => {
+    const res = makeRes();
+    const handled = await routeDepPaths.handle({
+      method: 'GET', path: '/violation-cache/dependency-paths/not-a-uuid',
+      url: '/violation-cache/dependency-paths/not-a-uuid', req: {}, res, principal: asUser(USER_ID),
+    });
+    assert.equal(handled, true);
+    assert.equal(res.statusCode, 400);
+    assert.equal(res.json.code, 'INVALID_PROJECT');
+  });
+
+  test('an administrator session is refused — this route has no data of its own', async () => {
+    const res = makeRes();
+    await routeDepPaths.handle({
+      method: 'GET', path: `/violation-cache/dependency-paths/${PROJECT}`,
+      url: `/violation-cache/dependency-paths/${PROJECT}`, req: {}, res, principal: asAdmin(),
+    });
+    assert.equal(res.statusCode, 403);
+    assert.equal(res.json.code, 'USER_ONLY');
+  });
+
+  test('an unconfigured account gets a clear 503, not a crash', async () => {
+    const restoreConn = stub(dtConnectionsMod, { getResolved: async () => ({ isConfigured: false }) });
+    try {
+      const res = makeRes();
+      await routeDepPaths.handle({
+        method: 'GET', path: `/violation-cache/dependency-paths/${PROJECT}`,
+        url: `/violation-cache/dependency-paths/${PROJECT}`, req: {}, res, principal: asUser(USER_ID),
+      });
+      assert.equal(res.statusCode, 503);
+      assert.equal(res.json.code, 'DT_NOT_CONFIGURED');
+    } finally { restoreConn(); }
+  });
+
+  test('GET always fetches the direct set live, even when a walk is cached and ready', async () => {
+    let projectCalls = 0;
+    const restoreConn  = stub(dtConnectionsMod, { getResolved: async () => CONN });
+    const restoreFetch = stub(dtFetchMod, {
+      dtGetWithRetry: async () => {
+        projectCalls++;
+        return { json: { directDependencies: JSON.stringify([{ uuid: 'a', name: 'a', purl: 'pkg:t/a@1' }]) } };
+      },
+    });
+    const restoreDep = stub(depPathCacheMod, {
+      getMeta: async () => ({
+        status: 'ready', bomImportAt: null, totalComponents: 3, resolvedComponents: 3,
+        paths: { 'pkg:t/b@1': { chain: ['a', 'b'], multiple: false } }, updatedAt: new Date().toISOString(),
+      }),
+    });
+    try {
+      const res = makeRes();
+      await routeDepPaths.handle({
+        method: 'GET', path: `/violation-cache/dependency-paths/${PROJECT}`,
+        url: `/violation-cache/dependency-paths/${PROJECT}`, req: {}, res, principal: asUser(USER_ID),
+      });
+      assert.equal(res.statusCode, 200);
+      assert.equal(projectCalls, 1, 'the direct set is always fetched live, never skipped for a cache hit');
+      assert.equal(res.json.status, 'ready');
+      assert.deepEqual(res.json.direct, [{ uuid: 'a', purl: 'pkg:t/a@1', name: 'a', group: null, version: null }]);
+      assert.ok(res.json.paths['pkg:t/b@1']);
+    } finally { restoreConn(); restoreFetch(); restoreDep(); }
+  });
+
+  test('a row built against an older BOM import is served, flagged stale, not discarded', async () => {
+    const restoreConn  = stub(dtConnectionsMod, { getResolved: async () => CONN });
+    const restoreFetch = stub(dtFetchMod, {
+      dtGetWithRetry: async () => ({
+        json: { directDependencies: '[]', lastBomImport: 2_000_000_000_000 },
+      }),
+    });
+    const restoreDep = stub(depPathCacheMod, {
+      getMeta: async () => ({
+        status: 'ready', bomImportAt: new Date(1_000_000_000_000).toISOString(),
+        totalComponents: 1, resolvedComponents: 1, paths: {}, updatedAt: new Date().toISOString(),
+      }),
+    });
+    try {
+      const res = makeRes();
+      await routeDepPaths.handle({
+        method: 'GET', path: `/violation-cache/dependency-paths/${PROJECT}`,
+        url: `/violation-cache/dependency-paths/${PROJECT}`, req: {}, res, principal: asUser(USER_ID),
+      });
+      assert.equal(res.json.status, 'ready', 'stale still serves what it has — something to verify beats nothing');
+      assert.equal(res.json.stale, true);
+    } finally { restoreConn(); restoreFetch(); restoreDep(); }
+  });
+
+  test('POST while already building answers 409, not a second walk', async () => {
+    const restoreConn = stub(dtConnectionsMod, { getResolved: async () => CONN });
+    const restoreCache = stub(depPathCacheMod, {
+      getMeta: async () => ({ status: 'building', updatedAt: new Date().toISOString() }),
+    });
+    const restoreDep = stub(depPathsMod, {
+      runJob: async () => { throw new Error('must not be called'); },
+    });
+    try {
+      const res = makeRes();
+      await routeDepPaths.handle({
+        method: 'POST', path: `/violation-cache/dependency-paths/${PROJECT}`,
+        url: `/violation-cache/dependency-paths/${PROJECT}`, req: {}, res, principal: asUser(USER_ID),
+      });
+      assert.equal(res.statusCode, 409);
+    } finally { restoreConn(); restoreCache(); restoreDep(); }
+  });
+
+  test('a build stalled by a dead process is recovered, not stuck at 409 forever', async () => {
+    const restoreConn = stub(dtConnectionsMod, { getResolved: async () => CONN });
+    let started = false;
+    const restoreCache = stub(depPathCacheMod, {
+      getMeta: async () => ({
+        status: 'building',
+        // Long past any reasonable stall window.
+        updatedAt: new Date(Date.now() - 3600_000).toISOString(),
+      }),
+    });
+    const restoreDep = stub(depPathsMod, {
+      runJob: async () => { started = true; return { started: true, completed: true }; },
+    });
+    try {
+      const res = makeRes();
+      await routeDepPaths.handle({
+        method: 'POST', path: `/violation-cache/dependency-paths/${PROJECT}`,
+        url: `/violation-cache/dependency-paths/${PROJECT}`, req: {}, res, principal: asUser(USER_ID),
+      });
+      assert.equal(res.statusCode, 202);
+      assert.equal(started, true);
+    } finally { restoreConn(); restoreCache(); restoreDep(); }
+  });
+});

@@ -103,7 +103,53 @@ function buildPortfolio() {
     }
   }
 
-  return { roots, children, violations, findings };
+  // ── Dependency graph fixture ─────────────────────────────────────────────
+  // Each leaf's findings split direct/transitive through one synthetic
+  // "carrier" component, so the dependency-path toggle (routes/dependency-
+  // paths.js) has a real, deterministic chain to resolve end to end. This is
+  // synthetic structure only — never a real portfolio's shape — just enough
+  // to prove the walk, the Direct/Transitive split, and the "no path
+  // recorded" fallback all work.
+  const directDepsByLeaf = {}; // leafUuid -> stringified DT directDependencies
+  const graphByLeaf = {};      // leafUuid -> { componentUuid -> node }, served for ANY componentUuid asked
+  let compSeq = 0;
+  const compUuidOf = () => uuidOf(50000 + (++compSeq));
+
+  for (const leaf of Object.values(children).flat()) {
+    const leafFindings = findings.filter(f => f.component.projectName === leaf.name);
+    const carrierUuid = compUuidOf();
+    const carrierPurl = `pkg:npm/carrier-for-${leaf.name}@1.0.0`;
+    const graph = {
+      [carrierUuid]: {
+        name: `carrier-for-${leaf.name}`, version: '1.0.0', purl: carrierPurl,
+        uuid: carrierUuid, group: '', dependencyGraph: [],
+      },
+    };
+    const directList = [{
+      uuid: carrierUuid, purl: carrierPurl, name: `carrier-for-${leaf.name}`, group: '', version: '1.0.0',
+    }];
+
+    // Even-indexed findings are declared straight on the project (Direct);
+    // odd-indexed ones are reachable only through the carrier (Transitive).
+    leafFindings.forEach((f, idx) => {
+      const compUuid = compUuidOf();
+      const purl = `pkg:npm/${f.component.name}@${f.component.version}`;
+      f.component.uuid = compUuid;
+      f.component.purl = purl;
+      graph[compUuid] = { name: f.component.name, version: f.component.version, purl, uuid: compUuid, group: '' };
+
+      if (idx % 2 === 0) {
+        directList.push({ uuid: compUuid, purl, name: f.component.name, group: '', version: f.component.version });
+      } else {
+        graph[carrierUuid].dependencyGraph.push(compUuid);
+      }
+    });
+
+    directDepsByLeaf[leaf.uuid] = JSON.stringify(directList);
+    graphByLeaf[leaf.uuid] = graph;
+  }
+
+  return { roots, children, violations, findings, directDepsByLeaf, graphByLeaf };
 }
 
 /**
@@ -146,6 +192,33 @@ async function start(opts = {}) {
     if (m) {
       const kids = portfolio.children[m[1]] || [];
       return send(200, kids, { 'X-Total-Count': String(kids.length) });
+    }
+
+    // Single-project detail — what routes/dependency-paths.js reads
+    // directDependencies and lastBomImport from. directDependencies is a
+    // JSON STRING on the real response, not a nested object, which is why the
+    // fixture stores it pre-stringified rather than as an array.
+    const projectDetail = u.pathname.match(/^\/api\/v1\/project\/([^/]+)$/);
+    if (projectDetail) {
+      const uuid = projectDetail[1];
+      const leaf = [...portfolio.roots, ...Object.values(portfolio.children).flat()]
+        .find(p => p.uuid === uuid);
+      if (!leaf) return send(404, { error: 'Not found' });
+      return send(200, {
+        ...leaf,
+        directDependencies: portfolio.directDepsByLeaf[uuid] || '[]',
+        lastBomImport: 1_700_000_000_000,
+      });
+    }
+
+    // The dependency graph — served in full for whichever componentUuid is
+    // asked, same as the real endpoint returned far more than just the
+    // requested node's own subtree in practice (see the design notes in
+    // lib/dependency-paths.js).
+    const graphMatch = u.pathname.match(/^\/api\/v1\/component\/project\/([^/]+)\/dependencyGraph\/([^/]+)$/);
+    if (graphMatch) {
+      const [, projUuid] = graphMatch;
+      return send(200, portfolio.graphByLeaf[projUuid] || {});
     }
 
     if (u.pathname === '/api/v1/violation') {
