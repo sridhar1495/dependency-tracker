@@ -4021,6 +4021,11 @@ const VULN_SEVERITY_ORDER = ['critical', 'high', 'medium', 'low', 'unassigned'];
 // the same worst-first ordering VULN_SEVERITY_ORDER gives Security, so License
 // Risk reads the same way instead of arriving in whatever order DT paged it in.
 const LICENSE_STATE_ORDER = ['fail', 'warn', 'info'];
+// Q33: mirrors MAX_ROUTE_COUNT in lib/dependency-paths.js, where the count
+// saturates. A stored count sitting exactly on the cap means "at least this
+// many", so the badge has to say so even when the walk itself was exact — a
+// test asserts the two numbers still agree.
+const VULN_ROUTE_COUNT_CAP = 9999;
 
 function vulnFindingsQuery(name, version, pageNumber) {
   return [
@@ -4143,17 +4148,30 @@ const VULN_TABLE_COLS = {
 };
 
 /**
- * Q33: the route count that follows one chain. `n` routes reach this component
- * from that chain's own root — the chain shown is one of them, so the count is
- * a total and never an "N more" to be added to it.
+ * Q33: the route count that follows one chain — "10 more routes from alpinex".
  *
- * A count of 1 renders nothing: the chain on screen already says there is a
- * route, and "1 route" on every row of an ordinary flat SBOM is noise that
- * would bury the rows where the number is actually interesting.
+ * `n` is the TOTAL number of routes reaching this component from that chain's
+ * own root, and the chain on screen is one of them, so what is rendered is
+ * `n - 1`: the routes a reader has *not* been shown. Naming the root is what
+ * earns the "more" phrasing — a bare "11 routes" beside one of several chains
+ * never said which parent it was counting, and on a component with three
+ * chains that is the whole question.
+ *
+ * A total of 1 renders nothing: there is nothing further to see, and "0 more"
+ * on every row of an ordinary flat SBOM is noise that would bury the rows
+ * where the number is actually interesting.
+ *
+ * `exact` is the walk's own flag, but a count sitting on VULN_ROUTE_COUNT_CAP
+ * is a floor regardless of how complete the walk was — saturation and
+ * truncation are different reasons for the same "+".
  */
-function vulnRouteCountHtml(n, exact) {
+function vulnRouteCountHtml(n, exact, root) {
   if (!Number.isFinite(n) || n <= 1) return '';
-  const label = exact ? `${n} routes` : `${n}+ routes`;
+  const more = n - 1;
+  const bounded = exact && n < VULN_ROUTE_COUNT_CAP;
+  const plural = (bounded && more === 1) ? 'route' : 'routes';
+  const label = `${more}${bounded ? '' : '+'} more ${plural}`
+    + (root ? ` from ${root}` : '');
   return `<span class="dep-path-routes">${escHtml(label)}</span>`;
 }
 
@@ -4164,7 +4182,7 @@ function vulnDepPathRowHtml(origin) {
     const counts = Array.isArray(origin.routeCounts) ? origin.routeCounts : [];
     body = origin.chains
       .map((chain, i) => `<div class="dep-path-chain">${chain.map(escHtml).join(' &rarr; ')}`
-        + `${vulnRouteCountHtml(counts[i], origin.routesExact)}</div>`)
+        + `${vulnRouteCountHtml(counts[i], origin.routesExact, chain[0])}</div>`)
       .join('');
     // The parents the display cap is holding back. Silence here is what this
     // replaces: a component reachable from twenty direct dependencies used to

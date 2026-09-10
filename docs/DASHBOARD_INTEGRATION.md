@@ -265,19 +265,24 @@ shows "No path recorded by DependencyTrack for this component" — expected
 for a flat, manifest-built SBOM, not a bug.
 
 Each chain also carries a **route count** when there is more than one way in
-from that same parent — e.g. `alpha → mid → shared` **`12 routes`**. The
-number is a *total* including the chain shown, counted per parent, and it is
-omitted entirely when there is only one route (the chain itself already says
-that). Routes are counted, never listed: a graph with a handful of "diamonds"
-can carry astronomically many distinct routes to one component, so the
-dashboard reports how many exist and shows the shortest one per parent rather
-than attempting to enumerate them. Counts are capped at 9,999, displayed as
-`9999+`.
+from that same parent — e.g. `alpinex → xxxx → daas` **`10 more routes from
+alpinex`**. The number is how many routes you have *not* been shown: eleven
+reach `daas` from `alpinex`, one of which is the chain displayed. The parent
+is named because a component can carry several chains, each with its own
+count, and a bare number would not say which one it belonged to. The badge is
+omitted entirely when there is only one route (there is nothing further to
+see).
 
-A count shown as `12+` rather than `12` means the walk could not see the
-whole graph — it hit the component ceiling, was stopped by the stall
-watchdog, or the graph contained a cycle — so the number is a lower bound.
-The API reports this as `routesExact` on the GET response. Rows cached before
+Routes are counted, never listed: a graph with a handful of "diamonds" can
+carry astronomically many distinct routes to one component, so the dashboard
+reports how many exist and shows the shortest one per parent rather than
+attempting to enumerate them. Counts saturate at 9,999.
+
+A count shown as `12+ more routes` rather than `12 more routes` means the
+figure is a lower bound — either the walk could not see the whole graph (it
+hit the component ceiling, was stopped by the stall watchdog, or the graph
+contained a cycle) or the count reached the saturation cap. The API reports
+the first of those as `routesExact` on the GET response. Rows cached before
 this feature shipped carry no counts at all and simply render without badges
 until the project is next walked.
 

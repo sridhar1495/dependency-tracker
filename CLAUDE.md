@@ -626,13 +626,23 @@ doubles the route count per diamond, so a 91-node graph, comfortably inside
 component. Counting them is a linear-time dynamic program over edges the
 walk has already fetched. Six things make that safe and honest:
 
-- **The count is a total, and it counts the chain being shown.** "12 routes"
-  beside a chain means twelve including that one, not twelve besides it. The
-  rejected alternative, "+11 more", makes a reader do arithmetic to recover
-  the number they actually wanted.
-- **A count of 1 renders nothing.** The chain on screen already says a route
-  exists; "1 route" on every row of a flat, manifest-built SBOM is noise that
-  buries the handful of rows where the number means something.
+- **The badge counts what has *not* been shown, and names the parent it is
+  counting from**: `alpinex → xxxx → daas` **`10 more routes from alpinex`**.
+  The stored `routeCounts[i]` is the total from that root, so the rendered
+  number is `n - 1` — the chain on screen is one of them. A bare total ("11
+  routes") shipped first and was wrong for the case that matters: on a
+  component with three chains it never said *which* parent it was counting,
+  and that is the whole question a release engineer is asking. Naming the root
+  is what earns the "more" phrasing; without the name, "more" would just be
+  arithmetic homework.
+- **A total of 1 renders nothing.** There is nothing further to see, and
+  "0 more" on every row of a flat, manifest-built SBOM is noise that buries
+  the handful of rows where the number means something.
+- **A count sitting on the cap is a floor even when the walk was exact.**
+  Saturation and truncation are different reasons for the same `+`, so
+  `vulnRouteCountHtml()` tests both. `VULN_ROUTE_COUNT_CAP` in `index.html`
+  mirrors `MAX_ROUTE_COUNT` and a test asserts the two still agree — there is
+  no build step to share the constant.
 - **Kahn's algorithm, not a depth-first count**, because it yields the
   topological order the DP needs *and* the cycle check that order depends on.
   A dependency graph is a DAG — but this is data from an external system, and
@@ -1566,7 +1576,7 @@ The frontend never performs uniqueness checks — those are backend-only, via
 | `vulnRowHtml(finding, origin)` / `vulnLicenseRowHtml(violation, origin)` | frontend | One `<tr>` for a Security or License row, each with its own column set |
 | `vulnOriginCellHtml(origin)` / `vulnOriginFor(finding, showPaths)` | frontend | Render and compute a row's Direct/Transitive badge — takes either finding type, since origin is a component property |
 | `vulnDepPathRowHtml(origin)` | frontend | The full-width path detail row; its `colspan` follows `VULN_TABLE_COLS[_vulnViewType]` (Q28) |
-| `vulnRouteCountHtml(n, exact)` | frontend | The route-count badge beside one chain — a total, silent at 1, suffixed `+` when the walk could not be exact (Q33) |
+| `vulnRouteCountHtml(n, exact, root)` | frontend | The route-count badge beside one chain — "10 more routes from alpinex". Takes the **total** `n` and renders `n - 1`; silent at 1, suffixed `+` when the walk was inexact or the count is on the cap (Q33) |
 | `transitiveTargets()` | frontend | The union of both tables' transitive components, so a walk never loses coverage when the view switches (Q28) |
 | `vulnParentOptions(source, showPaths, originMode)` | frontend | `{ hasDirect, roots }` — whether N/A applies and the distinct chain roots, both scoped to the current Origin mode (Q32) |
 | `vulnParentMatches(origin, parentFilter)` | frontend | Whether a row belongs to All, the N/A (Direct-only) bucket, or a specific chain root (Q32) |
@@ -1867,13 +1877,17 @@ Running the browser checks in CI was on this list and is now the `e2e` job.
   itself: that one root with two routes stores **one** chain and a count of
   two, that a counting walk does not take Q26's early exit, that an
   explicitly empty target list still walks nothing, and that a truncated walk
-  reports `routesExact: false`. On the page: that a count of 1 renders no
-  badge, that an inexact walk renders `4+`, that `rootsTotal` is disclosed
-  only when it exceeds the chains shown, and that an entry with **no**
-  `routeCounts` — a row cached before this shipped — renders exactly as it
-  always did. The browser tier proves exactness end to end, which no unit
-  test can: the stub gives one component a second route in from the same
-  carrier, and the badge must read "2 routes" with no `+`.
+  reports `routesExact: false`. On the page: that a total of 1 renders no
+  badge, that a total of 11 from root `alpinex` renders "10 more routes from
+  alpinex" and a second chain on the same row renders its own root's number,
+  that one unseen route is singular, that an inexact walk and a saturated
+  count each render `+`, that the frontend's `VULN_ROUTE_COUNT_CAP` still
+  equals `MAX_ROUTE_COUNT`, that `rootsTotal` is disclosed only when it
+  exceeds the chains shown, and that an entry with **no** `routeCounts` — a
+  row cached before this shipped — renders exactly as it always did. The
+  browser tier proves exactness end to end, which no unit test can: the stub
+  gives one component a second route in from the same carrier, and the badge
+  must read "1 more route from carrier-…" with no `+`.
 - License risk (Q28, §8.1): `vulnLicenseQuery()` checked against
   `streamViolationsForProject()`'s own source the same way `vulnFindingsQuery()`
   is checked against `fetchAllFindings()`'s — sliced to that function

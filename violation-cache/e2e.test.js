@@ -978,14 +978,15 @@ describe('e2e — the dashboard in a real browser', { skip: BROWSER_SKIP }, () =
 
     // Q33: the stub gives exactly one transitive component a second route in
     // from the same carrier (carrier → comp and carrier → relay → comp), so a
-    // route-count badge must appear — and must say "2 routes", not "2+".
-    // Exactness is the assertion that matters: it can only hold if the walk
-    // really did stop taking Q26's early exit and really did see the whole
-    // edge set, which no unit test can prove end to end.
+    // route-count badge must appear. Two routes total, one of them the chain
+    // on screen, so it reads "1 more route from carrier-for-…" — singular,
+    // and with no "+". The absence of the "+" is the assertion that matters:
+    // it can only hold if the walk really did stop taking Q26's early exit and
+    // really did see the whole edge set, which no unit test can prove.
     const badges = await page.locator('.dep-path-routes').allTextContents();
     assert.ok(badges.length > 0, 'a component reachable two ways must carry a route count');
-    assert.ok(badges.some(b => /^2 routes$/.test(b.trim())),
-      `expected an exact "2 routes" badge, got ${JSON.stringify(badges)}`);
+    assert.ok(badges.some(b => /^1 more route from carrier-for-/.test(b.trim())),
+      `expected an exact "1 more route from carrier-…" badge, got ${JSON.stringify(badges)}`);
     assert.ok(!badges.some(b => /\+/.test(b)),
       'this walk is complete and acyclic, so no count may be reported as a floor');
 
