@@ -5428,20 +5428,76 @@ describe('dependency paths — direct dependencies (Tier 1, live, never cached)'
   });
 });
 
+describe('dependency paths — route counting (Q33)', () => {
+  const g = (o) => new Map(Object.entries(o).map(([k, v]) => [k, new Set(v)]));
+
+  test('a linear chain has exactly one route', () => {
+    const { counts, acyclic } = depPathsMod.countRoutesFrom(g({ r: ['a'], a: ['t'] }), 'r');
+    assert.equal(counts.get('t'), 1);
+    assert.equal(acyclic, true);
+  });
+
+  test('a diamond has two routes and a double diamond has four — the DP multiplies, it does not add', () => {
+    assert.equal(
+      depPathsMod.countRoutesFrom(g({ r: ['a', 'b'], a: ['t'], b: ['t'] }), 'r').counts.get('t'), 2);
+    assert.equal(
+      depPathsMod.countRoutesFrom(
+        g({ r: ['a', 'b'], a: ['m'], b: ['m'], m: ['c', 'd'], c: ['t'], d: ['t'] }), 'r'
+      ).counts.get('t'), 4);
+  });
+
+  test('the count saturates instead of overflowing on a diamond ladder', () => {
+    // 20 diamonds is 2^20 = 1,048,576 routes across 61 nodes — an ordinary
+    // graph size. Unsaturated this grows past what a UI can show long before
+    // it grows past what a Number can hold, and both are reasons to cap.
+    const adj = {};
+    let cur = 'r';
+    for (let i = 0; i < 20; i++) {
+      adj[cur] = [`a${i}`, `b${i}`];
+      adj[`a${i}`] = [`m${i}`];
+      adj[`b${i}`] = [`m${i}`];
+      cur = `m${i}`;
+    }
+    const { counts } = depPathsMod.countRoutesFrom(g(adj), 'r');
+    assert.equal(counts.get(cur), depPathsMod.MAX_ROUTE_COUNT);
+  });
+
+  test('a cycle is reported rather than counted — an unorderable graph has no finite answer', () => {
+    const { acyclic } = depPathsMod.countRoutesFrom(g({ r: ['a'], a: ['b'], b: ['a', 't'] }), 'r');
+    assert.equal(acyclic, false);
+  });
+
+  test('an edge pointing back at the root does not starve the root of its seed count', () => {
+    // Without ignoring in-edges to the root, the root never reaches in-degree
+    // zero, never enters the queue, and every count downstream comes out 0.
+    const { counts, acyclic } = depPathsMod.countRoutesFrom(g({ r: ['a'], a: ['t'], t: ['r'] }), 'r');
+    assert.equal(counts.get('t'), 1);
+    assert.equal(acyclic, true);
+  });
+
+  test('a node the root cannot reach has no count at all', () => {
+    const { counts } = depPathsMod.countRoutesFrom(g({ r: ['a'], a: [], island: ['x'] }), 'r');
+    assert.equal(counts.get('island'), undefined);
+  });
+});
+
 describe('dependency paths — the walk (Tier 2)', () => {
   // A → X → Y → Z, and B → X too, so X is a diamond: reachable from two
   // different direct dependencies. One dependencyGraph response always
   // returns the WHOLE known graph, regardless of which uuid was asked for —
   // matching what the real endpoint does in practice (see the design note
   // above walkGraph in lib/dependency-paths.js).
-  function diamondFetch() {
-    const GRAPH = {
+  function diamondGraph() {
+    return {
       A: { name: 'A', uuid: 'A', purl: 'pkg:t/A@1', dependencyGraph: ['X'] },
       B: { name: 'B', uuid: 'B', purl: 'pkg:t/B@1', dependencyGraph: ['X'] },
       X: { name: 'X', uuid: 'X', purl: 'pkg:t/X@1', dependencyGraph: ['Y'] },
       Y: { name: 'Y', uuid: 'Y', purl: 'pkg:t/Y@1', dependencyGraph: ['Z'] },
       Z: { name: 'Z', uuid: 'Z', purl: 'pkg:t/Z@1' },
     };
+  }
+  function diamondFetch() {
+    const GRAPH = diamondGraph();
     return async () => ({ json: GRAPH });
   }
 
@@ -5503,6 +5559,168 @@ describe('dependency paths — the walk (Tier 2)', () => {
       const { paths } = await depPathsMod.walkGraph('http://dt', 'k', 'proj', direct);
       assert.equal(paths['pkg:t/shared@1'].chains.length, cap,
         `a widely shared component must be capped at ${cap} chains, not ${rootCount}`);
+    } finally { restoreFetch(); }
+  });
+
+  test('Q33: the cap is a display cap — rootsTotal reports every root, so none is dropped silently', async () => {
+    const cap = depPathsMod.MAX_ROOTS_PER_COMPONENT;
+    const rootCount = cap + 3;
+    const GRAPH = {};
+    const direct = [];
+    for (let i = 0; i < rootCount; i++) {
+      const uuid = `root${String(i).padStart(2, '0')}`;
+      GRAPH[uuid] = { name: uuid, uuid, purl: `pkg:t/${uuid}@1`, dependencyGraph: ['shared'] };
+      direct.push({ uuid, name: uuid, purl: `pkg:t/${uuid}@1` });
+    }
+    GRAPH.shared = { name: 'shared', uuid: 'shared', purl: 'pkg:t/shared@1' };
+    const restoreFetch = stub(dtFetchMod, { dtGetWithRetry: async () => ({ json: GRAPH }) });
+    try {
+      const { paths } = await depPathsMod.walkGraph(
+        'http://dt', 'k', 'proj', direct, () => {}, () => false, null, { countRoutes: true });
+      const shared = paths['pkg:t/shared@1'];
+      assert.equal(shared.chains.length, cap, 'still only `cap` chains are rendered');
+      assert.equal(shared.rootsTotal, rootCount,
+        'but the true number of parents is reported, which is what the dialog discloses');
+
+      // Deterministic across walks: BFS order depends on which of
+      // WALK_CONCURRENCY requests answered first, so the surviving roots are
+      // chosen by name, not by arrival.
+      const shown = shared.chains.map(c => c[0]);
+      assert.deepEqual(shown, [...shown].sort((a, b) => a.localeCompare(b)),
+        'the roots that survive the display cap are the alphabetically first, so a re-walk shows the same ones');
+    } finally { restoreFetch(); }
+  });
+
+  test('Q33: rootsTotal is omitted when nothing is being held back', async () => {
+    const restoreFetch = stub(dtFetchMod, { dtGetWithRetry: diamondFetch() });
+    const direct = [
+      { uuid: 'A', name: 'A', purl: 'pkg:t/A@1' },
+      { uuid: 'B', name: 'B', purl: 'pkg:t/B@1' },
+    ];
+    try {
+      const { paths } = await depPathsMod.walkGraph(
+        'http://dt', 'k', 'proj', direct, () => {}, () => false, null, { countRoutes: true });
+      // Two roots, two chains — an "2 of 2" note would be noise, and leaving
+      // the field out is what keeps the stored JSON the size it was for the
+      // overwhelmingly common single-root component.
+      assert.equal(paths['pkg:t/X@1'].rootsTotal, undefined);
+    } finally { restoreFetch(); }
+  });
+
+  test('Q33: route counts are per root, count the shown chain, and stay silent at one', async () => {
+    // A and B both reach X; X reaches Y. From A there is exactly one route to
+    // Y, and likewise from B — the diamond gives Y two roots, not two routes
+    // per root. Conflating the two is the specific mistake this pins.
+    const restoreFetch = stub(dtFetchMod, { dtGetWithRetry: diamondFetch() });
+    const direct = [
+      { uuid: 'A', name: 'A', purl: 'pkg:t/A@1' },
+      { uuid: 'B', name: 'B', purl: 'pkg:t/B@1' },
+    ];
+    try {
+      const { paths, routesExact } = await depPathsMod.walkGraph(
+        'http://dt', 'k', 'proj', direct, () => {}, () => false, null, { countRoutes: true });
+      assert.equal(routesExact, true, 'an untruncated acyclic walk yields exact counts');
+      const y = paths['pkg:t/Y@1'];
+      assert.equal(y.chains.length, 2);
+      assert.deepEqual(y.routeCounts, [1, 1],
+        'one route per root — the diamond is between roots, not within one');
+      assert.equal(y.routeCounts.length, y.chains.length,
+        'routeCounts is parallel to chains, so the badge can never attach to the wrong parent');
+    } finally { restoreFetch(); }
+  });
+
+  test('Q33: two routes from ONE root are counted as two, and only one chain is stored', async () => {
+    // R → p, R → q, and both p and q → t. One root, two genuinely distinct
+    // routes to t. This is the case the old code showed as a single chain
+    // with nothing to say a second route existed.
+    const GRAPH = {
+      R: { name: 'R', uuid: 'R', purl: 'pkg:t/R@1', dependencyGraph: ['p', 'q'] },
+      p: { name: 'p', uuid: 'p', purl: 'pkg:t/p@1', dependencyGraph: ['t'] },
+      q: { name: 'q', uuid: 'q', purl: 'pkg:t/q@1', dependencyGraph: ['t'] },
+      t: { name: 't', uuid: 't', purl: 'pkg:t/t@1' },
+    };
+    const restoreFetch = stub(dtFetchMod, { dtGetWithRetry: async () => ({ json: GRAPH }) });
+    try {
+      const { paths } = await depPathsMod.walkGraph(
+        'http://dt', 'k', 'proj', [{ uuid: 'R', name: 'R', purl: 'pkg:t/R@1' }],
+        () => {}, () => false, null, { countRoutes: true });
+      const t = paths['pkg:t/t@1'];
+      assert.equal(t.chains.length, 1, 'one root means one chain — enumeration is what we refuse to do');
+      assert.deepEqual(t.routeCounts, [2], 'but the second route is counted, which is the whole point');
+      assert.equal(t.chains[0][0], 'R');
+    } finally { restoreFetch(); }
+  });
+
+  test('Q33: a counting walk does not take Q26\'s early exit, because a partial graph undercounts', async () => {
+    // Targeting only `p` would previously stop the walk the moment p was
+    // reached — leaving R→q→t undiscovered and t's count short.
+    const GRAPH = {
+      R: { name: 'R', uuid: 'R', purl: 'pkg:t/R@1', dependencyGraph: ['p', 'q'] },
+      p: { name: 'p', uuid: 'p', purl: 'pkg:t/p@1', dependencyGraph: ['t'] },
+      q: { name: 'q', uuid: 'q', purl: 'pkg:t/q@1', dependencyGraph: ['t'] },
+      t: { name: 't', uuid: 't', purl: 'pkg:t/t@1' },
+    };
+    const restoreFetch = stub(dtFetchMod, { dtGetWithRetry: async () => ({ json: GRAPH }) });
+    const direct = [{ uuid: 'R', name: 'R', purl: 'pkg:t/R@1' }];
+    try {
+      const { paths } = await depPathsMod.walkGraph(
+        'http://dt', 'k', 'proj', direct, () => {}, () => false,
+        ['pkg:t/p@1'], { countRoutes: true });
+      assert.deepEqual(paths['pkg:t/t@1'].routeCounts, [2],
+        'the walk continued past the target, so both routes to t were seen');
+    } finally { restoreFetch(); }
+  });
+
+  test('Q33: an explicitly empty target list still walks nothing at all', async () => {
+    // The half of Q26 a counting walk must NOT give up: "nothing to resolve"
+    // is a different instruction from "stop once satisfied", and confusing
+    // them would answer a caller who asked for nothing with the whole graph.
+    let graphCalls = 0;
+    const restoreFetch = stub(dtFetchMod, {
+      dtGetWithRetry: async (url) => {
+        if (url.includes('dependencyGraph')) graphCalls++;
+        return { json: diamondGraph() };
+      },
+    });
+    try {
+      const { paths } = await depPathsMod.walkGraph(
+        'http://dt', 'k', 'proj', [{ uuid: 'A', name: 'A', purl: 'pkg:t/A@1' }],
+        () => {}, () => false, [], { countRoutes: true });
+      assert.deepEqual(paths, {});
+      assert.equal(graphCalls, 0, 'an empty target list must not balloon into a full walk');
+    } finally { restoreFetch(); }
+  });
+
+  test('Q33: a truncated walk reports its counts as inexact rather than as answers', async () => {
+    // A linear chain with no end hits MAX_GRAPH_NODES, so edges certainly
+    // exist that were never fetched — every count from it is a floor.
+    let n = 0;
+    const restoreFetch = stub(dtFetchMod, {
+      dtGetWithRetry: async (url) => {
+        if (!url.includes('dependencyGraph')) return { json: {} };
+        const cur = `n${n}`, next = `n${++n}`;
+        return { json: {
+          [cur]:  { name: cur, uuid: cur, purl: `pkg:t/${cur}@1`, dependencyGraph: [next] },
+          [next]: { name: next, uuid: next, purl: `pkg:t/${next}@1` },
+        } };
+      },
+    });
+    try {
+      const { routesExact } = await depPathsMod.walkGraph(
+        'http://dt', 'k', 'proj', [{ uuid: 'n0', name: 'n0', purl: 'pkg:t/n0@1' }],
+        () => {}, () => false, null, { countRoutes: true });
+      assert.equal(routesExact, false);
+    } finally { restoreFetch(); }
+  });
+
+  test('Q33: a walk with countRoutes off carries no counts and claims no exactness', async () => {
+    const restoreFetch = stub(dtFetchMod, { dtGetWithRetry: diamondFetch() });
+    try {
+      const { paths, routesExact } = await depPathsMod.walkGraph(
+        'http://dt', 'k', 'proj', [{ uuid: 'A', name: 'A', purl: 'pkg:t/A@1' }]);
+      assert.equal(routesExact, false);
+      assert.equal(paths['pkg:t/X@1'].routeCounts, undefined,
+        'the field is absent, not zero — a reader must be able to tell "not counted" from "no routes"');
     } finally { restoreFetch(); }
   });
 

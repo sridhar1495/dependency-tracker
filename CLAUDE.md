@@ -214,7 +214,7 @@ Inline comments use lettered prefixes to trace design decisions:
 - **O-numbers** — observability notes (`// O3: JSON log format for log aggregators`)
 - **S-numbers** — security rationale (`// S2: token hashed before storage`) — **new in revision 2**
 
-Highest numbers currently in use: **Q32, P20, O5, S34**. When adding logic with a
+Highest numbers currently in use: **Q33, P20, O5, S34**. When adding logic with a
 non-obvious trade-off, add the next number in the appropriate series. Check the
 current maximum before assigning — parallel branches can claim the same number.
 
@@ -298,7 +298,7 @@ await tx(async (client) => {
 | `reports`, `report_file_chunks` | Report metadata and file bytes |
 | `violation_caches` | Shared violation cache, keyed by connection fingerprint |
 | `risk_snapshots` | One row per connection per day, written when a violation-cache build completes; the history behind the trend view (migration 012). Keyed by fingerprint for the same reason the cache is, so accounts sharing a connection share one series. Stores the severity counts and the policy counts **separately** — "critical" means two different things in this product and a schema that accretes history must not decide which one a graph plots. **No foreign key to `violation_caches`**: a cache row is a 24-hour artefact that housekeeping deletes as a matter of routine, and a cascade would let that destroy a year of measurements |
-| `dependency_paths` | One row per connection per project, the cached result of walking that project's DependencyTrack dependency graph (migration 013) — see §6.3a. Keyed by `(fingerprint, project_uuid)` for the same sharing reason as every other cache here. Holds only the expensive, opt-in half (the graph walk); the cheap Direct/Transitive classification is never stored — see §6.3a for why |
+| `dependency_paths` | One row per connection per project, the cached result of walking that project's DependencyTrack dependency graph (migration 013) — see §6.3a. Keyed by `(fingerprint, project_uuid)` for the same sharing reason as every other cache here. Holds only the expensive, opt-in half (the graph walk); the cheap Direct/Transitive classification is never stored — see §6.3a for why. `paths` entries carry `chains`, a parallel `routeCounts`, and `rootsTotal` **only when the display cap is hiding parents** (Q33). `routes_exact` (migration 014) says whether those counts are answers or floors, and is a column because it describes the whole walk — migration 013's own comment still documents the original one-chain shape, since a merged migration is never edited (§5.3) |
 | `branding_assets` | The administrator's sign-in background. Bytes live here, **not** on `app_settings`, because the administration listing cross-joins that table |
 | `schema_migrations` | Migration ledger |
 
@@ -613,6 +613,67 @@ make this work:
   License view deliberately does **not** trigger this: those are not a
   "dependency path change," so a still-valid selection survives them, and
   only an actually stale one falls through to the ordinary fallback above.
+
+**Q33: routes are counted, never enumerated — and the count is what closes
+the two silences Q26 and Q27 left behind.** A chain answers "how does this
+component get in"; it does not answer "is this the only way in". Two rows
+looked identical and meant different things: a component with one route from
+its parent, and a component with twenty. Enumerating those routes is not an
+option — a diamond ladder (two siblings both pulling one helper, repeated
+down a chain, which is an ordinary SBOM shape and not a contrived one)
+doubles the route count per diamond, so a 91-node graph, comfortably inside
+`MAX_GRAPH_NODES`, carries over a **billion** distinct routes to a single
+component. Counting them is a linear-time dynamic program over edges the
+walk has already fetched. Six things make that safe and honest:
+
+- **The count is a total, and it counts the chain being shown.** "12 routes"
+  beside a chain means twelve including that one, not twelve besides it. The
+  rejected alternative, "+11 more", makes a reader do arithmetic to recover
+  the number they actually wanted.
+- **A count of 1 renders nothing.** The chain on screen already says a route
+  exists; "1 route" on every row of a flat, manifest-built SBOM is noise that
+  buries the handful of rows where the number means something.
+- **Kahn's algorithm, not a depth-first count**, because it yields the
+  topological order the DP needs *and* the cycle check that order depends on.
+  A dependency graph is a DAG — but this is data from an external system, and
+  `processed === reach.size` is what proves the assumption held for **this**
+  graph instead of assuming it. Edges pointing back at the root are ignored,
+  or a root something else also depends on would never reach in-degree zero
+  and every count downstream of it would come out zero.
+- **Addition saturates at `MAX_ROUTE_COUNT`.** Unsaturated, the ladder above
+  leaves `Number`'s exact-integer range long before a human could read the
+  result. Past the cap the badge reads `9999+`.
+- **Exactness is a property of the walk, so it is a column** (`routes_exact`,
+  migration 014) **and not a field repeated inside `paths`.** A walk that hit
+  the node ceiling, was stopped by the stall watchdog, or met a cycle has an
+  incomplete or unorderable edge set, and *every* count from it is a floor
+  equally — rendered `12+` rather than `12`. A row written before migration
+  014 carries no counts at all and reports `false`, which is why the frontend
+  treats a missing `routeCounts` as "say nothing" rather than as zero.
+- **A counting walk gives up Q26's early exit, and only that.** Stopping as
+  soon as every target is *reached* leaves siblings of the reached node
+  unfetched, so the count would be silently short — and a number that is
+  quietly wrong is worse than no number. What survives untouched is Q26's
+  other half: an explicitly **empty** `targets` array still walks nothing at
+  all. "There is nothing to resolve" and "stop once satisfied" are different
+  instructions, and confusing them would answer a caller who asked for
+  nothing with the project's entire graph. The extra crawl is bounded and
+  paid once — the result is cached per `(fingerprint, project)` until
+  DependencyTrack records a new BOM import, and shared by every account on
+  that connection (§7.5).
+
+**Q33 also makes `MAX_ROOTS_PER_COMPONENT` a display cap rather than a
+silent one.** `rootsReaching` is now uncapped, and the entry carries
+`rootsTotal` so the dialog can say "Showing 8 of 20 parent dependencies"
+instead of dropping twelve with nothing on screen to admit it — the same
+objection Q27 raised against the old `multiple: true` flag, one level up.
+Uncapping also fixed a quieter bug: the cap used to sit inside the walk's
+propagation loop, so a capped node never passed on the roots it had refused
+to record and the under-count spread to everything beneath it. Which roots
+survive the cap is now decided by **name**, at reconstruction — BFS order
+depends on which of `WALK_CONCURRENCY` in-flight requests answered first, so
+without sorting the same project could show a different eight parents on
+every re-walk.
 
 **Bounded the same way the snapshot crawl is** (§6.3): `MAX_GRAPH_NODES`
 caps how many components one walk will ever discover, so a toggle click cannot
@@ -1154,7 +1215,10 @@ class as the CWE helpers above; a cross-file test asserts the two agree.
   data. A Transitive finding with a resolved chain draws as **two** `<tr>`s —
   the finding row (`vulnRowHtml()` or `vulnLicenseRowHtml()`, whichever view
   is showing), immediately followed by a full-width detail row from
-  `vulnDepPathRowHtml()` — never squeezed into the Origin cell itself.
+  `vulnDepPathRowHtml()` — never squeezed into the Origin cell itself. Each
+  chain carries its own route count (Q33) *inside its own line*, because a
+  badge that floated free of its chain would attach to the wrong parent the
+  moment a component had two.
   `.vuln-table` is `table-layout: fixed` with widths declared once on the
   header cells (§8.10) specifically so that an appearing, changing, or
   disappearing detail row can never resize the other columns — before this,
@@ -1502,6 +1566,7 @@ The frontend never performs uniqueness checks — those are backend-only, via
 | `vulnRowHtml(finding, origin)` / `vulnLicenseRowHtml(violation, origin)` | frontend | One `<tr>` for a Security or License row, each with its own column set |
 | `vulnOriginCellHtml(origin)` / `vulnOriginFor(finding, showPaths)` | frontend | Render and compute a row's Direct/Transitive badge — takes either finding type, since origin is a component property |
 | `vulnDepPathRowHtml(origin)` | frontend | The full-width path detail row; its `colspan` follows `VULN_TABLE_COLS[_vulnViewType]` (Q28) |
+| `vulnRouteCountHtml(n, exact)` | frontend | The route-count badge beside one chain — a total, silent at 1, suffixed `+` when the walk could not be exact (Q33) |
 | `transitiveTargets()` | frontend | The union of both tables' transitive components, so a walk never loses coverage when the view switches (Q28) |
 | `vulnParentOptions(source, showPaths, originMode)` | frontend | `{ hasDirect, roots }` — whether N/A applies and the distinct chain roots, both scoped to the current Origin mode (Q32) |
 | `vulnParentMatches(origin, parentFilter)` | frontend | Whether a row belongs to All, the N/A (Direct-only) bucket, or a specific chain root (Q32) |
@@ -1518,6 +1583,7 @@ The frontend never performs uniqueness checks — those are backend-only, via
 | `snapshots.series(fp, days)` | server | Dense daily history; a gap is `captured: false`, never carried forward |
 | `dependencyPaths.getDirectDependencies(url, key, uuid)` | server | Live, uncached Tier-1 direct-dependency set (§6.3a) |
 | `dependencyPaths.walkGraph(...)` / `.runJob(conn, uuid)` | server | The cached Tier-2 graph walk and its job orchestration |
+| `dependencyPaths.countRoutesFrom(childrenOf, root)` | server | Every distinct route from one root, by Kahn topological DP — saturating, and reporting `acyclic` rather than guessing on a cycle (Q33) |
 | `dependencyPathCache.getMeta` / `.deriveStatus` / `.acquireBuildLock` | server | Row CRUD and the advisory lock behind the walk — the pair split for the reason `caches.js`/`violation-cache.js` are (§6.3a) |
 | `collectReportData(...)` | server | Shared collection core for manual and scheduled reports |
 | `sendEmail(mailCfg, ...)` | server | Deliver report via nodemailer |
@@ -1794,6 +1860,20 @@ Running the browser checks in CI was on this list and is now the `e2e` job.
   that module pulls in other `lib/` modules at load time, unlike `lib/cwe.js`,
   so it needs a real `require()` rather than a `new Function()` sandbox with
   no resolver.
+- Route counting (Q33): the DP against a diamond (2) and a double diamond (4),
+  so a test would catch it adding where it should multiply; saturation on a
+  20-diamond ladder; a cycle reported rather than counted; an edge pointing
+  back at the root not starving the root of its seed count. On the walk
+  itself: that one root with two routes stores **one** chain and a count of
+  two, that a counting walk does not take Q26's early exit, that an
+  explicitly empty target list still walks nothing, and that a truncated walk
+  reports `routesExact: false`. On the page: that a count of 1 renders no
+  badge, that an inexact walk renders `4+`, that `rootsTotal` is disclosed
+  only when it exceeds the chains shown, and that an entry with **no**
+  `routeCounts` — a row cached before this shipped — renders exactly as it
+  always did. The browser tier proves exactness end to end, which no unit
+  test can: the stub gives one component a second route in from the same
+  carrier, and the badge must read "2 routes" with no `+`.
 - License risk (Q28, §8.1): `vulnLicenseQuery()` checked against
   `streamViolationsForProject()`'s own source the same way `vulnFindingsQuery()`
   is checked against `fetchAllFindings()`'s — sliced to that function

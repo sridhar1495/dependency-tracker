@@ -257,11 +257,29 @@ pay for it twice. A status line shows progress while a walk that has not been
 resolved before is in flight. The chain renders as its own row directly under
 the finding, not inside the Origin column, so a long chain never squeezes a
 fixed-width column. If a component is reachable from more than one direct
-dependency, each root gets its own line — up to 8 (`MAX_ROOTS_PER_COMPONENT`)
-— rather than one chain plus a "+ more routes" flag; past that cap the extra
-roots are silently dropped rather than counted. A component the walk never
-reaches shows "No path recorded by DependencyTrack for this component" —
-expected for a flat, manifest-built SBOM, not a bug.
+dependency, each root gets its own line — up to 8
+(`MAX_ROOTS_PER_COMPONENT`) — rather than one chain plus a "+ more routes"
+flag. When more parents exist than are shown, the row says so:
+*"Showing 8 of 20 parent dependencies."* A component the walk never reaches
+shows "No path recorded by DependencyTrack for this component" — expected
+for a flat, manifest-built SBOM, not a bug.
+
+Each chain also carries a **route count** when there is more than one way in
+from that same parent — e.g. `alpha → mid → shared` **`12 routes`**. The
+number is a *total* including the chain shown, counted per parent, and it is
+omitted entirely when there is only one route (the chain itself already says
+that). Routes are counted, never listed: a graph with a handful of "diamonds"
+can carry astronomically many distinct routes to one component, so the
+dashboard reports how many exist and shows the shortest one per parent rather
+than attempting to enumerate them. Counts are capped at 9,999, displayed as
+`9999+`.
+
+A count shown as `12+` rather than `12` means the walk could not see the
+whole graph — it hit the component ceiling, was stopped by the stall
+watchdog, or the graph contained a cycle — so the number is a lower bound.
+The API reports this as `routesExact` on the GET response. Rows cached before
+this feature shipped carry no counts at all and simply render without badges
+until the project is next walked.
 
 A third dropdown, **Parent**, appears once the toggle has something
 transitive to group — hidden again if Origin is set to Direct, since a
@@ -405,8 +423,8 @@ compact per-project count map in a JSON file, and serves only that file to the b
 | `/violation-cache/data` | GET | The cached map `{uuid: {ops, lic, secpolicy}}`, served gzipped. Build metadata comes from `/status` |
 | `/violation-cache/refresh` | POST | Trigger a background rebuild (409 if already running) |
 | `/violation-cache/risk-series` | GET | Daily risk history for your connection — see [Risk history](#risk-history) |
-| `/violation-cache/dependency-paths/:id` | GET | A project's direct-dependency set (live, never cached) plus whatever the cached graph walk currently knows — see [Vulnerability Detail Dialog](#vulnerability-detail-dialog) |
-| `/violation-cache/dependency-paths/:id` | POST | Resolve the dependency-graph walk for one project (409 if already running). Body: `{ targets?: string[], force?: boolean }` — `targets` are componentKeys to resolve a path for (omitted walks the whole graph, an empty array walks nothing); `force: true` re-walks even when a ready cache already covers every requested target, without bypassing the already-running guard |
+| `/violation-cache/dependency-paths/:id` | GET | A project's direct-dependency set (live, never cached) plus whatever the cached graph walk currently knows, including `routesExact` — see [Vulnerability Detail Dialog](#vulnerability-detail-dialog) |
+| `/violation-cache/dependency-paths/:id` | POST | Resolve the dependency-graph walk for one project (409 if already running). Body: `{ targets?: string[], force?: boolean }` — `targets` are componentKeys the caller needs resolved, and decide whether a walk is needed at all (an empty array walks nothing); `force: true` re-walks even when a ready cache already covers every requested target, without bypassing the already-running guard. Because route counts must be exact, the walk itself explores the whole reachable graph rather than stopping at the targets |
 
 ### Risk history
 

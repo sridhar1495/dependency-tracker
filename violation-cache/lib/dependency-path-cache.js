@@ -33,7 +33,7 @@ const META_COLUMNS = `
   fingerprint, project_uuid AS "projectUuid", status,
   bom_import_at AS "bomImportAt", total_components AS "totalComponents",
   resolved_components AS "resolvedComponents", paths, error,
-  updated_at AS "updatedAt"
+  routes_exact AS "routesExact", updated_at AS "updatedAt"
 `;
 
 async function getMeta(fingerprint, projectUuid) {
@@ -90,14 +90,17 @@ async function touchBuild(fingerprint, projectUuid) {
   return rowCount > 0;
 }
 
-async function storeResult(fingerprint, projectUuid, { paths, totalComponents, bomImportAt }) {
+async function storeResult(
+  fingerprint, projectUuid, { paths, totalComponents, bomImportAt, routesExact = false }
+) {
   await query(
     `UPDATE dependency_paths
         SET status = 'ready', paths = $3::jsonb,
             total_components = $4, resolved_components = $4,
-            bom_import_at = $5, error = NULL, updated_at = now()
+            bom_import_at = $5, routes_exact = $6, error = NULL, updated_at = now()
       WHERE fingerprint = $1 AND project_uuid = $2`,
-    [fingerprint, projectUuid, JSON.stringify(paths), totalComponents, bomImportAt]
+    [fingerprint, projectUuid, JSON.stringify(paths), totalComponents, bomImportAt,
+      routesExact === true]
   );
 }
 

@@ -3144,8 +3144,19 @@ function handledRoutes() {
     for (const m of src.matchAll(/action === '([a-z-]+)'/g)) {
       found.add(`/violation-cache/schedules/:id/${m[1]}`);
     }
-    // Regex-matched id routes, e.g. /admin/users/([^/]+)/settings
-    for (const m of src.matchAll(/parsedPath\.match\(\/\^([^/]*(?:\/[^(]*)*)\(\[\^\/\]\+\)([^/]*(?:\/[^$]*)*)\$\//g)) {
+    // Regex-matched id routes, e.g. /admin/users/([^/]+)/settings.
+    //
+    // Both halves are `[^\n]*?` deliberately. Every such route literal in
+    // routes/ is written on one line, so nothing here needs to cross one —
+    // and the version that did, `([^/]*(?:\/[^(]*)*)`, nested two unbounded
+    // quantifiers over a character class that spanned newlines. That is the
+    // classic catastrophic-backtracking shape: it ran fine for a year and
+    // then wedged this suite into an infinite busy-loop the moment a route
+    // file gained a long comment with no parentheses in it, because the inner
+    // `[^(]*` could then run for hundreds of characters and the engine had
+    // exponentially many ways to divide them up. Lazy, newline-bounded and
+    // un-nested is linear and expresses the actual rule.
+    for (const m of src.matchAll(/parsedPath\.match\(\/\^([^\n]*?)\(\[\^\/\]\+\)([^\n]*?)\$\//g)) {
       found.add((m[1] + ':id' + (m[2] || '')).replace(/\\\//g, '/'));
     }
   }
@@ -3856,7 +3867,8 @@ const VULN_FN_NAMES = [
   'vulnFindingsQuery', 'vulnLicenseQuery',
   'vulnCweIds', 'vulnCweLabel', 'sortFindingsBySeverity', 'sortLicenseByState',
   'vulnRowHtml', 'vulnLicenseRowHtml',
-  'componentKeyOf', 'vulnOriginCellHtml', 'vulnDepPathRowHtml', 'vulnParentMatches',
+  'componentKeyOf', 'vulnOriginCellHtml', 'vulnRouteCountHtml', 'vulnDepPathRowHtml',
+  'vulnParentMatches',
 ];
 const vuln = new Function(
   INDEX_HTML.match(/const CONFIG = \{[\s\S]*?\n\};/)[0] + '\n'
@@ -4208,12 +4220,67 @@ describe('dependency paths — the path detail row (Q27: one chain per root, no 
     });
     const lines = (html.match(/class="dep-path-chain"/g) || []).length;
     assert.equal(lines, 2, 'one dep-path-chain line per distinct root, not a collapsed count');
-    assert.doesNotMatch(html, /more routes/i, 'every root is shown directly — no "+more" flag (Q27)');
+    assert.doesNotMatch(html, /routes/i,
+      'no routeCounts supplied — a row cached before Q33 must render exactly as it always did');
   });
 
   test('a resolved walk that never reached this component says so plainly, not a blank row', () => {
     const html = vuln.vulnDepPathRowHtml({ direct: false, pathsReady: true, chains: null });
     assert.match(html, /No path recorded/i);
+  });
+
+  // ── Q33: route counts and the parents the display cap holds back ──────────
+  test('Q33: a route count rides the chain it belongs to, and reads as a total', () => {
+    const html = vuln.vulnDepPathRowHtml({
+      direct: false, pathsReady: true, routesExact: true,
+      chains: [['a', 'x'], ['b', 'x']], routeCounts: [3, 7],
+    });
+    assert.match(html, /a &rarr; x<span class="dep-path-routes">3 routes<\/span>/,
+      'the badge must sit inside its own chain line, or it would attach to the wrong parent');
+    assert.match(html, /b &rarr; x<span class="dep-path-routes">7 routes<\/span>/);
+    assert.doesNotMatch(html, /\+/, 'an exact walk states the number without a "+"');
+  });
+
+  test('Q33: a count of one renders nothing — the chain already says a route exists', () => {
+    const html = vuln.vulnDepPathRowHtml({
+      direct: false, pathsReady: true, routesExact: true,
+      chains: [['a', 'x']], routeCounts: [1],
+    });
+    assert.doesNotMatch(html, /dep-path-routes/,
+      '"1 route" on every row of a flat SBOM is noise that buries the interesting rows');
+  });
+
+  test('Q33: an inexact walk marks the count as a floor rather than stating it', () => {
+    const html = vuln.vulnDepPathRowHtml({
+      direct: false, pathsReady: true, routesExact: false,
+      chains: [['a', 'x']], routeCounts: [4],
+    });
+    assert.match(html, /4\+ routes/,
+      'a truncated or cyclic walk knows only a lower bound and must say so');
+  });
+
+  test('Q33: the parents held back by the display cap are disclosed, not dropped silently', () => {
+    const html = vuln.vulnDepPathRowHtml({
+      direct: false, pathsReady: true, routesExact: true,
+      chains: [['a', 'x'], ['b', 'x']], routeCounts: [1, 1], rootsTotal: 20,
+    });
+    assert.match(html, /Showing 2 of 20 parent dependencies/);
+    assert.match(html, /class="dep-path-more-parents"/);
+  });
+
+  test('Q33: no note when every parent is already on screen', () => {
+    const html = vuln.vulnDepPathRowHtml({
+      direct: false, pathsReady: true, routesExact: true,
+      chains: [['a', 'x'], ['b', 'x']], routeCounts: [1, 1], rootsTotal: 2,
+    });
+    assert.doesNotMatch(html, /dep-path-more-parents/, '"2 of 2" is noise');
+  });
+
+  test('Q33: a malformed count is ignored rather than rendered as NaN or zero', () => {
+    for (const bad of [null, undefined, 'many', NaN, 0]) {
+      assert.equal(vuln.vulnRouteCountHtml(bad, true), '',
+        `a count of ${String(bad)} must produce no badge at all`);
+    }
   });
 });
 
@@ -4223,11 +4290,14 @@ describe('dependency paths — vulnOriginFor (which badge a row gets)', () => {
   // the eye-icon suite wires CONFIG/LEVEL_CSS — declared alongside the
   // extracted function, then set per call through a small test-only adapter.
   const originSandbox = new Function(
-    'let _vulnDirectKeys, _depPathStatus, _depPathPaths;\n'
+    'let _vulnDirectKeys, _depPathStatus, _depPathPaths, _depPathExact;\n'
     + extractFunction(INDEX_HTML, 'componentKeyOf') + '\n'
     + extractFunction(INDEX_HTML, 'vulnOriginFor') + '\n'
     + `return { vulnOriginFor: function(finding, showPaths, directKeys, status, paths) {
          _vulnDirectKeys = directKeys; _depPathStatus = status; _depPathPaths = paths;
+         // Q33: exactness is a walk-level flag vulnOriginFor copies onto every
+         // origin it builds; these suites are about badges, so it stays true.
+         _depPathExact = true;
          return vulnOriginFor(finding, showPaths);
        } };`
   )();
@@ -4324,12 +4394,15 @@ describe('Q32/item 1.4, 2.1-2.5: vulnParentOptions (hasDirect + the root list, b
   // Same adapter pattern as the vulnOriginFor sandbox above — vulnParentOptions
   // calls vulnOriginFor internally, so it needs the identical module state wired.
   const parentOptSandbox = new Function(
-    'let _vulnDirectKeys, _depPathStatus, _depPathPaths;\n'
+    'let _vulnDirectKeys, _depPathStatus, _depPathPaths, _depPathExact;\n'
     + extractFunction(INDEX_HTML, 'componentKeyOf') + '\n'
     + extractFunction(INDEX_HTML, 'vulnOriginFor') + '\n'
     + extractFunction(INDEX_HTML, 'vulnParentOptions') + '\n'
     + `return { vulnParentOptions: function(source, showPaths, originMode, directKeys, status, paths) {
          _vulnDirectKeys = directKeys; _depPathStatus = status; _depPathPaths = paths;
+         // Q33: exactness is a walk-level flag vulnOriginFor copies onto every
+         // origin it builds; these suites are about badges, so it stays true.
+         _depPathExact = true;
          return vulnParentOptions(source, showPaths, originMode);
        } };`
   )();

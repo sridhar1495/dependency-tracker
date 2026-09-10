@@ -1,0 +1,41 @@
+-- SPDX-License-Identifier: MIT
+-- 014 — record whether a dependency-path walk's route counts are exact.
+--
+-- ── What changed above this row ──────────────────────────────────────────────
+-- Migration 013 stored one shortest chain per transitive component. Since then
+-- the stored shape has grown twice, and because a merged migration is never
+-- edited (CLAUDE.md §5.3), 013's own comment still describes the first of them.
+-- The current shape of `paths`, for the avoidance of doubt, is:
+--
+--   { "<componentKey>": {
+--       "chains":      [ ["directDepName", ..., "targetName"], ... ],
+--       "routeCounts": [ 12, 1, ... ],   -- parallel to chains, one per root
+--       "rootsTotal":  20                -- present ONLY when > chains.length
+--   } }
+--
+-- `chains` is one shortest route per distinct direct-dependency root, capped
+-- for display at MAX_ROOTS_PER_COMPONENT. `routeCounts[i]` is how many
+-- distinct routes reach the component from chains[i]'s root — counted, never
+-- enumerated, because a diamond-heavy graph carries exponentially many routes
+-- and only the count is bounded. `rootsTotal` is the true number of roots when
+-- the display cap hid some, so the dialog can say "8 of 20" rather than
+-- dropping twelve parents with nothing on screen to say it did.
+--
+-- ── Why exactness is a column and not a field inside `paths` ─────────────────
+-- It is a property of the WALK, not of a component: a walk that hit
+-- MAX_GRAPH_NODES, was stopped by the stall watchdog, or found a cycle has an
+-- incomplete or unorderable edge set, and every count derived from it is a
+-- lower bound equally. Repeating one boolean across a few hundred JSON entries
+-- would both waste the space and invite the two halves to disagree.
+--
+-- Defaulting to FALSE is the safe direction for rows written before this
+-- migration: their `paths` predate route counting entirely, so they carry no
+-- counts to be exact about, and the dialog renders them exactly as it does
+-- today. Nothing is rewritten or rebuilt — the next natural re-walk fills it in.
+--
+-- ── DATA IMPACT (CLAUDE.md §5.3) ─────────────────────────────────────────────
+-- Adds one nullable-with-default column. No row is deleted, no column dropped,
+-- no existing value altered.
+
+ALTER TABLE dependency_paths
+  ADD COLUMN IF NOT EXISTS routes_exact boolean NOT NULL DEFAULT false;
