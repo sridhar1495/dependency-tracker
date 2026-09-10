@@ -694,6 +694,18 @@
       margin-top: 3px; font-size: 11px; color: var(--text-muted); line-height: 1.4;
     }
     .dep-path-chain.dep-path-none { font-style: italic; }
+    /* Q33: the route count for the chain it follows. Accent-coloured rather
+       than muted so it reads as a second fact about the row and not as more
+       of the chain's own text — the chain is already muted, and two muted
+       runs on one line would blur into one sentence. */
+    .dep-path-routes {
+      margin-left: 6px; color: var(--accent); font-weight: 600; white-space: nowrap;
+    }
+    /* The parents the display cap is not showing. Its own line, because it
+       belongs to the component rather than to any one chain above it. */
+    .dep-path-more-parents {
+      margin-top: 4px; font-size: 11px; font-style: italic; color: var(--text-muted);
+    }
 
     /* ── Pills ────────────────────────────────────────────────────────────── */
     .pill {
@@ -4130,13 +4142,39 @@ const VULN_TABLE_COLS = {
   license:  6,
 };
 
+/**
+ * Q33: the route count that follows one chain. `n` routes reach this component
+ * from that chain's own root — the chain shown is one of them, so the count is
+ * a total and never an "N more" to be added to it.
+ *
+ * A count of 1 renders nothing: the chain on screen already says there is a
+ * route, and "1 route" on every row of an ordinary flat SBOM is noise that
+ * would bury the rows where the number is actually interesting.
+ */
+function vulnRouteCountHtml(n, exact) {
+  if (!Number.isFinite(n) || n <= 1) return '';
+  const label = exact ? `${n} routes` : `${n}+ routes`;
+  return `<span class="dep-path-routes">${escHtml(label)}</span>`;
+}
+
 function vulnDepPathRowHtml(origin) {
   if (!origin || origin.direct) return '';
   let body;
   if (origin.chains && origin.chains.length) {
+    const counts = Array.isArray(origin.routeCounts) ? origin.routeCounts : [];
     body = origin.chains
-      .map(chain => `<div class="dep-path-chain">${chain.map(escHtml).join(' &rarr; ')}</div>`)
+      .map((chain, i) => `<div class="dep-path-chain">${chain.map(escHtml).join(' &rarr; ')}`
+        + `${vulnRouteCountHtml(counts[i], origin.routesExact)}</div>`)
       .join('');
+    // The parents the display cap is holding back. Silence here is what this
+    // replaces: a component reachable from twenty direct dependencies used to
+    // show eight chains and nothing at all about the other twelve, so the
+    // dialog read as complete when it was not.
+    const total = origin.rootsTotal;
+    if (Number.isFinite(total) && total > origin.chains.length) {
+      body += `<div class="dep-path-more-parents">`
+        + `${escHtml(`Showing ${origin.chains.length} of ${total} parent dependencies.`)}</div>`;
+    }
   } else if (origin.pathsReady) {
     body = `<div class="dep-path-chain dep-path-none">No path recorded by DependencyTrack for this component.</div>`;
   } else {
@@ -4212,6 +4250,11 @@ let _vulnDirectKeys      = null; // Set<componentKey> | null while Tier 1 has no
 let _depPathStatus       = 'none';
 let _depPathStale        = false;
 let _depPathPaths        = {};
+// Q33: whether the stored route counts are exact or a floor. A walk that hit
+// the node ceiling, stalled, or met a cycle cannot know the full edge set, and
+// a row written before route counting existed has no counts at all — both
+// report false, and the badge then reads "12+" instead of "12 routes".
+let _depPathExact        = false;
 
 /**
  * Rebuilds the table body from what is already known — never refetches.
@@ -4325,6 +4368,13 @@ function vulnOriginFor(finding, showPaths) {
   return {
     direct: false, pathsReady: true,
     chains: entry ? entry.chains : null,
+    // Q33. Both are absent on a row cached before route counting shipped, so
+    // every reader below treats "missing" as "say nothing" rather than as a
+    // zero — an unqualified "0 routes" beside a chain that plainly exists is
+    // worse than the badge simply not being there.
+    routeCounts: entry ? entry.routeCounts : null,
+    rootsTotal: entry ? entry.rootsTotal : null,
+    routesExact: _depPathExact,
   };
 }
 
@@ -4431,6 +4481,7 @@ async function loadVulnOrigins(projectUuid, seq) {
     _depPathStatus  = data.status;
     _depPathStale   = !!data.stale;
     _depPathPaths   = data.paths || {};
+    _depPathExact   = !!data.routesExact;
 
     document.getElementById('vulnDepPathToggleWrap').hidden = false;
     renderVulnRows();
@@ -4469,6 +4520,7 @@ function startDepPathPoll(projectUuid, seq) {
       _depPathStatus = data.status;
       _depPathStale  = !!data.stale;
       _depPathPaths  = data.paths || {};
+      _depPathExact  = !!data.routesExact;
       if (data.status === 'ready') {
         statusEl.hidden = !_depPathStale;
         if (_depPathStale) statusEl.textContent = 'A newer BOM has been imported — these paths may be outdated.';
@@ -4660,6 +4712,7 @@ async function openVulnDialog(uuid) {
   _depPathStatus        = 'none';
   _depPathStale         = false;
   _depPathPaths         = {};
+  _depPathExact         = false;
   toggleWrapEl.hidden = true;
   toggleEl.checked    = false;
   depStatusEl.hidden  = true;

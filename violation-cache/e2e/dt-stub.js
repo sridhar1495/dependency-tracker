@@ -145,6 +145,23 @@ function buildPortfolio() {
       }
     });
 
+    // Q33: give the FIRST transitive component a second route in from the same
+    // carrier — carrier → comp, and carrier → relay → comp. One root, two
+    // genuinely distinct routes, which is the case a route count exists to
+    // report and the one a single stored chain cannot show on its own. Without
+    // this every transitive component here has exactly one route, the count is
+    // always 1, and the badge would never render for the browser tier to see.
+    const firstTransitive = graph[carrierUuid].dependencyGraph[0];
+    if (firstTransitive) {
+      const relayUuid = compUuidOf();
+      graph[relayUuid] = {
+        name: `relay-for-${leaf.name}`, version: '1.0.0',
+        purl: `pkg:npm/relay-for-${leaf.name}@1.0.0`,
+        uuid: relayUuid, group: '', dependencyGraph: [firstTransitive],
+      };
+      graph[carrierUuid].dependencyGraph.push(relayUuid);
+    }
+
     directDepsByLeaf[leaf.uuid] = JSON.stringify(directList);
     graphByLeaf[leaf.uuid] = graph;
   }

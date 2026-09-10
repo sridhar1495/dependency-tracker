@@ -976,6 +976,19 @@ describe('e2e — the dashboard in a real browser', { skip: BROWSER_SKIP }, () =
       assert.match(chain, /carrier-for-/, 'the chain must name the intermediate component, not just the target');
     }
 
+    // Q33: the stub gives exactly one transitive component a second route in
+    // from the same carrier (carrier → comp and carrier → relay → comp), so a
+    // route-count badge must appear — and must say "2 routes", not "2+".
+    // Exactness is the assertion that matters: it can only hold if the walk
+    // really did stop taking Q26's early exit and really did see the whole
+    // edge set, which no unit test can prove end to end.
+    const badges = await page.locator('.dep-path-routes').allTextContents();
+    assert.ok(badges.length > 0, 'a component reachable two ways must carry a route count');
+    assert.ok(badges.some(b => /^2 routes$/.test(b.trim())),
+      `expected an exact "2 routes" badge, got ${JSON.stringify(badges)}`);
+    assert.ok(!badges.some(b => /\+/.test(b)),
+      'this walk is complete and acyclic, so no count may be reported as a floor');
+
     // Toggling off hides the chains without discarding the Direct/Transitive badges.
     await page.locator('#vulnDepPathToggle').click();
     await page.waitForTimeout(300);

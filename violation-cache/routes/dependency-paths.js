@@ -111,6 +111,10 @@ async function handle({ method, path: parsedPath, req, res, principal }) {
         stale: bomChanged,
         totalComponents: (meta && meta.totalComponents) || 0,
         resolvedComponents: (meta && meta.resolvedComponents) || 0,
+        // Q33: whether the stored route counts are exact or a lower bound.
+        // A row written before migration 014, or by a walk that truncated,
+        // reports false and the dialog renders "12+" rather than "12".
+        routesExact: Boolean(status === 'ready' && meta && meta.routesExact),
         paths: status === 'ready' ? (meta.paths || {}) : {},
         error: status === 'failed' ? (meta && meta.error) : null,
       });

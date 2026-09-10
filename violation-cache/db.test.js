@@ -3043,6 +3043,38 @@ describe('dependency-path cache', { skip: !ENABLED && 'TEST_DATABASE_URL not set
     assert.equal(meta.totalComponents, 4);
     assert.equal(meta.resolvedComponents, 4, 'a finished walk has resolved everything it discovered');
     assert.equal(new Date(meta.bomImportAt).getTime(), bomAt.getTime());
+    assert.equal(meta.routesExact, false,
+      'a store that says nothing about exactness must not claim it (migration 014 default)');
+  });
+
+  test('Q33: the Q33 payload survives the jsonb round trip with its numbers intact', async () => {
+    // The shape grew twice since migration 013 and the counts are what a
+    // badge reads — a number that came back as a string, or a rootsTotal
+    // silently dropped, would render as a wrong disclosure rather than as an
+    // error, so the round trip is worth pinning against real PostgreSQL.
+    const payload = {
+      'pkg:npm/shared@2': {
+        chains: [['alpha', 'mid', 'shared'], ['beta', 'shared']],
+        routeCounts: [12, 1],
+        rootsTotal: 20,
+      },
+      'pkg:npm/lonely@1': { chains: [['alpha', 'lonely']], routeCounts: [1] },
+    };
+    await depCache.markBuilding(FP_A, PROJ_1);
+    await depCache.storeResult(FP_A, PROJ_1, {
+      paths: payload, totalComponents: 9, bomImportAt: null, routesExact: true,
+    });
+    const meta = await depCache.getMeta(FP_A, PROJ_1);
+    assert.deepEqual(meta.paths, payload);
+    assert.equal(typeof meta.paths['pkg:npm/shared@2'].routeCounts[0], 'number');
+    assert.equal(meta.routesExact, true);
+
+    // And a later inexact walk must be able to take the claim back.
+    await depCache.markBuilding(FP_A, PROJ_1);
+    await depCache.storeResult(FP_A, PROJ_1, {
+      paths: {}, totalComponents: 1, bomImportAt: null, routesExact: false,
+    });
+    assert.equal((await depCache.getMeta(FP_A, PROJ_1)).routesExact, false);
   });
 
   test('markFailed sets failed and records why, truncated at 500 characters', async () => {

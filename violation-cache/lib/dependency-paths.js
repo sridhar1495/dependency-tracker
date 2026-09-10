@@ -47,13 +47,22 @@ const MAX_GRAPH_NODES  = 2000;
 const MAX_CHAIN_LENGTH = 40; // guards path reconstruction against a malformed cycle
 const WALK_CONCURRENCY = 5;  // matches REPORT_CONCURRENCY/VIOLATION_CONCURRENCY's order of magnitude
 
-// Q27: a hard cap on how many distinct roots' chains one component keeps —
-// a widely shared package (a common logging library, say) can be reachable
-// from dozens of direct dependencies, and without a ceiling that fans out
-// into both the walk's own per-node bookkeeping and an unreadable wall of
-// chains in one dialog row. No count is shown once the cap is hit — exact
-// "+N more" counting is deferred, not built now.
+// Q27/Q33: how many distinct roots' chains one component *displays*. A widely
+// shared package (a common logging library, say) can be reachable from dozens
+// of direct dependencies, and an unreadable wall of chains in one dialog row
+// helps nobody. This is now a display cap only: `rootsReaching` below counts
+// every root without a ceiling, so the stored entry can say "8 of 20" instead
+// of dropping the other twelve silently, which is what it used to do.
 const MAX_ROOTS_PER_COMPONENT = 8;
+
+// Q33: routes are counted, never enumerated, and the count saturates here.
+// A diamond ladder — two siblings both pulling the same helper, repeated down
+// a chain, which is an ordinary shape rather than a contrived one — doubles
+// the route count per diamond: a 91-node graph, well inside MAX_GRAPH_NODES,
+// carries over a billion distinct routes to one component. Saturating
+// addition is what keeps that a readable "9999+" instead of an unbounded
+// integer, and keeps every intermediate sum inside Number's safe range.
+const MAX_ROUTE_COUNT = 9999;
 
 const PROGRESS_INTERVAL_MS = 1000; // P: publish progress at most once a second
 const HEARTBEAT_MS         = 30_000;
@@ -96,6 +105,70 @@ async function getDirectDependencies(apiUrl, apiKey, projectUuid) {
   return { direct, lastBomImport: json.lastBomImport || null };
 }
 
+// ── Route counting (Q33) ────────────────────────────────────────────────────
+/**
+ * Count every distinct route from one root to each node it can reach.
+ *
+ * Enumerating those routes is the combinatorial trap CLAUDE.md §6.3a warns
+ * about; *counting* them is a linear-time dynamic program over the same edges
+ * the walk already fetched, so a dialog can say "reached by 12 routes" while
+ * storing one chain. That is the whole trade: an engineer deciding an upgrade
+ * needs to know a second route exists, not to read all twelve.
+ *
+ * Kahn's algorithm gives both the topological order the DP needs and, for
+ * free, the cycle check it depends on: a dependency graph is a DAG, but this
+ * walks data from an external system, and `processed === reach.size` is what
+ * proves the assumption held for *this* graph rather than assuming it. A
+ * cyclic subgraph has no finite route count, so the caller marks the result
+ * inexact instead of reporting a number derived from a partial pass.
+ *
+ * Edges back into `root` are ignored, so a root that something else also
+ * points at is still treated as a source rather than being starved of its
+ * seed count of 1.
+ *
+ * @returns {{counts: Map<string, number>, acyclic: boolean}}
+ */
+function countRoutesFrom(childrenOf, root) {
+  const reach = new Set([root]);
+  const stack = [root];
+  while (stack.length) {
+    const u = stack.pop();
+    for (const v of childrenOf.get(u) || []) {
+      if (!reach.has(v)) { reach.add(v); stack.push(v); }
+    }
+  }
+
+  const indeg = new Map();
+  for (const u of reach) indeg.set(u, 0);
+  for (const u of reach) {
+    for (const v of childrenOf.get(u) || []) {
+      if (v === root || !reach.has(v)) continue;
+      indeg.set(v, indeg.get(v) + 1);
+    }
+  }
+
+  const counts = new Map([[root, 1]]);
+  const queue = [];
+  for (const [u, d] of indeg) if (d === 0) queue.push(u);
+
+  let head = 0; // index cursor — Array.shift() is O(n) and this runs per root
+  let processed = 0;
+  while (head < queue.length) {
+    const u = queue[head++];
+    processed++;
+    const cu = counts.get(u) || 0;
+    for (const v of childrenOf.get(u) || []) {
+      if (v === root || !reach.has(v)) continue;
+      if (cu) counts.set(v, Math.min(MAX_ROUTE_COUNT, (counts.get(v) || 0) + cu));
+      const d = indeg.get(v) - 1;
+      indeg.set(v, d);
+      if (d === 0) queue.push(v);
+    }
+  }
+
+  return { counts, acyclic: processed === reach.size };
+}
+
 // ── The walk (Tier 2 — expensive, cached) ───────────────────────────────────
 /**
  * Discover as much of the project's transitive graph as MAX_GRAPH_NODES
@@ -129,11 +202,27 @@ async function getDirectDependencies(apiUrl, apiKey, projectUuid) {
  * it sounds, but it is not a guarantee.
  */
 async function walkGraph(
-  apiUrl, apiKey, projectUuid, directDeps, onProgress = () => {}, shouldStop = () => false, targets = null
+  apiUrl, apiKey, projectUuid, directDeps, onProgress = () => {}, shouldStop = () => false,
+  targets = null, opts = {}
 ) {
+  // Q33: counting routes needs the whole edge set, so a counting walk cannot
+  // also take Q26's early exit — a walk that stopped as soon as every target
+  // was *reached* would report route counts derived from a partial graph, and
+  // a number that is silently short is worse than no number. The two modes
+  // therefore stay separate rather than one being quietly dropped: a scoped
+  // walk is still the cheap shape a future full-graph caller wants.
+  const countRoutes = opts.countRoutes === true;
+
+  // Both root-keyed maps are bounded by MAX_GRAPH_NODES × the project's own
+  // direct-dependency count. Neither may be pruned per node: chain
+  // reconstruction walks parentByRoot at *every* hop, so dropping a root from
+  // an intermediate node truncates the chains of everything beneath it — which
+  // is exactly the defect the old per-node cap caused, one reason it moved to
+  // reconstruction (Q33).
   const nodes        = new Map(); // uuid -> {name, version, purl, group, ...}
   const rootsReaching = new Map(); // uuid -> Set<root uuid> — every distinct root known to reach it
   const parentByRoot = new Map(); // uuid -> Map<root uuid, parent uuid> — one predecessor per root
+  const childrenOf   = new Map(); // uuid -> Set<uuid> — every edge seen, for the route count only
   const expanded      = new Set(); // uuids whose own dependencyGraph call has been made
 
   const directUuids = [...new Set(directDeps.map(d => d && d.uuid).filter(Boolean))];
@@ -147,7 +236,7 @@ async function walkGraph(
   // immediately rather than silently falling back to an exhaustive walk.
   const targetSet = targets ? new Set(targets) : null;
   const settled = new Set();
-  const isDone = () => targetSet !== null && settled.size >= targetSet.size;
+  const isDone = () => !countRoutes && targetSet !== null && settled.size >= targetSet.size;
   // A target is settled once its path is knowable — direct (trivial) or it
   // is reached by at least one root — never merely because its name has been
   // seen; a component can appear as metadata before it is reachable.
@@ -159,6 +248,19 @@ async function walkGraph(
     if (targetSet.has(key)) settled.add(key);
   };
   for (const uuid of directUuids) checkSettled(uuid);
+
+  // Q26's empty-array rule survives Q33 intact, and it has to: "there is
+  // nothing to resolve" is a different instruction from "stop once the targets
+  // are satisfied". A counting walk gives up only the second — if giving up
+  // the first came with it, a caller who said "nothing" would be answered with
+  // the project's entire graph, which is precisely backwards.
+  if (targetSet !== null && targetSet.size === 0) {
+    onProgress(nodes.size, 0);
+    return {
+      paths: {}, totalComponents: nodes.size,
+      routesExact: countRoutes, truncated: false,
+    };
+  }
 
   const sem = makeSemaphore(WALK_CONCURRENCY);
   let queue = directUuids;
@@ -193,6 +295,14 @@ async function walkGraph(
         if (!myRoots) continue; // this node's own reachability has not been recorded yet
         for (const kidUuid of kids) {
           if (!nodes.has(kidUuid) && graph[kidUuid]) nodes.set(kidUuid, graph[kidUuid]);
+          // Q33: every edge is kept when counting, including the ones that lead
+          // to an already-reached node. Those are exactly the edges a second
+          // route is made of, so the set the chain reconstruction ignores is
+          // the set the count is about.
+          if (countRoutes) {
+            if (!childrenOf.has(nodeUuid)) childrenOf.set(nodeUuid, new Set());
+            childrenOf.get(nodeUuid).add(kidUuid);
+          }
           // A direct dependency is already its own root — it never gains a
           // transitive chain, regardless of which other branch also reaches it.
           if (!directSet.has(kidUuid)) {
@@ -200,7 +310,11 @@ async function walkGraph(
             const kidRoots = rootsReaching.get(kidUuid);
             for (const root of myRoots) {
               if (kidRoots.has(root)) continue; // already have a (shortest) chain via this root
-              if (kidRoots.size >= MAX_ROOTS_PER_COMPONENT) break; // Q27: bounded fan-in
+              // Q33: uncapped. The cap used to sit here, which not only dropped
+              // roots silently but starved this node's own children of the
+              // roots it never recorded — the under-count propagated downward.
+              // It is applied once, at reconstruction, where it is a display
+              // decision and the true total is still known.
               kidRoots.add(root);
               if (!parentByRoot.has(kidUuid)) parentByRoot.set(kidUuid, new Map());
               parentByRoot.get(kidUuid).set(root, nodeUuid);
@@ -216,28 +330,77 @@ async function walkGraph(
   }
   onProgress(nodes.size, resolvedCalls);
 
+  // The graph is only fully known if nothing cut the walk short. Either of
+  // these means an edge may exist that was never fetched, so any route count
+  // derived from what *was* fetched is a lower bound, not an answer.
+  const truncated = nodes.size >= MAX_GRAPH_NODES || shouldStop();
+
+  // Route counts are per root, so they are computed once per root and read
+  // per component below — not recomputed for each of the (many) components a
+  // root reaches.
+  const routeCounts = new Map(); // root uuid -> Map<node uuid, count>
+  let allAcyclic = true;
+  if (countRoutes) {
+    for (const root of directUuids) {
+      const { counts, acyclic } = countRoutesFrom(childrenOf, root);
+      routeCounts.set(root, counts);
+      if (!acyclic) allAcyclic = false;
+    }
+  }
+
+  const nameOf = (uuid) => {
+    const n = nodes.get(uuid);
+    return (n && n.name) || uuid;
+  };
+
   // ── Reconstruct one shortest chain per distinct root, per transitive component ──
   const paths = {};
   for (const [uuid, info] of nodes) {
     if (directSet.has(uuid) || !parentByRoot.has(uuid)) continue; // direct, or never reached
+
+    // Sorted so which roots survive the display cap is stable between walks.
+    // Insertion order is BFS order, and BFS order depends on which of
+    // WALK_CONCURRENCY in-flight requests answered first — so without this the
+    // same project could show a different eight parents on each re-walk.
+    const allRoots = [...rootsReaching.get(uuid)].sort((a, b) => nameOf(a).localeCompare(nameOf(b)));
+    const shownRoots = allRoots.slice(0, MAX_ROOTS_PER_COMPONENT);
+
     const chains = [];
-    for (const root of rootsReaching.get(uuid)) {
+    const counts = [];
+    for (const root of shownRoots) {
       const chain = [];
       let cur = uuid;
       let guard = 0;
       while (cur && guard++ < MAX_CHAIN_LENGTH) {
-        const n = nodes.get(cur);
-        chain.unshift((n && n.name) || cur);
+        chain.unshift(nameOf(cur));
         if (directSet.has(cur)) break;
         const pmap = parentByRoot.get(cur);
         cur = pmap ? pmap.get(root) : undefined;
       }
       chains.push(chain);
+      if (countRoutes) {
+        const perRoot = routeCounts.get(root);
+        counts.push((perRoot && perRoot.get(uuid)) || 1);
+      }
     }
-    paths[componentKey(info)] = { chains };
+
+    const entry = { chains };
+    if (countRoutes) entry.routeCounts = counts;
+    // Only when there is something to disclose — an entry showing every root
+    // it has needs no "8 of 8" note, and omitting it keeps the stored JSON
+    // the same size it was for the overwhelmingly common single-root case.
+    if (allRoots.length > shownRoots.length) entry.rootsTotal = allRoots.length;
+    paths[componentKey(info)] = entry;
   }
 
-  return { paths, totalComponents: nodes.size };
+  return {
+    paths,
+    totalComponents: nodes.size,
+    // Exactness is a property of the whole walk, not of one component: a
+    // truncated graph or a cycle anywhere invalidates every count equally.
+    routesExact: countRoutes && !truncated && allAcyclic,
+    truncated,
+  };
 }
 
 /**
@@ -327,11 +490,18 @@ async function runJob(conn, projectUuid, targets = null, force = false) {
     const directKeys = new Set(direct.map(componentKey));
     const scopedTargets = targets ? targets.filter(t => !directKeys.has(t)) : null;
 
-    const { paths, totalComponents } = await walkGraph(
+    // Q33: the dialog shows an exact route count per parent, and an exact count
+    // is only possible from the complete edge set — so this walk does not take
+    // Q26's early exit. The cost is bounded and paid once: the result is cached
+    // per (fingerprint, project) until DependencyTrack records a new BOM import,
+    // and shared by every account on that connection (§7.5). `scopedTargets`
+    // still decides whether a walk is needed at all, above.
+    const { paths, totalComponents, routesExact } = await walkGraph(
       apiUrl, apiKey, projectUuid, direct,
       (total, resolved) => { state.total = total; state.resolved = resolved; publish(); },
       () => timedOut,
-      scopedTargets
+      scopedTargets,
+      { countRoutes: true }
     );
 
     if (timedOut) {
@@ -347,14 +517,14 @@ async function runJob(conn, projectUuid, targets = null, force = false) {
     clearInterval(watchdog);
 
     await depCache.storeResult(fingerprint, projectUuid, {
-      paths, totalComponents,
+      paths, totalComponents, routesExact,
       bomImportAt: lastBomImport ? new Date(lastBomImport) : null,
     });
     log('info', 'Dependency-path walk stored', {
       fingerprint: fingerprint.slice(0, 12), projectUuid, totalComponents,
-      transitiveWithPaths: Object.keys(paths).length,
+      transitiveWithPaths: Object.keys(paths).length, routesExact,
     });
-    return { started: true, completed: true, totalComponents };
+    return { started: true, completed: true, totalComponents, routesExact };
   } catch (err) {
     log('error', `Dependency-path walk failed: ${err.message}`, {
       fingerprint: fingerprint.slice(0, 12), projectUuid,
@@ -369,6 +539,7 @@ async function runJob(conn, projectUuid, targets = null, force = false) {
 }
 
 module.exports = {
-  componentKey, getDirectDependencies, walkGraph, runJob,
+  componentKey, getDirectDependencies, walkGraph, countRoutesFrom, runJob,
   MAX_GRAPH_NODES, MAX_CHAIN_LENGTH, WALK_CONCURRENCY, MAX_ROOTS_PER_COMPONENT,
+  MAX_ROUTE_COUNT,
 };
