@@ -3875,6 +3875,7 @@ const vuln = new Function(
   + INDEX_HTML.match(/const LEVEL_CSS = \{[\s\S]*?\n\};/)[0] + '\n'
   + INDEX_HTML.match(/const VULN_SEVERITY_ORDER = \[[\s\S]*?\];/)[0] + '\n'
   + INDEX_HTML.match(/const LICENSE_STATE_ORDER = \[[\s\S]*?\];/)[0] + '\n'
+  + INDEX_HTML.match(/const VULN_ROUTE_COUNT_CAP = \d+;/)[0] + '\n'
   + INDEX_HTML.match(/const VULN_TABLE_COLS = \{[\s\S]*?\n\};/)[0] + '\n'
   // vulnDepPathRowHtml reads _vulnViewType from module scope in the real
   // page; the sandbox defaults it to 'security' (the dialog's own default)
@@ -3883,7 +3884,7 @@ const vuln = new Function(
   + `let _vulnViewType = 'security';\n`
   + extractFunction(INDEX_HTML, 'escHtml') + '\n'
   + VULN_FN_NAMES.map(n => extractFunction(INDEX_HTML, n)).join('\n')
-  + `\nreturn { ${VULN_FN_NAMES.join(', ')}, setViewType: (t) => { _vulnViewType = t; } };`
+  + `\nreturn { ${VULN_FN_NAMES.join(', ')}, VULN_ROUTE_COUNT_CAP, setViewType: (t) => { _vulnViewType = t; } };`
 )();
 
 describe('vulnerability dialog — the eye icon', () => {
@@ -4230,33 +4231,61 @@ describe('dependency paths — the path detail row (Q27: one chain per root, no 
   });
 
   // ── Q33: route counts and the parents the display cap holds back ──────────
-  test('Q33: a route count rides the chain it belongs to, and reads as a total', () => {
+  test('Q33: the badge names its own parent and counts only the routes NOT shown', () => {
     const html = vuln.vulnDepPathRowHtml({
       direct: false, pathsReady: true, routesExact: true,
-      chains: [['a', 'x'], ['b', 'x']], routeCounts: [3, 7],
+      chains: [['alpinex', 'xxxx', 'daas'], ['beta', 'daas']], routeCounts: [11, 3],
     });
-    assert.match(html, /a &rarr; x<span class="dep-path-routes">3 routes<\/span>/,
-      'the badge must sit inside its own chain line, or it would attach to the wrong parent');
-    assert.match(html, /b &rarr; x<span class="dep-path-routes">7 routes<\/span>/);
-    assert.doesNotMatch(html, /\+/, 'an exact walk states the number without a "+"');
+    // 11 routes reach daas from alpinex; one of them is the chain on screen,
+    // so ten remain unseen. Naming the root is what makes "more" answerable
+    // on a component whose second chain has a different count entirely.
+    assert.match(html, /daas<span class="dep-path-routes">10 more routes from alpinex<\/span>/);
+    assert.match(html, /daas<span class="dep-path-routes">2 more routes from beta<\/span>/);
+    assert.doesNotMatch(html, /\+/, 'an exact, unsaturated walk states the number without a "+"');
   });
 
-  test('Q33: a count of one renders nothing — the chain already says a route exists', () => {
+  test('Q33: a total of one renders nothing — there is nothing further to see', () => {
     const html = vuln.vulnDepPathRowHtml({
       direct: false, pathsReady: true, routesExact: true,
       chains: [['a', 'x']], routeCounts: [1],
     });
     assert.doesNotMatch(html, /dep-path-routes/,
-      '"1 route" on every row of a flat SBOM is noise that buries the interesting rows');
+      '"0 more" on every row of a flat SBOM is noise that buries the interesting rows');
+  });
+
+  test('Q33: exactly one unseen route is singular', () => {
+    const html = vuln.vulnDepPathRowHtml({
+      direct: false, pathsReady: true, routesExact: true,
+      chains: [['a', 'x']], routeCounts: [2],
+    });
+    assert.match(html, /1 more route from a</);
   });
 
   test('Q33: an inexact walk marks the count as a floor rather than stating it', () => {
     const html = vuln.vulnDepPathRowHtml({
       direct: false, pathsReady: true, routesExact: false,
-      chains: [['a', 'x']], routeCounts: [4],
+      chains: [['a', 'x']], routeCounts: [5],
     });
-    assert.match(html, /4\+ routes/,
+    assert.match(html, /4\+ more routes from a</,
       'a truncated or cyclic walk knows only a lower bound and must say so');
+  });
+
+  test('Q33: a saturated count is a floor even when the walk itself was exact', () => {
+    // Saturation and truncation are different reasons for the same "+": a
+    // count sitting on the cap means "at least", however complete the walk.
+    const html = vuln.vulnDepPathRowHtml({
+      direct: false, pathsReady: true, routesExact: true,
+      chains: [['a', 'x']], routeCounts: [vuln.VULN_ROUTE_COUNT_CAP],
+    });
+    assert.match(html, /\+ more routes from a</,
+      'a count on the cap must never be reported as an exact total');
+  });
+
+  test('Q33: the frontend cap matches the server constant it mirrors', () => {
+    // Cross-file, like componentKeyOf/componentKey: there is no build step to
+    // share the number, so a test is what stops the two drifting apart.
+    const depPaths = require('./lib/dependency-paths');
+    assert.equal(vuln.VULN_ROUTE_COUNT_CAP, depPaths.MAX_ROUTE_COUNT);
   });
 
   test('Q33: the parents held back by the display cap are disclosed, not dropped silently', () => {
