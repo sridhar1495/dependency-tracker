@@ -6014,86 +6014,73 @@ function loadMockData() {
   afterLoad();
 }
 
-// ── Fetch all projects via BFS (roots → children → grandchildren …) ────────
-// Step 1: GET /api/v1/project?onlyRoot=true&excludeInactive=true
-//         Returns top-level active projects; each object embeds metrics{} and
-//         children[] (direct child summaries with uuid/name but no metrics).
-// Step 2: For every project whose embedded children[] is NON-EMPTY, issue a
-//         single GET /api/v1/project/{uuid}/children call to fetch full child
-//         objects (including their own metrics{} and children[]).
-//         If children[] is empty the project is a leaf — skip the call entirely.
-// Step 3: All same-level /children calls fire in full parallel (Promise.all).
-//         Repeat until a level produces no non-leaf projects.
-// This minimises API round-trips: leaf projects (≈ 80-90% of the tree) never
-// trigger a /children fetch; metrics are embedded in every response object so
-// the separate /metrics per-project loop in Phase 3 is no longer needed.
+// ── Fetch every project in one flat, paged sweep ───────────────────────────
+// GET /api/v1/project?onlyRoot=false&excludeInactive=true — the whole
+// portfolio — and the hierarchy is rebuilt afterwards from each project's own
+// `parent.uuid` (extractMetrics reads it; buildTree nests on it).
+//
+// Q34: this replaced a breadth-first crawl that asked for `onlyRoot=true` and
+// then descended by reading an **embedded `children[]` array** off each
+// project. That array is what DependencyTrack stopped guaranteeing at v5, and
+// the whole descent was gated on it:
+//
+//     const parents = currentLevel.filter(p => p.children?.length > 0);
+//     if (parents.length === 0) break;
+//
+// so the moment it went missing the crawl ended on its first pass and the
+// dashboard rendered root projects **alone**. Worse than a missing hierarchy:
+// the descendants were never fetched at all, which left inferParentUuids()
+// — the name-based fallback that exists for exactly this — with nothing to
+// work from. Scheduled reports kept working throughout, because they address
+// projects by stored uuid and never need the tree; that contrast is what
+// located the fault.
+//
+// Reading `parent.uuid` instead is not a guess about v5: lib/scheduler.js has
+// always swept `onlyRoot=false` this way and kept working across the upgrade,
+// so it is the shape both versions agree on. It is also strictly *less*
+// upstream work than the crawl it replaces — one paged sweep instead of a
+// request per non-leaf project (§13), which is the same complaint
+// DependencyTrack's own issue #7263 raises against eager `children[]`.
+//
+// Nothing here depends on a field the server might drop. A project the API
+// gives no parent for simply arrives unparented, and the existing name
+// heuristics get their chance at it; the failure mode is a flat list of
+// everything rather than a short list of roots.
 async function fetchAllProjects() {
   const pageSize = CONFIG.PROJECT_PAGE_SIZE;
   const signal   = _fetchController ? _fetchController.signal : undefined;
+  let page = 1;
+  let all  = [];
 
-  async function fetchAllPages(url) {
-    let page = 1, all = [];
-    while (true) {
-      const sep = url.includes('?') ? '&' : '?';
-      // DT_PROXY prefixes every DependencyTrack path. The key is added by the
-      // backend from this user's stored connection — it is never in the browser.
-      const res = await apiFetch(
-        `${DT_PROXY}${url}${sep}pageSize=${pageSize}&pageNumber=${page}&excludeInactive=true`,
-        { signal }
-      );
-      if (!res.ok) {
-        const detail = await res.json().catch(() => ({}));
-        throw new Error(detail.error || `HTTP ${res.status} — check your DependencyTrack connection`);
-      }
-      const data = await res.json();
-      const batch = Array.isArray(data.values) ? data.values
-                  : Array.isArray(data)        ? data
-                  : [];
-      all = all.concat(batch);
-      const total = parseInt(res.headers.get('X-Total-Count') || '0', 10);
-      if ((total && all.length >= total) || batch.length < pageSize) break;
-      page++;
+  while (true) {
+    // DT_PROXY prefixes every DependencyTrack path. The key is added by the
+    // backend from this user's stored connection — it is never in the browser.
+    const res = await apiFetch(
+      `${DT_PROXY}/api/v1/project?onlyRoot=false&excludeInactive=true`
+      + `&pageSize=${pageSize}&pageNumber=${page}`,
+      { signal }
+    );
+    if (!res.ok) {
+      const detail = await res.json().catch(() => ({}));
+      throw new Error(detail.error || `HTTP ${res.status} — check your DependencyTrack connection`);
     }
-    return all;
+    const data = await res.json();
+    // v4 answers with a bare array plus an X-Total-Count header; v5 enforces
+    // pagination and may wrap the page as {values,total}. Both are read, and a
+    // short page ends the loop on its own — so neither the header nor the
+    // envelope is load-bearing, which is the mistake this function is fixing.
+    const batch = Array.isArray(data.values) ? data.values
+                : Array.isArray(data)        ? data
+                : [];
+    all = all.concat(batch);
+
+    const headerTotal = parseInt(res.headers.get('X-Total-Count') || '', 10);
+    const total = Number.isFinite(headerTotal) ? headerTotal
+                : (data && Number.isFinite(data.total)) ? data.total
+                : 0;
+    if ((total && all.length >= total) || batch.length < pageSize) break;
+    page++;
   }
-
-  // Level 0 — root projects only
-  const roots = await fetchAllPages('/api/v1/project?onlyRoot=true');
-  const all = [...roots];
-
-  // BFS — fire ALL same-level /children calls in full parallel.
-  // Only fetch children for projects whose embedded children[] is non-empty
-  // (leaf projects are skipped entirely — no wasted round-trip).
-  let currentLevel = roots;
-
-  while (currentLevel.length > 0) {
-    // Select only projects that have at least one child according to the
-    // embedded children[] array returned by the DependencyTrack API.
-    const parents = currentLevel.filter(p => Array.isArray(p.children) && p.children.length > 0);
-    if (parents.length === 0) break;
-
-    const results = await Promise.all(parents.map(async parentProj => {
-      try {
-        const children = await fetchAllPages(
-          `/api/v1/project/${parentProj.uuid}/children`
-        );
-        // Stamp parent reference on each child so the pipeline can read
-        // p.parent?.uuid correctly without any extra resolution step.
-        children.forEach(c => {
-          if (!c.parent) c.parent = { uuid: parentProj.uuid };
-        });
-        return children;
-      } catch(_) {
-        return [];   // /children endpoint absent on older DT — skip silently
-      }
-    }));
-
-    const nextLevel = results.flat();
-    if (nextLevel.length === 0) break;
-    all.push(...nextLevel);
-    currentLevel = nextLevel;
-  }
-
   return all;
 }
 
@@ -6108,9 +6095,10 @@ function extractTags(rawTags) {
 }
 
 // ── Extract metrics synchronously from an embedded project object ─────────
-// Called by Phase 3 after BFS completes. Every project returned by the
-// /project and /project/{uuid}/children endpoints embeds a metrics{} field
-// with security counts (critical/high/medium/low/unassigned).
+// Called after the project sweep completes. A project returned by /project
+// embeds a metrics{} field with security counts (critical/high/medium/low/
+// unassigned); one that does not is marked with _dataWarn rather than being
+// silently counted as zero.
 // Policy-violation breakdown (ops/lic/secpolicy) comes from violationMap built
 // in Phase 2; projects absent from the map have zero violations (valid data).
 function extractMetrics(p, violationMap) {

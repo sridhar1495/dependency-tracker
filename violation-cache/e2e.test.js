@@ -902,6 +902,42 @@ describe('e2e — the dashboard in a real browser', { skip: BROWSER_SKIP }, () =
       'table controls should be enabled once there is a table (§8.5)');
   }, { timeout: 60_000 });
 
+  test('Q34: the hierarchy is rebuilt from parent links, not an embedded children[]', async () => {
+    // The regression this exists for: a DependencyTrack v5 upgrade stopped
+    // guaranteeing the embedded children[] the old crawl descended by, and the
+    // dashboard silently rendered root projects alone. The stub no longer
+    // supplies that field at all (e2e/dt-stub.js), so the tree below can only
+    // appear if the flat sweep fetched the descendants and buildTree nested
+    // them on parent.uuid.
+    //
+    // Asserting a row COUNT would not have caught it — roots alone are still
+    // "> 0 rows", which is exactly why the old assertion passed throughout.
+    await page.waitForTimeout(1500);
+    const toggles = page.locator('#tableBody .tree-toggle');
+    assert.ok(await toggles.count() > 0,
+      'no expander rendered — every project came back as a root, so no parent link survived');
+
+    // The descendant is on screen by name, not merely as an extra row: the
+    // stub names roots "Group N" and their children "service-N". Under the
+    // old crawl against a v5-shaped stub this is what would be missing.
+    assert.match(await page.locator('#tableBody').textContent(), /service-\d+/,
+      'no child project rendered — the sweep never fetched below the roots');
+
+    // Groups render expanded, so collapsing is what proves the row is really
+    // nested under its parent rather than sitting beside it as another root.
+    const expanded = await page.locator('#tableBody tr').count();
+    await toggles.first().click();
+    await page.waitForTimeout(400);
+    const collapsed = await page.locator('#tableBody tr').count();
+    assert.ok(collapsed < expanded,
+      `collapsing a group must hide its children (${expanded} → ${collapsed})`);
+
+    await toggles.first().click();
+    await page.waitForTimeout(400);
+    assert.equal(await page.locator('#tableBody tr').count(), expanded,
+      're-expanding must restore exactly the rows the collapse hid');
+  }, { timeout: 60_000 });
+
   test('the vulnerability dialog opens from the eye icon and lists real findings', async () => {
     // The eye icon only appears on a leaf row with at least one finding
     // (CLAUDE.md §8.1 vulnerability dialog rules) — the dt-stub portfolio

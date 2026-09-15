@@ -37,18 +37,19 @@ const ROOT_IDS = [1, 2, 3];
 const uuidOf = (i) => `${String(i).padStart(8, '0')}-0000-4000-8000-000000000000`;
 
 function buildPortfolio() {
-  const roots = ROOT_IDS.map(i => {
-    const p = makeProject(i, null);
-    // The dashboard only fetches children for a project whose embedded
-    // children[] is non-empty, so this field decides the shape of the crawl.
-    p.children = [{ uuid: uuidOf(i + 100) }];
-    return p;
-  });
+  // Q34: roots deliberately carry NO embedded children[]. DependencyTrack v4
+  // put one there and v5 stopped guaranteeing it, and the dashboard's old
+  // crawl was gated on it — so a stub that keeps supplying it is a stub that
+  // can never fail the way production did. This is §6.2's rule ("stubs must
+  // mirror the upstream's real routing") applied to a payload field: the
+  // hierarchy here is expressed only through each child's `parent.uuid`,
+  // which is the one shape both versions agree on.
+  const roots = ROOT_IDS.map(i => makeProject(i, null));
   const children = {};
   for (const i of ROOT_IDS) {
-    const c = makeProject(i + 100, uuidOf(i));
-    c.children = [];
-    children[uuidOf(i)] = [c];
+    // makeProject() stamps parent:{uuid} — that link, and nothing else, is
+    // what the dashboard rebuilds the tree from.
+    children[uuidOf(i)] = [makeProject(i + 100, uuidOf(i))];
   }
 
   // Policy violations, spread so every risk type and state has some.

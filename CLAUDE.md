@@ -214,7 +214,7 @@ Inline comments use lettered prefixes to trace design decisions:
 - **O-numbers** — observability notes (`// O3: JSON log format for log aggregators`)
 - **S-numbers** — security rationale (`// S2: token hashed before storage`) — **new in revision 2**
 
-Highest numbers currently in use: **Q33, P20, O5, S34**. When adding logic with a
+Highest numbers currently in use: **Q34, P20, O5, S34**. When adding logic with a
 non-obvious trade-off, add the next number in the appropriate series. Check the
 current maximum before assigning — parallel branches can claim the same number.
 
@@ -1450,6 +1450,60 @@ was then overwritten by the first render.
 
 ### 8.7 Tree building, filtering, mock data
 
+**Q34: the portfolio is fetched flat, and the hierarchy is rebuilt from
+`parent.uuid` — never from an embedded `children[]`.** `fetchAllProjects()`
+makes one paged sweep of `/api/v1/project?onlyRoot=false&excludeInactive=true`
+and hands the whole list to `inferParentUuids()` → `buildTree()`, which nests
+on each project's own parent link.
+
+What this replaced, and why it must not come back: a breadth-first crawl that
+asked for `onlyRoot=true` and descended by reading a `children[]` array
+embedded in each project. **DependencyTrack v5 removed that array and replaced
+it with a `hasChildren` boolean** — confirmed against a v5.1.0 server, whose
+root projects now return `"collectionLogic":"AGGREGATE_DIRECT_CHILDREN",
+"hasChildren":true` and no `children` field at all. The entire descent was
+gated on the array — `filter(p => p.children?.length > 0)`, then `break` — so
+the crawl ended on its first pass and the dashboard rendered **root projects
+alone**. The descendants were never fetched, which also left
+`inferParentUuids()`, the name-based fallback that exists for precisely this,
+with nothing to work from. Scheduled reports kept working the whole time
+because they address projects by stored uuid and never need the tree; that
+contrast is what located the fault.
+
+`hasChildren` is deliberately **not** used as a replacement gate. Swapping one
+server-supplied field for another rebuilds the same fragility, and it would
+still cost a request per parent; the flat sweep needs no such signal.
+
+Three properties are load-bearing:
+
+- **`parent.uuid`, not `children[]`.** This is not a bet on v5: `lib/
+  scheduler.js` has always swept `onlyRoot=false` this way and kept working
+  across the upgrade, so it is the shape both versions agree on.
+- **It is less upstream work, not more** (§13): one paged sweep instead of a
+  request per non-leaf project. DependencyTrack's own issue #7263 raises the
+  same complaint against eager `children[]`.
+- **Neither the `X-Total-Count` header nor the response envelope is
+  load-bearing.** v4 answers with a bare array and the header; v5 enforces
+  pagination and may wrap the page as `{values,total}`. Both are read, and a
+  short page ends the loop on its own — no single field can flatten the
+  portfolio again.
+- **Nothing is swallowed.** The old code's `catch (_) { return []; }` around
+  the per-parent `/children` call is gone: silently turning a failed request
+  into "this project has no children" is what made two different upstream
+  causes — a dropped field and a dead endpoint — produce one indistinguishable
+  blank hierarchy, with nothing in the console either way.
+
+The degraded case is now the right way round. A project the API gives no
+parent for arrives unparented and the name heuristics get their chance at it,
+so the worst outcome is a flat list of *everything* rather than a short list
+of roots.
+
+**The e2e stub is part of this contract.** `e2e/dt-stub.js` used to embed
+`children[]` on its roots specifically to drive the old crawl, so the tier
+could not have failed the way production did — §6.2's "stubs must mirror the
+upstream's real routing", applied to a payload field rather than a path. It
+now expresses the hierarchy only through `parent.uuid`.
+
 - `inferParentUuids(projects)` runs before `buildTree(projects)`; siblings sort
   alphabetically; parent rows aggregate descendant counts.
 - `applyFilters()` always operates on `allProjects`, never on a previous result.
@@ -1899,6 +1953,18 @@ Running the browser checks in CI was on this list and is now the `e2e` job.
   never excluding a row via the origin filter before Tier 1 has classified it;
   `transitiveTargets()`'s union across both tables, including that a
   not-yet-fetched License view is excluded rather than treated as empty.
+- The project sweep (Q34): that it asks for `onlyRoot=false` and never calls
+  `/children`; that a portfolio whose roots carry **no** embedded `children[]`
+  still yields its descendants with their parent links intact — the exact v5
+  shape that broke production; that it pages on the v4 bare-array + header
+  form and the v5 `{values,total}` envelope alike, and stops on a short page
+  when neither total is present; and that an HTTP failure is raised rather
+  than swallowed into an empty portfolio. A source-level guard asserts
+  `fetchAllProjects` reads no `children` field and contains no silent catch,
+  because reintroducing that filter is a one-line change a stub supplying
+  `children[]` would happily pass. The browser tier proves the rest: expanding
+  a group must reveal a *named* descendant, since a row count alone is still
+  "> 0" when only roots load, which is why the old assertion never noticed.
 - **Authorisation:** every route rejects a missing or invalid token with 401;
   cross-user access returns 404; the profile endpoint ignores login ID and email.
 - Do **not** write tests that require a live DT API.
