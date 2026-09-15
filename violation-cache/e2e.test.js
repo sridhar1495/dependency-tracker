@@ -29,7 +29,7 @@
 // is a sequence, and re-registering an account per assertion would test the
 // registration route forty times and everything else once.
 
-const { test, describe, before, after } = require('node:test');
+const { test, describe, before, after, afterEach } = require('node:test');
 const assert = require('node:assert/strict');
 
 const stackLib = require('./e2e/stack');
@@ -866,6 +866,46 @@ describe('e2e — the dashboard in a real browser', { skip: BROWSER_SKIP }, () =
 
   after(async () => { if (browser) await browser.close(); });
 
+  // A test that fails between opening a modal and closing it leaves the overlay
+  // on screen, and `.modal-overlay.open` covers the whole viewport — so every
+  // later test that clicks anything dies on "intercepts pointer events" after a
+  // full 30s timeout apiece. One real failure then reports as six, and the five
+  // decoys all name a control that has nothing wrong with it. Closing here
+  // costs nothing when the test passed (there is no open modal to close) and
+  // keeps a genuine failure reporting as exactly one failure, with its own
+  // message. It deliberately does not assert — cleanup that can itself fail is
+  // one more way to lose the real error.
+  afterEach(async () => {
+    if (!page || page.isClosed()) return;
+    await page.evaluate(() => {
+      document.querySelectorAll('.modal-overlay.open')
+        .forEach(el => el.classList.remove('open'));
+    }).catch(() => {});
+  });
+
+  /**
+   * The dependency-path walk is asynchronous end to end — a POST that starts a
+   * job, then a 1.5s poll until the row is `ready` — so the only honest wait is
+   * for the chain itself to appear. What a bare waitForSelector cannot say is
+   * WHY it never did: still building, failed upstream, refused to start, or
+   * nothing transitive to resolve are four different faults with one symptom.
+   * #vulnDepPathStatus carries the distinguishing message in every one of those
+   * cases (startDepPathPoll/onVulnDepPathToggle in index.html both write it),
+   * so quote it rather than making the next person re-derive it from CI logs.
+   */
+  async function waitForDepPathChains(ms) {
+    try {
+      await page.waitForSelector('.dep-path-chain', { timeout: ms });
+    } catch (err) {
+      const status = await page.locator('#vulnDepPathStatus').textContent().catch(() => '(unreadable)');
+      const checked = await page.locator('#vulnDepPathToggle').isChecked().catch(() => '(unreadable)');
+      const rows = await page.locator('#vulnDialogRows tr').count().catch(() => -1);
+      err.message += `\n  #vulnDepPathStatus: ${JSON.stringify(status)}`
+        + `\n  toggle checked: ${checked}; dialog rows: ${rows}`;
+      throw err;
+    }
+  }
+
   test('the auth gate redirects before painting anything', async () => {
     // §8.4: the gate runs in <head>, so a signed-out visitor never sees a
     // dashboard flash.
@@ -1029,13 +1069,15 @@ describe('e2e — the dashboard in a real browser', { skip: BROWSER_SKIP }, () =
     assert.ok(!(await page.locator('.dep-path-chain').count()), 'no chain is shown before the toggle is used');
 
     // Toggling on triggers the walk and shows a chain per Transitive row.
-    // 30s, not 15s: observed flaky under CI resource contention at the
-    // tighter margin — the walk itself is fast (Q26 scopes it to exactly
-    // this dialog's targets), but a loaded runner's Postgres/HTTP round
-    // trips can still eat the difference. Matches the timeout the rest of
-    // this describe block's individual steps already use.
+    // 45s, not 15s and no longer 30s: observed flaky under CI resource
+    // contention at each tighter margin — the walk itself is small (Q26 scopes
+    // it to exactly this dialog's targets, a dozen stub components here), but
+    // a loaded runner's Postgres and HTTP round trips, plus a 1.5s poll
+    // interval, can still eat the difference. This bound is correctness, not
+    // performance: the cache-hit re-toggle below still asserts 3s, which is
+    // the timing claim that actually matters.
     await page.locator('#vulnDepPathToggle').click();
-    await page.waitForSelector('.dep-path-chain', { timeout: 30_000 });
+    await waitForDepPathChains(45_000);
     const chains = await page.locator('.dep-path-chain').allTextContents();
     assert.ok(chains.length > 0);
     for (const chain of chains) {
@@ -1071,7 +1113,11 @@ describe('e2e — the dashboard in a real browser', { skip: BROWSER_SKIP }, () =
 
     await page.locator('#vulnDialog .modal-close').click();
     await page.waitForTimeout(400);
-  }, { timeout: 60_000 });
+    // 90s so the 45s chain wait above cannot be truncated by the test's own
+    // budget: a walk cut off at the outer boundary reports as the test timing
+    // out rather than as the chain never arriving, which loses the one piece
+    // of information worth having.
+  }, { timeout: 90_000 });
 
   test('License Risk shows real violations, filters by origin locally, and shares the dependency-path cache with Security', async () => {
     // dt-stub.js seeds each leaf with two license violations reusing that
@@ -1120,7 +1166,7 @@ describe('e2e — the dashboard in a real browser', { skip: BROWSER_SKIP }, () =
     // component here is the very same one the earlier test already walked,
     // so this must resolve, never read "no path recorded".
     await page.locator('#vulnDepPathToggle').click();
-    await page.waitForSelector('.dep-path-chain', { timeout: 30_000 });
+    await waitForDepPathChains(45_000);
     const chains = await page.locator('.dep-path-chain').allTextContents();
     assert.ok(chains.length > 0);
     assert.ok(!chains.some(t => /No path recorded/.test(t)),
@@ -1138,7 +1184,7 @@ describe('e2e — the dashboard in a real browser', { skip: BROWSER_SKIP }, () =
 
     await page.locator('#vulnDialog .modal-close').click();
     await page.waitForTimeout(400);
-  }, { timeout: 60_000 });
+  }, { timeout: 90_000 });   // as above: room for the 45s chain wait plus a 15s License fetch
 
   test('a clean project (no findings) shows no eye icon at all', async () => {
     // hasVulnerabilities() gates the icon — this is a structural guarantee,

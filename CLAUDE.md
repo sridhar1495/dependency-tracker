@@ -1921,6 +1921,22 @@ Running the browser checks in CI was on this list and is now the `e2e` job.
   "Does the merge produce the right recipient list" is `server.test.js`; "do
   those addresses reach `RCPT TO`" is `e2e.test.js`. Anything provable with a
   stub belongs in the offline tier, which runs in two seconds and needs nothing.
+- **One browser failure must report as one failure.** The browser tier shares a
+  single page across its tests on purpose, so a test that fails between opening
+  a modal and closing it leaves `.modal-overlay.open` covering the viewport —
+  and every later test that clicks anything then dies on Playwright's
+  "intercepts pointer events" after a full 30 s each. One real defect reported
+  as six, five of them naming a control with nothing wrong with it. The
+  `afterEach` that clears the class is cleanup, not an assertion: it must never
+  be able to fail and take the real error with it.
+- **A wait that can time out says why it timed out.** `waitForDepPathChains()`
+  exists because "no chain appeared" has four distinct causes — still building,
+  the walk failed, the `POST` was refused, nothing transitive to resolve — and
+  `#vulnDepPathStatus` already distinguishes them on screen. Quoting it in the
+  failure is the difference between a fix and another archaeology session in
+  the CI logs. Prefer this to raising a timeout again: the timeout is a
+  correctness bound, and the timing claims that matter get their own tight
+  assertions (the cached re-toggle's 3 s).
 
 ### 10.5 What to test
 
