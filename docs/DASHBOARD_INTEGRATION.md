@@ -59,12 +59,23 @@ the browser never talks to it.
 
 ### Hierarchical Tree View
 
-Projects are fetched using a **BFS (breadth-first) traversal** of the
-DependencyTrack project hierarchy:
+Projects are fetched in **one flat, paged sweep**, and the tree is rebuilt in
+the browser:
 
-1. Root projects via `GET /api/v1/project?onlyRoot=true`
-2. Children via `GET /api/v1/project/{uuid}/children` — repeated level by level
-3. Each level is batched in parallel until no further children remain
+1. `GET /api/v1/project?onlyRoot=false&excludeInactive=true`, paged at 500 —
+   the whole portfolio, in as many requests as it takes
+2. Each project's own `parent.uuid` is what nests it; a project the API gives
+   no parent for falls back to the name heuristics below
+3. No request is made per project — one sweep covers the entire hierarchy
+
+> **Changed for DependencyTrack v5.** This previously crawled breadth-first:
+> `?onlyRoot=true`, then `GET /api/v1/project/{uuid}/children` level by level,
+> descending only into projects whose response embedded a non-empty
+> `children[]`. v5 no longer guarantees that embedded array, and because the
+> descent was gated on it the dashboard rendered **root projects only** —
+> descendants were never requested at all. Reading `parent.uuid` from a flat
+> list works on v4 and v5 alike and costs fewer upstream calls. If you have
+> integrations of your own that walk `children[]`, check them against v5.
 
 ```
 ▶ Retail                            (collapsed group)
@@ -646,8 +657,7 @@ image and nothing else: no account, no setting, no count.
 
 | Section | Endpoint | Purpose |
 |---------|----------|---------|
-| Hierarchy (roots) | `GET /violation-cache/dt/api/v1/project?onlyRoot=true` | All root-level projects (paginated), proxied with your stored key |
-| Hierarchy (children) | `GET /violation-cache/dt/api/v1/project/{uuid}/children` | Children per project (paginated) |
+| Hierarchy | `GET /violation-cache/dt/api/v1/project?onlyRoot=false` | The whole portfolio (paginated), proxied with your stored key; the tree is rebuilt client-side from each project's `parent.uuid` |
 | Config | `GET /violation-cache/config` | Your connection (never the key), settings, mail and schedule |
 | Config | `POST /violation-cache/config/test-connection` | Probe a URL and key before saving them |
 | Config | `DELETE /violation-cache/config/dt-key` | Forget the stored DependencyTrack API key |

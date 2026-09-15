@@ -5047,3 +5047,158 @@ describe('license risk — dialog state resets and orchestration', () => {
       'the filter condition must require a resolved origin before it can exclude a row');
   });
 });
+
+// ── Q34: the project sweep that rebuilds the hierarchy ──────────────────────
+// A DependencyTrack v5 upgrade flattened the dashboard to root projects alone.
+// The crawl it replaced asked for `onlyRoot=true` and then descended by reading
+// an embedded `children[]` array off each project — a field v5 stopped
+// guaranteeing — so it stopped on its first pass and never fetched a single
+// descendant. Nothing in any tier noticed: no test covered fetchAllProjects at
+// all, and the e2e stub supplied `children[]` exactly as v4 had.
+describe('project hierarchy — the flat sweep (Q34)', () => {
+  /** Sandbox fetchAllProjects with a scripted apiFetch, capturing every URL. */
+  function makeSweep(pages, { pageSize = 3, maxPages = 200 } = {}) {
+    const calls = [];
+    const warnings = [];
+    const toasts = [];
+    const sandbox = new Function(
+      `const CONFIG = { PROJECT_PAGE_SIZE: ${pageSize}, PROJECT_MAX_PAGES: ${maxPages} };\n`
+      + `const DT_PROXY = '/violation-cache/dt';\n`
+      + 'let _fetchController = null;\n'
+      + 'const calls = [], warnings = [], toasts = [];\n'
+      + 'const console = { warn: (m) => warnings.push(m) };\n'
+      + 'const showToast = (m, t) => toasts.push([m, t]);\n'
+      + 'let _pages = [];\n'
+      + `const apiFetch = async (url) => {
+           calls.push(url);
+           const page = _pages.shift();
+           if (!page) return { ok: true, headers: { get: () => null }, json: async () => [] };
+           if (page.status) {
+             return { ok: false, status: page.status,
+                      headers: { get: () => null }, json: async () => page.body || {} };
+           }
+           return {
+             ok: true,
+             headers: { get: (h) => (h === 'X-Total-Count' ? page.totalHeader ?? null : null) },
+             json: async () => page.body,
+           };
+         };\n`
+      // extractFunction() anchors on the `function` keyword, so it drops the
+      // leading `async` — which this is the first extracted function to have.
+      + 'async ' + extractFunction(INDEX_HTML, 'fetchAllProjects') + '\n'
+      + 'return { fetchAllProjects, calls, warnings, toasts, load: (p) => { _pages = p.slice(); } };'
+    )();
+    sandbox.load(pages);
+    return sandbox;
+  }
+
+  const proj = (uuid, parent) => ({ uuid, name: uuid, parent: parent ? { uuid: parent } : undefined });
+
+  test('asks for the whole portfolio flat — never onlyRoot=true, never /children', async () => {
+    const s = makeSweep([{ body: [proj('a'), proj('b', 'a')], totalHeader: '2' }]);
+    const all = await s.fetchAllProjects();
+    assert.equal(all.length, 2);
+    assert.equal(s.calls.length, 1, 'one paged sweep, not a request per non-leaf project');
+    assert.match(s.calls[0], /onlyRoot=false/);
+    assert.doesNotMatch(s.calls[0], /onlyRoot=true/);
+    assert.ok(!s.calls.some(u => /\/children/.test(u)),
+      'the /children endpoint is no longer part of the contract');
+    assert.match(s.calls[0], /excludeInactive=true/);
+  });
+
+  test('the hierarchy survives roots that carry no embedded children[] — the v5 shape', async () => {
+    // A fake that routes like DependencyTrack v5 does, rather than returning
+    // one canned body to every URL: onlyRoot=true yields the root alone, and
+    // no project advertises a children[]. That routing is the whole point —
+    // a fake that answers every URL identically hands the old crawl the
+    // descendants by accident and reports a pass it did not earn.
+    const calls = [];
+    const sandbox = new Function(
+      'const CONFIG = { PROJECT_PAGE_SIZE: 100, PROJECT_MAX_PAGES: 200 };\n'
+      + "const DT_PROXY = '/violation-cache/dt';\n"
+      + 'let _fetchController = null;\n'
+      + 'const calls = [];\n'
+      + 'const console = { warn: () => {} };\n'
+      + 'const showToast = () => {};\n'
+      + `const ROOT = { uuid: 'root', name: 'root' };
+         const KID  = { uuid: 'kid', name: 'kid', parent: { uuid: 'root' } };
+         const apiFetch = async (url) => {
+           calls.push(url);
+           let body;
+           if (/onlyRoot=true/.test(url))      body = [ROOT];          // v5: no children[]
+           else if (/\\/children/.test(url))    body = [];              // v5: nothing to descend into
+           else                                 body = [ROOT, KID];     // the flat sweep
+           return { ok: true,
+                    headers: { get: (h) => (h === 'X-Total-Count' ? String(body.length) : null) },
+                    json: async () => body };
+         };\n`
+      + 'async ' + extractFunction(INDEX_HTML, 'fetchAllProjects') + '\n'
+      + 'return { fetchAllProjects, calls };'
+    )();
+
+    const all = await sandbox.fetchAllProjects();
+    assert.deepEqual(all.map(p => p.uuid), ['root', 'kid'],
+      'the descendant must be fetched even though nothing announced it — '
+      + 'this is the exact shape that flattened production to roots alone');
+    assert.equal(all.find(p => p.uuid === 'kid').parent.uuid, 'root',
+      'and it must still carry the parent link buildTree nests on');
+  });
+
+  test('pages until a short page, on the v4 bare-array shape', async () => {
+    const s = makeSweep([
+      { body: [proj('1'), proj('2'), proj('3')], totalHeader: '5' },
+      { body: [proj('4'), proj('5')],            totalHeader: '5' },
+    ]);
+    assert.equal((await s.fetchAllProjects()).length, 5);
+    assert.equal(s.calls.length, 2);
+    assert.match(s.calls[1], /pageNumber=2/);
+  });
+
+  test('reads the v5 {values,total} envelope, and does not need the header to stop', async () => {
+    // v5 enforces pagination and may drop X-Total-Count; a short page still ends it.
+    const s = makeSweep([
+      { body: { values: [proj('1'), proj('2'), proj('3')], total: 4 }, totalHeader: null },
+      { body: { values: [proj('4')],                        total: 4 }, totalHeader: null },
+    ]);
+    const all = await s.fetchAllProjects();
+    assert.deepEqual(all.map(p => p.uuid), ['1', '2', '3', '4']);
+  });
+
+  test('a total in the body ends the sweep even on a full final page', async () => {
+    const s = makeSweep([
+      { body: { values: [proj('1'), proj('2'), proj('3')], total: 3 }, totalHeader: null },
+    ]);
+    assert.equal((await s.fetchAllProjects()).length, 3);
+    assert.equal(s.calls.length, 1, 'a body total must be honoured, or this would fetch a second page');
+  });
+
+  test('a server that ignores pageNumber is stopped by the ceiling, and says so', async () => {
+    // Full pages forever, no total anywhere — the shape that would otherwise
+    // loop until the tab dies.
+    const forever = Array.from({ length: 10 },
+      () => ({ body: [proj('x'), proj('y'), proj('z')], totalHeader: null }));
+    const s = makeSweep(forever, { pageSize: 3, maxPages: 4 });
+    await s.fetchAllProjects();
+    assert.equal(s.calls.length, 4, 'the ceiling must bound the sweep');
+    assert.equal(s.warnings.length, 1);
+    assert.match(s.warnings[0], /incomplete/i);
+    assert.equal(s.toasts.length, 1, 'a truncated portfolio must reach the user, not just the console');
+  });
+
+  test('an HTTP failure is raised, never swallowed into an empty portfolio', async () => {
+    const s = makeSweep([{ status: 503, body: { error: 'DependencyTrack is unreachable' } }]);
+    await assert.rejects(() => s.fetchAllProjects(), /unreachable/);
+  });
+
+  test('the source no longer gates the hierarchy on an embedded children[] array', () => {
+    // The regression guard. The defect was one filter — reintroducing it is a
+    // one-line change that no behavioural test above would obviously catch,
+    // because a stub that supplies children[] makes the old code pass too.
+    const fn = extractFunction(INDEX_HTML, 'fetchAllProjects');
+    assert.doesNotMatch(fn, /\.children\s*&&|children\.length|children\?\./,
+      'fetchAllProjects must not read an embedded children[] — v5 does not guarantee it');
+    assert.doesNotMatch(fn, /\/children/, 'and must not call the /children endpoint');
+    assert.doesNotMatch(fn, /catch\s*\(\s*_\s*\)\s*\{\s*return \[\]/,
+      'no silent catch: swallowing the failure is what made the two causes indistinguishable');
+  });
+});
