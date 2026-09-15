@@ -7290,6 +7290,18 @@ window.__cacheWatchTick     = async () => {
 // Read-only: neither can change what is rendered.
 window.__trendSeries        = () => _trendSeries;
 window.__trendValues        = trendValues;
+// Exposed for the same reason, one layer over: when a dependency-path walk
+// produces no chain, the four backend states the dialog collapses into one
+// sentence ('none', 'stalled', 'failed', or 'ready' with nothing resolved)
+// are indistinguishable from the rendered DOM. Read-only, like the two above.
+window.__depPathState       = () => ({
+  project: _vulnCurrentProject,
+  status:  _depPathStatus,
+  stale:   _depPathStale,
+  exact:   _depPathExact,
+  resolved: Object.keys(_depPathPaths || {}),
+  targets: transitiveTargets(),
+});
 window.toggleTrendPanel     = toggleTrendPanel;
 window.onTrendPeriodChange  = onTrendPeriodChange;
 window.onTrendMetricChange  = onTrendMetricChange;

@@ -897,11 +897,45 @@ describe('e2e — the dashboard in a real browser', { skip: BROWSER_SKIP }, () =
     try {
       await page.waitForSelector('.dep-path-chain', { timeout: ms });
     } catch (err) {
-      const status = await page.locator('#vulnDepPathStatus').textContent().catch(() => '(unreadable)');
-      const checked = await page.locator('#vulnDepPathToggle').isChecked().catch(() => '(unreadable)');
-      const rows = await page.locator('#vulnDialogRows tr').count().catch(() => -1);
-      err.message += `\n  #vulnDepPathStatus: ${JSON.stringify(status)}`
-        + `\n  toggle checked: ${checked}; dialog rows: ${rows}`;
+      const lines = [];
+      const add = (label, v) => lines.push(`  ${label}: ${typeof v === 'string' ? v : JSON.stringify(v)}`);
+
+      add('#vulnDepPathStatus',
+        await page.locator('#vulnDepPathStatus').textContent().catch(() => '(unreadable)'));
+      add('toggle checked',
+        await page.locator('#vulnDepPathToggle').isChecked().catch(() => '(unreadable)'));
+      add('dialog rows', await page.locator('#vulnDialogRows tr').count().catch(() => -1));
+
+      // What the page believes, and what the route actually answered. The four
+      // states the dialog renders identically — 'none' (no row was ever
+      // written), 'stalled' (the watchdog gave up), 'failed' (the walk threw)
+      // and 'ready' with an empty `paths` — are the whole question here, and
+      // only these two reads tell them apart.
+      const state = await page.evaluate(() => window.__depPathState()).catch(e => ({ unreadable: e.message }));
+      add('page state', state);
+      if (state && state.project) {
+        add('GET dependency-paths', await page.evaluate(async (uuid) => {
+          const r = await fetch(`/violation-cache/dependency-paths/${uuid}`, {
+            headers: { Authorization: `Bearer ${localStorage.getItem('dt_session_token')}` },
+          });
+          const b = await r.json().catch(() => ({}));
+          return {
+            http: r.status, status: b.status, error: b.error, stale: b.stale,
+            totalComponents: b.totalComponents, resolvedComponents: b.resolvedComponents,
+            pathKeys: Object.keys(b.paths || {}).length, routesExact: b.routesExact,
+          };
+        }, state.project).catch(e => ({ unreadable: e.message })));
+      }
+
+      // The server logs its own reason (`Dependency-path walk failed: …`,
+      // `… stalled …`, `… expansion failed for one component: …`) and the
+      // harness has been capturing it all along — it was simply never shown,
+      // which is why two CI runs could fail without naming a cause.
+      const serverLog = (stack.log() || '').split('\n')
+        .filter(l => /[Dd]ependency-path|dependencyGraph/.test(l)).slice(-12);
+      if (serverLog.length) lines.push('  server log:\n    ' + serverLog.join('\n    '));
+
+      err.message += '\n' + lines.join('\n');
       throw err;
     }
   }
