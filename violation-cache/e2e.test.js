@@ -938,6 +938,36 @@ describe('e2e — the dashboard in a real browser', { skip: BROWSER_SKIP }, () =
       're-expanding must restore exactly the rows the collapse hid');
   }, { timeout: 60_000 });
 
+  test('Q35: a group row totals its descendants, through an intermediate group', async () => {
+    // The stub's root 1 is three deep — Group 1 → service-101 → service-201 —
+    // and service-101 is now an intermediate GROUP, not a leaf. So the chain
+    // only reads equal if the rollup climbed through it. Group 2 is two deep,
+    // covering the ordinary case in the same pass.
+    //
+    // Read the rendered cells rather than any internal state: this has to be
+    // what a user actually sees, and the four category columns follow the
+    // select/name/level/isLatest cells, so security.critical is index 4.
+    const byName = await page.evaluate(() => {
+      const out = {};
+      for (const tr of document.querySelectorAll('#tableBody tr')) {
+        const name = tr.querySelector('.proj-name-text');
+        const tds  = tr.querySelectorAll('td');
+        if (name && tds.length > 4) out[name.textContent.trim()] = tds[4].textContent.trim();
+      }
+      return out;
+    });
+
+    for (const n of ['Group 1', 'service-101', 'service-201', 'Group 2', 'service-102']) {
+      assert.ok(n in byName, `row "${n}" missing — got ${JSON.stringify(Object.keys(byName))}`);
+    }
+    assert.equal(byName['service-101'], byName['service-201'],
+      'the intermediate group must equal its single leaf');
+    assert.equal(byName['Group 1'], byName['service-201'],
+      'and the root must equal it too — the rollup has to climb two levels, not one');
+    assert.equal(byName['Group 2'], byName['service-102'],
+      'the ordinary two-level case must still total its leaf');
+  }, { timeout: 60_000 });
+
   test('the vulnerability dialog opens from the eye icon and lists real findings', async () => {
     // The eye icon only appears on a leaf row with at least one finding
     // (CLAUDE.md §8.1 vulnerability dialog rules) — the dt-stub portfolio

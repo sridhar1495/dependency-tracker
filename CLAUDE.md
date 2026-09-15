@@ -214,7 +214,7 @@ Inline comments use lettered prefixes to trace design decisions:
 - **O-numbers** — observability notes (`// O3: JSON log format for log aggregators`)
 - **S-numbers** — security rationale (`// S2: token hashed before storage`) — **new in revision 2**
 
-Highest numbers currently in use: **Q34, P20, O5, S34**. When adding logic with a
+Highest numbers currently in use: **Q35, P20, O5, S34**. When adding logic with a
 non-obvious trade-off, add the next number in the appropriate series. Check the
 current maximum before assigning — parallel branches can claim the same number.
 
@@ -1505,7 +1505,77 @@ upstream's real routing", applied to a payload field rather than a path. It
 now expresses the hierarchy only through `parent.uuid`.
 
 - `inferParentUuids(projects)` runs before `buildTree(projects)`; siblings sort
-  alphabetically; parent rows aggregate descendant counts.
+  alphabetically; parent rows aggregate descendant counts — see Q35 below,
+  which is what actually makes that sentence true.
+**Q35: a group row's four category columns are the sum of its descendants',
+computed here — not taken from what DependencyTrack reported for that
+project.** `aggregateTree()` runs at the end of `buildTree()`: a post-order
+walk that replaces every non-leaf node's `security`/`operations`/`license`/
+`secpolicy` with the total of its children's, which are themselves already
+totals. A three-level tree therefore rolls leaves through the middle tier to
+the root in one pass.
+
+This sentence used to be a claim the code merely asserted. `vulnEyeIconHtml()`
+said "a group row aggregates its descendants' counts" and §6.3 said "a
+parent's numbers already carry its descendants'", but nothing summed anything:
+`renderTree()` rendered `node[cat][lvl]` exactly as DependencyTrack reported
+it against that project's own uuid. That was a real rollup only for
+**security**, and only on a root configured as a v5 Collection Project
+(`collectionLogic: AGGREGATE_DIRECT_CHILDREN`). The three policy categories
+come from our own `/api/v1/violation` crawl bucketed by the uuid each
+violation carries, so an organisational parent with no SBOM of its own showed
+zeros above a subtree full of failures — and one column on a group row could
+be a rollup while the three beside it were not.
+
+Six properties are load-bearing:
+
+- **Replace, never add.** A root DependencyTrack has already rolled up reports
+  its descendants' totals *as its own*; adding a computed child sum on top
+  would double it. Discarding what the server said and recomputing is the only
+  rule that is correct whether or not a given root is a Collection Project —
+  which is the inconsistency this exists to remove. The cost is that a node
+  carrying both children *and* its own components reports only the children;
+  a project with children is already treated as a `Group` rather than a
+  `Project` everywhere else in this page, so that is the consistent reading.
+- **It sums `AGG_LEVELS`, not `CAT_LEVELS`.** The latter is what the table
+  *renders*, and it omits `unassigned` for the three policy categories.
+  `riskScore()` and the §8.6 data model both carry it, so rolling up only the
+  rendered levels would leave a group's `unassigned` holding a stale
+  pre-aggregation value — invisible in the table and wrong in everything that
+  reads it.
+- **Idempotent, because leaves are never written.** This is not a nicety:
+  `applyViolationData()` writes each project's own violation counts back over
+  every node when a refetch lands — group rows included, undoing the rollup —
+  and then calls `aggregateTree()` again to restore it. Recomputing from
+  unchanged leaves gives the same sums however many times it runs.
+- **The KPI tiles read the same numbers.** `computeSummaryTotals()` sums
+  `treeRoots` rather than re-deriving roots from `allProjects`. The root *set*
+  is identical either way; what differs is that a card is now guaranteed to
+  equal the sum of the group rows beneath it, instead of being free to
+  contradict the row directly under it — the same failure §6.3 guards against
+  between the trend graph and these tiles.
+- **A group keeps no ⚠ of its own.** Its numbers no longer come from its own
+  metrics, so its own "metrics unavailable" warning is moot. What matters is
+  whether a descendant's gap has silently understated the total, so that is
+  what `_dataWarn` now reports on a group, and it climbs the whole chain
+  (§11.2).
+- **Cycle-guarded.** `inferParentUuids()` refuses to self-reference, but parent
+  links also arrive straight from the API, and `buildTree()` will push a
+  self-referencing node into its own `children`. A `seen` set is what stops the
+  post-order walk recursing until the stack dies.
+
+`allProjects` is not touched by any of this. `buildTree()` clones into new
+nodes (`{ ...p, children: [] }`) and only those clones are aggregated, so the
+"never mutate `allProjects`" rule holds unchanged — the rollup is derived
+state, which is exactly what that rule asks for.
+
+**Still not rolled up: the risk-trend graph.** `captureSnapshot()` and
+`snapshots.summarise()` sum `onlyRoot=true` projects server-side and carry the
+original assumption. Giving them the same treatment means fetching the flat
+portfolio backend-side and rebuilding the tree there; until that happens the
+trend graph and the KPI tiles can disagree for a portfolio whose roots are not
+Collection Projects.
+
 - `applyFilters()` always operates on `allProjects`, never on a previous result.
   Parent rows are auto-included when a child matches.
 - `generateMockProjects()` uses `makeLCG(seed)` (Q6) for deterministic output.
@@ -1965,6 +2035,19 @@ Running the browser checks in CI was on this list and is now the `e2e` job.
   `children[]` would happily pass. The browser tier proves the rest: expanding
   a group must reveal a *named* descendant, since a row count alone is still
   "> 0" when only roots load, which is why the old assertion never noticed.
+- Group-row aggregation (Q35): a three-level tree totalling leaves through an
+  intermediate tier, not just direct children; every category *and* the
+  `unassigned` levels `CAT_LEVELS` does not render; that a group's own
+  reported numbers are replaced rather than added to (the double-count trap a
+  Collection Project root sets); that re-running is idempotent, since
+  `applyViolationData()` depends on it; a child missing a category object
+  contributing zero rather than `NaN`; several independent roots totalling
+  only their own subtrees, with a childless top-level project left alone as a
+  leaf; `_dataWarn` climbing the whole chain while the leaf keeps its own more
+  specific message; and both a self-referencing parent and a two-node cycle
+  returning instead of exhausting the stack. The browser tier proves the chain
+  end to end off the rendered cells: the stub's root 1 is three deep, so
+  root == intermediate == leaf only if the rollup climbed through a group.
 - **Authorisation:** every route rejects a missing or invalid token with 401;
   cross-user access returns 404; the profile endpoint ignores login ID and email.
 - Do **not** write tests that require a live DT API.

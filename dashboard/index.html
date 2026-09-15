@@ -1782,6 +1782,18 @@ const CAT_LEVELS = {
 };
 const CATS = ['security','operations','license','secpolicy'];
 
+// Q35: what the group-row rollup sums. Deliberately NOT CAT_LEVELS — that list
+// is what the table *renders*, and it omits `unassigned` for the three policy
+// categories. riskScore() and the §8.6 data model both carry it, so rolling up
+// only the rendered levels would leave a group's `unassigned` holding its own
+// stale pre-aggregation value while its siblings held a sum.
+const AGG_LEVELS = {
+  security:   ['critical','high','medium','low','unassigned'],
+  operations: ['fail','warn','info','unassigned'],
+  license:    ['fail','warn','info','unassigned'],
+  secpolicy:  ['fail','warn','info','unassigned'],
+};
+
 // ── State ─────────────────────────────────────────────────────────────────
 let allProjects      = [];   // flat array (source of truth)
 let filtered         = [];   // flat array matching current filters (for CSV + count)
@@ -3488,6 +3500,70 @@ function buildTree(projects) {
     nodes.forEach(n => sortSiblings(n.children));
   }
   sortSiblings(roots);
+  aggregateTree(roots);
+  return roots;
+}
+
+// ── Q35: roll descendant counts up into every group row ────────────────────
+// A group row's four category columns become the sum of its children's, which
+// are themselves already sums — a post-order walk, so a three-level tree rolls
+// leaves through the middle tier to the root in one pass.
+//
+// Before this, a group row showed whatever DependencyTrack reported against
+// that project's OWN uuid, and the code merely asserted that was already a
+// rollup ("a group row aggregates its descendants' counts", vulnEyeIconHtml).
+// That held only for security, and only on a root configured as a v5
+// Collection Project (`collectionLogic: AGGREGATE_DIRECT_CHILDREN`). The three
+// policy categories come from our own /api/v1/violation crawl, bucketed by the
+// uuid each violation carries, so an organisational parent with no SBOM of its
+// own showed zeros under a subtree full of failures.
+//
+// Four properties are load-bearing:
+//
+//   * **Replace, never add.** A root DT has already rolled up reports its
+//     descendants' totals as its own; adding a computed child sum on top would
+//     double it. Discarding what the server said and recomputing is the only
+//     rule that is correct whether or not a given root is a Collection
+//     Project — which is the inconsistency this exists to remove.
+//   * **Idempotent.** Leaves are never written, so re-running recomputes the
+//     same sums from the same inputs. applyViolationData() depends on this: it
+//     writes raw per-project violation counts into these same nodes when a
+//     refetch lands, and calls this again to restore the rollup.
+//   * **Groups keep no ⚠ of their own.** Their numbers no longer come from
+//     their own metrics, so their own "metrics unavailable" warning is moot.
+//     What matters instead is whether a descendant's gap has silently
+//     understated the total, so that is what the ⚠ now reports (§11.2).
+//   * **Cycle-guarded.** inferParentUuids() refuses to self-reference, but the
+//     parent links can also come straight from the API, and a node that ends
+//     up inside its own children would otherwise recurse until the stack dies.
+function aggregateTree(roots) {
+  const seen = new Set();
+
+  function visit(node) {
+    if (seen.has(node.uuid)) return;
+    seen.add(node.uuid);
+    if (node.children.length === 0) return;   // leaf: its own numbers stand
+
+    node.children.forEach(visit);             // post-order — children first
+
+    for (const cat of CATS) {
+      const sum = {};
+      for (const lvl of AGG_LEVELS[cat]) sum[lvl] = 0;
+      for (const child of node.children) {
+        const d = child[cat] || {};           // a category may be absent entirely
+        for (const lvl of AGG_LEVELS[cat]) sum[lvl] += d[lvl] || 0;
+      }
+      node[cat] = sum;
+    }
+
+    // Direct children suffice: post-order means a child group already carries
+    // its own descendants' warning by the time this reads it.
+    node._dataWarn = node.children.some(c => c._dataWarn)
+      ? 'Some projects under this group have incomplete data — this total may be understated.'
+      : null;
+  }
+
+  roots.forEach(visit);
   return roots;
 }
 
@@ -3594,9 +3670,15 @@ function computeLevels(projects) {
 // Project counts: single-pass over leaves (uses cached module-level parentUuids).
 // Called once per data load; stored in summaryTotals and never recalculated.
 function computeSummaryTotals() {
-  // parentUuids is set by afterLoad() before this is called — no recomputation needed.
-  const allUuids = new Set(allProjects.map(p => p.uuid));
-  const roots = allProjects.filter(p => !p.parentUuid || !allUuids.has(p.parentUuid));
+  // Q35: the tiles sum the tree's OWN root nodes, which carry the rolled-up
+  // totals aggregateTree() computed — not the raw root entries in allProjects.
+  // The root SET is identical either way (buildTree treats a project whose
+  // parentUuid is absent or unknown as a root, exactly as the filter here used
+  // to); what differs is that these numbers are now guaranteed to equal the
+  // sum of the rows beneath them. Reading the raw entries instead would let a
+  // card contradict the group row directly under it — the same failure §6.3
+  // guards against between the trend graph and these tiles.
+  const roots = treeRoots;
 
   const t = { critical:0, high:0, medium:0, low:0 };
   let _sCrit=0,_oFail=0,_lFail=0,_spFail=0,
@@ -5973,9 +6055,9 @@ function hasLicenseRisk(node) {
   return (l.fail||0) + (l.warn||0) + (l.info||0) + (l.unassigned||0) > 0;
 }
 
-// Only for leaf rows — a group row aggregates its descendants' counts but has
-// no DependencyTrack project of its own to ask for findings, so there is
-// nothing behind the icon to open (§8.6: parent rows are synthetic). The icon
+// Only for leaf rows — a group row's counts are the rollup aggregateTree()
+// computed (Q35), and it has no DependencyTrack project of its own to ask for
+// findings, so there is nothing behind the icon to open. The icon
 // shows for either finding type: a project clean on CVEs but failing license
 // policy still has something the dialog behind this icon can show.
 function vulnEyeIconHtml(node, isGroup) {
@@ -6458,6 +6540,11 @@ function applyViolationData(map) {
       node.secpolicy  = p.secpolicy;
     }
   });
+  // Q35: the loop above just wrote each project's OWN violation counts over
+  // every node, group rows included — which is exactly the rollup being undone.
+  // Re-running it restores the sums; aggregateTree() never writes a leaf, so
+  // recomputing from the same leaves is idempotent.
+  aggregateTree(treeRoots);
   // Recompute totals, then re-run the user's filters against the DATA THAT JUST
   // ARRIVED rather than re-rendering the old match set.
   //

@@ -51,6 +51,11 @@ function buildPortfolio() {
     // what the dashboard rebuilds the tree from.
     children[uuidOf(i)] = [makeProject(i + 100, uuidOf(i))];
   }
+  // Q35: one branch goes three deep — root 1 → service-101 → service-201 — so
+  // the browser tier exercises a rollup that has to climb through an
+  // intermediate group, not just a parent totalling its own direct leaves.
+  // The other two roots stay two-deep, so mixed depths are covered at once.
+  children[uuidOf(ROOT_IDS[0] + 100)] = [makeProject(ROOT_IDS[0] + 200, uuidOf(ROOT_IDS[0] + 100))];
 
   // Policy violations, spread so every risk type and state has some.
   const violations = [];
