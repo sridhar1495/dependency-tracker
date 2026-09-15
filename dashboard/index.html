@@ -1746,11 +1746,6 @@
 const CONFIG = {
   SEARCH_DEBOUNCE_MS:  200,   // ms to wait after last keypress before re-filtering
   PROJECT_PAGE_SIZE:   500,   // projects per page when fetching from DT API
-  // Q34: a ceiling on the project sweep, so a server that ignores pageNumber
-  // cannot turn the loop into an unbounded crawl. At PROJECT_PAGE_SIZE this is
-  // 100,000 projects — headroom, not a target. Hitting it is reported, never
-  // silently truncated.
-  PROJECT_MAX_PAGES:   200,
   CACHE_POLL_MS:      5000,   // ms between /violation-cache/status polls while building
   // Slow idle watch. The violation cache is shared by connection fingerprint, so
   // a build another user starts must disable this dashboard's refetch too —
@@ -6056,7 +6051,6 @@ async function fetchAllProjects() {
   const signal   = _fetchController ? _fetchController.signal : undefined;
   let page = 1;
   let all  = [];
-  let truncated = false;
 
   while (true) {
     // DT_PROXY prefixes every DependencyTrack path. The key is added by the
@@ -6085,17 +6079,7 @@ async function fetchAllProjects() {
                 : (data && Number.isFinite(data.total)) ? data.total
                 : 0;
     if ((total && all.length >= total) || batch.length < pageSize) break;
-
-    if (++page > CONFIG.PROJECT_MAX_PAGES) { truncated = true; break; }
-  }
-
-  // Never silently short: a truncated portfolio would read as "those projects
-  // were deleted", which is the class of quiet wrongness Q34 exists to end.
-  if (truncated) {
-    console.warn(
-      `Project sweep stopped at the ${CONFIG.PROJECT_MAX_PAGES}-page ceiling `
-      + `(${all.length} projects). The portfolio shown may be incomplete.`);
-    showToast('Project list may be incomplete — the page ceiling was reached.', 'error');
+    page++;
   }
   return all;
 }

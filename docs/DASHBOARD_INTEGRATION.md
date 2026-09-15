@@ -71,11 +71,20 @@ the browser:
 > **Changed for DependencyTrack v5.** This previously crawled breadth-first:
 > `?onlyRoot=true`, then `GET /api/v1/project/{uuid}/children` level by level,
 > descending only into projects whose response embedded a non-empty
-> `children[]`. v5 no longer guarantees that embedded array, and because the
-> descent was gated on it the dashboard rendered **root projects only** —
-> descendants were never requested at all. Reading `parent.uuid` from a flat
-> list works on v4 and v5 alike and costs fewer upstream calls. If you have
-> integrations of your own that walk `children[]`, check them against v5.
+> `children[]`. **v5 removed that array and replaced it with a `hasChildren`
+> boolean**, so a v5 root now looks like:
+>
+> ```json
+> {"uuid":"…","name":"SWDC-IN-Retail","metrics":{…},
+>  "collectionLogic":"AGGREGATE_DIRECT_CHILDREN","hasChildren":true,"active":true}
+> ```
+>
+> Because the descent was gated on the array, the dashboard rendered **root
+> projects only** and never requested the descendants at all. Reading
+> `parent.uuid` from a flat list works on v4 and v5 alike and costs fewer
+> upstream calls, so `hasChildren` is not used as a replacement gate — that
+> would rebuild the same fragility around a different field. **If you have
+> integrations of your own that walk `children[]`, check them against v5.**
 
 ```
 ▶ Retail                            (collapsed group)

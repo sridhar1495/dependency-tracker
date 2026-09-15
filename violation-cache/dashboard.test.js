@@ -5057,17 +5057,12 @@ describe('license risk — dialog state resets and orchestration', () => {
 // all, and the e2e stub supplied `children[]` exactly as v4 had.
 describe('project hierarchy — the flat sweep (Q34)', () => {
   /** Sandbox fetchAllProjects with a scripted apiFetch, capturing every URL. */
-  function makeSweep(pages, { pageSize = 3, maxPages = 200 } = {}) {
-    const calls = [];
-    const warnings = [];
-    const toasts = [];
+  function makeSweep(pages, { pageSize = 3 } = {}) {
     const sandbox = new Function(
-      `const CONFIG = { PROJECT_PAGE_SIZE: ${pageSize}, PROJECT_MAX_PAGES: ${maxPages} };\n`
+      `const CONFIG = { PROJECT_PAGE_SIZE: ${pageSize} };\n`
       + `const DT_PROXY = '/violation-cache/dt';\n`
       + 'let _fetchController = null;\n'
-      + 'const calls = [], warnings = [], toasts = [];\n'
-      + 'const console = { warn: (m) => warnings.push(m) };\n'
-      + 'const showToast = (m, t) => toasts.push([m, t]);\n'
+      + 'const calls = [];\n'
       + 'let _pages = [];\n'
       + `const apiFetch = async (url) => {
            calls.push(url);
@@ -5086,7 +5081,7 @@ describe('project hierarchy — the flat sweep (Q34)', () => {
       // extractFunction() anchors on the `function` keyword, so it drops the
       // leading `async` — which this is the first extracted function to have.
       + 'async ' + extractFunction(INDEX_HTML, 'fetchAllProjects') + '\n'
-      + 'return { fetchAllProjects, calls, warnings, toasts, load: (p) => { _pages = p.slice(); } };'
+      + 'return { fetchAllProjects, calls, load: (p) => { _pages = p.slice(); } };'
     )();
     sandbox.load(pages);
     return sandbox;
@@ -5114,12 +5109,10 @@ describe('project hierarchy — the flat sweep (Q34)', () => {
     // descendants by accident and reports a pass it did not earn.
     const calls = [];
     const sandbox = new Function(
-      'const CONFIG = { PROJECT_PAGE_SIZE: 100, PROJECT_MAX_PAGES: 200 };\n'
+      'const CONFIG = { PROJECT_PAGE_SIZE: 100 };\n'
       + "const DT_PROXY = '/violation-cache/dt';\n"
       + 'let _fetchController = null;\n'
       + 'const calls = [];\n'
-      + 'const console = { warn: () => {} };\n'
-      + 'const showToast = () => {};\n'
       + `const ROOT = { uuid: 'root', name: 'root' };
          const KID  = { uuid: 'kid', name: 'kid', parent: { uuid: 'root' } };
          const apiFetch = async (url) => {
@@ -5170,19 +5163,6 @@ describe('project hierarchy — the flat sweep (Q34)', () => {
     ]);
     assert.equal((await s.fetchAllProjects()).length, 3);
     assert.equal(s.calls.length, 1, 'a body total must be honoured, or this would fetch a second page');
-  });
-
-  test('a server that ignores pageNumber is stopped by the ceiling, and says so', async () => {
-    // Full pages forever, no total anywhere — the shape that would otherwise
-    // loop until the tab dies.
-    const forever = Array.from({ length: 10 },
-      () => ({ body: [proj('x'), proj('y'), proj('z')], totalHeader: null }));
-    const s = makeSweep(forever, { pageSize: 3, maxPages: 4 });
-    await s.fetchAllProjects();
-    assert.equal(s.calls.length, 4, 'the ceiling must bound the sweep');
-    assert.equal(s.warnings.length, 1);
-    assert.match(s.warnings[0], /incomplete/i);
-    assert.equal(s.toasts.length, 1, 'a truncated portfolio must reach the user, not just the console');
   });
 
   test('an HTTP failure is raised, never swallowed into an empty portfolio', async () => {

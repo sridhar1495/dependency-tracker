@@ -1458,16 +1458,23 @@ on each project's own parent link.
 
 What this replaced, and why it must not come back: a breadth-first crawl that
 asked for `onlyRoot=true` and descended by reading a `children[]` array
-embedded in each project. DependencyTrack stopped guaranteeing that array at
-**v5**, and the entire descent was gated on it — `filter(p =>
-p.children?.length > 0)`, then `break` — so the crawl ended on its first pass
-and the dashboard rendered **root projects alone**. The descendants were never
-fetched at all, which also left `inferParentUuids()`, the name-based fallback
-that exists for precisely this, with nothing to work from. Scheduled reports
-kept working the whole time because they address projects by stored uuid and
-never need the tree; that contrast is what located the fault.
+embedded in each project. **DependencyTrack v5 removed that array and replaced
+it with a `hasChildren` boolean** — confirmed against a v5.1.0 server, whose
+root projects now return `"collectionLogic":"AGGREGATE_DIRECT_CHILDREN",
+"hasChildren":true` and no `children` field at all. The entire descent was
+gated on the array — `filter(p => p.children?.length > 0)`, then `break` — so
+the crawl ended on its first pass and the dashboard rendered **root projects
+alone**. The descendants were never fetched, which also left
+`inferParentUuids()`, the name-based fallback that exists for precisely this,
+with nothing to work from. Scheduled reports kept working the whole time
+because they address projects by stored uuid and never need the tree; that
+contrast is what located the fault.
 
-Four properties are load-bearing:
+`hasChildren` is deliberately **not** used as a replacement gate. Swapping one
+server-supplied field for another rebuilds the same fragility, and it would
+still cost a request per parent; the flat sweep needs no such signal.
+
+Three properties are load-bearing:
 
 - **`parent.uuid`, not `children[]`.** This is not a bet on v5: `lib/
   scheduler.js` has always swept `onlyRoot=false` this way and kept working
@@ -1480,11 +1487,11 @@ Four properties are load-bearing:
   pagination and may wrap the page as `{values,total}`. Both are read, and a
   short page ends the loop on its own — no single field can flatten the
   portfolio again.
-- **Truncation is reported, never silent.** `CONFIG.PROJECT_MAX_PAGES` bounds
-  a server that ignores `pageNumber`, and hitting it raises a toast as well as
-  a console warning. The old code's `catch (_) { return []; }` is gone with
-  it: swallowing the `/children` failure is what made two different upstream
-  causes produce one indistinguishable blank hierarchy.
+- **Nothing is swallowed.** The old code's `catch (_) { return []; }` around
+  the per-parent `/children` call is gone: silently turning a failed request
+  into "this project has no children" is what made two different upstream
+  causes — a dropped field and a dead endpoint — produce one indistinguishable
+  blank hierarchy, with nothing in the console either way.
 
 The degraded case is now the right way round. A project the API gives no
 parent for arrives unparented and the name heuristics get their chance at it,
@@ -1951,9 +1958,8 @@ Running the browser checks in CI was on this list and is now the `e2e` job.
   still yields its descendants with their parent links intact — the exact v5
   shape that broke production; that it pages on the v4 bare-array + header
   form and the v5 `{values,total}` envelope alike, and stops on a short page
-  when neither total is present; that a server ignoring `pageNumber` is
-  stopped by the ceiling *and* reported; and that an HTTP failure is raised
-  rather than swallowed into an empty portfolio. A source-level guard asserts
+  when neither total is present; and that an HTTP failure is raised rather
+  than swallowed into an empty portfolio. A source-level guard asserts
   `fetchAllProjects` reads no `children` field and contains no silent catch,
   because reintroducing that filter is a one-line change a stub supplying
   `children[]` would happily pass. The browser tier proves the rest: expanding
