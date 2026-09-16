@@ -1366,7 +1366,10 @@
      tables — Security Violations and License Risk — picked by the view-type
      dropdown; both are fetched live from DependencyTrack through the existing
      read proxy, never cached beyond one dialog session. -->
-<div class="modal-overlay" id="vulnDialog">
+<!-- data-no-backdrop-close: only the ✕ closes this one. Opening it starts a
+     finding crawl against DependencyTrack, and a mis-aimed click beside the
+     dialog used to discard that in-flight work silently. -->
+<div class="modal-overlay" id="vulnDialog" data-no-backdrop-close>
   <div class="modal" style="width:980px;max-width:96vw">
     <button class="modal-close" onclick="closeModal('vulnDialog')">&times;</button>
     <h2>🔎 Findings — <span id="vulnDialogProject" class="vuln-dialog-project-tag"></span></h2>
@@ -1765,6 +1768,12 @@ const CONFIG = {
   VULN_MAX_ROWS:       900,
   // How often the dialog polls while a dependency-path walk is building.
   DEP_PATH_POLL_MS:    1500,
+  // Q36: how many projects' finding fetches are remembered across dialog
+  // opens. Small deliberately — each entry can hold VULN_MAX_ROWS findings,
+  // and §13 forbids unbounded in-memory accumulation. Eight covers the
+  // back-and-forth comparison this exists for without becoming a second copy
+  // of the portfolio.
+  VULN_MEMO_MAX_PROJECTS: 8,
 };
 
 // ── Constants ─────────────────────────────────────────────────────────────
@@ -4356,6 +4365,53 @@ let _depPathPaths        = {};
 // report false, and the badge then reads "12+" instead of "12 routes".
 let _depPathExact        = false;
 
+// ── Q36: the findings a dialog fetched outlive the dialog ───────────────────
+// Reopening a project used to refetch it from DependencyTrack, every time, so
+// a glance at four projects in a row cost four full finding crawls and going
+// back to the first cost a fifth. Two stores, both keyed by project uuid and
+// both living only until the page reloads:
+//
+//   _vulnMemo        — a completed fetch: { findings, total, license }.
+//   _vulnFetchShared — the promise of a fetch still running, so a second
+//                      opener joins it instead of starting a parallel crawl.
+//
+// What is deliberately NOT memoised: the Direct/Transitive set. §6.3a makes
+// Tier 1 live on every open precisely so a badge cannot lag behind what
+// DependencyTrack currently reports, and caching it here would reintroduce
+// exactly the staleness that rule exists to prevent. The Tier-2 walk needs no
+// help — it is already cached server-side, shared by connection fingerprint.
+//
+// Bounded per §13: VULN_MEMO_MAX_PROJECTS entries, evicted least-recently-used
+// (a hit re-inserts, so alternating between two projects never evicts either).
+// Emptied whenever the underlying numbers move — see vulnMemoClear()'s callers.
+const _vulnMemo        = new Map();
+const _vulnFetchShared = new Map();
+
+function vulnMemoGet(uuid) {
+  if (!_vulnMemo.has(uuid)) return null;
+  const entry = _vulnMemo.get(uuid);
+  _vulnMemo.delete(uuid);       // re-insert at the end: Map keeps insertion
+  _vulnMemo.set(uuid, entry);   // order, which is what makes eviction LRU
+  return entry;
+}
+
+function vulnMemoSet(uuid, entry) {
+  _vulnMemo.delete(uuid);
+  _vulnMemo.set(uuid, entry);
+  while (_vulnMemo.size > CONFIG.VULN_MEMO_MAX_PROJECTS) {
+    _vulnMemo.delete(_vulnMemo.keys().next().value); // oldest first
+  }
+  return entry;
+}
+
+/**
+ * Forget every memoised fetch. Called when the numbers behind them move: a
+ * violation refetch, or a full hierarchy reload. A stale finding list is worse
+ * than a slow one — the dialog is what a release engineer reads before deciding
+ * whether a build ships.
+ */
+function vulnMemoClear() { _vulnMemo.clear(); }
+
 /**
  * Rebuilds the table body from what is already known — never refetches.
  * Branches on the view-type dropdown (security/license) for which array and
@@ -4834,8 +4890,31 @@ async function openVulnDialog(uuid) {
   }
 
   const seq = ++_vulnReqSeq;
+
+  // Q36: a fetch this page already completed is rendered straight away. The
+  // Direct/Transitive badges are still resolved live below — only the rows
+  // themselves come from the memo.
+  const memo = vulnMemoGet(uuid);
+  if (memo) {
+    _vulnShownFindings = memo.findings;
+    _vulnShownLicense  = memo.license;
+    renderVulnRows();
+    if (memo.findings.length === 0) {
+      statusEl.textContent = 'No open vulnerabilities were found for this project.';
+    } else {
+      statusEl.hidden = true;
+      wrapEl.hidden = false;
+      if (memo.total > memo.findings.length) {
+        noteEl.hidden = false;
+        noteEl.textContent = `Showing the ${memo.findings.length} most severe of ${memo.total} findings.`;
+      }
+    }
+    loadVulnOrigins(uuid, seq);
+    return;
+  }
+
   try {
-    const findings = await fetchProjectFindings(node.name, node.version || '', seq);
+    const { findings: shown, total } = await sharedFindingsFetch(uuid, node.name, node.version || '');
     if (seq !== _vulnReqSeq) return; // superseded by a newer click
 
     // The dropdowns are reachable the instant the dialog opens, before this
@@ -4845,21 +4924,19 @@ async function openVulnDialog(uuid) {
     // keeping either way, so _vulnShownFindings and renderVulnRows() (which
     // reads _vulnViewType itself and so stays correct either way) always run;
     // only the status/wrap/note UI is guarded to the view that asked for it.
-    if (findings.length === 0) {
+    if (shown.length === 0) {
       if (_vulnViewType === 'security') statusEl.textContent = 'No open vulnerabilities were found for this project.';
       return;
     }
 
-    const sorted = sortFindingsBySeverity(findings);
-    const shown  = sorted.slice(0, CONFIG.VULN_MAX_ROWS);
     _vulnShownFindings = shown;
     renderVulnRows();
     if (_vulnViewType === 'security') {
       statusEl.hidden = true;
       wrapEl.hidden = false;
-      if (sorted.length > shown.length) {
+      if (total > shown.length) {
         noteEl.hidden = false;
-        noteEl.textContent = `Showing the ${shown.length} most severe of ${sorted.length} findings.`;
+        noteEl.textContent = `Showing the ${shown.length} most severe of ${total} findings.`;
       }
     }
 
@@ -4872,16 +4949,64 @@ async function openVulnDialog(uuid) {
 }
 
 /**
+ * Q36: one finding crawl per project at a time, whatever the dialog does.
+ *
+ * Two openers of the same project — reopening it while the first fetch is
+ * still running — join the same promise instead of starting a second crawl
+ * against DependencyTrack (§13's "no upstream work nobody asked for", applied
+ * to the same user rather than to two of them). The result is sorted,
+ * truncated and memoised here rather than in the caller, so it is kept exactly
+ * once no matter how many openers were waiting on it, and kept even when the
+ * opener that started it has since been superseded — a completed crawl is
+ * worth keeping regardless of who is still looking at it.
+ *
+ * A crawl that gave up early because the user moved to a different project
+ * returns its partial list but is NOT memoised: a truncated list stored as if
+ * complete would render later as a confident, wrong answer.
+ */
+function sharedFindingsFetch(uuid, name, version) {
+  if (_vulnFetchShared.has(uuid)) return _vulnFetchShared.get(uuid);
+  const pending = (async () => {
+    const { findings: all, complete } = await fetchProjectFindings(name, version, uuid);
+    const sorted = sortFindingsBySeverity(all);
+    const entry  = {
+      findings: sorted.slice(0, CONFIG.VULN_MAX_ROWS),
+      total:    sorted.length,
+      license:  null,
+    };
+    // `complete` is reported by the crawl itself rather than re-read from
+    // _vulnCurrentProject here: by the time this line runs the user may have
+    // navigated back to the project the crawl abandoned, and a global re-read
+    // would then call a half-finished list finished.
+    if (complete) vulnMemoSet(uuid, entry);
+    return entry;
+  })();
+  _vulnFetchShared.set(uuid, pending);
+  // Settled either way: a rejection must not leave a poisoned entry that every
+  // later open joins and re-throws from.
+  pending.catch(() => {}).then(() => _vulnFetchShared.delete(uuid));
+  return pending;
+}
+
+/**
  * Page through DT's finding search for one project. Bounded at
  * CONFIG.VULN_MAX_ROWS so a click against a portfolio project with thousands
  * of findings cannot turn into an unbounded fetch loop — the same reasoning
  * as the snapshot crawl's page ceiling in violation-cache/lib/violation-cache.js.
  */
-async function fetchProjectFindings(name, version, seq) {
+async function fetchProjectFindings(name, version, uuid) {
   const all = [];
   let page = 1;
   while (true) {
-    if (seq !== _vulnReqSeq) return all; // superseded — stop fetching, not just stop rendering
+    // Q36: abandoning the crawl is keyed to the PROJECT, not to _vulnReqSeq.
+    // The point of stopping early is to spare DependencyTrack work nobody
+    // wants any more — and reopening the same project wants it just as much as
+    // the first open did. Guarding on the sequence number instead threw away a
+    // crawl that was still entirely relevant, so the reopen started a second
+    // one from page 1. Rendering is still sequence-guarded by the caller: this
+    // decides what is worth fetching, not what is allowed on screen.
+    // `complete: false` is what stops a list cut short here being memoised.
+    if (_vulnCurrentProject !== uuid) return { findings: all, complete: false };
     const qs  = vulnFindingsQuery(name, version, page);
     const res = await apiFetch(`${DT_PROXY}/api/v1/finding?${qs}`);
     if (!res.ok) {
@@ -4895,7 +5020,10 @@ async function fetchProjectFindings(name, version, seq) {
     if (all.length >= CONFIG.VULN_MAX_ROWS) break;
     page++;
   }
-  return all;
+  // Reaching a `break` means the crawl finished on its own terms — every page
+  // read, or VULN_MAX_ROWS hit, which is the documented ceiling rather than an
+  // interruption. Both are complete answers to what this dialog can show.
+  return { findings: all, complete: true };
 }
 
 /**
@@ -4906,12 +5034,14 @@ async function fetchProjectFindings(name, version, seq) {
  * which can include partial-name matches from other projects). Bounded at
  * CONFIG.VULN_MAX_ROWS for the same reason fetchProjectFindings is.
  */
-async function fetchProjectLicenseViolations(name, uuid, seq) {
+async function fetchProjectLicenseViolations(name, uuid) {
   const all = [];
   let fetched = 0;
   let page = 1;
   while (true) {
-    if (seq !== _vulnReqSeq) return all; // superseded — stop fetching, not just stop rendering
+    // Q36, exactly as in fetchProjectFindings — including reporting whether
+    // the crawl finished, which is what decides if it may be memoised.
+    if (_vulnCurrentProject !== uuid) return { violations: all, complete: false };
     const qs  = vulnLicenseQuery(name, page);
     const res = await apiFetch(`${DT_PROXY}/api/v1/violation?${qs}`);
     if (!res.ok) {
@@ -4932,7 +5062,7 @@ async function fetchProjectLicenseViolations(name, uuid, seq) {
     if (all.length >= CONFIG.VULN_MAX_ROWS) break;
     page++;
   }
-  return all;
+  return { violations: all, complete: true };
 }
 
 /**
@@ -4975,11 +5105,22 @@ async function onVulnViewTypeChange() {
   wrapEl.hidden = true;
   statusEl.hidden = false;
   statusEl.textContent = 'Loading…';
-  const seq = _vulnReqSeq; // this dialog session's fetch guard — not bumped, license shares the security fetch's session
+  const seq  = _vulnReqSeq; // this dialog session's fetch guard — not bumped, license shares the security fetch's session
+  const uuid = _vulnCurrentProject; // pinned: this fetch memoises against the project it asked about, not whatever is open when it lands
   try {
-    const violations = await fetchProjectLicenseViolations(node.name, _vulnCurrentProject, seq);
+    const { violations, complete } = await fetchProjectLicenseViolations(node.name, uuid);
+    const sorted = sortLicenseByState(violations);
+    // Q36: kept before the guard, for the same reason the security fetch is —
+    // a completed crawl is worth remembering even if the user has moved on.
+    // Only a crawl that gave up early is skipped, and only an entry the memo
+    // already holds is updated: without that, a license fetch could resurrect
+    // a security entry that vulnMemoClear() has just discarded.
+    if (complete) {
+      const entry = vulnMemoGet(uuid);
+      if (entry) vulnMemoSet(uuid, { ...entry, license: sorted });
+    }
     if (seq !== _vulnReqSeq || _vulnViewType !== 'license') return; // superseded by a newer click or another view switch
-    _vulnShownLicense = sortLicenseByState(violations);
+    _vulnShownLicense = sorted;
 
     if (violations.length === 0) {
       statusEl.textContent = 'No license violations were found for this project.';
@@ -6525,6 +6666,10 @@ async function triggerCacheRefresh() {
 // was already shown with security-only data.  Updates allProjects in-place and
 // re-renders the table so operational/license/secpolicy columns populate.
 function applyViolationData(map) {
+  // Q36: new violation data means any memoised finding list may now be wrong.
+  // This is the single funnel every refetch path arrives through, which is why
+  // the invalidation lives here rather than at each of the four call sites.
+  vulnMemoClear();
   allProjects.forEach(p => {
     const v = map.get(p.uuid);
     p.operations = v ? v.ops      : { fail:0, warn:0, info:0, unassigned:0 };
@@ -6625,6 +6770,10 @@ async function connectLiveApi() {
 }
 
 async function refreshData() {
+  // Q36: ↻ Refresh reloads the whole portfolio, so nothing memoised against
+  // the old one may survive it — including a project that has since been
+  // removed from DependencyTrack entirely.
+  vulnMemoClear();
   if (liveMode) await connectLiveApi();
   else          loadMockData();
 }
@@ -6654,7 +6803,16 @@ function closeModal(id) {
   }
 }
 
+// Clicking the backdrop dismisses a modal — except one that opts out with
+// data-no-backdrop-close. The findings dialog does, because dismissal there is
+// not free: it is the one modal that starts network work on open, and a stray
+// click beside it threw that work away with nothing to say it had happened.
+// The attribute is declarative rather than an id test here so the exemption is
+// visible in the markup of the dialog it applies to, next to everything else
+// about that dialog, instead of in a list somewhere else that a new modal's
+// author would have to know to read.
 document.querySelectorAll('.modal-overlay').forEach(el => {
+  if (el.hasAttribute('data-no-backdrop-close')) return;
   el.addEventListener('click', e => { if (e.target === el) closeModal(el.id); });
 });
 

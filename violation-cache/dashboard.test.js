@@ -4111,17 +4111,29 @@ describe('vulnerability dialog — structure in the page', () => {
   test('an unconfigured account is told to connect, without a network round trip', () => {
     const fn = extractFunction(INDEX_HTML, 'openVulnDialog');
     assert.match(fn, /if \(!dtConfigured\)/);
-    // The early return must come before fetchProjectFindings is ever called.
+    // The early return must come before any fetch is ever started.
     const guardAt  = fn.indexOf('if (!dtConfigured)');
-    const fetchAt  = fn.indexOf('fetchProjectFindings(');
+    const fetchAt  = fn.indexOf('sharedFindingsFetch(');
     assert.ok(guardAt !== -1 && fetchAt !== -1 && guardAt < fetchAt);
   });
 
   test('a superseded click cannot land its response in a dialog the user has moved on from', () => {
+    // Q36 split one guard into two with different jobs, and both must hold.
+    // Rendering stays sequence-guarded: only the newest open may paint.
     const fn = extractFunction(INDEX_HTML, 'openVulnDialog');
-    assert.match(fn, /_vulnReqSeq/);
+    assert.match(fn, /seq !== _vulnReqSeq/);
+    // Fetching is guarded by PROJECT, not by sequence, so reopening the same
+    // project joins the crawl already running instead of abandoning it and
+    // starting a second one. Asserting the absence of the old guard is the
+    // point: reinstating it is the regression, and it would still pass every
+    // behavioural test because the second crawl does return the right rows.
     const fetchFn = extractFunction(INDEX_HTML, 'fetchProjectFindings');
-    assert.match(fetchFn, /seq !== _vulnReqSeq/);
+    assert.match(fetchFn, /_vulnCurrentProject !== uuid/);
+    // Comments stripped first: this one names _vulnReqSeq to explain why it is
+    // gone, and a test that reads prose would fail on its own documentation.
+    const code = fetchFn.replace(/\/\/[^\n]*/g, '');
+    assert.ok(!/_vulnReqSeq/.test(code),
+      'the crawl must not abandon itself on a sequence bump — that is what discarded a still-wanted fetch');
   });
 
   test('the fetch loop is bounded, so a huge project cannot spin forever', () => {
@@ -4419,6 +4431,152 @@ describe('dependency paths — transitiveTargets (Q26 walk scoping, Q27 union ac
   });
 });
 
+describe('Q36: the findings dialog keeps what it fetched', () => {
+  // The memo helpers read one Map and one CONFIG number, so they sandbox the
+  // same way every other pure helper on this page does.
+  const CAP = 3; // shrunk from VULN_MEMO_MAX_PROJECTS so eviction is testable
+  const memoSandbox = () => new Function(
+    `const CONFIG = { VULN_MEMO_MAX_PROJECTS: ${CAP} };\n`
+    + 'const _vulnMemo = new Map();\n'
+    + extractFunction(INDEX_HTML, 'vulnMemoGet') + '\n'
+    + extractFunction(INDEX_HTML, 'vulnMemoSet') + '\n'
+    + extractFunction(INDEX_HTML, 'vulnMemoClear') + '\n'
+    + 'return { vulnMemoGet, vulnMemoSet, vulnMemoClear, keys: () => [..._vulnMemo.keys()] };'
+  )();
+
+  const entry = (n) => ({ findings: [{ id: n }], total: n, license: null });
+
+  test('a stored entry comes back, and an unknown project is null not undefined', () => {
+    const m = memoSandbox();
+    m.vulnMemoSet('a', entry(1));
+    assert.deepEqual(m.vulnMemoGet('a'), entry(1));
+    assert.equal(m.vulnMemoGet('nope'), null);
+  });
+
+  test('the memo is bounded — the oldest project is evicted past the cap', () => {
+    // §13 forbids unbounded in-memory accumulation, and each entry can hold up
+    // to VULN_MAX_ROWS findings, so this bound is the whole reason the memo is
+    // allowed to exist at all.
+    const m = memoSandbox();
+    for (const k of ['a', 'b', 'c', 'd']) m.vulnMemoSet(k, entry(1));
+    assert.deepEqual(m.keys(), ['b', 'c', 'd'], 'the oldest insert should be gone');
+    assert.equal(m.vulnMemoGet('a'), null);
+  });
+
+  test('eviction is least-recently-USED, so alternating between two projects evicts neither', () => {
+    // Insertion order alone would evict 'a' here even though it is the project
+    // being looked at most — which is exactly the comparison the memo exists
+    // to make fast.
+    const m = memoSandbox();
+    m.vulnMemoSet('a', entry(1));
+    m.vulnMemoSet('b', entry(2));
+    m.vulnMemoSet('c', entry(3));
+    m.vulnMemoGet('a');                 // a re-read counts as use
+    m.vulnMemoSet('d', entry(4));
+    assert.deepEqual(m.keys(), ['c', 'a', 'd']);
+    assert.ok(m.vulnMemoGet('a'), 'the recently read project must survive');
+    assert.equal(m.vulnMemoGet('b'), null, 'the genuinely stale one goes instead');
+  });
+
+  test('re-storing a project updates it in place rather than adding a second entry', () => {
+    const m = memoSandbox();
+    m.vulnMemoSet('a', entry(1));
+    m.vulnMemoSet('a', { ...entry(1), license: [] });
+    assert.deepEqual(m.keys(), ['a']);
+    assert.deepEqual(m.vulnMemoGet('a').license, []);
+  });
+
+  test('vulnMemoClear empties it', () => {
+    const m = memoSandbox();
+    m.vulnMemoSet('a', entry(1));
+    m.vulnMemoClear();
+    assert.deepEqual(m.keys(), []);
+  });
+
+  test('the cap the page actually ships is a small positive number', () => {
+    const cap = INDEX_HTML.match(/VULN_MEMO_MAX_PROJECTS:\s*(\d+)/);
+    assert.ok(cap, 'VULN_MEMO_MAX_PROJECTS must be a CONFIG constant, not a literal at the use site');
+    const n = parseInt(cap[1], 10);
+    assert.ok(n >= 1 && n <= 32, `a memo of ${n} projects is a second copy of the portfolio`);
+  });
+
+  test('the memo is read before any fetch is started', () => {
+    const fn = extractFunction(INDEX_HTML, 'openVulnDialog');
+    assert.ok(fn.indexOf('vulnMemoGet(uuid)') < fn.indexOf('await sharedFindingsFetch'),
+      'a memo consulted after the fetch would save nothing');
+  });
+
+  test('a memo hit still resolves Direct/Transitive live — §6.3a is not negotiable', () => {
+    // The whole point of Tier 1 being uncached server-side is that a badge can
+    // never lag behind what DependencyTrack currently reports. A memo that
+    // also served the origin set would reintroduce exactly that staleness, so
+    // the hit path must still call loadVulnOrigins.
+    const fn  = extractFunction(INDEX_HTML, 'openVulnDialog');
+    const hit = fn.slice(fn.indexOf('const memo = vulnMemoGet(uuid)'),
+                         fn.indexOf('await sharedFindingsFetch'));
+    assert.match(hit, /loadVulnOrigins\(uuid, seq\)/);
+    assert.ok(!/_vulnDirectKeys\s*=/.test(hit),
+      'the memo must never restore a stored Direct/Transitive set');
+  });
+
+  test('only a crawl that finished is remembered', () => {
+    // A list cut short by the user moving to another project would otherwise
+    // be served later as a complete answer.
+    const fn = extractFunction(INDEX_HTML, 'sharedFindingsFetch');
+    assert.match(fn, /if \(complete\) vulnMemoSet\(uuid, entry\)/);
+    const crawl = extractFunction(INDEX_HTML, 'fetchProjectFindings');
+    assert.match(crawl, /complete: false/);
+    assert.match(crawl, /complete: true/);
+  });
+
+  test('one crawl per project: a second opener joins the first instead of racing it', () => {
+    const fn = extractFunction(INDEX_HTML, 'sharedFindingsFetch');
+    assert.match(fn, /_vulnFetchShared\.has\(uuid\)/);
+    assert.match(fn, /_vulnFetchShared\.set\(uuid, pending\)/);
+    // And a rejected fetch must not leave a poisoned promise every later open
+    // joins and re-throws from.
+    assert.match(fn, /catch\(\(\) => \{\}\)[\s\S]*_vulnFetchShared\.delete\(uuid\)/);
+  });
+
+  test('new violation data and a hierarchy reload both discard the memo', () => {
+    assert.match(extractFunction(INDEX_HTML, 'applyViolationData'), /vulnMemoClear\(\)/);
+    assert.match(extractFunction(INDEX_HTML, 'refreshData'), /vulnMemoClear\(\)/);
+  });
+});
+
+describe('Q36: only the ✕ closes the findings dialog', () => {
+  test('the dialog opts out of backdrop dismissal in its own markup', () => {
+    const tag = INDEX_HTML.match(/<div class="modal-overlay" id="vulnDialog"[^>]*>/);
+    assert.ok(tag, 'the findings dialog markup moved');
+    assert.match(tag[0], /data-no-backdrop-close/);
+  });
+
+  test('the backdrop handler honours the opt-out', () => {
+    const handler = INDEX_HTML.slice(
+      INDEX_HTML.indexOf("document.querySelectorAll('.modal-overlay')"),
+      INDEX_HTML.indexOf('function escHtml'));
+    assert.match(handler, /hasAttribute\('data-no-backdrop-close'\)/);
+    assert.ok(handler.indexOf('hasAttribute') < handler.indexOf('addEventListener'),
+      'the opt-out must be checked before the listener is attached, not inside it');
+  });
+
+  test('every other modal still dismisses on a backdrop click', () => {
+    // The exemption is for the one dialog that starts network work on open.
+    // A second one would need its own reason, in its own diff.
+    const optedOut = [...INDEX_HTML.matchAll(/<div class="modal-overlay" id="(\w+)"([^>]*)>/g)]
+      .filter(m => /data-no-backdrop-close/.test(m[2])).map(m => m[1]);
+    assert.deepEqual(optedOut, ['vulnDialog']);
+  });
+
+  test('closing still stops the dependency-path poll', () => {
+    // Removing backdrop dismissal must not quietly leave the ✕ as the only
+    // path that cleans up — it was already the only one that did.
+    const fn = extractFunction(INDEX_HTML, 'closeModal');
+    assert.match(fn, /id === 'vulnDialog'/);
+    assert.match(fn, /stopDepPathPoll\(\)/);
+  });
+});
+
 describe('Q32/item 1.4, 2.1-2.5: vulnParentOptions (hasDirect + the root list, both scoped to Origin mode)', () => {
   // Same adapter pattern as the vulnOriginFor sandbox above — vulnParentOptions
   // calls vulnOriginFor internally, so it needs the identical module state wired.
@@ -4583,7 +4741,7 @@ describe('dependency paths — the toggle and its polling', () => {
     // to the security view, or a fetch that lands late steals the screen back
     // from whatever the user switched to in the meantime.
     const fn = extractFunction(INDEX_HTML, 'openVulnDialog');
-    const afterFetch = fn.slice(fn.indexOf('const findings = await fetchProjectFindings'));
+    const afterFetch = fn.slice(fn.indexOf('await sharedFindingsFetch'));
     assert.match(afterFetch, /_vulnViewType === 'security'/,
       'the UI-state writes after the fetch must be conditioned on still being on the security view');
   });
@@ -5018,7 +5176,17 @@ describe('license risk — dialog state resets and orchestration', () => {
 
   test('item 5: the License fetch is sorted FAIL-WARN-INFO before it is stored, the same as Security', () => {
     const fn = extractFunction(INDEX_HTML, 'onVulnViewTypeChange');
-    assert.match(fn, /_vulnShownLicense\s*=\s*sortLicenseByState\(violations\)/);
+    // Sorted once, at the point the fetch lands, so no later re-render — an
+    // origin-filter change, a dependency-path toggle — ever has to re-sort.
+    // Q36 made the sorted array serve two consumers (the live view and the
+    // memo), so the assertion is that both read the same sorted value rather
+    // than that one particular assignment is spelled a particular way.
+    const sortAt   = fn.indexOf('sortLicenseByState(violations)');
+    const assignAt = fn.indexOf('_vulnShownLicense = sorted');
+    const memoAt   = fn.indexOf('license: sorted');
+    assert.ok(sortAt !== -1, 'the license fetch must be sorted where it lands');
+    assert.ok(assignAt > sortAt, 'the rendered array must be the sorted one');
+    assert.ok(memoAt   > sortAt, 'the memoised array must be the sorted one too');
   });
 
   test('switching to License re-checks dependency-path coverage when the toggle is already on', () => {
