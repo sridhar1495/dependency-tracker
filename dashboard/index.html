@@ -1768,6 +1768,12 @@ const CONFIG = {
   VULN_MAX_ROWS:       900,
   // How often the dialog polls while a dependency-path walk is building.
   DEP_PATH_POLL_MS:    1500,
+  // Q38: how many consecutive "no row yet" answers to wait through before
+  // deciding the walk never started. The window it covers is the gap between
+  // the route's 202 and runJob's markBuilding — milliseconds in practice, so
+  // ten ticks (~15s) is generous rather than tight, and it is bounded so a walk
+  // that truly never starts still ends in a message instead of a spinner.
+  DEP_PATH_START_GRACE_TICKS: 10,
   // Q36: how many projects' finding fetches are remembered across dialog
   // opens. Small deliberately — each entry can hold VULN_MAX_ROWS findings,
   // and §13 forbids unbounded in-memory accumulation. Eight covers the
@@ -4654,9 +4660,47 @@ function stopDepPathPoll() {
   if (_depPathPollTimer) { clearInterval(_depPathPollTimer); _depPathPollTimer = null; }
 }
 
+/**
+ * Q38: what one poll response means. Pure, so the three-way decision can be
+ * tested without a timer, a DOM or a network.
+ *
+ * `'none'` is the one that matters. It means the backend holds no row for this
+ * project — and immediately after a POST that is the *normal* state for a few
+ * milliseconds, because the route answers 202 and `runJob` writes `markBuilding`
+ * a beat later, while `startDepPathPoll` fires its first tick synchronously.
+ * Treating it as terminal made the dialog give up on a walk that then completed
+ * successfully, and report "Could not resolve dependency paths" over a cache row
+ * that said `ready` with six chains in it. It is a race the frontend lost, not
+ * an upstream failure, so `'none'` waits — but only for a bounded number of
+ * ticks, or a walk that genuinely never started would spin forever.
+ */
+function depPathPollAction(status, notFoundTicks) {
+  if (status === 'building') return 'wait';
+  if (status === 'none') {
+    return notFoundTicks <= CONFIG.DEP_PATH_START_GRACE_TICKS ? 'wait' : 'stop';
+  }
+  return status === 'ready' ? 'render' : 'stop';
+}
+
+/**
+ * Q38: why a walk produced nothing, in the dialog's own words. These were one
+ * undifferentiated sentence, which is why a CI failure needed the server log to
+ * explain it — and a user had no way at all to tell "try again" from "nobody
+ * looked" from "this one is wedged".
+ */
+function depPathFailureText(data) {
+  const why = {
+    none:    'the walk never started',
+    stalled: 'the walk stopped making progress — try ↻ Refetch paths',
+    failed:  (data && data.error) || 'the walk failed',
+  }[data && data.status];
+  return `Could not resolve dependency paths${why ? ': ' + why : '.'}`;
+}
+
 function startDepPathPoll(projectUuid, seq) {
   stopDepPathPoll();
   const statusEl = document.getElementById('vulnDepPathStatus');
+  let notFoundTicks = 0;
   const tick = async () => {
     if (seq !== _depPathReqSeq) { stopDepPathPoll(); return; }
     try {
@@ -4665,7 +4709,8 @@ function startDepPathPoll(projectUuid, seq) {
       const data = await r.json();
       if (seq !== _depPathReqSeq) return;
 
-      if (data.status === 'building') {
+      if (data.status === 'none') notFoundTicks++;
+      if (depPathPollAction(data.status, notFoundTicks) === 'wait') {
         statusEl.hidden = false;
         statusEl.textContent = data.totalComponents > 0
           ? `Resolving dependency paths — ${data.resolvedComponents} of ${data.totalComponents} components…`
@@ -4688,7 +4733,7 @@ function startDepPathPoll(projectUuid, seq) {
         renderVulnRows();
       } else {
         statusEl.hidden = false;
-        statusEl.textContent = `Could not resolve dependency paths${data.error ? ': ' + data.error : '.'}`;
+        statusEl.textContent = depPathFailureText(data);
       }
     } catch (_) { /* network hiccup — keep polling */ }
   };

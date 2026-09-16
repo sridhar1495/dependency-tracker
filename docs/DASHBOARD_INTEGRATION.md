@@ -806,8 +806,63 @@ A sheet is added only for the risk categories you selected.
 | Risk category | Sheets |
 |---|---|
 | Security | `SV_Vulnerability Findings`, `SV_Project Summary`, `SV_Component Summary`, `SV_CWE Summary` |
-| License | `LR_Violations`, `LR_Project Summary` |
-| Operational | `OR_Violations`, `OR_Project Summary` |
+| License | `LR_Violations`, `LR_Project Summary`, `LR_Unique Risks` |
+| Operational | `OR_Violations`, `OR_Project Summary`, `OR_Unique Risks` |
+
+### Origin and Dependency Path
+
+`SV_Vulnerability Findings` and `LR_Violations` each end with two columns
+answering the same question the findings dialog's Origin column does: does this
+component **block the release**, or does it go on the security SME's backlog?
+
+| Origin | Dependency Path | Means |
+|---|---|---|
+| `Direct` | *(blank)* | The project declares this component itself. The Origin column already said it; there is no chain to show. |
+| `Transitive` | `spring-boot-starter-web → jackson-databind` | Something else pulled it in, and this is how. One line per direct dependency that reaches it — a component reachable from three roots gets three lines. |
+| `Transitive` | `No path recorded` | The graph was walked and DependencyTrack records no route. Ordinary for a flat, manifest-built SBOM — not an error. |
+| `Transitive` | `Not resolved` | No walk result is available: the graph walk was skipped, failed, or the job was cancelled. Nobody looked, which is a different thing from looking and finding nothing. |
+| *(blank)* | *(blank)* | DependencyTrack could not be asked which components are direct for that project. The cell is left empty rather than guessed. |
+
+`LR_Unique Risks` — one row per unique component + version across every project
+— carries **Origin** and **Dependency Path** too. Origin has a third value here:
+
+- `Mixed` — the component is a *direct* dependency of one affected project and
+  *transitive* in another. Both are true, so neither single label is.
+
+Because one row covers several projects, **every line in its Dependency Path
+cell says which projects it applies to**:
+
+```
+Direct in: payments-api, checkout-web
+spring-boot-starter-web → jackson-databind  (orders-svc, billing-svc)
+logging-core → jackson-databind  (reporting-job)
+No path recorded: legacy-batch
+```
+
+Read that as: it ships as a direct dependency of two projects (those are the
+release blockers), arrives through Spring Boot in two more, through the logging
+stack in a fifth, and in the sixth DependencyTrack records no route at all.
+
+- Lines are grouped **by chain**, not by project, so a component pulled in the
+  same way by eight projects is one line with eight names rather than eight
+  near-identical lines. The widest-shared route is listed first.
+- `Direct in: …` always leads when it applies — that half is what blocks a
+  release.
+- Long cells are capped, and say so: `+N more routes` when a component has more
+  than 12 distinct routes, and `, +N more` when more than 6 projects share one
+  line. The **Project Names** column always carries the complete, uncapped list.
+
+Open `LR_Violations` if you want it laid out one project per row instead.
+
+**What this costs.** One extra DependencyTrack call per project to ask which
+components are direct, plus — only when something is actually transitive — one
+graph walk scoped to the components the workbook is going to print. That walk
+result is cached and shared by everyone using the same DependencyTrack
+connection, so the second report over the same project does not repeat it. If
+either step fails the report is still delivered; the affected cells are blank.
+
+The operational sheets have no Origin column: an operational policy violation is
+not about how a component entered the build.
 
 **`SV_CWE Summary`** has one row per unique **vulnerability + CWE** pair taken
 from `SV_Vulnerability Findings`: S.No, Vulnerability, CWE, Vulnerability Count,

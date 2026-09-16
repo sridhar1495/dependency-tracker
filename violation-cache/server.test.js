@@ -3714,14 +3714,25 @@ describe('reports — the CWE summary needs no extra DependencyTrack call', () =
     });
     try {
       const data = await reportsMod.collectReportData(
-        'http://dt', 'k',
+        { apiUrl: 'http://dt', apiKey: 'k' },
         [{ uuid: 'p1', name: 'Alpha', version: '1' }],
         ['security'], { cancelled: false }
       );
       assert.equal(data.secCweMap.size, 1);
-      assert.equal(asked.length, 1, `one findings page only: ${JSON.stringify(asked)}`);
-      assert.ok(asked.every(p => p.startsWith('/api/v1/finding')),
-        'the CWE summary must not introduce a second upstream endpoint');
+      // The CWE summary itself still adds nothing: one findings page, and no
+      // second findings-shaped call to build the summary from.
+      const findingCalls = asked.filter(p => p.startsWith('/api/v1/finding'));
+      assert.equal(findingCalls.length, 1, `one findings page only: ${JSON.stringify(asked)}`);
+      // Q37 narrowed this rule rather than deleting it. Origin resolution is
+      // allowed exactly one Tier-1 project read per project (CLAUDE.md §6.3a
+      // keeps it live and uncached on purpose) and nothing else — no per
+      // finding call, and no graph walk when nothing is transitive, which is
+      // the case this stub's single direct-less project produces.
+      const allowed = /^\/api\/v1\/(finding|project\/)/;
+      assert.ok(asked.every(p => allowed.test(p)),
+        `no upstream endpoint beyond findings and the Tier-1 project read: ${JSON.stringify(asked)}`);
+      assert.equal(asked.filter(p => p.startsWith('/api/v1/project/')).length, 1,
+        'exactly one Tier-1 read per project — never one per finding');
     } finally { restore(); }
   });
 
@@ -3737,7 +3748,7 @@ describe('reports — the CWE summary needs no extra DependencyTrack call', () =
     });
     try {
       const data = await reportsMod.collectReportData(
-        'http://dt', 'k',
+        { apiUrl: 'http://dt', apiKey: 'k' },
         [{ uuid: 'p1', name: 'Alpha', version: '1' }],
         ['security'], { cancelled: false }
       );
@@ -3760,7 +3771,7 @@ describe('reports — the CWE summary needs no extra DependencyTrack call', () =
     });
     try {
       const data = await reportsMod.collectReportData(
-        'http://dt', 'k',
+        { apiUrl: 'http://dt', apiKey: 'k' },
         [{ uuid: 'p1', name: 'Alpha', version: '1' },
          { uuid: 'p2', name: 'Beta',  version: '1' }],
         ['security'], { cancelled: false }
@@ -3785,7 +3796,7 @@ describe('reports — the CWE summary needs no extra DependencyTrack call', () =
     });
     try {
       const data = await reportsMod.collectReportData(
-        'http://dt', 'k',
+        { apiUrl: 'http://dt', apiKey: 'k' },
         [{ uuid: 'p1', name: 'Alpha', version: '1' }],
         ['security'], { cancelled: false }
       );
@@ -3797,6 +3808,441 @@ describe('reports — the CWE summary needs no extra DependencyTrack call', () =
       const multi = [...data.secCweMap.values()].find(e => e.vulnId === 'CVE-3');
       assert.equal(multi.cwe, 'CWE-20, CWE-79', 'multi-CWE findings stay on one row');
     } finally { restore(); }
+  });
+});
+
+describe('Q37: Direct/Transitive and the chain behind it, in a report', () => {
+  const originsMod   = require('./lib/report-origins');
+  const depPathsMod  = require('./lib/dependency-paths');
+  const depCacheMod  = require('./lib/dependency-path-cache');
+  const K = originsMod.originKey;
+
+  // ── The pure cell formatters ──────────────────────────────────────────────
+  test('the Origin cell is blank rather than guessed when Tier 1 could not answer', () => {
+    assert.equal(originsMod.originCell({ origin: 'Direct' }), 'Direct');
+    assert.equal(originsMod.originCell({ origin: 'Transitive' }), 'Transitive');
+    assert.equal(originsMod.originCell(null), '');
+    assert.equal(originsMod.originCell({ origin: '' }), '',
+      'an empty cell reads as "not determined"; "Direct" would read as a release-blocking fact');
+  });
+
+  test('the path cell distinguishes all four states a reader cannot otherwise tell apart', () => {
+    assert.equal(originsMod.pathCell({ origin: 'Direct', chains: null }), '',
+      'a direct component has no chain and the Origin column already said so');
+    assert.equal(
+      originsMod.pathCell({ origin: 'Transitive', chains: [['a', 'b', 'c']] }),
+      'a \u2192 b \u2192 c');
+    assert.equal(originsMod.pathCell({ origin: 'Transitive', chains: [] }), 'No path recorded',
+      'walked, nothing found — an ordinary flat SBOM, not a failure');
+    assert.equal(originsMod.pathCell({ origin: 'Transitive', chains: null }), 'Not resolved',
+      'no walk result at all is a different thing from a walk that found nothing');
+  });
+
+  test('a component reachable from two roots prints one line per root', () => {
+    const cell = originsMod.pathCell({ origin: 'Transitive', chains: [['a', 'x'], ['b', 'x']] });
+    assert.equal(cell.split('\n').length, 2);
+    assert.match(cell, /a \u2192 x/);
+    assert.match(cell, /b \u2192 x/);
+  });
+
+  test('the aggregate Origin reports Mixed rather than picking a side', () => {
+    const D = { origin: 'Direct' }, T = { origin: 'Transitive' };
+    assert.equal(originsMod.aggregateOriginCell([D, D]), 'Direct');
+    assert.equal(originsMod.aggregateOriginCell([T, T]), 'Transitive');
+    assert.equal(originsMod.aggregateOriginCell([D, T]), 'Mixed',
+      'direct in one project and transitive in another is a real answer');
+    assert.equal(originsMod.aggregateOriginCell([]), '');
+    assert.equal(originsMod.aggregateOriginCell([null, { origin: '' }]), '',
+      'unresolved entries must not silently become one of the two labels');
+  });
+
+  test('the aggregate path cell keeps all four kinds of line distinct', () => {
+    const cell = originsMod.aggregatePathCell([
+      { projName: 'Alpha',   entry: { origin: 'Direct', chains: null } },
+      { projName: 'Beta',    entry: { origin: 'Transitive', chains: [['r', 'lib']] } },
+      { projName: 'Gamma',   entry: { origin: 'Transitive', chains: [] } },
+      { projName: 'Delta',   entry: { origin: 'Transitive', chains: null } },
+    ]);
+    assert.deepEqual(cell.split('\n'), [
+      'Direct in: Alpha',
+      'r \u2192 lib  (Beta)',
+      'No path recorded: Gamma',
+      'Not resolved: Delta',
+    ], 'walked-and-found-nothing and nobody-looked stay separate sentences');
+  });
+
+  test('the aggregate path cell is empty when nothing resolved at all', () => {
+    assert.equal(originsMod.aggregatePathCell([{ projName: 'Alpha', entry: null }]), '');
+    assert.equal(originsMod.aggregatePathCell([]), '');
+    assert.equal(originsMod.aggregatePathCell(undefined), '');
+  });
+
+  test('both aggregate caps admit what they hide rather than dropping it', () => {
+    // Q33's rule, one level up: a display cap must say so on screen.
+    const manyProjects = Array.from({ length: originsMod.UNIQUE_PATH_MAX_PROJECTS + 3 },
+      (_, i) => ({ projName: `p${String(i).padStart(2, '0')}`,
+                   entry: { origin: 'Transitive', chains: [['r', 'lib']] } }));
+    assert.match(originsMod.aggregatePathCell(manyProjects), /, \+3 more\)/);
+
+    const manyChains = Array.from({ length: originsMod.UNIQUE_PATH_MAX_CHAINS + 2 },
+      (_, i) => ({ projName: `p${i}`, entry: { origin: 'Transitive', chains: [[`root${i}`, 'lib']] } }));
+    const lines = originsMod.aggregatePathCell(manyChains).split('\n');
+    assert.equal(lines.length, originsMod.UNIQUE_PATH_MAX_CHAINS + 1);
+    assert.equal(lines[lines.length - 1], '+2 more routes');
+  });
+
+  test('the aggregate path cell renders the same way whatever order it is given', () => {
+    // Sorted by share count then name, so a report run twice is byte-identical.
+    const refs = [
+      { projName: 'Zeta',  entry: { origin: 'Transitive', chains: [['b', 'lib']] } },
+      { projName: 'Alpha', entry: { origin: 'Transitive', chains: [['a', 'lib']] } },
+      { projName: 'Beta',  entry: { origin: 'Transitive', chains: [['a', 'lib']] } },
+    ];
+    const forward = originsMod.aggregatePathCell(refs);
+    const reverse = originsMod.aggregatePathCell([...refs].reverse());
+    assert.equal(forward, reverse);
+    assert.equal(forward.split('\n')[0], 'a \u2192 lib  (Alpha, Beta)');
+  });
+
+  // ── Resolution ────────────────────────────────────────────────────────────
+  const conn = { apiUrl: 'http://dt', apiKey: 'k', fingerprint: 'fp' };
+
+  test('a project whose components are all direct starts no walk at all', async () => {
+    let walked = false;
+    const restore = stub(depPathsMod, {
+      getDirectDependencies: async () => ({ direct: [{ purl: 'pkg:npm/a@1' }, { purl: 'pkg:npm/b@1' }] }),
+      runJob: async () => { walked = true; },
+    });
+    try {
+      const out = await originsMod.resolveForProject(
+        conn, 'p1', new Set(['pkg:npm/a@1', 'pkg:npm/b@1']), { cancelled: false });
+      assert.equal(walked, false, 'nothing transitive means no graph walk is worth starting');
+      assert.equal(out.get(K('p1', 'pkg:npm/a@1')).origin, 'Direct');
+      assert.equal(out.get(K('p1', 'pkg:npm/b@1')).chains, null);
+    } finally { restore(); }
+  });
+
+  test('the walk is scoped to the transitive components the workbook will print', async () => {
+    let targets = null;
+    const restore = stub(depPathsMod, {
+      getDirectDependencies: async () => ({ direct: [{ purl: 'pkg:npm/a@1' }] }),
+      runJob: async (_c, _u, t) => { targets = t; },
+    });
+    const restoreCache = stub(depCacheMod, {
+      getMeta: async () => ({ status: 'ready', paths: { 'pkg:npm/x@1': { chains: [['a', 'x']] } } }),
+    });
+    try {
+      const out = await originsMod.resolveForProject(
+        conn, 'p1', new Set(['pkg:npm/a@1', 'pkg:npm/x@1', 'pkg:npm/y@1']), { cancelled: false });
+      assert.deepEqual([...targets].sort(), ['pkg:npm/x@1', 'pkg:npm/y@1'],
+        'the direct component must not be walked for, and nothing outside the report may be either');
+      assert.deepEqual(out.get(K('p1', 'pkg:npm/x@1')).chains, [['a', 'x']]);
+      assert.deepEqual(out.get(K('p1', 'pkg:npm/y@1')).chains, [],
+        'a target the walk reached no path for is "walked, nothing found", not "not resolved"');
+    } finally { restore(); restoreCache(); }
+  });
+
+  test('a Tier-1 failure leaves every cell blank instead of guessing', async () => {
+    const restore = stub(depPathsMod, {
+      getDirectDependencies: async () => { throw new Error('DT said no'); },
+      runJob: async () => { throw new Error('must not be reached'); },
+    });
+    try {
+      const out = await originsMod.resolveForProject(
+        conn, 'p1', new Set(['pkg:npm/a@1']), { cancelled: false });
+      assert.equal(out.size, 0, 'a report is worth delivering without the column; not worth failing over');
+    } finally { restore(); }
+  });
+
+  test('no fingerprint means Tier 1 only — badges yes, chains no', async () => {
+    let walked = false;
+    const restore = stub(depPathsMod, {
+      getDirectDependencies: async () => ({ direct: [] }),
+      runJob: async () => { walked = true; },
+    });
+    try {
+      const out = await originsMod.resolveForProject(
+        { apiUrl: 'http://dt', apiKey: 'k' }, 'p1', new Set(['pkg:npm/x@1']), { cancelled: false });
+      assert.equal(walked, false, 'the path cache is keyed by fingerprint — without one there is nothing to share');
+      assert.equal(out.get(K('p1', 'pkg:npm/x@1')).origin, 'Transitive');
+      assert.equal(out.get(K('p1', 'pkg:npm/x@1')).chains, null);
+    } finally { restore(); }
+  });
+
+  test('a cancelled job classifies what it has and starts no new walk', async () => {
+    let walked = false;
+    const restore = stub(depPathsMod, {
+      getDirectDependencies: async () => ({ direct: [] }),
+      runJob: async () => { walked = true; },
+    });
+    try {
+      const out = await originsMod.resolveForProject(
+        conn, 'p1', new Set(['pkg:npm/x@1']), { cancelled: true });
+      assert.equal(walked, false);
+      assert.equal(out.get(K('p1', 'pkg:npm/x@1')).origin, 'Transitive');
+    } finally { restore(); }
+  });
+
+  test('a walk that did not end ready leaves chains null, never empty', async () => {
+    // "Not resolved" and "No path recorded" are different sentences in the
+    // workbook, and this is the boundary between them.
+    const restore = stub(depPathsMod, {
+      getDirectDependencies: async () => ({ direct: [] }),
+      runJob: async () => {},
+    });
+    const restoreCache = stub(depCacheMod, { getMeta: async () => ({ status: 'failed', paths: {} }) });
+    try {
+      const out = await originsMod.resolveForProject(
+        conn, 'p1', new Set(['pkg:npm/x@1']), { cancelled: false });
+      assert.equal(out.get(K('p1', 'pkg:npm/x@1')).chains, null);
+    } finally { restore(); restoreCache(); }
+  });
+
+  // ── Wiring into the collector ─────────────────────────────────────────────
+  test('Security and License share ONE walk per project, over the union of both', async () => {
+    // Two walks would be worse than wasteful: runJob's storeResult overwrites
+    // the stored paths with exactly what it was asked for, so the narrower
+    // second walk would discard the first one's result (§8.1, one layer down).
+    reportsMod.configure({ reportConcurrency: 2, violationConcurrency: 2 });
+    const walks = [];
+    const restoreDt = stub(dtFetchMod, {
+      dtGetWithRetry: async (urlPath) => {
+        if (urlPath.startsWith('/api/v1/finding')) {
+          return {
+            json: [{ vulnerability: { vulnId: 'CVE-1', severity: 'HIGH' },
+                     component: { name: 'lib-a', purl: 'pkg:npm/lib-a@1', projectName: 'Alpha' } }],
+            headers: { 'x-total-count': '1' },
+          };
+        }
+        if (urlPath.startsWith('/api/v1/violation')) {
+          return {
+            json: [{ project: { uuid: 'p1' },
+                     component: { name: 'lib-b', purl: 'pkg:npm/lib-b@1', version: '1' },
+                     policyCondition: { value: 'GPL', policy: { name: 'Lic', violationState: 'FAIL' } } }],
+            headers: { 'x-total-count': '1' },
+          };
+        }
+        return { json: [], headers: {} };
+      },
+    });
+    const restorePaths = stub(depPathsMod, {
+      getDirectDependencies: async () => ({ direct: [] }),
+      runJob: async (_c, uuid, targets) => { walks.push({ uuid, targets: [...targets].sort() }); },
+    });
+    const restoreCache = stub(depCacheMod, {
+      getMeta: async () => ({ status: 'ready', paths: { 'pkg:npm/lib-a@1': { chains: [['root', 'lib-a']] } } }),
+    });
+    try {
+      const data = await reportsMod.collectReportData(
+        { apiUrl: 'http://dt', apiKey: 'k', fingerprint: 'fp' },
+        [{ uuid: 'p1', name: 'Alpha', version: '1' }],
+        ['security', 'license'], { cancelled: false }
+      );
+      assert.equal(walks.length, 1, `one walk per project, not one per category: ${JSON.stringify(walks)}`);
+      assert.deepEqual(walks[0].targets, ['pkg:npm/lib-a@1', 'pkg:npm/lib-b@1'],
+        'the walk must cover what BOTH sheets are going to print');
+      assert.deepEqual(data.origins.get(K('p1', 'pkg:npm/lib-a@1')).chains, [['root', 'lib-a']]);
+      assert.deepEqual(data.origins.get(K('p1', 'pkg:npm/lib-b@1')).chains, []);
+      // The rows carry what the workbook needs to look an origin up.
+      assert.equal(data.secFindings[0]._projUuid, 'p1');
+      assert.equal(data.secFindings[0]._compKey, 'pkg:npm/lib-a@1');
+      assert.equal(data.licViolations[0].projUuid, 'p1');
+      assert.equal(data.licViolations[0].compKey, 'pkg:npm/lib-b@1');
+    } finally { restoreDt(); restorePaths(); restoreCache(); }
+  });
+
+  test('an operational-only report resolves no origins and reads no project', async () => {
+    reportsMod.configure({ reportConcurrency: 2, violationConcurrency: 2 });
+    const asked = [];
+    const restoreDt = stub(dtFetchMod, {
+      dtGetWithRetry: async (urlPath) => { asked.push(urlPath); return { json: [], headers: {} }; },
+    });
+    try {
+      const data = await reportsMod.collectReportData(
+        { apiUrl: 'http://dt', apiKey: 'k', fingerprint: 'fp' },
+        [{ uuid: 'p1', name: 'Alpha', version: '1' }],
+        ['operational'], { cancelled: false }
+      );
+      assert.equal(data.origins.size, 0);
+      assert.ok(!asked.some(p => p.startsWith('/api/v1/project/')),
+        'neither operational sheet names an Origin, so nothing should be resolved for one');
+    } finally { restoreDt(); }
+  });
+});
+
+describe('Q37: the Origin and Dependency Path columns in the workbook', () => {
+  const originsMod = require('./lib/report-origins');
+  const K = originsMod.originKey;
+
+  const finding = (projUuid, compKey, name) => ({
+    vulnerability: { vulnId: 'CVE-1', severity: 'HIGH' },
+    component: { name, projectName: 'Alpha', projectVersion: '1', version: '1' },
+    _projUuid: projUuid, _compKey: compKey,
+  });
+  const licRow = (projUuid, compKey, projName, component) => ({
+    projUuid, compKey, projName, projVersion: '1',
+    component, compVersion: '1', licenseName: 'GPL', licenseId: 'GPL-3.0',
+    license: 'GPL', policy: 'Lic', state: 'FAIL',
+  });
+
+  const data = (over = {}) => ({
+    riskTypes: ['security', 'license'],
+    secFindings: [], secProjectSummary: new Map(), secComponentMap: new Map(), secCweMap: new Map(),
+    licViolations: [], licProjectSummary: new Map(),
+    opsViolations: [], opsProjectSummary: new Map(),
+    ...over,
+  });
+
+  async function sheet(d, name) {
+    const buf = await excelMod.buildExcelReport(null, d);
+    const wb = new (require('exceljs').Workbook)();
+    await wb.xlsx.load(buf);
+    return wb.getWorksheet(name);
+  }
+  const headers = (ws) => ws.getRow(1).values.slice(1).map(String);
+  const cellsAt = (ws, header) => {
+    const i = headers(ws).indexOf(header) + 1;
+    const out = [];
+    ws.eachRow((row, n) => { if (n > 1) out.push(row.getCell(i).value); });
+    return out;
+  };
+
+  test('the findings sheet gains both columns, and each row reports its own project', async () => {
+    // The same component is direct in one project and transitive in another —
+    // the case a per-component (rather than per project+component) lookup gets
+    // silently wrong.
+    const origins = new Map([
+      [K('p1', 'c-shared'), { origin: 'Direct', chains: null }],
+      [K('p2', 'c-shared'), { origin: 'Transitive', chains: [['root', 'c-shared']] }],
+    ]);
+    const ws = await sheet(data({
+      origins,
+      secFindings: [finding('p1', 'c-shared', 'shared'), finding('p2', 'c-shared', 'shared')],
+    }), 'SV_Vulnerability Findings');
+    assert.deepEqual(headers(ws).slice(-2), ['Origin', 'Dependency Path']);
+    assert.deepEqual(cellsAt(ws, 'Origin'), ['Direct', 'Transitive']);
+    assert.deepEqual(cellsAt(ws, 'Dependency Path'), ['', 'root \u2192 c-shared']);
+  });
+
+  test('an unresolved transitive row says so rather than leaving a blank cell', async () => {
+    const ws = await sheet(data({
+      origins: new Map([[K('p1', 'c1'), { origin: 'Transitive', chains: null }]]),
+      secFindings: [finding('p1', 'c1', 'lib')],
+    }), 'SV_Vulnerability Findings');
+    assert.deepEqual(cellsAt(ws, 'Dependency Path'), ['Not resolved']);
+  });
+
+  test('a finding with no origin entry at all still renders, blank', async () => {
+    const ws = await sheet(data({ origins: new Map(), secFindings: [finding('p9', 'c9', 'lib')] }),
+      'SV_Vulnerability Findings');
+    assert.deepEqual(cellsAt(ws, 'Origin'), ['']);
+    assert.deepEqual(cellsAt(ws, 'Dependency Path'), ['']);
+  });
+
+  test('a workbook built with no origins map at all does not throw', async () => {
+    // buildExcelReport is called by two paths and has been for a long time;
+    // a missing field must degrade to blank cells, never to a failed report.
+    const ws = await sheet(data({ secFindings: [finding('p1', 'c1', 'lib')] }),
+      'SV_Vulnerability Findings');
+    assert.deepEqual(cellsAt(ws, 'Origin'), ['']);
+  });
+
+  test('the license violations sheet gains the same two columns', async () => {
+    const ws = await sheet(data({
+      origins: new Map([
+        [K('p1', 'c1'), { origin: 'Transitive', chains: [['a', 'b', 'c1']] }],
+        [K('p1', 'c2'), { origin: 'Direct', chains: null }],
+      ]),
+      licViolations: [licRow('p1', 'c1', 'Alpha', 'lib-1'), licRow('p1', 'c2', 'Alpha', 'lib-2')],
+    }), 'LR_Violations');
+    assert.deepEqual(headers(ws).slice(-2), ['Origin', 'Dependency Path']);
+    assert.deepEqual(cellsAt(ws, 'Origin'), ['Transitive', 'Direct']);
+    assert.deepEqual(cellsAt(ws, 'Dependency Path'), ['a \u2192 b \u2192 c1', '']);
+  });
+
+  test('LR_Unique Risks reports Mixed, and names the projects behind each half', async () => {
+    // One component, two projects, two different answers. Collapsing that to
+    // either label would be false for half the rows the line covers — and the
+    // path cell has to say which project each half belongs to, or a reader
+    // cannot tell "direct here, transitive there" from "transitive by two
+    // different routes".
+    const ws = await sheet(data({
+      origins: new Map([
+        [K('p1', 'ck'), { origin: 'Direct', chains: null }],
+        [K('p2', 'ck'), { origin: 'Transitive', chains: [['r', 'lib']] }],
+      ]),
+      licViolations: [licRow('p1', 'ck', 'Alpha', 'lib'), licRow('p2', 'ck', 'Beta', 'lib')],
+    }), 'LR_Unique Risks');
+    assert.ok(headers(ws).includes('Origin'));
+    assert.ok(headers(ws).includes('Dependency Path'));
+    assert.deepEqual(cellsAt(ws, 'Origin'), ['Mixed']);
+    assert.deepEqual(cellsAt(ws, 'Affected Projects'), [2], 'still one aggregated row');
+    const cell = String(cellsAt(ws, 'Dependency Path')[0]);
+    assert.equal(cell.split('\n')[0], 'Direct in: Alpha',
+      'the release-blocking half leads');
+    assert.match(cell, /r \u2192 lib {2}\(Beta\)/,
+      'and the chain names the project it actually applies to');
+  });
+
+  test('one project violating the same component twice contributes one path entry', async () => {
+    // originRefs is keyed by (project, component), so a component with a FAIL
+    // and a WARN in one project must not list that project twice.
+    const ws = await sheet(data({
+      origins: new Map([[K('p1', 'ck'), { origin: 'Transitive', chains: [['r', 'lib']] }]]),
+      licViolations: [licRow('p1', 'ck', 'Alpha', 'lib'), licRow('p1', 'ck', 'Alpha', 'lib')],
+    }), 'LR_Unique Risks');
+    assert.equal(String(cellsAt(ws, 'Dependency Path')[0]), 'r \u2192 lib  (Alpha)');
+  });
+
+  test('projects sharing one chain collapse onto a single line', async () => {
+    // The whole reason the cell groups by chain rather than by project: three
+    // projects pulled in the same way is one line with three names, not three
+    // near-identical lines.
+    const ws = await sheet(data({
+      origins: new Map([
+        [K('p1', 'ck'), { origin: 'Transitive', chains: [['r', 'lib']] }],
+        [K('p2', 'ck'), { origin: 'Transitive', chains: [['r', 'lib']] }],
+        [K('p3', 'ck'), { origin: 'Transitive', chains: [['other', 'lib']] }],
+      ]),
+      licViolations: [licRow('p1', 'ck', 'Alpha', 'lib'), licRow('p2', 'ck', 'Beta', 'lib'),
+                      licRow('p3', 'ck', 'Gamma', 'lib')],
+    }), 'LR_Unique Risks');
+    const lines = String(cellsAt(ws, 'Dependency Path')[0]).split('\n');
+    assert.equal(lines.length, 2, `one line per distinct chain: ${JSON.stringify(lines)}`);
+    assert.equal(lines[0], 'r \u2192 lib  (Alpha, Beta)', 'the widest-shared chain leads');
+    assert.equal(lines[1], 'other \u2192 lib  (Gamma)');
+  });
+
+  test('a unique risk that is transitive everywhere says Transitive, not Mixed', async () => {
+    const ws = await sheet(data({
+      origins: new Map([
+        [K('p1', 'ck'), { origin: 'Transitive', chains: [['r', 'lib']] }],
+        [K('p2', 'ck'), { origin: 'Transitive', chains: [] }],
+      ]),
+      licViolations: [licRow('p1', 'ck', 'Alpha', 'lib'), licRow('p2', 'ck', 'Beta', 'lib')],
+    }), 'LR_Unique Risks');
+    assert.deepEqual(cellsAt(ws, 'Origin'), ['Transitive']);
+  });
+
+  test('the path column wraps, so a second parent is not hidden behind the row height', async () => {
+    const ws = await sheet(data({
+      origins: new Map([[K('p1', 'c1'), { origin: 'Transitive', chains: [['a', 'c1'], ['b', 'c1']] }]]),
+      secFindings: [finding('p1', 'c1', 'lib')],
+    }), 'SV_Vulnerability Findings');
+    const i = headers(ws).indexOf('Dependency Path') + 1;
+    assert.equal(ws.getColumn(i).alignment.wrapText, true);
+    assert.match(String(cellsAt(ws, 'Dependency Path')[0]), /a \u2192 c1\nb \u2192 c1/);
+  });
+
+  test('the operational sheets are deliberately untouched', async () => {
+    const ws = await sheet({
+      ...data({ riskTypes: ['operational'] }),
+      opsViolations: [{ projName: 'Alpha', projVersion: '1', component: 'lib', compVersion: '1',
+                        policy: 'P', subject: 's', condition: 'c', state: 'FAIL' }],
+      opsProjectSummary: new Map(),
+    }, 'OR_Violations');
+    assert.ok(!headers(ws).includes('Origin'),
+      'operational violations are not about a component entering the build — out of scope by decision');
   });
 });
 

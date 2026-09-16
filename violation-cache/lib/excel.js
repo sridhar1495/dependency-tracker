@@ -5,6 +5,7 @@
 // Multi-sheet XLSX generation. The only consumer of exceljs.
 
 const ExcelJS = require('exceljs');    // MIT-licensed Excel generation library
+const reportOrigins = require('./report-origins');
 const { cweLabel, cweReference, vulnReference } = require('./cwe');
 // Required for the fallback only; lib/branding.js does no I/O at require time.
 const { DEFAULT_TITLE: DEFAULT_APP_TITLE } = require('./branding');
@@ -26,14 +27,51 @@ const { DEFAULT_TITLE: DEFAULT_APP_TITLE } = require('./branding');
  *           licViolations: object[], licProjectSummary: Map,
  *           opsViolations: object[], opsProjectSummary: Map }} reportData
  */
+/**
+ * Q37: a row's origin entry, or null. Kept as one helper so every sheet asks
+ * the same way and a row whose project or component was never resolved falls
+ * through to the blank/"Not resolved" cells rather than throwing.
+ */
+function originLookup(origins) {
+  return (projUuid, compKey) => {
+    if (!origins || !projUuid || !compKey) return null;
+    return origins.get(reportOrigins.originKey(projUuid, compKey)) || null;
+  };
+}
+
+/**
+ * Q37: one aggregated row's (project, component) pairs, resolved against the
+ * origins map. Built once per row and handed to both aggregate formatters, so
+ * the Origin cell and the Dependency Path cell can never be computed from
+ * different sets.
+ */
+function originRefsFor(origins) {
+  return (entry) => [...(entry.originRefs || new Map())].map(([key, projName]) => ({
+    projName,
+    entry: (origins && origins.get(key)) || null,
+  }));
+}
+
+/**
+ * A chain per line needs wrapping, or Excel shows one line and hides the rest
+ * behind the row height — which would read as "this component has one parent".
+ */
+function wrapPathColumn(ws, key) {
+  ws.getColumn(key).alignment = { wrapText: true, vertical: 'top' };
+}
+
 async function buildExcelReport(filePath, reportData) {
   const {
     riskTypes,
+    origins,
     secFindings, secProjectSummary, secComponentMap, secCweMap,
     licViolations, licProjectSummary,
     opsViolations, opsProjectSummary,
     appTitle,
   } = reportData;
+
+  const originOf     = originLookup(origins);
+  const originRefsOf = originRefsFor(origins);
 
   const wb = new ExcelJS.Workbook();
   // The administrator's title, when one is configured. Defaulted here rather
@@ -80,6 +118,10 @@ async function buildExcelReport(filePath, reportData) {
       { header: 'Component',       key: 'component',  width: 36 },
       { header: 'Current Version', key: 'curVer',     width: 14 },
       { header: 'Latest Version',  key: 'latestVer',  width: 14 },
+      // Q37: the same question the findings dialog's Origin column answers —
+      // does this block the release, or go on the SME's backlog.
+      { header: 'Origin',          key: 'origin',     width: 12 },
+      { header: 'Dependency Path', key: 'depPath',    width: 60 },
     ];
     styleHeader(ws1);
     secFindings.forEach((f, idx) => {
@@ -98,8 +140,11 @@ async function buildExcelReport(filePath, reportData) {
         component: comp,
         curVer:    c.version        || '',
         latestVer: c.latestVersion  || '',
+        origin:    reportOrigins.originCell(originOf(f._projUuid, f._compKey)),
+        depPath:   reportOrigins.pathCell(originOf(f._projUuid, f._compKey)),
       });
     });
+    wrapPathColumn(ws1, 'depPath');
     alternateShading(ws1);
 
     // Sheet: Security Project Summary
@@ -192,6 +237,8 @@ async function buildExcelReport(filePath, reportData) {
       { header: 'Policy Condition',  key: 'license',     width: 30 },
       { header: 'Policy',            key: 'policy',      width: 30 },
       { header: 'State',             key: 'state',       width: 10 },
+      { header: 'Origin',            key: 'origin',      width: 12 },
+      { header: 'Dependency Path',   key: 'depPath',     width: 60 },
     ];
     styleHeader(wsL1);
     licViolations.forEach((v, idx) => {
@@ -206,8 +253,11 @@ async function buildExcelReport(filePath, reportData) {
         license:     v.license,
         policy:      v.policy,
         state:       v.state,
+        origin:      reportOrigins.originCell(originOf(v.projUuid, v.compKey)),
+        depPath:     reportOrigins.pathCell(originOf(v.projUuid, v.compKey)),
       });
     });
+    wrapPathColumn(wsL1, 'depPath');
     alternateShading(wsL1);
 
     // Sheet 2: License Project Summary
@@ -239,9 +289,19 @@ async function buildExcelReport(filePath, reportData) {
           licenseId:   v.licenseId,
           fail: 0, warn: 0, info: 0,
           projects: new Set(),
+          // Q37: every (project, component) pair this row folds together, so
+          // the aggregate Origin can see that the same component is direct in
+          // one project and transitive in another — and so the aggregate path
+          // cell can name the projects each chain belongs to. Keyed by
+          // originKey so one project's several violations of the same
+          // component contribute one entry, not one per violation.
+          originRefs: new Map(),
         });
       }
       const entry = compLicMap.get(key);
+      if (v.projUuid && v.compKey) {
+        entry.originRefs.set(reportOrigins.originKey(v.projUuid, v.compKey), v.projName);
+      }
       // Prefer non-empty licenseName/licenseId if a later violation has it
       if (!entry.licenseName && v.licenseName) entry.licenseName = v.licenseName;
       if (!entry.licenseId   && v.licenseId)   entry.licenseId   = v.licenseId;
@@ -262,6 +322,12 @@ async function buildExcelReport(filePath, reportData) {
       { header: 'Fail',               key: 'fail',        width: 10 },
       { header: 'Warn',               key: 'warn',        width: 10 },
       { header: 'Info',               key: 'info',        width: 10 },
+      // Q37: one component, several projects — Direct here and Transitive
+      // there is a real answer ('Mixed'), not a hedge. No path column: the
+      // chains differ per project and a merged cell could not say which is
+      // which.
+      { header: 'Origin',             key: 'origin',      width: 12 },
+      { header: 'Dependency Path',    key: 'depPath',     width: 64 },
       { header: 'Affected Projects',  key: 'projCount',   width: 16 },
       { header: 'Project Names',      key: 'projNames',   width: 60 },
     ];
@@ -284,10 +350,13 @@ async function buildExcelReport(filePath, reportData) {
         fail:        e.fail,
         warn:        e.warn,
         info:        e.info,
+        origin:      reportOrigins.aggregateOriginCell(originRefsOf(e).map(r => r.entry)),
+        depPath:     reportOrigins.aggregatePathCell(originRefsOf(e)),
         projCount:   e.projects.size,
         projNames:   [...e.projects].sort().join(', '),
       });
     }
+    wrapPathColumn(wsL3, 'depPath');
     alternateShading(wsL3);
   }
 

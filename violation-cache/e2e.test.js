@@ -451,6 +451,127 @@ describe('e2e — reports', { skip: SKIP }, () => {
     assert.match(res.headers.get('content-disposition') || '', /filename/i);
   }, { timeout: 150_000 });
 
+  test('Q37: the workbook marks Direct/Transitive and prints the real chain', async () => {
+    // Against the stub's actual dependency graph, not a hand-written fixture:
+    // each leaf declares a `carrier-for-<leaf>` direct component, half its
+    // findings hang off the carrier, and its two license violations reuse one
+    // direct and one transitive component. So a report over a leaf must come
+    // back with both labels present and a chain that names the carrier.
+    const all = await (await fetch(`${dt.url}/api/v1/project?onlyRoot=false`,
+      { headers: { 'X-Api-Key': dt.apiKey } })).json();
+    const leaf = (Array.isArray(all) ? all : all.values).find(p => /^service-/.test(p.name));
+    assert.ok(leaf, 'the stub portfolio should contain a leaf project');
+
+    const started = await api.generateReport(token, {
+      projects: [{ uuid: leaf.uuid, name: leaf.name, version: leaf.version || '' }],
+      riskTypes: ['security', 'license'],
+    });
+    assert.ok(started.status < 300, `${started.status} ${JSON.stringify(started.json)}`);
+    const done = await api.waitForReport(token, started.json.id);
+    assert.equal(done && done.status, 'completed', JSON.stringify(done));
+
+    const res = await fetch(`${stack.url}/violation-cache/report/${started.json.id}/download`,
+      { headers: api.bearer(token) });
+    const wb = new (require('exceljs').Workbook)();
+    await wb.xlsx.load(Buffer.from(await res.arrayBuffer()));
+
+    const headers = (ws) => ws.getRow(1).values.slice(1).map(String);
+    const column  = (ws, header) => {
+      const i = headers(ws).indexOf(header) + 1;
+      assert.ok(i > 0, `${ws.name} has no ${header} column: ${headers(ws).join(', ')}`);
+      const out = [];
+      ws.eachRow((row, n) => { if (n > 1) out.push(String(row.getCell(i).value ?? '')); });
+      return out;
+    };
+
+    // ── Security findings ──────────────────────────────────────────────────
+    const sv = wb.getWorksheet('SV_Vulnerability Findings');
+    const svOrigin = column(sv, 'Origin');
+    const svPath   = column(sv, 'Dependency Path');
+    assert.ok(svOrigin.length > 0, 'the leaf should have findings to report on');
+    assert.ok(svOrigin.includes('Direct'), `no Direct row: ${JSON.stringify(svOrigin)}`);
+    assert.ok(svOrigin.includes('Transitive'), `no Transitive row: ${JSON.stringify(svOrigin)}`);
+    assert.ok(!svOrigin.includes(''), 'every row must be classified — a blank means Tier 1 failed');
+
+    // The chain is real: it names the intermediate carrier, not just the target.
+    const chains = svPath.filter(v => v.includes('\u2192'));
+    assert.ok(chains.length > 0, `no chain was printed: ${JSON.stringify(svPath)}`);
+    for (const c of chains) assert.match(c, /carrier-for-/, 'the chain must name the component in between');
+    // And a Direct row is blank rather than carrying somebody else's chain.
+    svOrigin.forEach((o, i) => {
+      if (o === 'Direct') assert.equal(svPath[i], '', 'a direct component has no chain');
+    });
+    assert.ok(!svPath.includes('Not resolved'),
+      'the walk should have completed for every transitive row in this report');
+
+    // ── License risk ───────────────────────────────────────────────────────
+    const lr = wb.getWorksheet('LR_Violations');
+    const lrOrigin = column(lr, 'Origin');
+    assert.ok(lrOrigin.includes('Direct') && lrOrigin.includes('Transitive'),
+      `the stub seeds one of each: ${JSON.stringify(lrOrigin)}`);
+    const lrChains = column(lr, 'Dependency Path').filter(v => v.includes('\u2192'));
+    assert.ok(lrChains.length > 0, 'the license sheet must print the chain too');
+    for (const c of lrChains) assert.match(c, /carrier-for-/);
+
+    const uniq = wb.getWorksheet('LR_Unique Risks');
+    assert.ok(headers(uniq).includes('Origin'));
+    assert.ok(headers(uniq).includes('Dependency Path'));
+    const uniqOrigin = column(uniq, 'Origin');
+    const uniqPath   = column(uniq, 'Dependency Path');
+    assert.ok(uniqOrigin.length > 0, 'the leaf seeds license violations, so this sheet has rows');
+    for (const v of uniqOrigin) {
+      assert.ok(['Direct', 'Transitive', 'Mixed'].includes(v), `unexpected aggregate origin ${JSON.stringify(v)}`);
+    }
+    // Every line in the aggregated cell names the project(s) it belongs to —
+    // that attribution is the whole reason this column is safe to add to a
+    // sheet that folds several projects into one row.
+    uniqOrigin.forEach((o, i) => {
+      const lines = uniqPath[i].split('\n').filter(Boolean);
+      assert.ok(lines.length > 0, `a ${o} row must say something: ${JSON.stringify(uniqPath[i])}`);
+      for (const line of lines) {
+        assert.match(line, /\((?:[^()]+)\)$|^(?:Direct in|No path recorded|Not resolved): /,
+          `every line must attribute itself to projects: ${JSON.stringify(line)}`);
+      }
+      if (o === 'Direct') {
+        assert.match(lines[0], /^Direct in: /, 'a wholly-direct row says where, and shows no chain');
+        assert.equal(lines.length, 1);
+      }
+      if (o === 'Transitive') {
+        assert.ok(!lines.some(l => l.startsWith('Direct in:')),
+          'a wholly-transitive row must not claim a direct project');
+        assert.ok(lines.some(l => l.includes('carrier-for-')),
+          `the real chain should appear here too: ${JSON.stringify(lines)}`);
+      }
+    });
+
+    // §6.3a/Q26 end to end: one Tier-1 read for the project, and a graph walk
+    // scoped to it — never a call per finding.
+    const projectReads = dt.calls().filter(c => c.includes(`/api/v1/project/${leaf.uuid}`)).length;
+    assert.ok(projectReads >= 1 && projectReads <= 4,
+      `Tier 1 is once per project, not once per finding: ${projectReads}`);
+  }, { timeout: 180_000 });
+
+  test('Q37: a second report reuses the cached walk instead of re-crawling the graph', async () => {
+    // The dependency_paths cache is shared by fingerprint (§7.5), so the walk
+    // the previous test paid for must serve this one — that is the whole
+    // reason origin resolution goes through runJob rather than walkGraph.
+    const all = await (await fetch(`${dt.url}/api/v1/project?onlyRoot=false`,
+      { headers: { 'X-Api-Key': dt.apiKey } })).json();
+    const leaf = (Array.isArray(all) ? all : all.values).find(p => /^service-/.test(p.name));
+
+    dt.reset();
+    const started = await api.generateReport(token, {
+      projects: [{ uuid: leaf.uuid, name: leaf.name, version: leaf.version || '' }],
+      riskTypes: ['security'],
+    });
+    const done = await api.waitForReport(token, started.json.id);
+    assert.equal(done && done.status, 'completed', JSON.stringify(done));
+
+    const graphCalls = dt.calls().filter(c => c.includes('/dependencyGraph/')).length;
+    assert.equal(graphCalls, 0,
+      `a cached walk must not be re-crawled: ${graphCalls} dependencyGraph calls`);
+  }, { timeout: 180_000 });
+
   test('a report name is validated, not sanitised', async () => {
     // §6.7: it becomes a filename and travels in a Content-Disposition header,
     // so what would break either is refused rather than silently rewritten.
