@@ -57,6 +57,33 @@ function buildPortfolio() {
   // The other two roots stay two-deep, so mixed depths are covered at once.
   children[uuidOf(ROOT_IDS[0] + 100)] = [makeProject(ROOT_IDS[0] + 200, uuidOf(ROOT_IDS[0] + 100))];
 
+  // Q39: a fourth root that is a real Collection Project, set to aggregate only
+  // children marked as the latest version. Roots 1-3 stay exactly as they were
+  // — they carry no collectionLogic at all, which is both the v4 shape and the
+  // organisational-parent case, so the "sum everything" path keeps its
+  // coverage. This one is what proves the other path: two versions of one
+  // service under it, and only the later one marked latest, so a dashboard
+  // that ignores collectionLogic shows their sum and one that honours it shows
+  // the latest alone. The numbers are pinned rather than derived from
+  // makeProject()'s formula, because a test that has to recompute the fixture's
+  // own arithmetic to know what to expect proves very little.
+  const collectionUuid = uuidOf(4);
+  const collectionRoot = makeProject(4, null);
+  collectionRoot.name = 'Collection 4';
+  collectionRoot.collectionLogic = 'AGGREGATE_LATEST_VERSION_CHILDREN';
+  roots.push(collectionRoot);
+  // The two keep DISTINCT names on purpose. Real DependencyTrack usually
+  // points this mode at several versions of one name, but the rollup keys on
+  // isLatest and never reads a name — while the carrier components below are
+  // built as `carrier-for-<leaf.name>`, so two same-named leaves would collide
+  // in the dependency-graph fixture and fail the tier for a reason that has
+  // nothing to do with what this covers.
+  const stale  = makeProject(401, collectionUuid);
+  const latest = makeProject(402, collectionUuid);
+  stale.isLatest  = false; stale.metrics  = { critical: 5, high: 0, medium: 0, low: 0, unassigned: 0 };
+  latest.isLatest = true;  latest.metrics = { critical: 3, high: 0, medium: 0, low: 0, unassigned: 0 };
+  children[collectionUuid] = [stale, latest];
+
   // Policy violations, spread so every risk type and state has some.
   const violations = [];
   const all = [...roots, ...Object.values(children).flat()];

@@ -112,9 +112,21 @@ async function getStatus(conn) {
  * would be a strictly worse trade for every user who is not looking at the
  * graph.
  *
- * The project crawl asks for root projects, active only — the same two filters
- * the dashboard applies — so the totals recorded here are the totals the tiles
- * would show for that instant.
+ * **Q39: the crawl asks for the whole active portfolio, not just its roots.**
+ * It used to sweep `onlyRoot=true` and sum what DependencyTrack reported
+ * against each root, which was the same answer as the tiles only while nothing
+ * was rolled up. It is not any more: the table computes a group's total from
+ * the children that parent's own `collectionLogic` counts, and a root that is
+ * not a collection project reports nothing at all for the three policy
+ * categories, which come from our own /api/v1/violation crawl. Summing roots as
+ * reported put a graph reading 22 under cards reading 25 on the same screen —
+ * the contradiction §6.3 exists to forbid. `snapshots.summarise()` now rebuilds
+ * the hierarchy and applies the identical rule, so the two are one arithmetic
+ * again.
+ *
+ * `excludeInactive=true` is unchanged, and still matches the dashboard. The
+ * extra cost is pages, not requests per project: one paged sweep of the
+ * portfolio, exactly what the dashboard itself already does (Q34).
  *
  * @param {{apiUrl: string, apiKey: string, fingerprint: string}} conn
  * @param {object} map  the violation count map this build produced
@@ -125,7 +137,7 @@ async function captureSnapshot(conn, map) {
     const projects = [];
     for (let page = 1; page <= MAX_PROJECT_PAGES; page++) {
       const { json } = await dtFetch.dtGetWithRetry(
-        `/api/v1/project?onlyRoot=true&excludeInactive=true` +
+        `/api/v1/project?onlyRoot=false&excludeInactive=true` +
         `&pageSize=${PROJECT_PAGE_SIZE}&pageNumber=${page}`,
         apiUrl, apiKey
       );

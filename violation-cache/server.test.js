@@ -5467,6 +5467,79 @@ describe('snapshots.summarise() — folding one day\'s totals', () => {
     assert.equal(t.pol.ops_fail, 0);
   });
 
+  // ── Q39: the fold rolls the hierarchy up, the same way the table does ────
+  describe('collection logic (Q39)', () => {
+    const child = (uuid, parent, critical, extra = {}) =>
+      Object.assign({ uuid, parent: { uuid: parent }, metrics: { critical } }, extra);
+
+    test('a root now reports its children\'s total, not its own reported one', () => {
+      // The trap: DependencyTrack already rolled up this root, so its own
+      // metrics carry the descendants' too. Adding them would double-count —
+      // 9, not 6 — which is why Q35's rule is "replace, never add".
+      const t = snapshotsMod.summarise([
+        { uuid: 'root', metrics: { critical: 3 } },
+        child('a', 'root', 2), child('b', 'root', 4),
+      ], {});
+      assert.equal(t.sev.critical, 6, 'the children\'s sum replaces the root\'s own 3');
+      assert.equal(t.rootProjectCount, 1, 'descendants are not roots');
+    });
+
+    test('AGGREGATE_LATEST_VERSION_CHILDREN counts only the latest child', () => {
+      // The exact case that put a graph reading 22 under cards reading 25.
+      const t = snapshotsMod.summarise([
+        { uuid: 'root', metrics: {}, collectionLogic: 'AGGREGATE_LATEST_VERSION_CHILDREN' },
+        child('old', 'root', 5, { isLatest: false }),
+        child('new', 'root', 3, { isLatest: true }),
+      ], {});
+      assert.equal(t.sev.critical, 3, 'not 8');
+    });
+
+    test('AGGREGATE_DIRECT_CHILDREN_WITH_TAG counts only the tagged children', () => {
+      const t = snapshotsMod.summarise([
+        {
+          uuid: 'root', metrics: {},
+          collectionLogic: 'AGGREGATE_DIRECT_CHILDREN_WITH_TAG', collectionTag: 'prod',
+        },
+        child('a', 'root', 1, { tags: [{ name: 'prod' }] }),
+        child('b', 'root', 2, { tags: ['staging'] }),
+      ], {});
+      assert.equal(t.sev.critical, 1);
+    });
+
+    test('policy counts roll up too — DependencyTrack never rolls those up at all', () => {
+      // They come from our own /api/v1/violation crawl bucketed by uuid, so a
+      // root with no SBOM of its own has none. Before Q39 this graph showed
+      // zero over a failing subtree.
+      const map = {
+        leaf: { ops: { fail: 2 }, lic: { warn: 1 }, secpolicy: { info: 3 } },
+      };
+      const t = snapshotsMod.summarise([
+        { uuid: 'root', metrics: {} }, child('leaf', 'root', 0),
+      ], map);
+      assert.equal(t.pol.ops_fail, 2);
+      assert.equal(t.pol.lic_warn, 1);
+      assert.equal(t.pol.secpol_info, 3);
+    });
+
+    test('a root-only list still folds exactly as it always did', () => {
+      // Every project is then its own root with no children, so the roll-up is
+      // a no-op — which is what let this change shape without changing any
+      // caller's contract.
+      const t = snapshotsMod.summarise(
+        [project('a', { critical: 2 }), project('b', { critical: 1 })], {});
+      assert.equal(t.sev.critical, 3);
+      assert.equal(t.rootProjectCount, 2);
+    });
+
+    test('a parent cycle does not exhaust the stack', () => {
+      const t = snapshotsMod.summarise([
+        { uuid: 'x', parent: { uuid: 'y' }, metrics: { critical: 1 } },
+        { uuid: 'y', parent: { uuid: 'x' }, metrics: { critical: 2 } },
+      ], {});
+      assert.ok(Number.isFinite(t.sev.critical), 'it must return a number, not hang');
+    });
+  });
+
   test('an empty portfolio folds to a complete row of zeroes', () => {
     // Not an absent row: "we looked and there was nothing" is a measurement,
     // and a graph that drops to zero is the correct picture of it.
@@ -5737,10 +5810,23 @@ describe('violation cache — the snapshot cannot fail the build', () => {
     } finally { restoreFetch(); restoreSnaps(); }
   });
 
-  test('it crawls root projects only, active only — the set the tiles sum', async () => {
-    // Summing every project instead double-counts: a parent's numbers already
-    // carry its descendants'. These two query parameters are the whole
-    // agreement between the graph and the cards above it.
+  test('Q39: it crawls the whole active portfolio, and rolls it up itself', async () => {
+    // This assertion used to read `onlyRoot=true`, and it was right while
+    // nothing was rolled up: summing every project would have double-counted,
+    // because a parent's reported numbers already carry its descendants'.
+    //
+    // Q39 changed which of those two sentences is true. The table now computes
+    // a group's total from the children that parent's own collectionLogic
+    // counts, so "what DT reported for this root" and "what the card shows"
+    // are different numbers for a collection project — and for the three
+    // policy categories a root reports nothing at all, since those come from
+    // our own /api/v1/violation crawl. Summing roots as reported left a graph
+    // reading 22 under cards reading 25.
+    //
+    // So the rule is NARROWED rather than dropped, and the half that still
+    // matters is pinned harder than before: still ONE request, still active
+    // only, and still no per-project call — the roll-up happens in
+    // snapshots.summarise(), not by asking DependencyTrack once per parent.
     const urls = [];
     const restoreFetch = stub(dtFetchMod, {
       dtGetWithRetry: async (url) => { urls.push(url); return { json: [], headers: {} }; },
@@ -5748,10 +5834,11 @@ describe('violation cache — the snapshot cannot fail the build', () => {
     const restoreSnaps = stub(snapshotsMod, { upsertForDay: async () => '2026-09-07' });
     try {
       await violationCacheMod.captureSnapshot(conn, {});
-      assert.equal(urls.length, 1);
-      assert.match(urls[0], /onlyRoot=true/);
-      assert.match(urls[0], /excludeInactive=true/);
+      assert.equal(urls.length, 1, 'one paged sweep, never a request per project');
+      assert.match(urls[0], /onlyRoot=false/, 'the roll-up needs the descendants');
+      assert.match(urls[0], /excludeInactive=true/, 'still the dashboard\'s own filter');
       assert.match(urls[0], /^\/api\/v1\/project\?/);
+      assert.ok(!/\/children/.test(urls[0]), 'Q34: never descend per parent');
     } finally { restoreFetch(); restoreSnaps(); }
   });
 

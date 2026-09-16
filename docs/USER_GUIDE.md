@@ -125,9 +125,40 @@ runs; the policy columns stay at zero until it finishes.
 ![The dashboard](images/dashboard.png)
 
 **The table is your project hierarchy.** Group rows (bold, with a ▾) expand to
-their children. A **group row's numbers are the total of everything beneath it**
-— in the screenshot `Group 1`, `service-101` and `service-201` show identical
-figures because that branch is a single chain three levels deep.
+their children. A **group row's numbers are the total of the children it is
+configured to aggregate** — in the screenshot `Collection 4` shows **3**, which
+is `service-402`'s figure alone, because that project is set in DependencyTrack
+to aggregate only children marked as the latest version. `service-401`'s 5 is
+not counted. Where a parent aggregates all its children instead, the roll-up
+climbs through however many levels the branch has.
+
+**Which children count is DependencyTrack's setting, not ours.** If you have made
+a project a *collection project* in DependencyTrack, this dashboard follows the
+collection logic you chose there:
+
+| Your setting in DependencyTrack | What the group row totals |
+|---|---|
+| Aggregate direct children | every child |
+| Aggregate direct children **marked as latest** | only the children flagged as the latest version |
+| Aggregate direct children **with tag** | only the children carrying that tag |
+| Not a collection project | every child |
+
+So a parent set to "latest only" over five versions of one service shows the
+latest version's figures, not the sum of all five — the same number
+DependencyTrack shows for it.
+
+Two consequences worth knowing:
+
+- Under **"latest only"**, a child that is itself a group has no version, so
+  DependencyTrack does not mark it latest and it is not counted. A whole branch
+  can legitimately read zero under such a parent.
+- A parent that is **not** a collection project still shows the total of its
+  children here. DependencyTrack would show only its own figures, which for an
+  organisational parent with no SBOM of its own is zero — and the three policy
+  columns are never aggregated by DependencyTrack at all, so that total is one
+  this dashboard computes for you either way.
+
+The risk-trend panel uses this same rule, so the graph and the cards always agree.
 
 **The four column groups are four different questions:**
 

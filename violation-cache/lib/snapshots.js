@@ -18,6 +18,7 @@
 
 const { query } = require('../db/pool');
 const { log } = require('./log');
+const projectTree = require('./project-tree');
 
 // The columns, once, in one order, so the reader and the writer cannot disagree
 // about what a snapshot contains.
@@ -59,36 +60,45 @@ function num(v) {
 }
 
 /**
- * Fold a set of root projects and the violation map into one day's totals.
+ * Fold a portfolio and the violation map into one day's totals.
  *
  * Pure — no I/O, no clock — so it is unit-tested directly (CLAUDE.md §10.4).
  *
  * Both halves are summed over the same projects, which is what lets the graph
- * and the KPI tiles agree: the tiles sum DependencyTrack's root projects, so
- * this does too. Summing every project instead would double-count, because a
- * parent's numbers already carry its descendants'.
+ * and the KPI tiles agree: the tiles sum the roll-up of DependencyTrack's root
+ * projects, so this does too.
  *
- * @param {Array<object>} projects     root projects, each with an embedded metrics{}
+ * **Q39: it takes the FLAT portfolio and rolls it up here**, rather than taking
+ * roots and trusting the numbers DependencyTrack reported against each one.
+ * Those two used to be the same thing and are not any more: a root configured
+ * as `AGGREGATE_LATEST_VERSION_CHILDREN` reports its latest child's figures,
+ * while the table above this graph now computes the same thing itself, and a
+ * root that is not a collection project at all reports nothing for the three
+ * policy categories — those come from our own `/api/v1/violation` crawl, which
+ * DependencyTrack never rolls up. Summing roots as reported left a graph
+ * reading 22 under cards reading 25 on one screen.
+ *
+ * **Passing only roots is still correct.** Every project would then have no
+ * parent in the list, so each is its own root with no children and the roll-up
+ * is a no-op — which is why this could change shape without changing any
+ * caller's contract.
+ *
+ * @param {Array<object>} projects     the portfolio, each with an embedded metrics{}
  * @param {object|null} violationMap   uuid → { ops, lic, secpolicy } count maps
  */
 function summarise(projects, violationMap) {
-  const map = violationMap || {};
   const totals = { rootProjectCount: 0, sev: {}, pol: {} };
   for (const k of SEV_KEYS) totals.sev[k] = 0;
   for (const [cat, state] of POL_KEYS) totals.pol[`${cat}_${state}`] = 0;
 
-  for (const p of (projects || [])) {
-    if (!p || !p.uuid) continue;
+  const roots = projectTree.aggregate(
+    projectTree.buildTree(projects), violationMap, POL_KEYS, MAP_CATEGORY, num);
+
+  for (const root of roots) {
     totals.rootProjectCount++;
-
-    const m = p.metrics || {};
-    for (const k of SEV_KEYS) totals.sev[k] += num(m[k]);
-
-    const v = map[p.uuid];
-    if (!v) continue;
+    for (const k of SEV_KEYS) totals.sev[k] += root.sev[k];
     for (const [cat, state] of POL_KEYS) {
-      const bucket = v[MAP_CATEGORY[cat]];
-      if (bucket) totals.pol[`${cat}_${state}`] += num(bucket[state]);
+      totals.pol[`${cat}_${state}`] += root.pol[`${cat}_${state}`];
     }
   }
   return totals;

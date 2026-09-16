@@ -3551,6 +3551,55 @@ function buildTree(projects) {
 //   * **Cycle-guarded.** inferParentUuids() refuses to self-reference, but the
 //     parent links can also come straight from the API, and a node that ends
 //     up inside its own children would otherwise recurse until the stack dies.
+// Q39: which of a group's children its total is actually the sum of.
+//
+// Q35 made a group row the sum of its descendants, but summed EVERY child
+// unconditionally — which is only one of the four things DependencyTrack can be
+// configured to do. A parent set to aggregate "direct children marked as latest"
+// over five versions of one service was shown roughly five times the number it
+// reports, and the dashboard contradicted the DT screen it was built to
+// summarise. `collectionLogic` was in the API payload the whole time and this
+// page discarded it at parse time; capturing it is most of the fix.
+//
+// Returns the children that count toward the parent's total:
+//
+//   AGGREGATE_LATEST_VERSION_CHILDREN   — only children DT marks isLatest
+//   AGGREGATE_DIRECT_CHILDREN_WITH_TAG  — only children carrying collectionTag
+//   AGGREGATE_DIRECT_CHILDREN           — all of them
+//   NONE, absent, or anything unrecognised — all of them
+//
+// **NONE and absent deliberately behave as AGGREGATE_DIRECT_CHILDREN, and that
+// is a decision rather than an oversight.** DependencyTrack v4 has no collection
+// projects at all, so the field is simply not there; reading absence as "show
+// this project's own numbers" would revert Q35 for every v4 installation and for
+// every organisational parent that has no SBOM of its own — the exact case Q35
+// exists to fix, where zeros sat above a subtree full of failures. It would also
+// mean nothing for the three policy categories, which DT never rolls up: those
+// counts come from our own /api/v1/violation crawl bucketed by uuid, so "what
+// the server reported for this project" is not a number that exists.
+// An unrecognised value falls here too — a mode added by a future DT release
+// shows a total that is too broad rather than a row of zeros.
+function collectionChildren(node) {
+  const kids = node.children || [];
+  switch (node.collectionLogic) {
+    case 'AGGREGATE_LATEST_VERSION_CHILDREN':
+      // Strictly isLatest, which is what DT itself computes — so this row
+      // equals the one DT shows for the same project. A child that is itself
+      // a group has no version and so is never isLatest, and is excluded with
+      // its whole subtree; that is DT's answer, not a special case of ours.
+      return kids.filter(c => c.isLatest === true);
+    case 'AGGREGATE_DIRECT_CHILDREN_WITH_TAG':
+      // An empty collectionTag matches nothing rather than everything: the
+      // parent is configured to filter, and falling back to "sum it all" would
+      // silently report a total the operator explicitly asked not to see.
+      return node.collectionTag
+        ? kids.filter(c => (c.tags || []).includes(node.collectionTag))
+        : [];
+    default:
+      return kids;
+  }
+}
+
 function aggregateTree(roots) {
   const seen = new Set();
 
@@ -3561,19 +3610,28 @@ function aggregateTree(roots) {
 
     node.children.forEach(visit);             // post-order — children first
 
+    // Q39: the filter applies to DIRECT children only, and that is enough. DT
+    // aggregates direct children's metrics, and a child that is itself a
+    // collection project already carries its own correctly-filtered total by
+    // the time this reads it — so filtering once per level composes into the
+    // right answer for the whole tree, and excluding a child excludes its
+    // subtree with it.
+    const counted = collectionChildren(node);
+
     for (const cat of CATS) {
       const sum = {};
       for (const lvl of AGG_LEVELS[cat]) sum[lvl] = 0;
-      for (const child of node.children) {
+      for (const child of counted) {
         const d = child[cat] || {};           // a category may be absent entirely
         for (const lvl of AGG_LEVELS[cat]) sum[lvl] += d[lvl] || 0;
       }
       node[cat] = sum;
     }
 
-    // Direct children suffice: post-order means a child group already carries
-    // its own descendants' warning by the time this reads it.
-    node._dataWarn = node.children.some(c => c._dataWarn)
+    // The warning follows the same children as the numbers. A gap inside a
+    // child this parent does not count cannot understate this parent's total,
+    // so flagging it here would point at a row whose figures are unaffected.
+    node._dataWarn = counted.some(c => c._dataWarn)
       ? 'Some projects under this group have incomplete data — this total may be understated.'
       : null;
   }
@@ -6396,6 +6454,17 @@ function extractMetrics(p, violationMap) {
     version:    p.version || '',
     parentUuid: p.parent?.uuid || p.parentUuid || null,
     isLatest:   p.isLatest === true,
+    // Q39: how THIS project aggregates its children, straight from DT. Absent on
+    // v4, which has no collection projects at all — normalised to '' rather than
+    // a default mode name, so "the server did not say" and "the server said
+    // NONE" stay distinguishable at the one place that reads them.
+    collectionLogic: typeof p.collectionLogic === 'string' ? p.collectionLogic : '',
+    // The tag AGGREGATE_DIRECT_CHILDREN_WITH_TAG filters on. DT sends it as a
+    // tag object on some versions and a bare string on others — the same
+    // two shapes extractTags() already normalises for the tags array.
+    collectionTag: (typeof p.collectionTag === 'string'
+      ? p.collectionTag
+      : (p.collectionTag && p.collectionTag.name) || ''),
     // Normalise DT API tag format [{name:"..."}] or plain string array → string[]
     tags:       extractTags(p.tags),
     security: sec, operations: ops, license: lic, secpolicy: secpol,

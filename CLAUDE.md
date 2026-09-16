@@ -112,6 +112,7 @@ dependency-tracker/
 │   │   ├── reports-db.js caches.js snapshots.js schedules.js scheduler.js
 │   │   ├── dt-fetch.js excel.js cwe.js mail.js reports.js violation-cache.js
 │   │   ├── dependency-path-cache.js dependency-paths.js   # §6.3a — direct/transitive resolution
+│   │   ├── project-tree.js     # §8.7 Q39 — the server's copy of the hierarchy roll-up
 │   │   ├── report-origins.js   # §6.7 Q37 — the same two tiers, for a workbook
 │   │   └── branding.js image.js   # title + sign-in background
 │   ├── routes/                 # auth.js profile.js admin.js dt-proxy.js config.js reports.js schedule.js cache.js branding.js dependency-paths.js
@@ -218,7 +219,7 @@ Inline comments use lettered prefixes to trace design decisions:
 - **O-numbers** — observability notes (`// O3: JSON log format for log aggregators`)
 - **S-numbers** — security rationale (`// S2: token hashed before storage`) — **new in revision 2**
 
-Highest numbers currently in use: **Q38, P20, O5, S34**. When adding logic with a
+Highest numbers currently in use: **Q39, P20, O5, S34**. When adding logic with a
 non-obvious trade-off, add the next number in the appropriate series. Check the
 current maximum before assigning — parallel branches can claim the same number.
 
@@ -406,12 +407,21 @@ Three properties are load-bearing:
   the snapshot's own project crawl as silence and log "build stalled" against a
   build that has in fact just succeeded. `clearInterval` is idempotent, so the
   `finally` still covers every other path.
-- **The crawl asks for `onlyRoot=true&excludeInactive=true`.** Those two
-  parameters are the entire agreement between the graph and the KPI tiles above
-  it: the tiles sum DependencyTrack's active root projects, because a parent's
-  numbers already carry its descendants'. Summing every project instead
-  double-counts, and the graph would then contradict the cards on the same
-  screen.
+- **The crawl asks for `onlyRoot=false&excludeInactive=true`, and the roll-up
+  happens here rather than upstream** (Q39). It asked for `onlyRoot=true` until
+  the table became collection-aware, and that was right while nothing was rolled
+  up: a parent's reported numbers already carried its descendants', so summing
+  every project double-counted. It stopped being right the moment a group row's
+  total became something this product computes — a root set to
+  `AGGREGATE_LATEST_VERSION_CHILDREN` reports its latest child's figures while
+  the cards now compute the same thing themselves, and for the three policy
+  categories a root reports nothing at all, because those come from our own
+  `/api/v1/violation` crawl. Summing roots as reported put a graph reading 22
+  under cards reading 25 on one screen. `snapshots.summarise()` now rebuilds the
+  hierarchy and applies the identical filter (§8.7), so the graph and the tiles
+  are one arithmetic again — which is what this bullet was always for. The cost
+  is pages, not requests per project: still one paged sweep, never a descent per
+  parent (Q34).
 
 ### 6.3a Dependency-path resolution
 
@@ -1563,6 +1573,8 @@ was then overwritten by the first render.
   level:       number,          // 1 = root
   isLatest:    boolean,
   tags:        string[],
+  collectionLogic: string,      // Q39: DT's own value, '' when the server did not say
+  collectionTag:   string,      // Q39: what WITH_TAG filters on, '' when unset
   security:    { critical, high, medium, low, unassigned },
   operations:  { fail, warn, info, unassigned },
   license:     { fail, warn, info, unassigned },
@@ -1693,12 +1705,74 @@ nodes (`{ ...p, children: [] }`) and only those clones are aggregated, so the
 "never mutate `allProjects`" rule holds unchanged — the rollup is derived
 state, which is exactly what that rule asks for.
 
-**Still not rolled up: the risk-trend graph.** `captureSnapshot()` and
-`snapshots.summarise()` sum `onlyRoot=true` projects server-side and carry the
-original assumption. Giving them the same treatment means fetching the flat
-portfolio backend-side and rebuilding the tree there; until that happens the
-trend graph and the KPI tiles can disagree for a portfolio whose roots are not
-Collection Projects.
+**Q39: the roll-up obeys the parent's own `collectionLogic`, and Q35 did not.**
+`aggregateTree()` summed **every** child unconditionally, which is only one of
+the four things DependencyTrack can be configured to do. A parent set to
+aggregate "direct children marked as latest" over five versions of one service
+was shown roughly five times the number DT reports for it, and the dashboard
+contradicted the screen it exists to summarise. `collectionChildren(node)` is
+the whole rule:
+
+| `collectionLogic` | Counted children |
+|---|---|
+| `AGGREGATE_LATEST_VERSION_CHILDREN` | only those DT marks `isLatest` |
+| `AGGREGATE_DIRECT_CHILDREN_WITH_TAG` | only those carrying `collectionTag` |
+| `AGGREGATE_DIRECT_CHILDREN` | all of them |
+| `NONE`, absent, or unrecognised | all of them |
+
+Six things are load-bearing:
+
+- **The field was in the payload the whole time and this page threw it away at
+  parse time.** Capturing `collectionLogic` and `collectionTag` in the project
+  shape is most of the fix; the filter itself is nine lines. A source test
+  asserts the parser still reads both, because dropping them again reintroduces
+  the entire defect silently — the rollup would simply have nothing to obey.
+- **`NONE` and absent behave as `AGGREGATE_DIRECT_CHILDREN`, and that is a
+  decision rather than an oversight.** DependencyTrack v4 has no collection
+  projects at all, so the field is not there; reading absence as "show this
+  project's own numbers" would revert Q35 for every v4 installation and for
+  every organisational parent with no SBOM of its own — the exact case Q35
+  exists to fix. It would also mean nothing for the three policy categories,
+  which DT never rolls up: those come from our own `/api/v1/violation` crawl
+  bucketed by uuid, so "what the server reported for this project" is not a
+  number that exists. An unrecognised value falls here too, so a mode added by
+  a future DT release reads too broad rather than as a row of zeros.
+- **An empty `collectionTag` under `WITH_TAG` matches nothing, not everything.**
+  The parent is configured to filter; falling back to summing it all would
+  report a total the operator explicitly asked not to see.
+- **The filter is applied per level, to direct children only, and that is
+  enough.** DT aggregates direct children's metrics, and a child that is itself
+  a collection project already carries its own correctly-filtered total by the
+  time the post-order walk reads it — so filtering once per level composes into
+  the right answer for the whole tree, and excluding a child excludes its
+  subtree with it. Each level applies its **own** logic, never the root's.
+- **Under `LATEST`, a child that is itself a group is excluded.** It has no
+  version, so DT reports `isLatest: false` for it. Following that strictly is
+  what keeps this row equal to the one DependencyTrack shows for the same
+  project; the cost is that a branch under a "latest only" parent can read zero
+  until you notice why.
+- **The ⚠ follows the counted children, not every child** (§11.2). A gap inside
+  a child this parent does not count cannot understate this parent's total, so
+  flagging it there would point at figures nothing is wrong with.
+
+**The risk-trend graph is rolled up too, and by the same rule.** This used to be
+a documented gap — `captureSnapshot()` swept `onlyRoot=true` and summed what DT
+reported against each root — and it stopped being theoretical the moment the
+table became collection-aware: a portfolio with one `LATEST` root had a graph
+reading 22 under cards reading 25, on one screen, which is the contradiction
+§6.3 exists to forbid. The crawl now sweeps `onlyRoot=false&excludeInactive=true`
+— one paged sweep, never a request per parent — and `snapshots.summarise()`
+rebuilds the hierarchy and applies the identical filter.
+
+**`lib/project-tree.js` is the server's copy, hand-mirrored.** §3 forbids a
+bundler and there is no build step, so a browser page cannot `require()` a lib
+module — the same duplication `lib/cwe.js`/the dialog's CWE cell and
+`componentKey()`/`componentKeyOf()` already carry, and the same thing makes it
+safe: a cross-file test reads `index.html`'s real source and asserts the two
+`collectionChildren` implementations answer identically across every mode,
+including one that exists in neither. `summarise()` kept its signature because
+a root-only list is a portfolio in which every project is its own root with no
+children, so the roll-up is a no-op and no caller's contract moved.
 
 - `applyFilters()` always operates on `allProjects`, never on a previous result.
   Parent rows are auto-included when a child matches.
@@ -1839,7 +1913,9 @@ The frontend never performs uniqueness checks — those are backend-only, via
 | `mintToken` / `hashToken` | server | Session token helpers |
 | `encryptSecret` / `decryptSecret` | server | AES-256-GCM wrappers |
 | `calcNextRun(schedule, now)` | server | Pure function: next fire time, in UTC |
-| `snapshots.summarise(projects, map)` | server | Pure fold of one day's risk totals |
+| `collectionChildren(node)` | frontend | Which children a group's total is the sum of, per its own `collectionLogic` (Q39) |
+| `projectTree.buildTree` / `.collectionChildren` / `.aggregate` | server | The server's hand-mirrored copy of the same roll-up, for the trend snapshot (Q39) |
+| `snapshots.summarise(projects, map)` | server | Pure fold of one day's risk totals — takes the FLAT portfolio and rolls it up (Q39) |
 | `snapshots.series(fp, days)` | server | Dense daily history; a gap is `captured: false`, never carried forward |
 | `dependencyPaths.getDirectDependencies(url, key, uuid)` | server | Live, uncached Tier-1 direct-dependency set (§6.3a) |
 | `dependencyPaths.walkGraph(...)` / `.runJob(conn, uuid)` | server | The cached Tier-2 graph walk and its job orchestration |
@@ -2236,6 +2312,41 @@ Running the browser checks in CI was on this list and is now the `e2e` job.
   returning instead of exhausting the stack. The browser tier proves the chain
   end to end off the rendered cells: the stub's root 1 is three deep, so
   root == intermediate == leaf only if the rollup climbed through a group.
+- Collection logic (Q39): each of the four modes counting the right children,
+  with `NONE`, absent **and an unrecognised value** all summing everything —
+  that last one is what keeps a future DT mode reading too broad rather than as
+  a row of zeros; an empty `collectionTag` under `WITH_TAG` matching nothing
+  rather than everything; the filter applying per level, so an excluded child
+  takes its subtree with it and each level uses its **own** logic rather than
+  the root's; a child group excluded under `LATEST` because DT reports it
+  not-latest; the ⚠ following the counted children rather than every child; and
+  that re-running is still idempotent under every mode, since
+  `applyViolationData()` depends on it. On the parser: that `collectionLogic`
+  and `collectionTag` are still read off the payload at all — the whole defect
+  was that they were discarded there, so the rollup had nothing to obey — that
+  absent normalises to `''` rather than to an invented default mode, and that
+  the tag tolerates both shapes DT sends.
+  **And the two copies, against each other.** `lib/project-tree.js` is
+  hand-mirrored from `index.html` (§8.7), so a cross-file test drives both
+  `collectionChildren` implementations from one table of modes and asserts they
+  answer identically — the same guard `componentKeyOf()` and `lib/cwe.js`
+  already have, for the same reason.
+  On the server half: that a root's reported numbers are **replaced** by its
+  children's rather than added to (the double-count trap), that the policy
+  counts roll up at all — DT never rolls those up, so a root with no SBOM used
+  to show zero over a failing subtree — that a root-only list still folds
+  exactly as it always did, which is what let `summarise()` change shape without
+  moving any caller's contract, and that a parent cycle returns rather than
+  exhausting the stack. On the crawl: `onlyRoot=false`, still `excludeInactive`,
+  still **one** request, and still no `/children` descent — narrowed rather than
+  dropped, so the half that bounds upstream cost is pinned harder than before.
+  The end-to-end tier is what proves it joined up: the stub carries a real
+  `AGGREGATE_LATEST_VERSION_CHILDREN` root over a stale child and a latest one,
+  the browser must render the latest one's figure alone on the group row, and
+  the trend series must equal a roll-up recomputed independently of
+  `lib/project-tree.js` — a check on the product rather than on the same
+  function twice. Roots 1–3 deliberately carry no `collectionLogic` at all, so
+  the v4 and organisational-parent path keeps its coverage in the same run.
 - The findings dialog's persistence (Q36): that the memo round-trips, is
   bounded, and evicts least-recently-**used** rather than least-recently-added
   — the alternating-projects case is the one insertion order gets wrong, and
