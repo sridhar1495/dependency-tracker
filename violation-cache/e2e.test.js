@@ -282,22 +282,54 @@ describe('e2e — the violation cache and the risk snapshot it writes', { skip: 
     assert.equal(earlier.sev, null, 'a gap must not be reported as a measurement of zero');
   });
 
-  test('the snapshot sums DependencyTrack\'s ACTIVE ROOT projects, and nothing else', async () => {
-    // The agreement between the graph and the KPI tiles. Summing every project
-    // double-counts, because a parent's numbers already carry its descendants'.
-    const roots = await (await fetch(`${dt.url}/api/v1/project?onlyRoot=true`,
+  test('Q39: the snapshot rolls the hierarchy up the way the table does', async () => {
+    // This used to sum the roots' own reported metrics, and that was the right
+    // answer while nothing was rolled up. It is not any more: the stub's root 4
+    // is an AGGREGATE_LATEST_VERSION_CHILDREN collection over a stale child
+    // (critical 5) and a latest one (critical 3), so "what DT reported for the
+    // roots" and "what the cards show" are now different numbers — and the
+    // graph has to be the second one, or it contradicts the tiles directly
+    // above it (§6.3).
+    const all = await (await fetch(`${dt.url}/api/v1/project?onlyRoot=false`,
       { headers: { 'X-Api-Key': dt.apiKey } })).json();
-    const expected = roots.reduce((a, p) => a + (p.metrics.critical || 0), 0);
+    const list = Array.isArray(all) ? all : all.values;
+    const byUuid = new Map(list.map(p => [p.uuid, p]));
+    const childrenOf = (uuid) => list.filter(p => p.parent && p.parent.uuid === uuid);
+
+    // Recompute the expectation independently of lib/project-tree.js, so this
+    // is a check on the product rather than the same function twice.
+    const rollup = (p) => {
+      const kids = childrenOf(p.uuid);
+      if (!kids.length) return p.metrics.critical || 0;
+      const counted = p.collectionLogic === 'AGGREGATE_LATEST_VERSION_CHILDREN'
+        ? kids.filter(k => k.isLatest === true) : kids;
+      return counted.reduce((a, k) => a + rollup(k), 0);
+    };
+    const roots = list.filter(p => !p.parent || !byUuid.has(p.parent.uuid));
+    const expected = roots.reduce((a, p) => a + rollup(p), 0);
+
     const r = await api.get('/violation-cache/risk-series?period=week', token);
     const today = r.json.points[6];
-    assert.equal(today.sev.critical, expected);
-    assert.equal(today.rootProjectCount, roots.length);
+    assert.equal(today.sev.critical, expected,
+      'the snapshot must equal the collection-aware roll-up, not the roots as reported');
+    assert.equal(today.rootProjectCount, roots.length, 'descendants are not roots');
+
+    // And the specific number the defect turned on: root 4 contributes its
+    // latest child's 3, never 3 + 5.
+    const collection = list.find(p => p.collectionLogic === 'AGGREGATE_LATEST_VERSION_CHILDREN');
+    assert.ok(collection, 'the stub should still carry a collection root');
+    assert.equal(rollup(collection), 3, 'the fixture itself must still pose the question');
   });
 
-  test('the crawl asks for exactly onlyRoot and excludeInactive', async () => {
+  test('Q39: the crawl sweeps the whole active portfolio, in one request', async () => {
+    // Narrowed, not dropped: onlyRoot flipped because the roll-up needs the
+    // descendants, but "active only" and "never a request per parent" are the
+    // halves that still bound what this costs DependencyTrack (§13, Q34).
     const projectCalls = dt.calls().filter(c => c.includes('/api/v1/project?'));
-    assert.ok(projectCalls.some(c => c.includes('onlyRoot=true') && c.includes('excludeInactive=true')),
+    assert.ok(projectCalls.some(c => c.includes('onlyRoot=false') && c.includes('excludeInactive=true')),
       `no snapshot crawl seen in: ${projectCalls.slice(0, 4).join(' | ')}`);
+    assert.ok(!dt.calls().some(c => c.includes('/children')),
+      'the hierarchy comes from parent links, never a per-parent descent');
   });
 
   test('the three periods are the only ones accepted', async () => {
@@ -1295,6 +1327,35 @@ describe('e2e — the dashboard in a real browser', { skip: BROWSER_SKIP }, () =
       'and the root must equal it too — the rollup has to climb two levels, not one');
     assert.equal(byName['Group 2'], byName['service-102'],
       'the ordinary two-level case must still total its leaf');
+  }, { timeout: 60_000 });
+
+  test('Q39: a collection root set to "latest only" counts only its latest child', async () => {
+    // The stub's root 4 is a real Collection Project with
+    // collectionLogic = AGGREGATE_LATEST_VERSION_CHILDREN over two children:
+    // service-401 (critical 5, not latest) and service-402 (critical 3,
+    // latest). A dashboard that ignores collectionLogic renders 8 here; one
+    // that honours it renders 3. No unit test can prove this end to end,
+    // because the whole defect was that the field never survived parsing —
+    // this is the only assertion that reads it off the real payload, through
+    // the real parser, to a rendered cell.
+    await page.locator('#searchInput').fill('');
+    await page.waitForTimeout(400);
+    const byName = await page.evaluate(() => {
+      const out = {};
+      for (const tr of document.querySelectorAll('#tableBody tr')) {
+        const name = tr.querySelector('.proj-name-text');
+        const tds  = tr.querySelectorAll('td');
+        if (name && tds.length > 4) out[name.textContent.trim()] = tds[4].textContent.trim();
+      }
+      return out;
+    });
+    for (const n of ['Collection 4', 'service-401', 'service-402']) {
+      assert.ok(n in byName, `row "${n}" missing — got ${JSON.stringify(Object.keys(byName))}`);
+    }
+    assert.equal(byName['service-401'], '5', 'the stale child keeps its own count');
+    assert.equal(byName['service-402'], '3', 'the latest child keeps its own count');
+    assert.equal(byName['Collection 4'], '3',
+      `the collection root must show only its latest child's 3, not 8 — got ${byName['Collection 4']}`);
   }, { timeout: 60_000 });
 
   test('the vulnerability dialog opens from the eye icon and lists real findings', async () => {

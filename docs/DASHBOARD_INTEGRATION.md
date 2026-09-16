@@ -96,9 +96,36 @@ the browser:
 ```
 
 **A leaf row shows what DependencyTrack reported for that project. A group row
-shows the sum of everything beneath it**, computed in the browser after the tree
-is built — so a three-level branch rolls its leaves through the middle tier up to
-the root, and the KPI cards above are the sum of the root rows.
+shows the sum of the children its own collection logic counts**, computed in the
+browser after the tree is built — so a three-level branch rolls its leaves
+through the middle tier up to the root, and the KPI cards above are the sum of
+the root rows.
+
+**Which children count follows the project's `collectionLogic` in
+DependencyTrack**, not a rule of ours:
+
+| `collectionLogic` | Counted |
+|---|---|
+| `AGGREGATE_LATEST_VERSION_CHILDREN` | children with `isLatest` |
+| `AGGREGATE_DIRECT_CHILDREN_WITH_TAG` | children carrying `collectionTag` |
+| `AGGREGATE_DIRECT_CHILDREN` | all children |
+| `NONE`, or absent (DependencyTrack v4) | all children |
+
+The filter is applied at every level against that level's own setting, so a
+parent that counts only its latest children, whose child counts all of its own,
+resolves correctly in one pass. A child excluded by the filter takes its whole
+subtree with it. Under `AGGREGATE_LATEST_VERSION_CHILDREN` a child that is itself
+a group has no version and so is never `isLatest` — DependencyTrack excludes it
+and so does this, which is what keeps the two screens showing the same number.
+
+`NONE` and absent counting every child is deliberate: v4 has no collection
+projects at all, and an organisational parent with no SBOM of its own would
+otherwise report zero over a failing subtree.
+
+**The risk-trend series applies the same rule server-side**, so the graph and the
+cards above it are the same arithmetic. Its crawl sweeps
+`onlyRoot=false&excludeInactive=true` in one paged request and rebuilds the
+hierarchy from `parent.uuid` — it never issues a request per parent.
 
 This is a change, and it is worth knowing why. Previously every row rendered
 whatever the API returned against that project's own uuid, which was a genuine

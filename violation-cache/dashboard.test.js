@@ -5416,9 +5416,10 @@ describe('project tree — group-row aggregation (Q35)', () => {
     + INDEX_HTML.match(/const CATS = \[[\s\S]*?\];/)[0] + '\n'
     + INDEX_HTML.match(/const AGG_LEVELS = \{[\s\S]*?\n\};/)[0] + '\n'
     + 'const nodeMap = new Map();\n'
+    + extractFunction(INDEX_HTML, 'collectionChildren') + '\n'
     + extractFunction(INDEX_HTML, 'aggregateTree') + '\n'
     + extractFunction(INDEX_HTML, 'buildTree') + '\n'
-    + 'return { buildTree, aggregateTree, nodeMap };'
+    + 'return { buildTree, aggregateTree, collectionChildren, nodeMap };'
   )();
 
   /** A leaf project with the §8.6 shape; only the fields under test are set. */
@@ -5549,6 +5550,244 @@ describe('project tree — group-row aggregation (Q35)', () => {
   test('a two-node parent cycle does not hang the build', () => {
     const roots = tree.buildTree([proj('x', 'y', { c: 1 }), proj('y', 'x', { c: 2 })]);
     assert.ok(Array.isArray(roots), 'buildTree must still return');
+  });
+
+  // ── Q39: the rollup obeys the parent's collection logic ──────────────────
+  // Q35 summed every child unconditionally, which is only one of DT's four
+  // modes. A parent set to aggregate "direct children marked as latest" over
+  // five versions of one service was shown roughly five times its real number,
+  // and the dashboard contradicted the DT screen it summarises.
+  describe('collection logic (Q39)', () => {
+    /** A versioned child, optionally latest and optionally tagged. */
+    const child = (uuid, parent, n, extra = {}) =>
+      Object.assign(proj(uuid, parent, n), { version: '1.0.0', isLatest: false, tags: [] }, extra);
+    const group = (uuid, parent, extra = {}) =>
+      Object.assign(proj(uuid, parent), { version: '', isLatest: false, tags: [] }, extra);
+
+    test('AGGREGATE_LATEST_VERSION_CHILDREN counts only the latest children', () => {
+      // Three versions of one service, one marked latest. Summing all three is
+      // the defect this exists for — the number would be 1+2+4 = 7.
+      const roots = tree.buildTree([
+        group('root', null, { collectionLogic: 'AGGREGATE_LATEST_VERSION_CHILDREN' }),
+        child('v1', 'root', { c: 1 }),
+        child('v2', 'root', { c: 2 }),
+        child('v3', 'root', { c: 4 }, { isLatest: true }),
+      ]);
+      assert.equal(byUuid(roots, 'root').security.critical, 4,
+        'only the isLatest child counts');
+    });
+
+    test('AGGREGATE_DIRECT_CHILDREN_WITH_TAG counts only children carrying the tag', () => {
+      const roots = tree.buildTree([
+        group('root', null, {
+          collectionLogic: 'AGGREGATE_DIRECT_CHILDREN_WITH_TAG', collectionTag: 'prod',
+        }),
+        child('a', 'root', { c: 1 }, { tags: ['prod'] }),
+        child('b', 'root', { c: 2 }, { tags: ['staging'] }),
+        child('c', 'root', { c: 4 }, { tags: ['prod', 'eu'] }),
+      ]);
+      assert.equal(byUuid(roots, 'root').security.critical, 5, '1 + 4, not 7');
+    });
+
+    test('a WITH_TAG parent with no tag configured counts nothing', () => {
+      // Falling back to "sum everything" would report a total the operator
+      // explicitly asked not to see — the opposite of what the mode means.
+      const roots = tree.buildTree([
+        group('root', null, { collectionLogic: 'AGGREGATE_DIRECT_CHILDREN_WITH_TAG' }),
+        child('a', 'root', { c: 1 }, { tags: ['prod'] }),
+      ]);
+      assert.equal(byUuid(roots, 'root').security.critical, 0);
+    });
+
+    test('AGGREGATE_DIRECT_CHILDREN, NONE, absent and unknown all sum everything', () => {
+      // NONE and absent are the v4 and organisational-parent cases Q35 exists
+      // for; an unknown value is a future DT mode, which should read too broad
+      // rather than as a row of zeros.
+      for (const logic of ['AGGREGATE_DIRECT_CHILDREN', 'NONE', undefined, 'SOMETHING_NEW']) {
+        const roots = tree.buildTree([
+          group('root', null, logic === undefined ? {} : { collectionLogic: logic }),
+          child('a', 'root', { c: 1 }),
+          child('b', 'root', { c: 2 }, { isLatest: true }),
+        ]);
+        assert.equal(byUuid(roots, 'root').security.critical, 3,
+          `collectionLogic ${JSON.stringify(logic)} should sum every child`);
+      }
+    });
+
+    test('the filter applies per level, so an excluded child takes its subtree', () => {
+      //  root (LATEST) ─┬─ midLatest (isLatest) ─┬─ leaf c=1
+      //                 │                        └─ leaf c=2
+      //                 └─ midOld    (not latest) ─ leaf c=99
+      // The excluded branch contributes nothing, including its descendants.
+      const roots = tree.buildTree([
+        group('root', null, { collectionLogic: 'AGGREGATE_LATEST_VERSION_CHILDREN' }),
+        child('midLatest', 'root', {}, { isLatest: true }),
+        child('midOld', 'root', {}),
+        child('l1', 'midLatest', { c: 1 }),
+        child('l2', 'midLatest', { c: 2 }),
+        child('l3', 'midOld', { c: 99 }),
+      ]);
+      assert.equal(byUuid(roots, 'midLatest').security.critical, 3);
+      assert.equal(byUuid(roots, 'root').security.critical, 3, '99 must not leak in');
+    });
+
+    test('each level applies its OWN logic, not the root\'s', () => {
+      // root sums everything; mid keeps only its latest child. A single global
+      // rule would get one of these two wrong.
+      const roots = tree.buildTree([
+        group('root', null, { collectionLogic: 'AGGREGATE_DIRECT_CHILDREN' }),
+        group('mid', 'root', { collectionLogic: 'AGGREGATE_LATEST_VERSION_CHILDREN' }),
+        child('other', 'root', { c: 10 }),
+        child('m1', 'mid', { c: 1 }),
+        child('m2', 'mid', { c: 2 }, { isLatest: true }),
+      ]);
+      assert.equal(byUuid(roots, 'mid').security.critical, 2);
+      assert.equal(byUuid(roots, 'root').security.critical, 12, '10 + mid\'s own 2');
+    });
+
+    test('under LATEST a child group is excluded, because DT reports it not-latest', () => {
+      // The decision recorded in §8.7: follow isLatest strictly so this row
+      // equals the one DependencyTrack shows for the same project. A child
+      // group has no version and so is never isLatest.
+      const roots = tree.buildTree([
+        group('root', null, { collectionLogic: 'AGGREGATE_LATEST_VERSION_CHILDREN' }),
+        group('childGroup', 'root'),
+        child('deep', 'childGroup', { c: 7 }),
+      ]);
+      assert.equal(byUuid(roots, 'childGroup').security.critical, 7,
+        'the child group still totals its own subtree');
+      assert.equal(byUuid(roots, 'root').security.critical, 0,
+        'but the root does not count it');
+    });
+
+    test('the ⚠ follows the counted children, not every child', () => {
+      // A gap inside a child this parent does not count cannot understate its
+      // total, so flagging it would point at figures nothing is wrong with.
+      const roots = tree.buildTree([
+        group('root', null, { collectionLogic: 'AGGREGATE_LATEST_VERSION_CHILDREN' }),
+        child('counted', 'root', {}, { isLatest: true }),
+        child('ignored', 'root', { warn: 'metrics unavailable' }),
+      ]);
+      assert.equal(byUuid(roots, 'root')._dataWarn, null);
+
+      const roots2 = tree.buildTree([
+        group('r2', null, { collectionLogic: 'AGGREGATE_LATEST_VERSION_CHILDREN' }),
+        child('c2', 'r2', { warn: 'metrics unavailable' }, { isLatest: true }),
+      ]);
+      assert.ok(byUuid(roots2, 'r2')._dataWarn, 'a counted child\'s gap must still warn');
+    });
+
+    test('re-running is still idempotent under every mode', () => {
+      // applyViolationData() writes each project's own counts back over every
+      // node and calls aggregateTree() again; that is only safe if leaves are
+      // inputs, and Q39 must not have broken it.
+      const roots = tree.buildTree([
+        group('root', null, { collectionLogic: 'AGGREGATE_LATEST_VERSION_CHILDREN' }),
+        child('a', 'root', { c: 1 }, { isLatest: true }),
+        child('b', 'root', { c: 2 }),
+      ]);
+      tree.aggregateTree(roots);
+      tree.aggregateTree(roots);
+      assert.equal(byUuid(roots, 'root').security.critical, 1);
+    });
+
+    test('collectionChildren is pure and never mutates the child list', () => {
+      const node = {
+        collectionLogic: 'AGGREGATE_LATEST_VERSION_CHILDREN',
+        children: [{ isLatest: true }, { isLatest: false }],
+      };
+      assert.equal(tree.collectionChildren(node).length, 1);
+      assert.equal(node.children.length, 2, 'the node keeps every child it has');
+      // A node with no children at all must not throw — buildTree guarantees
+      // the array, but a caller reaching for this directly may not.
+      assert.deepEqual(tree.collectionChildren({ collectionLogic: 'NONE' }), []);
+    });
+  });
+});
+
+// ── Q39: the server's copy of the rollup, and that it cannot drift ──────────
+// lib/project-tree.js is hand-mirrored from index.html because §3 forbids a
+// bundler and a browser page cannot require() a lib module — the same trade
+// lib/cwe.js and componentKey() already carry. This is what makes it safe.
+describe('project-tree — the server copy agrees with the page (Q39)', () => {
+  const projectTree = require('./lib/project-tree');
+  const page = new Function(
+    extractFunction(INDEX_HTML, 'collectionChildren') + '\n'
+    + 'return { collectionChildren };'
+  )();
+
+  test('collectionChildren answers identically in both copies', () => {
+    // Driven from one table so a mode added to one side and not the other
+    // fails here rather than in production.
+    const kid = (name, isLatest, tags) => ({ name, isLatest, tags });
+    const kids = [
+      kid('a', true,  ['prod']),
+      kid('b', false, ['prod', 'eu']),
+      kid('c', true,  []),
+      kid('d', false, ['staging']),
+    ];
+    const cases = [
+      { collectionLogic: 'AGGREGATE_LATEST_VERSION_CHILDREN' },
+      { collectionLogic: 'AGGREGATE_DIRECT_CHILDREN_WITH_TAG', collectionTag: 'prod' },
+      { collectionLogic: 'AGGREGATE_DIRECT_CHILDREN_WITH_TAG', collectionTag: '' },
+      { collectionLogic: 'AGGREGATE_DIRECT_CHILDREN' },
+      { collectionLogic: 'NONE' },
+      { collectionLogic: '' },
+      { collectionLogic: 'A_MODE_FROM_THE_FUTURE' },
+      {},
+    ];
+    for (const c of cases) {
+      const node = { ...c, children: kids };
+      const mine   = projectTree.collectionChildren(node).map(k => k.name);
+      const theirs = page.collectionChildren(node).map(k => k.name);
+      assert.deepEqual(mine, theirs,
+        `the two copies disagree for ${JSON.stringify(c)}`);
+    }
+  });
+
+  test('buildTree nests on parent.uuid and survives a self-reference', () => {
+    const roots = projectTree.buildTree([
+      { uuid: 'r' },
+      { uuid: 'a', parent: { uuid: 'r' } },
+      { uuid: 'b', parentUuid: 'r' },          // the flat form too
+      { uuid: 'loop', parent: { uuid: 'loop' } },
+      { uuid: 'orphan', parent: { uuid: 'gone' } },
+    ]);
+    const byUuid = Object.fromEntries(roots.map(r => [r.uuid, r]));
+    assert.deepEqual(Object.keys(byUuid).sort(), ['loop', 'orphan', 'r']);
+    assert.deepEqual(byUuid.r.children.map(c => c.uuid).sort(), ['a', 'b']);
+    assert.equal(byUuid.loop.children.length, 0, 'a self-link is not a parent');
+  });
+
+  test('tagNames normalises both shapes DT sends', () => {
+    assert.deepEqual(projectTree.tagNames([{ name: 'a' }, 'b', {}, null]), ['a', 'b']);
+  });
+});
+
+// ── Q39: the page must keep the fields the rollup reads ─────────────────────
+describe('project parsing keeps the collection fields (Q39)', () => {
+  test('collectionLogic and collectionTag are read from the API payload', () => {
+    // The whole defect was that these were in the response and discarded at
+    // parse time, so the rollup had nothing to obey. A source assertion is
+    // what makes dropping them again fail.
+    assert.match(INDEX_HTML, /collectionLogic:\s*typeof p\.collectionLogic/,
+      'the project shape must carry collectionLogic from the payload');
+    assert.match(INDEX_HTML, /collectionTag:/,
+      'the project shape must carry collectionTag');
+  });
+
+  test('an absent collectionLogic normalises to empty, not to a mode name', () => {
+    // "the server did not say" and "the server said NONE" behave the same, but
+    // defaulting to a mode name in the parser would hide which one happened.
+    const shape = INDEX_HTML.match(/collectionLogic:\s*typeof p\.collectionLogic[^\n]*\n/)[0];
+    assert.match(shape, /:\s*''/, 'absent must normalise to an empty string');
+    assert.ok(!/AGGREGATE_/.test(shape), 'the parser must not invent a default mode');
+  });
+
+  test('collectionTag tolerates both shapes DT sends', () => {
+    const shape = INDEX_HTML.match(/collectionTag:\s*\([\s\S]*?\),\n/)[0];
+    assert.match(shape, /typeof p\.collectionTag === 'string'/);
+    assert.match(shape, /p\.collectionTag\.name/);
   });
 });
 
@@ -5697,6 +5936,23 @@ describe('the documentation still describes this application', () => {
       assert.match(ciSection, new RegExp(`\\b${job}\\b`),
         `ci.yml defines a "${job}" job the README never mentions`);
     }
+  });
+
+  test('the two CI triggers still cover every branch between them', () => {
+    // The push trigger is `main` only, to stop a branch with an open PR running
+    // the whole workflow twice concurrently. That is safe ONLY because
+    // `pull_request` covers every other branch — dropping it while keeping the
+    // narrowed push would leave pull requests untested, which is the failure
+    // this pair has to be checked as a pair to catch. Widening push back to
+    // '**' is not wrong, only wasteful, so it fails here with the reason
+    // rather than silently doubling the bill.
+    const on = CI_YML.slice(CI_YML.indexOf('\non:'), CI_YML.indexOf('\npermissions:'));
+    assert.match(on, /pull_request:/,
+      'pull_request is what covers every branch that is up for review');
+    assert.match(on, /push:\s*\n\s*branches:\s*\[main\]/,
+      'push should be main-only — see §10.3 for why, and update it there if this changes');
+    assert.ok(!/branches:\s*\['\*\*'\]/.test(on),
+      'branches: [\'**\'] runs the whole workflow twice on every PR push');
   });
 
   test('the guide no longer claims group rows are unaggregated', () => {

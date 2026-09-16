@@ -37,10 +37,14 @@ administrator credentials it created.
 
 ![The dashboard: hierarchical portfolio, KPI cards and the risk trend](docs/images/dashboard.png)
 
-A group row shows the **total of everything beneath it** — above, `Group 1`,
-`service-101` and `service-201` agree because that branch is a single chain three
-deep and the roll-up climbs through the middle tier. The cards are summed from
-the same root rows, so a card can never contradict the row directly under it.
+A group row shows the **total of the children its collection logic counts**, and
+that logic is the one you set in DependencyTrack. `Collection 4` above aggregates
+*direct children marked as latest*, so it shows `service-402`'s **3** — not
+3 + 5. A parent that aggregates all its children shows their sum instead, and the
+roll-up climbs through however many levels the branch has. The cards are summed
+from the same root rows, so a card can never contradict the row under it, and the
+risk-trend panel applies the identical rule server-side.
+
 Note that a card folds all four categories together: *Critical issues* is
 severity-critical **plus** every operational, licence and security-policy `FAIL`,
 which is why it is larger than the Critical column alone.
@@ -217,7 +221,8 @@ editing the allow-list in a diff somebody reads (CLAUDE.md §7.6).
 
 ## Continuous integration
 
-`.github/workflows/ci.yml` runs on every push and pull request, as four jobs:
+`.github/workflows/ci.yml` runs on every pull request and on every push to
+`main`, as four jobs:
 
 | Job | What it runs |
 |---|---|
