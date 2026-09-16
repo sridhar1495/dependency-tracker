@@ -215,7 +215,7 @@ Inline comments use lettered prefixes to trace design decisions:
 - **O-numbers** — observability notes (`// O3: JSON log format for log aggregators`)
 - **S-numbers** — security rationale (`// S2: token hashed before storage`) — **new in revision 2**
 
-Highest numbers currently in use: **Q37, P20, O5, S34**. When adding logic with a
+Highest numbers currently in use: **Q38, P20, O5, S34**. When adding logic with a
 non-obvious trade-off, add the next number in the appropriate series. Check the
 current maximum before assigning — parallel branches can claim the same number.
 
@@ -1294,6 +1294,22 @@ class as the CWE helpers above; a cross-file test asserts the two agree.
   this one did earlier in the same dialog session — checking the toggle
   renders instantly from what is already in hand; `onVulnDepPathToggle()` only
   issues the `POST` that starts a walk when there is nothing to show yet.
+- **Q38: `'none'` is a state the poll waits through, not one it fails on.**
+  The route answers `POST` with 202 and `runJob` writes `markBuilding` a beat
+  later, while `startDepPathPoll` fires its first tick synchronously — so for a
+  few milliseconds the GET legitimately reports `'none'` (no row yet). Treating
+  that as terminal meant the dialog stopped polling and rendered "Could not
+  resolve dependency paths" over a walk that went on to finish in 216 ms, with
+  the cache row reading `ready` and six chains by the time anyone looked. It
+  cost a CI failure to find, and it was a user-visible false error every time
+  the race landed. `depPathPollAction()` is the three-way decision, pure so it
+  can be tested without a timer, a DOM or a network; the wait is **bounded** by
+  `CONFIG.DEP_PATH_START_GRACE_TICKS`, because a walk that genuinely never
+  starts must still end in a message rather than a permanent spinner.
+  `depPathFailureText()` then says *which* state it was — `'none'` (never
+  started), `'stalled'` (try ↻ Refetch paths), `'failed'` (the stored reason).
+  Those were one undifferentiated sentence, which is exactly why the CI failure
+  needed the server log to explain it.
 - **`_depPathReqSeq` guards the poll independently of `_vulnReqSeq`.** Opening
   a new project, or unchecking then rechecking the toggle, must invalidate
   whatever the previous poll was waiting on without disturbing an
@@ -2232,6 +2248,13 @@ Running the browser checks in CI was on this list and is now the `e2e` job.
   naming the intermediate `carrier-for-…` component, and a second report must
   issue **no** `dependencyGraph` call at all because the first one's walk is
   cached by fingerprint.
+- The dependency-path poll (Q38): that `'none'` returns `wait` inside the grace
+  window and `stop` past it — the bound is what keeps a false error from being
+  replaced by a permanent spinner; that the grace counter cannot leak into the
+  `'building'` case; and that the failure text names which state it was,
+  including an unknown status rendering a plain sentence rather than the word
+  `undefined` at a user. Plus a source assertion that the poll counts only the
+  not-found answers and routes both decisions through the two helpers.
 - **Authorisation:** every route rejects a missing or invalid token with 401;
   cross-user access returns 404; the profile endpoint ignores login ID and email.
 - Do **not** write tests that require a live DT API.

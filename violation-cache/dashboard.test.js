@@ -4544,6 +4544,58 @@ describe('Q36: the findings dialog keeps what it fetched', () => {
   });
 });
 
+describe('Q38: a walk that has not written its row yet is not a failed walk', () => {
+  const GRACE = parseInt(INDEX_HTML.match(/DEP_PATH_START_GRACE_TICKS:\s*(\d+)/)[1], 10);
+  const poll = new Function(
+    `const CONFIG = { DEP_PATH_START_GRACE_TICKS: ${GRACE} };\n`
+    + extractFunction(INDEX_HTML, 'depPathPollAction') + '\n'
+    + extractFunction(INDEX_HTML, 'depPathFailureText') + '\n'
+    + 'return { depPathPollAction, depPathFailureText };'
+  )();
+
+  test("'none' keeps polling through the start-up window", () => {
+    // The route answers 202 and runJob writes markBuilding a beat later, while
+    // the first tick fires synchronously — so 'none' is the normal answer for a
+    // few milliseconds. Treating it as terminal is what made the dialog report
+    // a failure over a cache row that went on to say `ready` with six chains.
+    assert.equal(poll.depPathPollAction('none', 1), 'wait');
+    assert.equal(poll.depPathPollAction('none', GRACE), 'wait');
+  });
+
+  test("'none' is still bounded — a walk that never starts ends in a message", () => {
+    assert.equal(poll.depPathPollAction('none', GRACE + 1), 'stop',
+      'an unbounded wait would replace a false error with a permanent spinner');
+  });
+
+  test('every other status keeps the meaning it had', () => {
+    assert.equal(poll.depPathPollAction('building', 1), 'wait');
+    assert.equal(poll.depPathPollAction('building', 999), 'wait',
+      'the grace counter must not leak into the building case');
+    assert.equal(poll.depPathPollAction('ready', 1), 'render');
+    assert.equal(poll.depPathPollAction('failed', 1), 'stop');
+    assert.equal(poll.depPathPollAction('stalled', 1), 'stop');
+  });
+
+  test('the failure text names which of the states it was', () => {
+    // One undifferentiated sentence is why a CI failure needed the server log
+    // to explain it, and why a user could not tell "try again" from "wedged".
+    assert.match(poll.depPathFailureText({ status: 'none' }), /never started/);
+    assert.match(poll.depPathFailureText({ status: 'stalled' }), /Refetch paths/);
+    assert.match(poll.depPathFailureText({ status: 'failed', error: 'DT said no' }), /DT said no/);
+    assert.match(poll.depPathFailureText({ status: 'failed' }), /the walk failed/,
+      'a failed walk with no stored reason still says more than a full stop');
+    // An unknown status must not render "undefined" at a user.
+    assert.equal(poll.depPathFailureText({ status: 'wat' }), 'Could not resolve dependency paths.');
+  });
+
+  test('the poll counts only the not-found answers, and asks the helper', () => {
+    const fn = extractFunction(INDEX_HTML, 'startDepPathPoll');
+    assert.match(fn, /if \(data\.status === 'none'\) notFoundTicks\+\+/);
+    assert.match(fn, /depPathPollAction\(data\.status, notFoundTicks\) === 'wait'/);
+    assert.match(fn, /depPathFailureText\(data\)/);
+  });
+});
+
 describe('Q36: only the ✕ closes the findings dialog', () => {
   test('the dialog opts out of backdrop dismissal in its own markup', () => {
     const tag = INDEX_HTML.match(/<div class="modal-overlay" id="vulnDialog"[^>]*>/);
