@@ -129,6 +129,8 @@ dependency-tracker/
 ├── docs/
 │   ├── PERFORMANCE.md          # Query plans and load evidence  [phase 10]
 │   ├── perf-check.js           # Reproduces that evidence
+│   ├── screenshots.js          # Regenerates docs/images/ from the e2e stub — §10.2
+│   ├── images/                 # The PNGs README.md and the guide embed
 │   └── auth-smoke-test.sh
 ├── .github/workflows/ci.yml    # Offline, database and audit jobs  [phase 8]
 ├── install.sh
@@ -1856,7 +1858,11 @@ The frontend never performs uniqueness checks — those are backend-only, via
 
 `dashboard/nginx.conf.template` uses `envsubst` placeholders (`${VAR_NAME}`).
 
-- `/auth/*`, `/profile` and `/violation-cache/*` → `dt-violation-cache:3001`.
+- Six locations proxy to `dt-violation-cache:3001`: `/auth/`, `/admin/`,
+  `/profile`, `/branding`, `/healthz` and `/violation-cache/`. The list is worth
+  stating in full because a route added under a *new* prefix is served by the SPA
+  fallback instead of the backend, and the symptom is `index.html` arriving where
+  JSON was expected rather than a 404.
 - **`client_max_body_size 6m`.** The report route deliberately accepts a 5 MB
   body for a large project selection (§12); nginx's 1 MB default rejected it
   here first, with nginx's own HTML 413 rather than the JSON the dashboard can
@@ -1982,6 +1988,22 @@ the database tier against a `postgres:16-alpine` service container
 `docs/perf-check.js` is **not** a test tier: it seeds tens of thousands of rows,
 which no test may do. It is run by hand before a release and its output lives in
 `docs/PERFORMANCE.md`.
+
+**`docs/screenshots.js` is not a test tier either**, for the same reason and one
+more: it asserts nothing, and it writes into the repository. It boots
+`e2e/stack.js` — the same assembled stack `e2e.test.js` uses — drives Playwright
+over it and regenerates the PNGs in `docs/images/` that `README.md` and
+`docs/DASHBOARD_INTEGRATION.md` embed.
+
+**Every pixel in those images comes from `e2e/dt-stub.js`, and that is a rule,
+not an accident of how they were first made.** A screenshot is the one artefact
+in this repository that can carry somebody's portfolio out of it — a real
+project name, a real CVE against a real product, an operator's own
+DependencyTrack URL in the settings panel. Driving the stub means the fixtures
+in the images are `Group 1`, `service-101` and `carrier-for-…` by construction,
+so there is nothing to redact. A test in `dashboard.test.js` asserts the tool
+still boots the stub rather than taking a URL, so a future "point it at staging
+for nicer screenshots" change fails offline rather than in review.
 
 ### 10.3 Continuous integration — `.github/workflows/ci.yml`
 
@@ -2248,6 +2270,16 @@ Running the browser checks in CI was on this list and is now the `e2e` job.
   naming the intermediate `carrier-for-…` component, and a second report must
   issue **no** `dependencyGraph` call at all because the first one's walk is
   cached by fingerprint.
+  **And once more through the scheduler**, which is Q37's second call site and
+  the only one nothing drove end to end: a manual report is downloaded over
+  HTTP, a scheduled one is built in memory and attached to an email (§6.8), so
+  the two share `collectReportData` and share nothing else. That test opens the
+  attachment the SMTP stub actually received — pulling the base64 run whose
+  decoded bytes start `PK` out of the raw DATA, rather than parsing MIME
+  boundaries the delivery layer is free to lay out differently — and reads the
+  same two columns off it. A `lib/scheduler.js` that stopped passing the whole
+  `conn` would still produce a valid workbook with empty Origin cells, which is
+  precisely the failure no other assertion in the suite can see.
 - The dependency-path poll (Q38): that `'none'` returns `wait` inside the grace
   window and `stop` past it — the bound is what keeps a false error from being
   replaced by a permanent spinner; that the grace counter cannot leak into the
@@ -2257,6 +2289,18 @@ Running the browser checks in CI was on this list and is now the `e2e` job.
   not-found answers and routes both decisions through the two helpers.
 - **Authorisation:** every route rejects a missing or invalid token with 401;
   cross-user access returns 404; the profile endpoint ignores login ID and email.
+- **The documentation, against the application it documents.** Prose drifts
+  silently — nothing fails when a guide keeps describing behaviour that changed
+  two phases ago, which is how `docs/DASHBOARD_INTEGRATION.md` came to state
+  that group rows show only their own project's numbers well after Q35 made
+  them roll up. So the claims that *can* be checked mechanically are: every
+  image `README.md` and the guide embed exists and really is a PNG, and carries
+  alt text; `README.md` names every job in `.github/workflows/ci.yml`, so a job
+  added there cannot go undocumented; it lists all five test files and the
+  `TEST_DATABASE_URL` switch; the guide no longer claims group rows are
+  unaggregated; and `docs/screenshots.js` still boots the stub rather than
+  accepting a URL (§10.2). These are cheap and they only catch the mechanical
+  half — a sentence that is merely wrong still needs a reader.
 - Do **not** write tests that require a live DT API.
 
 ---
