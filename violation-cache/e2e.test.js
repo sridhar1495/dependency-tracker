@@ -893,6 +893,36 @@ describe('e2e — the dashboard in a real browser', { skip: BROWSER_SKIP }, () =
    * cases (startDepPathPoll/onVulnDepPathToggle in index.html both write it),
    * so quote it rather than making the next person re-derive it from CI logs.
    */
+  /**
+   * Put the page back the way a test found it: scrolled to the top, pointer in
+   * the corner.
+   *
+   * The scroll half is not cosmetic. Clicking a row far enough down the table
+   * makes Playwright scroll it into view, and the trend panel sits above the
+   * table — so a test that clicks a low row leaves the charts off the top of
+   * the viewport. The trend tooltip test derives its hover coordinates from
+   * `#trendCharts svg`'s bounding box, which is then negative, and the
+   * mousemove lands outside the window: #trendTip is built on that event, so
+   * it never appears and the failure reads as "the tooltip is broken" three
+   * tests away from the test that actually scrolled.
+   *
+   * The pointer half matches what the tooltip test already does at its end.
+   */
+  const restoreViewport = async () => {
+    await page.evaluate(() => {
+      // window.scrollTo alone is not enough: this page scrolls an inner
+      // container, so window.scrollY reads 0 while the charts sit 56px above
+      // the viewport. Walk the charts' own ancestors and reset whichever one
+      // actually moved.
+      window.scrollTo(0, 0);
+      for (let el = document.getElementById('trendCharts'); el; el = el.parentElement) {
+        if (el.scrollTop) el.scrollTop = 0;
+      }
+    });
+    await page.mouse.move(5, 5);
+    await page.waitForTimeout(200); // the chart resize handler is debounced at 150ms
+  };
+
   async function waitForDepPathChains(ms) {
     try {
       await page.waitForSelector('.dep-path-chain', { timeout: ms });
@@ -1219,6 +1249,67 @@ describe('e2e — the dashboard in a real browser', { skip: BROWSER_SKIP }, () =
     await page.locator('#vulnDialog .modal-close').click();
     await page.waitForTimeout(400);
   }, { timeout: 90_000 });   // as above: room for the 45s chain wait plus a 15s License fetch
+
+  test('Q36: a click beside the dialog does not dismiss it — only the ✕ does', async () => {
+    // The reported bug: the dialog starts a finding crawl on open, and a
+    // mis-aimed click on the backdrop threw that work away with nothing on
+    // screen to say it had happened.
+    const eyeBtn = page.locator('.vuln-eye-btn').first();
+    await eyeBtn.click();
+    await page.waitForSelector('#vulnDialogRows tr', { timeout: 15_000 });
+
+    // Click the overlay itself, well clear of the dialog card. Playwright
+    // refuses a click the card would intercept, so position is the assertion:
+    // this lands on the backdrop and nowhere else.
+    await page.locator('#vulnDialog').click({ position: { x: 5, y: 5 } });
+    await page.waitForTimeout(400);
+    assert.equal(
+      await page.locator('#vulnDialog').evaluate(e => e.classList.contains('open')), true,
+      'a backdrop click must leave the findings dialog open');
+    assert.ok(await page.locator('#vulnDialogRows tr').count() > 0,
+      'and must not have discarded what it had already loaded');
+
+    await page.locator('#vulnDialog .modal-close').click();
+    await page.waitForTimeout(300);
+    assert.equal(
+      await page.locator('#vulnDialog').evaluate(e => e.classList.contains('open')), false,
+      'the ✕ must still close it');
+    await restoreViewport();
+  }, { timeout: 60_000 });
+
+  test('Q36: reopening a project reuses the fetch, while the Origin badges stay live', async () => {
+    // .nth(1) rather than .first(): every earlier test in this block opens the
+    // first project, so its rows are already memoised and this test would
+    // prove nothing about the initial fetch.
+    const eyeBtn = page.locator('.vuln-eye-btn').nth(1);
+    const findingCalls = () => dt.calls().filter(c => c.includes('/api/v1/finding?')).length;
+
+    dt.reset();
+    await eyeBtn.click();
+    await page.waitForSelector('#vulnDialogRows tr', { timeout: 15_000 });
+    const firstRows = await page.locator('#vulnDialogRows tr').count();
+    assert.ok(findingCalls() >= 1, 'the first open must actually crawl DependencyTrack');
+
+    await page.locator('#vulnDialog .modal-close').click();
+    await page.waitForTimeout(300);
+
+    dt.reset();
+    await eyeBtn.click();
+    await page.waitForSelector('#vulnDialogRows tr', { timeout: 15_000 });
+    assert.equal(findingCalls(), 0, 'reopening the same project must not crawl it again');
+    assert.equal(await page.locator('#vulnDialogRows tr').count(), firstRows,
+      'and the memo must render the same rows, not an empty table');
+
+    // §6.3a is the other half: the Direct/Transitive set is deliberately NOT
+    // memoised, so the reopen must still ask DependencyTrack for it. A memo
+    // that swallowed this would let a badge go stale against the live graph.
+    assert.ok(dt.calls().some(c => /\/api\/v1\/project\/[0-9a-f-]+$/.test(c)),
+      'Tier 1 must still be resolved live on a memo hit');
+
+    await page.locator('#vulnDialog .modal-close').click();
+    await page.waitForTimeout(300);
+    await restoreViewport();
+  }, { timeout: 90_000 });
 
   test('a clean project (no findings) shows no eye icon at all', async () => {
     // hasVulnerabilities() gates the icon — this is a structural guarantee,

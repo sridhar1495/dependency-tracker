@@ -214,7 +214,7 @@ Inline comments use lettered prefixes to trace design decisions:
 - **O-numbers** — observability notes (`// O3: JSON log format for log aggregators`)
 - **S-numbers** — security rationale (`// S2: token hashed before storage`) — **new in revision 2**
 
-Highest numbers currently in use: **Q35, P20, O5, S34**. When adding logic with a
+Highest numbers currently in use: **Q36, P20, O5, S34**. When adding logic with a
 non-obvious trade-off, add the next number in the appropriate series. Check the
 current maximum before assigning — parallel branches can claim the same number.
 
@@ -1311,6 +1311,54 @@ its own visual weight instead of relying on a type-specific heading next to it.
   findings") already covers anything beyond that, so the two never compete
   to explain the same number.
 
+**Q36: this is the one modal a stray click may not dismiss, and the one whose
+fetch outlives it.** Opening the findings dialog starts a finding crawl against
+DependencyTrack. Dismissal is therefore not free here the way it is for a
+confirm box, and the dialog used to lose that crawl to a mis-aimed click beside
+it, with nothing on screen to say anything had been discarded — then crawl the
+same project again from page 1 on the next open. Four pieces, and the first
+alone would have been a fix that still wasted the work:
+
+- **`data-no-backdrop-close` on `#vulnDialog`.** The global backdrop handler
+  skips any overlay carrying it, so the ✕ is the only way out. The opt-out is
+  an attribute in the dialog's own markup rather than an id test in the
+  handler: the next person to add a modal reads their own markup, not a list
+  of exceptions somewhere else. A test asserts `vulnDialog` is the *only*
+  overlay that opts out — a second one needs its own reason in its own diff.
+  There is no Escape handler on this page to reconcile this with; ✕ and the
+  backdrop were the only dismissals that ever existed.
+- **A crawl is abandoned when the PROJECT changes, not when `_vulnReqSeq`
+  bumps.** The point of stopping early is to spare DependencyTrack work nobody
+  wants any more, and reopening the same project wants it exactly as much as
+  the first open did — the sequence guard threw away a crawl that was still
+  entirely relevant, which is why the reopen started a second one. Rendering
+  is still sequence-guarded in `openVulnDialog`: the two guards answer
+  different questions, and collapsing them back into one is the regression.
+- **`_vulnFetchShared`: one crawl per project at a time.** A second opener
+  joins the promise already running instead of racing it — §13's "no upstream
+  work nobody asked for", applied to one user rather than to two. The entry is
+  deleted on settle *including rejection*, or one failed fetch would poison
+  every later open of that project.
+- **`_vulnMemo`: a completed crawl is kept until the page reloads.** Keyed by
+  project uuid, holding `{ findings, total, license }`. Only a crawl that
+  reported `complete` is stored — a list cut short by the user moving on would
+  otherwise be served later as a confident, wrong answer, and `complete` is
+  reported by the crawl itself rather than re-read from `_vulnCurrentProject`
+  at the end, which can have changed back by then. Bounded at
+  `CONFIG.VULN_MEMO_MAX_PROJECTS` and evicted least-recently-**used**, because
+  insertion order alone would evict the project a back-and-forth comparison
+  keeps returning to. Emptied by `applyViolationData()` and `refreshData()` —
+  the one funnel every refetch arrives through, and the full hierarchy reload.
+
+**What the memo deliberately does not hold: the Direct/Transitive set.** §6.3a
+keeps Tier 1 uncached on purpose so a badge can never lag behind what
+DependencyTrack currently reports, and a memo that also served the origin set
+would reintroduce exactly that staleness. A memo hit still calls
+`loadVulnOrigins()`. Two tests pin this — one on the source, one end to end on
+the stub's own request log — because it is the rule a future "make the dialog
+even faster" change is most likely to break. Tier 2 needs no help: the walk is
+already cached server-side and shared by connection fingerprint.
+
 Adding a page needs no nginx change: `try_files` serves a real file before the
 SPA fallback is considered.
 
@@ -1395,6 +1443,8 @@ Flat, module-scoped globals, no reactive framework.
 | `_trendSeries` | object \| null | Last `/risk-series` envelope; server-side history, independent of `allProjects` |
 | `_trendReqSeq` | number | Monotonic request id — only the newest response may render |
 | `_trendView` | object | How this viewer likes the panel; persisted under one `localStorage` key |
+| `_vulnMemo` | `Map<uuid, {findings,total,license}>` | Q36 — completed finding crawls, kept until the page reloads. LRU-bounded; never holds the Direct/Transitive set |
+| `_vulnFetchShared` | `Map<uuid, Promise>` | Q36 — the crawl currently running for a project, so a second opener joins it instead of starting another |
 
 `_cacheBuilding` is never assigned directly — every write goes through
 `setCacheBuilding()`, which also disables the toolbar's ↻ Refresh. The toolbar
@@ -1704,6 +1754,8 @@ The frontend never performs uniqueness checks — those are backend-only, via
 | `transitiveTargets()` | frontend | The union of both tables' transitive components, so a walk never loses coverage when the view switches (Q28) |
 | `vulnParentOptions(source, showPaths, originMode)` | frontend | `{ hasDirect, roots }` — whether N/A applies and the distinct chain roots, both scoped to the current Origin mode (Q32) |
 | `vulnParentMatches(origin, parentFilter)` | frontend | Whether a row belongs to All, the N/A (Direct-only) bucket, or a specific chain root (Q32) |
+| `vulnMemoGet(uuid)` / `vulnMemoSet(uuid, entry)` / `vulnMemoClear()` | frontend | The findings memo (Q36). `Get` counts as use, so eviction is LRU; `Set` enforces the cap; `Clear` is what every refetch path calls |
+| `sharedFindingsFetch(uuid, name, version)` | frontend | One finding crawl per project at a time; sorts, truncates and memoises its own result (Q36) |
 | `query(sql, params)` / `tx(fn)` | server | All database access |
 | `makeSemaphore(limit)` | server | Promise concurrency limit |
 | `sleep(ms)` | server | Promise delay |
@@ -1929,6 +1981,19 @@ Running the browser checks in CI was on this list and is now the `e2e` job.
   as six, five of them naming a control with nothing wrong with it. The
   `afterEach` that clears the class is cleanup, not an assertion: it must never
   be able to fail and take the real error with it.
+- **A browser test puts the page back where it found it.** The tier shares one
+  page, and two pieces of state leak between tests invisibly: the pointer
+  (Playwright leaves it wherever the last click landed) and the scroll offset
+  (clicking a row low in the table makes Playwright scroll it into view). The
+  trend panel sits above the table and the tooltip test derives its hover
+  coordinates from `#trendCharts svg`'s bounding box — so a test that clicks a
+  low row leaves that box 56px above the viewport, the hover lands on the
+  sticky header instead of the chart, and the failure reads as "the tooltip is
+  broken" three tests away from the test that actually scrolled. Hence
+  `restoreViewport()`. **`window.scrollTo(0, 0)` is not sufficient**: this page
+  scrolls an inner container, so `window.scrollY` reads 0 the whole time and
+  the naive reset silently does nothing — the helper walks the charts' own
+  ancestors and resets whichever one moved.
 - **A wait that can time out says why it timed out.** `waitForDepPathChains()`
   exists because "no chain appeared" has four distinct causes — still building,
   the walk failed, the `POST` was refused, nothing transitive to resolve — and
@@ -2064,6 +2129,25 @@ Running the browser checks in CI was on this list and is now the `e2e` job.
   returning instead of exhausting the stack. The browser tier proves the chain
   end to end off the rendered cells: the stub's root 1 is three deep, so
   root == intermediate == leaf only if the rollup climbed through a group.
+- The findings dialog's persistence (Q36): that the memo round-trips, is
+  bounded, and evicts least-recently-**used** rather than least-recently-added
+  — the alternating-projects case is the one insertion order gets wrong, and
+  it is the case the memo exists for; that re-storing a project updates it
+  rather than adding a second entry; that `vulnMemoClear()` empties it and
+  that both `applyViolationData()` and `refreshData()` call it. On the
+  ordering: that the memo is read *before* a fetch is started, since one read
+  afterwards saves nothing. On the crawl: that only a `complete` one is
+  stored. **And the §6.3a guard, twice** — a source assertion that the
+  memo-hit path still calls `loadVulnOrigins()` and never restores a stored
+  `_vulnDirectKeys`, plus a browser test that reads the stub's own request log
+  and requires the reopen to have asked for `/api/v1/project/{uuid}` again
+  while asking for `/api/v1/finding` zero times. The source half is what makes
+  a mutation that drops the live call fail; the browser half is what proves
+  the two halves really do differ in traffic. On dismissal: that `vulnDialog`
+  is the only overlay carrying `data-no-backdrop-close`, that the handler
+  checks the attribute before attaching rather than inside the listener, and
+  end to end that a click on the backdrop leaves the dialog open with its rows
+  intact while the ✕ still closes it.
 - **Authorisation:** every route rejects a missing or invalid token with 401;
   cross-user access returns 404; the profile endpoint ignores login ID and email.
 - Do **not** write tests that require a live DT API.

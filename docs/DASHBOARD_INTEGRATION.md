@@ -357,6 +357,39 @@ the one-walk-at-a-time guard: if a walk for this project is already running,
 a refetch gets the same 409 an ordinary request would. If every shown row is
 Direct, the button stays hidden — there is nothing a re-walk could change.
 
+#### Closing it, and reopening it
+
+**Only the ✕ closes this dialog.** Clicking the dimmed area beside it does
+nothing, deliberately: opening the dialog starts a finding crawl against
+DependencyTrack, and a mis-aimed click used to throw that crawl away with
+nothing on screen to say so. Every other dialog in the dashboard still closes
+on an outside click — this is the one that does not, because it is the one
+where dismissal costs something.
+
+**Reopening a project you have already looked at is instant.** The findings a
+dialog fetched are kept for the rest of the browser session, so comparing three
+projects and going back to the first costs three crawls rather than four.
+Reopening a project *while* its first crawl is still running joins that crawl
+instead of starting a second one.
+
+Two things are deliberately *not* reused:
+
+- **The Direct/Transitive badges are re-resolved every time.** They are one
+  cheap call and they must never lag behind what DependencyTrack currently
+  reports, so a reopened dialog asks again even though the rows themselves came
+  from memory.
+- **Anything that could have changed underneath.** Refetching violations (the
+  ↻ control or the banner) and reloading the portfolio both discard everything
+  remembered, so a finding list can never outlive the data it was consistent
+  with. Reloading the page clears it too — nothing is written to disk or to
+  `localStorage`.
+
+Only a crawl that finished is remembered. If you switch to a different project
+mid-crawl, the partial list is discarded rather than stored, so a later open
+cannot render half an answer as a complete one. At most
+`VULN_MEMO_MAX_PROJECTS` (8) projects are held at a time, the least recently
+looked at dropping out first.
+
 ---
 
 ## 3. Connecting to Live Data
