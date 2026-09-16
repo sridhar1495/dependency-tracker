@@ -796,11 +796,23 @@ if (method === 'GET' && path === '/violation-cache/status') {
     (walked, nothing found — an ordinary flat SBOM) and `Not resolved` (no walk
     result at all). Collapsing the last two would tell a reader a component has
     no parent when in fact nobody looked.
-  - **`LR_Unique Risks` aggregates to Direct / Transitive / `Mixed`, with no
-    path column.** One component can be a direct dependency of one project and
-    transitive in another, so either single label would be false for half the
-    rows the line covers; and the chains differ per project, so a merged cell
-    could not say which belonged to which.
+  - **`LR_Unique Risks` aggregates to Direct / Transitive / `Mixed`, and its
+    path cell attributes every line to the projects it belongs to.** One
+    component can be a direct dependency of one project and transitive in
+    another, so either single label would be false for half the rows the line
+    covers. The path cell was left out at first for a related reason — chains
+    differ per project and a merged cell could not say which belonged to which
+    — and the attribution is what makes it safe to add: the cell groups **by
+    chain**, listing the projects that share each one, so three projects pulled
+    in the same way is one line with three names rather than three
+    near-identical lines, and "one project reached through three parents" can
+    never be confused with "three projects reached through one each". A `Mixed`
+    row leads with `Direct in: …` because that half is the release-blocking
+    half. `aggregatePathCell()`'s two caps are display caps in Q33's sense —
+    what is hidden is admitted (`+N more routes`, `, +N more`), never silently
+    dropped — and the per-line project cap is the safer one to reach because
+    the sheet's own `Project Names` column carries the complete list. Ordering
+    is by share count then name, so the same data always renders identically.
 
   Failure is degradation, never a failed report: a Tier-1 error leaves that
   project's cells blank and logs once, and a workbook built with no `origins`
@@ -1816,7 +1828,8 @@ The frontend never performs uniqueness checks — those are backend-only, via
 | `dependencyPathCache.getMeta` / `.deriveStatus` / `.acquireBuildLock` | server | Row CRUD and the advisory lock behind the walk — the pair split for the reason `caches.js`/`violation-cache.js` are (§6.3a) |
 | `collectReportData(conn, ...)` | server | Shared collection core for manual and scheduled reports. Takes the whole connection because Q37 needs the fingerprint |
 | `reportOrigins.resolveForProject(conn, uuid, keys, cancelFlag)` | server | One project's Direct/Transitive split and the chains behind it, for a workbook (Q37) |
-| `reportOrigins.originCell` / `.pathCell` / `.aggregateOriginCell` | server | Pure workbook cell formatters — the four path states and the `Mixed` aggregate (Q37) |
+| `reportOrigins.originCell` / `.pathCell` | server | Pure workbook cell formatters — the four path states of one row (Q37) |
+| `reportOrigins.aggregateOriginCell` / `.aggregatePathCell` | server | The `LR_Unique Risks` pair: `Mixed` when a component is direct in one project and transitive in another, and a path cell grouped by chain with the projects that share each one (Q37) |
 | `sendEmail(mailCfg, ...)` | server | Deliver report via nodemailer |
 
 ---
@@ -2206,8 +2219,14 @@ Running the browser checks in CI was on this list and is now the `e2e` job.
   both, and an operational-only report reads no project at all. On the workbook:
   both columns present and in order, the same component reporting differently in
   two projects, a missing `origins` map degrading to blank rather than throwing,
-  `LR_Unique Risks` carrying Origin but no path column, and the path column
-  wrapping so a second parent is not hidden behind the row height. The
+  `LR_Unique Risks` carrying both, and the path column wrapping so a second
+  parent is not hidden behind the row height. On the aggregate cell
+  specifically: all four line kinds staying distinct in one cell; projects that
+  share a chain collapsing onto one line while a different chain gets its own;
+  one project violating the same component twice contributing one entry, not
+  two; both caps admitting what they hide; an empty cell when nothing resolved;
+  and the same refs in any order rendering byte-identically, so a report run
+  twice does not differ. The
   end-to-end tier proves it against the stub's real graph rather than a fixture:
   a report over a leaf must contain both labels, every row classified, a chain
   naming the intermediate `carrier-for-…` component, and a second report must

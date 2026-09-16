@@ -515,10 +515,34 @@ describe('e2e — reports', { skip: SKIP }, () => {
 
     const uniq = wb.getWorksheet('LR_Unique Risks');
     assert.ok(headers(uniq).includes('Origin'));
-    assert.ok(!headers(uniq).includes('Dependency Path'));
-    for (const v of column(uniq, 'Origin')) {
+    assert.ok(headers(uniq).includes('Dependency Path'));
+    const uniqOrigin = column(uniq, 'Origin');
+    const uniqPath   = column(uniq, 'Dependency Path');
+    assert.ok(uniqOrigin.length > 0, 'the leaf seeds license violations, so this sheet has rows');
+    for (const v of uniqOrigin) {
       assert.ok(['Direct', 'Transitive', 'Mixed'].includes(v), `unexpected aggregate origin ${JSON.stringify(v)}`);
     }
+    // Every line in the aggregated cell names the project(s) it belongs to —
+    // that attribution is the whole reason this column is safe to add to a
+    // sheet that folds several projects into one row.
+    uniqOrigin.forEach((o, i) => {
+      const lines = uniqPath[i].split('\n').filter(Boolean);
+      assert.ok(lines.length > 0, `a ${o} row must say something: ${JSON.stringify(uniqPath[i])}`);
+      for (const line of lines) {
+        assert.match(line, /\((?:[^()]+)\)$|^(?:Direct in|No path recorded|Not resolved): /,
+          `every line must attribute itself to projects: ${JSON.stringify(line)}`);
+      }
+      if (o === 'Direct') {
+        assert.match(lines[0], /^Direct in: /, 'a wholly-direct row says where, and shows no chain');
+        assert.equal(lines.length, 1);
+      }
+      if (o === 'Transitive') {
+        assert.ok(!lines.some(l => l.startsWith('Direct in:')),
+          'a wholly-transitive row must not claim a direct project');
+        assert.ok(lines.some(l => l.includes('carrier-for-')),
+          `the real chain should appear here too: ${JSON.stringify(lines)}`);
+      }
+    });
 
     // §6.3a/Q26 end to end: one Tier-1 read for the project, and a graph walk
     // scoped to it — never a call per finding.

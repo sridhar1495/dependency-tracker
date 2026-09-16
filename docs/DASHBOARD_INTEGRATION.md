@@ -824,14 +824,35 @@ component **block the release**, or does it go on the security SME's backlog?
 | *(blank)* | *(blank)* | DependencyTrack could not be asked which components are direct for that project. The cell is left empty rather than guessed. |
 
 `LR_Unique Risks` — one row per unique component + version across every project
-— carries an **Origin** column too, with a third value:
+— carries **Origin** and **Dependency Path** too. Origin has a third value here:
 
 - `Mixed` — the component is a *direct* dependency of one affected project and
   *transitive* in another. Both are true, so neither single label is.
 
-That sheet has no Dependency Path column on purpose: the chain differs per
-project, and one cell holding several projects' chains could not say which
-belonged to which. Open `LR_Violations` for the per-project chains.
+Because one row covers several projects, **every line in its Dependency Path
+cell says which projects it applies to**:
+
+```
+Direct in: payments-api, checkout-web
+spring-boot-starter-web → jackson-databind  (orders-svc, billing-svc)
+logging-core → jackson-databind  (reporting-job)
+No path recorded: legacy-batch
+```
+
+Read that as: it ships as a direct dependency of two projects (those are the
+release blockers), arrives through Spring Boot in two more, through the logging
+stack in a fifth, and in the sixth DependencyTrack records no route at all.
+
+- Lines are grouped **by chain**, not by project, so a component pulled in the
+  same way by eight projects is one line with eight names rather than eight
+  near-identical lines. The widest-shared route is listed first.
+- `Direct in: …` always leads when it applies — that half is what blocks a
+  release.
+- Long cells are capped, and say so: `+N more routes` when a component has more
+  than 12 distinct routes, and `, +N more` when more than 6 projects share one
+  line. The **Project Names** column always carries the complete, uncapped list.
+
+Open `LR_Violations` if you want it laid out one project per row instead.
 
 **What this costs.** One extra DependencyTrack call per project to ask which
 components are direct, plus — only when something is actually transitive — one

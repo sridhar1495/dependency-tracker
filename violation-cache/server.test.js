@@ -3856,6 +3856,54 @@ describe('Q37: Direct/Transitive and the chain behind it, in a report', () => {
       'unresolved entries must not silently become one of the two labels');
   });
 
+  test('the aggregate path cell keeps all four kinds of line distinct', () => {
+    const cell = originsMod.aggregatePathCell([
+      { projName: 'Alpha',   entry: { origin: 'Direct', chains: null } },
+      { projName: 'Beta',    entry: { origin: 'Transitive', chains: [['r', 'lib']] } },
+      { projName: 'Gamma',   entry: { origin: 'Transitive', chains: [] } },
+      { projName: 'Delta',   entry: { origin: 'Transitive', chains: null } },
+    ]);
+    assert.deepEqual(cell.split('\n'), [
+      'Direct in: Alpha',
+      'r \u2192 lib  (Beta)',
+      'No path recorded: Gamma',
+      'Not resolved: Delta',
+    ], 'walked-and-found-nothing and nobody-looked stay separate sentences');
+  });
+
+  test('the aggregate path cell is empty when nothing resolved at all', () => {
+    assert.equal(originsMod.aggregatePathCell([{ projName: 'Alpha', entry: null }]), '');
+    assert.equal(originsMod.aggregatePathCell([]), '');
+    assert.equal(originsMod.aggregatePathCell(undefined), '');
+  });
+
+  test('both aggregate caps admit what they hide rather than dropping it', () => {
+    // Q33's rule, one level up: a display cap must say so on screen.
+    const manyProjects = Array.from({ length: originsMod.UNIQUE_PATH_MAX_PROJECTS + 3 },
+      (_, i) => ({ projName: `p${String(i).padStart(2, '0')}`,
+                   entry: { origin: 'Transitive', chains: [['r', 'lib']] } }));
+    assert.match(originsMod.aggregatePathCell(manyProjects), /, \+3 more\)/);
+
+    const manyChains = Array.from({ length: originsMod.UNIQUE_PATH_MAX_CHAINS + 2 },
+      (_, i) => ({ projName: `p${i}`, entry: { origin: 'Transitive', chains: [[`root${i}`, 'lib']] } }));
+    const lines = originsMod.aggregatePathCell(manyChains).split('\n');
+    assert.equal(lines.length, originsMod.UNIQUE_PATH_MAX_CHAINS + 1);
+    assert.equal(lines[lines.length - 1], '+2 more routes');
+  });
+
+  test('the aggregate path cell renders the same way whatever order it is given', () => {
+    // Sorted by share count then name, so a report run twice is byte-identical.
+    const refs = [
+      { projName: 'Zeta',  entry: { origin: 'Transitive', chains: [['b', 'lib']] } },
+      { projName: 'Alpha', entry: { origin: 'Transitive', chains: [['a', 'lib']] } },
+      { projName: 'Beta',  entry: { origin: 'Transitive', chains: [['a', 'lib']] } },
+    ];
+    const forward = originsMod.aggregatePathCell(refs);
+    const reverse = originsMod.aggregatePathCell([...refs].reverse());
+    assert.equal(forward, reverse);
+    assert.equal(forward.split('\n')[0], 'a \u2192 lib  (Alpha, Beta)');
+  });
+
   // ── Resolution ────────────────────────────────────────────────────────────
   const conn = { apiUrl: 'http://dt', apiKey: 'k', fingerprint: 'fp' };
 
@@ -4112,9 +4160,12 @@ describe('Q37: the Origin and Dependency Path columns in the workbook', () => {
     assert.deepEqual(cellsAt(ws, 'Dependency Path'), ['a \u2192 b \u2192 c1', '']);
   });
 
-  test('LR_Unique Risks reports Mixed, and carries no path column', async () => {
+  test('LR_Unique Risks reports Mixed, and names the projects behind each half', async () => {
     // One component, two projects, two different answers. Collapsing that to
-    // either label would be false for half the rows the line covers.
+    // either label would be false for half the rows the line covers — and the
+    // path cell has to say which project each half belongs to, or a reader
+    // cannot tell "direct here, transitive there" from "transitive by two
+    // different routes".
     const ws = await sheet(data({
       origins: new Map([
         [K('p1', 'ck'), { origin: 'Direct', chains: null }],
@@ -4123,10 +4174,43 @@ describe('Q37: the Origin and Dependency Path columns in the workbook', () => {
       licViolations: [licRow('p1', 'ck', 'Alpha', 'lib'), licRow('p2', 'ck', 'Beta', 'lib')],
     }), 'LR_Unique Risks');
     assert.ok(headers(ws).includes('Origin'));
-    assert.ok(!headers(ws).includes('Dependency Path'),
-      'the chains differ per project — a merged cell could not say which is which');
+    assert.ok(headers(ws).includes('Dependency Path'));
     assert.deepEqual(cellsAt(ws, 'Origin'), ['Mixed']);
     assert.deepEqual(cellsAt(ws, 'Affected Projects'), [2], 'still one aggregated row');
+    const cell = String(cellsAt(ws, 'Dependency Path')[0]);
+    assert.equal(cell.split('\n')[0], 'Direct in: Alpha',
+      'the release-blocking half leads');
+    assert.match(cell, /r \u2192 lib {2}\(Beta\)/,
+      'and the chain names the project it actually applies to');
+  });
+
+  test('one project violating the same component twice contributes one path entry', async () => {
+    // originRefs is keyed by (project, component), so a component with a FAIL
+    // and a WARN in one project must not list that project twice.
+    const ws = await sheet(data({
+      origins: new Map([[K('p1', 'ck'), { origin: 'Transitive', chains: [['r', 'lib']] }]]),
+      licViolations: [licRow('p1', 'ck', 'Alpha', 'lib'), licRow('p1', 'ck', 'Alpha', 'lib')],
+    }), 'LR_Unique Risks');
+    assert.equal(String(cellsAt(ws, 'Dependency Path')[0]), 'r \u2192 lib  (Alpha)');
+  });
+
+  test('projects sharing one chain collapse onto a single line', async () => {
+    // The whole reason the cell groups by chain rather than by project: three
+    // projects pulled in the same way is one line with three names, not three
+    // near-identical lines.
+    const ws = await sheet(data({
+      origins: new Map([
+        [K('p1', 'ck'), { origin: 'Transitive', chains: [['r', 'lib']] }],
+        [K('p2', 'ck'), { origin: 'Transitive', chains: [['r', 'lib']] }],
+        [K('p3', 'ck'), { origin: 'Transitive', chains: [['other', 'lib']] }],
+      ]),
+      licViolations: [licRow('p1', 'ck', 'Alpha', 'lib'), licRow('p2', 'ck', 'Beta', 'lib'),
+                      licRow('p3', 'ck', 'Gamma', 'lib')],
+    }), 'LR_Unique Risks');
+    const lines = String(cellsAt(ws, 'Dependency Path')[0]).split('\n');
+    assert.equal(lines.length, 2, `one line per distinct chain: ${JSON.stringify(lines)}`);
+    assert.equal(lines[0], 'r \u2192 lib  (Alpha, Beta)', 'the widest-shared chain leads');
+    assert.equal(lines[1], 'other \u2192 lib  (Gamma)');
   });
 
   test('a unique risk that is transitive everywhere says Transitive, not Mixed', async () => {
