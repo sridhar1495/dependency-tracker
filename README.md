@@ -24,6 +24,45 @@ administrator credentials it created.
 
 ---
 
+## What it looks like
+
+> Every screenshot on this page is generated from the **stubbed** DependencyTrack
+> fixture the end-to-end tests use — `Group 1`, `service-101`, `carrier-for-…`.
+> No image contains a real project, a real finding or anybody's data. Regenerate
+> them with `node docs/screenshots.js` (see [Screenshots](#screenshots)).
+
+![The dashboard: hierarchical portfolio, KPI cards and the risk trend](docs/images/dashboard.png)
+
+A group row shows the **total of everything beneath it** — above, `Group 1`,
+`service-101` and `service-201` agree because that branch is a single chain three
+deep and the roll-up climbs through the middle tier. The cards are summed from
+the same root rows, so a card can never contradict the row directly under it.
+Note that a card folds all four categories together: *Critical issues* is
+severity-critical **plus** every operational, licence and security-policy `FAIL`,
+which is why it is larger than the Critical column alone.
+
+![The findings dialog, showing Direct/Transitive origin and resolved dependency paths](docs/images/findings-dialog.png)
+
+The findings dialog answers the question a release engineer actually has: is this
+component **Direct** (it blocks the release) or **Transitive** (it goes on the
+security SME's backlog)? Turning on *Show full dependency paths* resolves the
+chain behind each transitive finding — `carrier-for-service-201 →
+dep-service-201-2` — and says when there is more than one way in.
+
+<details>
+<summary>More screens — risk trend, settings, administration, sign-in</summary>
+
+| | |
+|---|---|
+| ![Risk trend](docs/images/risk-trend.png) | **Risk trend.** Critical/high/medium/low over the last week, month or year. A day nobody refreshed carries the previous reading, drawn dashed and shaded so it cannot be mistaken for a measurement. |
+| ![Settings](docs/images/settings.png) | **Settings.** Your own DependencyTrack connection, mail, and schedules. The API key is write-only — it is never returned to a browser. |
+| ![Administration](docs/images/administration.png) | **Administration.** Accounts, quotas, storage headroom and branding. It can do exactly six things and read nothing sensitive. |
+| ![Sign-in](docs/images/login.png) | **Sign-in.** Registration and sign-in, with the administrator-configurable title and background. |
+
+</details>
+
+---
+
 ## What's Included
 
 | Component | Description |
@@ -31,7 +70,7 @@ administrator credentials it created.
 | `dashboard/login.html` | Sign-in and registration page (zero npm dependencies) |
 | `dashboard/index.html` | Single-file SPA dashboard (zero npm dependencies) |
 | `dashboard/admin.html` | Single-file administration screen (administrator only) |
-| `dashboard/nginx.conf.template` | nginx config with API proxy and violation-cache proxy |
+| `dashboard/nginx.conf.template` | nginx config: serves the three pages and proxies `/auth/`, `/admin/`, `/profile`, `/branding`, `/healthz` and `/violation-cache/` to the backend |
 | `violation-cache/server.js` | Node.js service that pre-fetches policy violations server-side |
 | `violation-cache/Dockerfile` | Builds the cache service image |
 | `docker-compose.yml` | Defines `dt-dashboard` (nginx), `dt-violation-cache` and `dt-postgres` |
@@ -53,7 +92,9 @@ administrator credentials it created.
   marker — so it reads as one line without any carried number being mistakable
   for a measurement.
 - **Excel reports on demand**, with security findings, a CWE summary, and
-  licence and operational policy violations.
+  licence and operational policy violations — each finding and licence violation
+  marked **Direct** or **Transitive**, with the dependency path behind a
+  transitive one, the same question the findings dialog answers on screen.
 - **Scheduled reports by email.** Each account can have several — a weekly
   operational report to one team and a monthly licence report to another — each
   with its own projects, frequency, time, risk categories and recipients. Times
@@ -172,9 +213,44 @@ editing the allow-list in a diff somebody reads (CLAUDE.md §7.6).
 
 ## Continuous integration
 
-`.github/workflows/ci.yml` runs on every push and pull request: an **offline**
-job (unit, route, frontend-contract and installer tests — no database, no
-Docker, no network), a **database** job against a real `postgres:16-alpine`
-service container, and an informational **audit** job recording `npm ls` and
-`npm audit`. See CLAUDE.md §10.3 for what each job is for and what it
-deliberately does not do.
+`.github/workflows/ci.yml` runs on every push and pull request, as four jobs:
+
+| Job | What it runs |
+|---|---|
+| **offline** | Unit, route, frontend-contract and installer tests — no database, no Docker, no network. Keeping it separate is what proves that tier really is offline. |
+| **database** | The opt-in `db.test.js` tier against a real `postgres:16-alpine` service container — migrations, partial indexes, cascade deletes, `SKIP LOCKED`. |
+| **e2e** | The assembled product: the real `server.js`, a real database and the real pages in Chromium, with only DependencyTrack and SMTP stubbed. The one job that notices a change correct in every unit and wrong once the layers are joined up. |
+| **audit** | `npm ls` and `npm audit`, recorded rather than enforced — see CLAUDE.md §10.3 for why it deliberately does not gate merges. |
+
+See CLAUDE.md §10.3 for what each job is for and what CI deliberately does not do.
+
+## Running the tests yourself
+
+```bash
+node --test violation-cache/server.test.js violation-cache/dashboard.test.js \
+             violation-cache/installer.test.js          # offline: no database, no network
+
+# Opt-in tiers. Both DESTROY the contents of the database you point them at.
+TEST_DATABASE_URL=postgres://… node --test violation-cache/db.test.js
+TEST_DATABASE_URL=postgres://… node --test violation-cache/e2e.test.js
+```
+
+Run the two opt-in tiers **separately**, not in one `node --test` invocation:
+the end-to-end tier resets the schema out from under anything sharing it. The
+end-to-end tier's browser section skips by itself unless Playwright resolves —
+it is a CI tool, not a project dependency, so the three-package cap in CLAUDE.md
+§3 still holds.
+
+## Screenshots
+
+The images in this README are regenerated by:
+
+```bash
+TEST_DATABASE_URL=postgres://… node docs/screenshots.js
+```
+
+It boots the same stubbed stack the end-to-end tier uses and drives it with
+Playwright, so the portfolio, findings and dependency graph in every image are
+synthetic fixtures. Nothing from a live DependencyTrack can reach a committed
+PNG. Like `docs/perf-check.js` it is a tool rather than a test tier — nothing
+runs it automatically.

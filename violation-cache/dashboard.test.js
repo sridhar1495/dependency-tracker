@@ -5550,3 +5550,77 @@ describe('project tree — group-row aggregation (Q35)', () => {
     assert.ok(Array.isArray(roots), 'buildTree must still return');
   });
 });
+
+// ── Documentation contracts ──────────────────────────────────────────────────
+// The README and the integration guide are read by people deciding whether to
+// run this and by contributors deciding how. A stale claim there is worse than
+// a missing one, because it is acted on — so the few statements that can be
+// checked mechanically are checked here rather than trusted.
+describe('the documentation still describes this application', () => {
+  const REPO   = path.join(__dirname, '..');
+  const CI_YML = fs.readFileSync(path.join(REPO, '.github', 'workflows', 'ci.yml'), 'utf8');
+
+  test('every image the README embeds actually exists, and is a PNG', () => {
+    const refs = [...README.matchAll(/!\[[^\]]*\]\(([^)]+)\)/g)].map(m => m[1]);
+    assert.ok(refs.length > 0, 'the README should show the product, not only describe it');
+    for (const ref of refs) {
+      const file = path.join(REPO, ref);
+      assert.ok(fs.existsSync(file), `README embeds ${ref}, which is not in the repository`);
+      // A broken image renders as alt text on GitHub, which looks like a typo
+      // rather than a missing file — so check the bytes, not just the path.
+      assert.deepEqual([...fs.readFileSync(file).subarray(0, 4)], [0x89, 0x50, 0x4e, 0x47],
+        `${ref} is not a PNG`);
+    }
+  });
+
+  test('every embedded image has alt text', () => {
+    for (const m of README.matchAll(/!\[([^\]]*)\]\(([^)]+)\)/g)) {
+      assert.ok(m[1].trim().length > 0, `${m[2]} is embedded with no alt text`);
+    }
+  });
+
+  test('the README names every CI job that actually exists', () => {
+    // It described three for as long as there were four: the end-to-end job was
+    // running on every PR and documented nowhere a reader would look.
+    const jobs = [...CI_YML.matchAll(/^ {2}([a-z0-9-]+):$/gm)].map(m => m[1])
+      .filter(j => !['push', 'pull_request'].includes(j));
+    assert.ok(jobs.includes('e2e'), 'the workflow should still define an e2e job');
+    const ciSection = README.slice(README.indexOf('## Continuous integration'));
+    for (const job of jobs) {
+      assert.match(ciSection, new RegExp(`\\b${job}\\b`),
+        `ci.yml defines a "${job}" job the README never mentions`);
+    }
+  });
+
+  test('the guide no longer claims group rows are unaggregated', () => {
+    // Q35 made a group row the sum of its descendants. The guide said the
+    // opposite in two places, which is the kind of sentence somebody quotes
+    // back at you when the numbers do not look the way they expected.
+    assert.ok(/aggregateTree/.test(INDEX_HTML), 'the roll-up should still exist');
+    assert.ok(!/No child-aggregation is performed/i.test(INTEGRATION_MD),
+      'the guide still says the dashboard performs no child aggregation');
+    assert.ok(!/each row always shows its own API-returned/i.test(INTEGRATION_MD),
+      'the guide still says every row shows its own API-returned counts');
+  });
+
+  test('the README tells a contributor how to run each test tier', () => {
+    for (const tier of ['server.test.js', 'dashboard.test.js', 'installer.test.js',
+                        'db.test.js', 'e2e.test.js']) {
+      assert.ok(README.includes(tier), `the README never shows how to run ${tier}`);
+    }
+    assert.match(README, /TEST_DATABASE_URL/,
+      'the opt-in tiers need their switch documented where a contributor will look');
+  });
+
+  test('the screenshot tool can only ever photograph the stub', () => {
+    // The images are committed, so this is the guard that keeps a real
+    // DependencyTrack — or an operator's own data — out of the repository.
+    const src = fs.readFileSync(path.join(REPO, 'docs', 'screenshots.js'), 'utf8');
+    assert.match(src, /require\('\.\.\/violation-cache\/e2e\/stack'\)/,
+      'it must drive the stubbed stack, never an arbitrary URL');
+    assert.match(src, /TEST_DATABASE_URL/, 'it must refuse to run without a throwaway database');
+    const code = src.replace(/\/\/[^\n]*/g, '').replace(/\/\*[\s\S]*?\*\//g, '');
+    assert.ok(!/https?:\/\/(?!127\.0\.0\.1|localhost)/.test(code),
+      'no hard-coded external host may appear in the screenshot tool');
+  });
+});

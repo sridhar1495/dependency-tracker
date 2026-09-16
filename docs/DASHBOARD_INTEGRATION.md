@@ -23,8 +23,8 @@ served by an nginx container on port `3000`. It provides:
 
 - A filterable **hierarchical tree view** mirroring the DependencyTrack
   parent/child project structure
-- **Expand/collapse** per group row — each row always shows its own API-returned
-  counts; collapsing a group hides its children but does not change the parent's numbers
+- **Expand/collapse** per group row — a group row shows the **total of everything
+  beneath it**, and collapsing it hides its children without changing that total
 - **Single Expand All / Collapse All toggle button** that dynamically switches label
   based on the current state of the tree
 - **Tag filtering** — filter by project tags with a multi-select dropdown
@@ -95,7 +95,25 @@ the browser:
           commerce-be v1.3.0        (leaf project)
 ```
 
-Every row — group or leaf — displays counts **exactly as returned by the DependencyTrack API**. No child-aggregation is performed in the dashboard.
+**A leaf row shows what DependencyTrack reported for that project. A group row
+shows the sum of everything beneath it**, computed in the browser after the tree
+is built — so a three-level branch rolls its leaves through the middle tier up to
+the root, and the KPI cards above are the sum of the root rows.
+
+This is a change, and it is worth knowing why. Previously every row rendered
+whatever the API returned against that project's own uuid, which was a genuine
+roll-up only for **security**, and only when the root was configured as a
+DependencyTrack v5 *Collection Project*. The three policy categories come from
+this dashboard's own `/api/v1/violation` crawl, bucketed by the uuid each
+violation carries — so an organisational parent with no SBOM of its own showed
+**zeros above a subtree full of failures**, and one column on a group row could
+be a roll-up while the three beside it were not.
+
+A group's own reported numbers are now discarded and recomputed rather than added
+to, because a root DependencyTrack has already rolled up reports its descendants'
+totals as its own — adding a computed sum on top would double it. The consequence
+worth knowing: a project that has children *and* components of its own reports
+only its children.
 
 ### Risk Matrix Columns
 

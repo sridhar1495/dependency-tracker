@@ -771,6 +771,110 @@ describe('e2e — scheduled delivery, asserted at the SMTP envelope', { skip: SK
 });
 
 // ══════════════════════════════════════════════════════════════════════════════
+/**
+ * Pull the xlsx attachment out of a raw SMTP conversation.
+ *
+ * The stub keeps the DATA verbatim, so this walks the MIME body looking for a
+ * run of base64 lines whose decoded bytes carry a zip's local-file header —
+ * rather than parsing boundaries, which would make the helper depend on how
+ * nodemailer happens to lay out a multipart message.
+ */
+function xlsxFromMime(raw) {
+  const isB64 = (s) => /^[A-Za-z0-9+/]+={0,2}$/.test(s);
+  let run = [];
+  const settle = () => {
+    const lines = run; run = [];
+    if (lines.length < 2) return null;
+    const buf = Buffer.from(lines.join(''), 'base64');
+    return buf.subarray(0, 2).toString() === 'PK' ? buf : null;
+  };
+  for (const rawLine of raw.split(/\r?\n/)) {
+    const line = rawLine.trim();
+    // A run has to *start* with a full-width wrapped line, or a short word in
+    // the covering note would open one; once open, the final short line joins.
+    if (isB64(line) && (run.length ? true : line.length >= 60)) { run.push(line); continue; }
+    const hit = settle();
+    if (hit) return hit;
+  }
+  return settle();
+}
+
+describe('e2e — Q37 survives the scheduler\'s own report path', { skip: SKIP }, () => {
+  // lib/scheduler.js is the second of Q37's two call sites and the only one no
+  // test drove end to end: a manual report is downloaded over HTTP, a scheduled
+  // one is built in memory and attached to an email (§6.8), so nothing proved
+  // the workbook that actually reaches an inbox carries the Origin and
+  // Dependency Path columns. This opens the delivered attachment and reads them.
+  let token, leaf;
+
+  before(async () => {
+    if (!ENABLED) return;
+    token = await api.signUp(account('schedorigin'));
+    await api.saveConnection(token, { apiUrl: dt.url, apiKey: dt.apiKey });
+    await api.saveMail(token, {
+      enabled: true, from: 'dashboard@example.com', to: 'origins@example.com',
+      subject: 'Scheduled origins', body: 'Attached.',
+      smtp: { host: stack.smtp.host, port: stack.smtp.port, secure: false, user: 'u', pass: 'p' },
+    });
+    // A leaf, not a root: the stub hangs its findings and its dependency graph
+    // off the leaves, so a root would produce a workbook with nothing to label.
+    const all = await (await fetch(`${dt.url}/api/v1/project?onlyRoot=false`,
+      { headers: { 'X-Api-Key': dt.apiKey } })).json();
+    const p = (Array.isArray(all) ? all : all.values).find(x => /^service-/.test(x.name));
+    leaf = { uuid: p.uuid, name: p.name, version: p.version || '' };
+  }, { timeout: 60_000 });
+
+  test('the emailed workbook carries Origin and the real chain', async () => {
+    const created = await api.createSchedule(token, {
+      name: 'origins-daily', frequency: 'daily', hour: 9, minute: 0,
+      riskTypes: ['security', 'license'], projects: [leaf],
+    });
+    assert.ok(created.status < 300, `${created.status} ${JSON.stringify(created.json)}`);
+
+    const r = await api.post(
+      `/violation-cache/schedules/${created.json.schedule.id}/run-now`, {}, token);
+    assert.ok(r.status < 300, `Send now answered ${r.status} ${JSON.stringify(r.json)}`);
+
+    const mail = await stack.smtp.waitFor('origins@example.com', 120_000);
+    assert.ok(mail, 'the scheduled report never reached SMTP');
+    assert.match(mail.data, /Content-Disposition:\s*attachment/i);
+
+    const bytes = xlsxFromMime(mail.data);
+    assert.ok(bytes, 'no xlsx attachment was found in the delivered message');
+    const wb = new (require('exceljs').Workbook)();
+    await wb.xlsx.load(bytes);
+
+    const headers = (ws) => ws.getRow(1).values.slice(1).map(String);
+    const column  = (ws, header) => {
+      const i = headers(ws).indexOf(header) + 1;
+      assert.ok(i > 0, `${ws.name} has no ${header} column: ${headers(ws).join(', ')}`);
+      const out = [];
+      ws.eachRow((row, n) => { if (n > 1) out.push(String(row.getCell(i).value ?? '')); });
+      return out;
+    };
+
+    const sv = wb.getWorksheet('SV_Vulnerability Findings');
+    const origin = column(sv, 'Origin');
+    const paths  = column(sv, 'Dependency Path');
+    assert.ok(origin.length > 0, 'the leaf should have findings to report on');
+    assert.ok(origin.includes('Direct') && origin.includes('Transitive'),
+      `both labels should appear: ${JSON.stringify(origin)}`);
+    assert.ok(!origin.includes(''), 'every row must be classified in a mailed report too');
+    const chains = paths.filter(v => v.includes('→'));
+    assert.ok(chains.length > 0, `no chain was printed: ${JSON.stringify(paths)}`);
+    for (const c of chains) assert.match(c, /carrier-for-/);
+
+    // The unique sheet's aggregate travels too — it is computed in excel.js
+    // from the same origins map, so a scheduler call site that forgot to pass
+    // `conn` would leave this blank rather than failing loudly.
+    const uniq = wb.getWorksheet('LR_Unique Risks');
+    assert.ok(headers(uniq).includes('Dependency Path'));
+    assert.ok(column(uniq, 'Origin').some(v => ['Direct', 'Transitive', 'Mixed'].includes(v)),
+      'the aggregated origin should be populated in a mailed workbook');
+  }, { timeout: 240_000 });
+});
+
+// ══════════════════════════════════════════════════════════════════════════════
 describe('e2e — the database after the product has used it', { skip: SKIP }, () => {
   test('a manual run does not move the timetable', async () => {
     // Recomputing next_run_at would push a Monday 09:00 schedule a week every
