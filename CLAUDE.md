@@ -127,10 +127,11 @@ dependency-tracker/
 │   ├── e2e.test.js             # End-to-end tier (opt-in)
 │   └── installer.test.js       # install.sh uninstall contract  [phase 8]
 ├── docs/
+│   ├── USER_GUIDE.md           # The end-user manual, one screenshot per screen
 │   ├── PERFORMANCE.md          # Query plans and load evidence  [phase 10]
 │   ├── perf-check.js           # Reproduces that evidence
 │   ├── screenshots.js          # Regenerates docs/images/ from the e2e stub — §10.2
-│   ├── images/                 # The PNGs README.md and the guide embed
+│   ├── images/                 # The PNGs README.md and USER_GUIDE.md embed
 │   └── auth-smoke-test.sh
 ├── .github/workflows/ci.yml    # Offline, database and audit jobs  [phase 8]
 ├── install.sh
@@ -1993,7 +1994,17 @@ which no test may do. It is run by hand before a release and its output lives in
 more: it asserts nothing, and it writes into the repository. It boots
 `e2e/stack.js` — the same assembled stack `e2e.test.js` uses — drives Playwright
 over it and regenerates the PNGs in `docs/images/` that `README.md` and
-`docs/DASHBOARD_INTEGRATION.md` embed.
+`docs/USER_GUIDE.md` embed.
+
+**It runs as one continuous journey, and the order is load-bearing.** The tool
+registers an account through the page, signs in with nothing configured, adds a
+DependencyTrack connection, and only then has a portfolio to photograph — the
+same order `USER_GUIDE.md` tells it in, with numbered sections that match the
+guide's headings. This is not tidiness: `guide-first-run.png` — the demo-data
+screen a new user actually meets — exists only *before* a connection is saved,
+so a tool that shot the finished product and reconstructed the earlier screens
+afterwards would have to fake the one image a newcomer needs most. Adding a
+screenshot means adding the step that produces it, in its place.
 
 **Every pixel in those images comes from `e2e/dt-stub.js`, and that is a rule,
 not an accident of how they were first made.** A screenshot is the one artefact
@@ -2294,13 +2305,25 @@ Running the browser checks in CI was on this list and is now the `e2e` job.
   two phases ago, which is how `docs/DASHBOARD_INTEGRATION.md` came to state
   that group rows show only their own project's numbers well after Q35 made
   them roll up. So the claims that *can* be checked mechanically are: every
-  image `README.md` and the guide embed exists and really is a PNG, and carries
-  alt text; `README.md` names every job in `.github/workflows/ci.yml`, so a job
-  added there cannot go undocumented; it lists all five test files and the
-  `TEST_DATABASE_URL` switch; the guide no longer claims group rows are
-  unaggregated; and `docs/screenshots.js` still boots the stub rather than
-  accepting a URL (§10.2). These are cheap and they only catch the mechanical
-  half — a sentence that is merely wrong still needs a reader.
+  image `README.md` and `docs/USER_GUIDE.md` embed exists and really is a PNG,
+  and carries alt text — resolved against each document's own directory, since
+  the README's links are repo-relative and the guide's are not; `README.md`
+  names every job in `.github/workflows/ci.yml`, so a job added there cannot go
+  undocumented; it lists all five test files and the `TEST_DATABASE_URL` switch;
+  the guide no longer claims group rows are unaggregated; and
+  `docs/screenshots.js` still boots the stub rather than accepting a URL
+  (§10.2).
+  **The screenshot set is checked in both directions, and each catches a
+  different mistake.** A PNG in `docs/images/` that nothing embeds is dead
+  weight nobody notices — usually the leftover of a renamed section. A name the
+  documents reference but `screenshots.js` never writes survives until somebody
+  regenerates into a clean checkout, and then the guide is full of broken
+  images; only the second direction would have caught that. `USER_GUIDE.md` is
+  also required to keep a section per capability and to say on its own face that
+  its images are stub data — a reader who cannot tell a fixture from a real
+  portfolio will try to reconcile the numbers with their own and conclude the
+  product is broken. These are cheap and they only catch the mechanical half —
+  a sentence that is merely wrong still needs a reader.
 - Do **not** write tests that require a live DT API.
 
 ---

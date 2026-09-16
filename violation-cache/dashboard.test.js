@@ -3130,6 +3130,7 @@ const README    = fs.readFileSync(path.join(__dirname, '..', 'README.md'), 'utf8
 const INSTALL_MD = fs.readFileSync(path.join(__dirname, '..', 'docs', 'INSTALLATION.md'), 'utf8');
 const INTEGRATION_MD = fs.readFileSync(path.join(__dirname, '..', 'docs', 'DASHBOARD_INTEGRATION.md'), 'utf8');
 const PERF_MD   = fs.readFileSync(path.join(__dirname, '..', 'docs', 'PERFORMANCE.md'), 'utf8');
+const GUIDE_MD  = fs.readFileSync(path.join(__dirname, '..', 'docs', 'USER_GUIDE.md'), 'utf8');
 const SERVER_SRC = fs.readFileSync(path.join(__dirname, 'server.js'), 'utf8');
 
 /** Every `/violation-cache/...` and `/admin/...` path the route modules answer. */
@@ -5560,23 +5561,92 @@ describe('the documentation still describes this application', () => {
   const REPO   = path.join(__dirname, '..');
   const CI_YML = fs.readFileSync(path.join(REPO, '.github', 'workflows', 'ci.yml'), 'utf8');
 
-  test('every image the README embeds actually exists, and is a PNG', () => {
-    const refs = [...README.matchAll(/!\[[^\]]*\]\(([^)]+)\)/g)].map(m => m[1]);
-    assert.ok(refs.length > 0, 'the README should show the product, not only describe it');
-    for (const ref of refs) {
-      const file = path.join(REPO, ref);
-      assert.ok(fs.existsSync(file), `README embeds ${ref}, which is not in the repository`);
-      // A broken image renders as alt text on GitHub, which looks like a typo
-      // rather than a missing file — so check the bytes, not just the path.
-      assert.deepEqual([...fs.readFileSync(file).subarray(0, 4)], [0x89, 0x50, 0x4e, 0x47],
-        `${ref} is not a PNG`);
+  // Image references are relative to the document that makes them, so each
+  // document carries the directory its links resolve against.
+  const ILLUSTRATED = [
+    ['README.md', README, REPO],
+    ['docs/USER_GUIDE.md', GUIDE_MD, path.join(REPO, 'docs')],
+  ];
+  const imageRefs = (md) => [...md.matchAll(/!\[[^\]]*\]\(([^)]+)\)/g)].map(m => m[1]);
+
+  test('every image the docs embed actually exists, and is a PNG', () => {
+    for (const [name, md, base] of ILLUSTRATED) {
+      const refs = imageRefs(md);
+      assert.ok(refs.length > 0, `${name} should show the product, not only describe it`);
+      for (const ref of refs) {
+        const file = path.join(base, ref);
+        assert.ok(fs.existsSync(file), `${name} embeds ${ref}, which is not in the repository`);
+        // A broken image renders as alt text on GitHub, which looks like a typo
+        // rather than a missing file — so check the bytes, not just the path.
+        assert.deepEqual([...fs.readFileSync(file).subarray(0, 4)], [0x89, 0x50, 0x4e, 0x47],
+          `${ref} is not a PNG`);
+      }
     }
   });
 
   test('every embedded image has alt text', () => {
-    for (const m of README.matchAll(/!\[([^\]]*)\]\(([^)]+)\)/g)) {
-      assert.ok(m[1].trim().length > 0, `${m[2]} is embedded with no alt text`);
+    for (const [name, md] of ILLUSTRATED) {
+      for (const m of md.matchAll(/!\[([^\]]*)\]\(([^)]+)\)/g)) {
+        assert.ok(m[1].trim().length > 0, `${name} embeds ${m[2]} with no alt text`);
+      }
     }
+  });
+
+  test('no committed screenshot is an orphan, and none is missing', () => {
+    // Both halves of the same rule, and each catches a different mistake. A
+    // shot the tool writes but nothing embeds is dead weight nobody notices —
+    // usually the leftover of a renamed section. A name the docs reference
+    // but the tool never writes survives only until somebody regenerates into
+    // a clean checkout, and then the guide is full of broken images.
+    const onDisk = new Set(fs.readdirSync(path.join(REPO, 'docs', 'images'))
+      .filter(f => f.endsWith('.png')));
+    const embedded = new Set();
+    for (const [, md] of ILLUSTRATED) {
+      for (const ref of imageRefs(md)) embedded.add(path.basename(ref));
+    }
+    const orphans = [...onDisk].filter(f => !embedded.has(f)).sort();
+    assert.deepEqual(orphans, [],
+      `docs/images holds screenshots nothing embeds: ${orphans.join(', ')}`);
+
+    // Two call shapes: shoot(page, 'name') for a whole page, and
+    // shootEl(page, selector, 'name') for one element.
+    const src = fs.readFileSync(path.join(REPO, 'docs', 'screenshots.js'), 'utf8');
+    const written = new Set([
+      ...[...src.matchAll(/\bshoot\(\s*\w+\s*,\s*'([a-z0-9-]+)'/g)].map(m => m[1]),
+      ...[...src.matchAll(/\bshootEl\(\s*\w+\s*,\s*'[^']*'\s*,\s*'([a-z0-9-]+)'/g)].map(m => m[1]),
+    ].map(n => `${n}.png`));
+    const unmade = [...embedded].filter(f => !written.has(f)).sort();
+    assert.deepEqual(unmade, [],
+      `the docs embed images docs/screenshots.js never writes: ${unmade.join(', ')}`);
+  });
+
+  test('the user guide walks the whole product, in order', () => {
+    // Not a prose review — it cannot be one. What it does pin is that a
+    // capability cannot be added to the product and left out of the one
+    // document a user reads, and that the README still points at it.
+    assert.match(README, /docs\/USER_GUIDE\.md/,
+      'the guide is unreachable if nothing links to it');
+    for (const heading of [
+      'Create your account', 'first sign-in', 'Connect to DependencyTrack',
+      'Read the dashboard', 'Track risk over time', "Inspect a project's findings",
+      'Generate an Excel report', 'Set up email', 'Schedule a recurring report',
+      'Manage your account', 'For administrators', 'Troubleshooting',
+    ]) {
+      assert.ok(GUIDE_MD.includes(heading), `the guide has no section on: ${heading}`);
+    }
+    // Every screenshot in the guide is introduced by a step, never dropped in
+    // as decoration — an image at the very top of the file has nothing above
+    // it to explain what the reader is looking at.
+    assert.ok(GUIDE_MD.indexOf('![') > GUIDE_MD.indexOf('## 1.'),
+      'the first image should follow the first step, not precede the guide');
+  });
+
+  test('the guide says where its screenshots come from', () => {
+    // The same promise README.md makes. A reader has to be able to tell a
+    // fixture from somebody's real portfolio, or they will try to match the
+    // numbers against their own and conclude the product is wrong.
+    assert.match(GUIDE_MD, /stub/i, 'the guide never says the screenshots are stub data');
+    assert.match(GUIDE_MD, /screenshots\.js/, 'the guide should name the tool that made them');
   });
 
   test('the README names every CI job that actually exists', () => {
