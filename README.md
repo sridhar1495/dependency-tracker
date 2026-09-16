@@ -221,7 +221,8 @@ editing the allow-list in a diff somebody reads (CLAUDE.md §7.6).
 
 ## Continuous integration
 
-`.github/workflows/ci.yml` runs on every push and pull request, as four jobs:
+`.github/workflows/ci.yml` runs on every pull request and on every push to
+`main`, as four jobs:
 
 | Job | What it runs |
 |---|---|

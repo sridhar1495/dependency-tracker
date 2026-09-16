@@ -2094,9 +2094,20 @@ for nicer screenshots" change fails offline rather than in review.
 
 ### 10.3 Continuous integration — `.github/workflows/ci.yml`
 
-Nobody runs it locally; **GitHub Actions** runs it on every push to any branch
-and on every pull request, and reports each job as a check on the PR. Nothing in
-it is bespoke — it runs the same commands listed in §10.1.
+Nobody runs it locally; **GitHub Actions** runs it on every pull request and on
+every push to `main`, and reports each job as a check on the PR. Nothing in it
+is bespoke — it runs the same commands listed in §10.1.
+
+**The push trigger is `main` only, and that is deliberate.** It was
+`branches: ['**']`, which meant a branch with an open pull request ran the whole
+workflow **twice, concurrently, on every push** — two `e2e` jobs and two
+PostgreSQL service containers racing for the same runner minutes to report the
+same answer. `pull_request` already covers every branch up for review, and
+`main` is covered so a direct push or a merge commit is still checked. The trade
+is stated in the workflow itself: a push to a branch with **no** open pull
+request is not tested by CI, which is intended — work in progress gets its first
+full run when it is proposed for merge, which is when somebody is going to read
+the result.
 
 | Job | What it runs | Why it is separate |
 |---|---|---|

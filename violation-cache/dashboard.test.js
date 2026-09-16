@@ -5938,6 +5938,23 @@ describe('the documentation still describes this application', () => {
     }
   });
 
+  test('the two CI triggers still cover every branch between them', () => {
+    // The push trigger is `main` only, to stop a branch with an open PR running
+    // the whole workflow twice concurrently. That is safe ONLY because
+    // `pull_request` covers every other branch — dropping it while keeping the
+    // narrowed push would leave pull requests untested, which is the failure
+    // this pair has to be checked as a pair to catch. Widening push back to
+    // '**' is not wrong, only wasteful, so it fails here with the reason
+    // rather than silently doubling the bill.
+    const on = CI_YML.slice(CI_YML.indexOf('\non:'), CI_YML.indexOf('\npermissions:'));
+    assert.match(on, /pull_request:/,
+      'pull_request is what covers every branch that is up for review');
+    assert.match(on, /push:\s*\n\s*branches:\s*\[main\]/,
+      'push should be main-only — see §10.3 for why, and update it there if this changes');
+    assert.ok(!/branches:\s*\['\*\*'\]/.test(on),
+      'branches: [\'**\'] runs the whole workflow twice on every PR push');
+  });
+
   test('the guide no longer claims group rows are unaggregated', () => {
     // Q35 made a group row the sum of its descendants. The guide said the
     // opposite in two places, which is the kind of sentence somebody quotes
