@@ -806,8 +806,42 @@ A sheet is added only for the risk categories you selected.
 | Risk category | Sheets |
 |---|---|
 | Security | `SV_Vulnerability Findings`, `SV_Project Summary`, `SV_Component Summary`, `SV_CWE Summary` |
-| License | `LR_Violations`, `LR_Project Summary` |
-| Operational | `OR_Violations`, `OR_Project Summary` |
+| License | `LR_Violations`, `LR_Project Summary`, `LR_Unique Risks` |
+| Operational | `OR_Violations`, `OR_Project Summary`, `OR_Unique Risks` |
+
+### Origin and Dependency Path
+
+`SV_Vulnerability Findings` and `LR_Violations` each end with two columns
+answering the same question the findings dialog's Origin column does: does this
+component **block the release**, or does it go on the security SME's backlog?
+
+| Origin | Dependency Path | Means |
+|---|---|---|
+| `Direct` | *(blank)* | The project declares this component itself. The Origin column already said it; there is no chain to show. |
+| `Transitive` | `spring-boot-starter-web → jackson-databind` | Something else pulled it in, and this is how. One line per direct dependency that reaches it — a component reachable from three roots gets three lines. |
+| `Transitive` | `No path recorded` | The graph was walked and DependencyTrack records no route. Ordinary for a flat, manifest-built SBOM — not an error. |
+| `Transitive` | `Not resolved` | No walk result is available: the graph walk was skipped, failed, or the job was cancelled. Nobody looked, which is a different thing from looking and finding nothing. |
+| *(blank)* | *(blank)* | DependencyTrack could not be asked which components are direct for that project. The cell is left empty rather than guessed. |
+
+`LR_Unique Risks` — one row per unique component + version across every project
+— carries an **Origin** column too, with a third value:
+
+- `Mixed` — the component is a *direct* dependency of one affected project and
+  *transitive* in another. Both are true, so neither single label is.
+
+That sheet has no Dependency Path column on purpose: the chain differs per
+project, and one cell holding several projects' chains could not say which
+belonged to which. Open `LR_Violations` for the per-project chains.
+
+**What this costs.** One extra DependencyTrack call per project to ask which
+components are direct, plus — only when something is actually transitive — one
+graph walk scoped to the components the workbook is going to print. That walk
+result is cached and shared by everyone using the same DependencyTrack
+connection, so the second report over the same project does not repeat it. If
+either step fails the report is still delivered; the affected cells are blank.
+
+The operational sheets have no Origin column: an operational policy violation is
+not about how a component entered the build.
 
 **`SV_CWE Summary`** has one row per unique **vulnerability + CWE** pair taken
 from `SV_Vulnerability Findings`: S.No, Vulnerability, CWE, Vulnerability Count,

@@ -19,6 +19,8 @@ const { buildExcelReport } = require('./excel');
 const { cweIdsOf, cweLabel } = require('./cwe');
 const branding = require('./branding');
 const reportsDb = require('./reports-db');
+const depPaths      = require('./dependency-paths');
+const reportOrigins = require('./report-origins');
 
 const REPORT_TIMEOUT_MS     = 30 * 60_000;  // 30 min hard limit per job
 const FINDINGS_PAGE_SIZE    = 300;  // DT API page size for findings
@@ -59,17 +61,27 @@ function isRunningHere(reportId) { return _cancelFlags.has(reportId); }
  * a list of projects.  Shared between runReportJob (registry-tracked) and
  * runScheduledJob (fire-and-email).
  *
- * @param {string}   apiUrl
- * @param {string}   apiKey
+ * @param {{apiUrl, apiKey, fingerprint}} conn — the account's DT connection.
+ *        Takes the whole object rather than two strings because Q37's origin
+ *        resolution needs the fingerprint too: the dependency-path cache is
+ *        keyed by it, so passing only the URL and key would mean every report
+ *        re-walking graphs another account on the same connection has already
+ *        paid for (§7.5).
  * @param {Array}    projects    — [{ uuid, name, version }]
  * @param {string[]} riskTypes   — subset of ['security','license','operational']
  * @param {{ cancelled: boolean }} cancelFlag
  * @param {Function} [onProgress]  — called with (riskType) after each project finishes that category
  * @returns {Promise<object>} collected data maps
  */
-async function collectReportData(apiUrl, apiKey, projects, riskTypes, cancelFlag, onProgress) {
+async function collectReportData(conn, projects, riskTypes, cancelFlag, onProgress) {
+  const { apiUrl, apiKey } = conn;
   const semaphore     = makeSemaphore(deps().reportConcurrency);
   const violationSema = makeSemaphore(deps().violationConcurrency);
+
+  // Q37: only the two sheets that name a component carry an Origin column, so
+  // an operational-only report does no origin work at all.
+  const wantOrigins = riskTypes.includes('security') || riskTypes.includes('license');
+  const origins     = new Map();
 
   const secFindings       = [];
   const secProjectSummary = new Map();
@@ -84,6 +96,12 @@ async function collectReportData(apiUrl, apiKey, projects, riskTypes, cancelFlag
     semaphore(async () => {
       if (cancelFlag.cancelled) return;
 
+      // Q37: the components this project's own rows name, gathered as those
+      // rows are built so the walk below is scoped to exactly them (Q26) — not
+      // to the project's whole component list, most of which the workbook
+      // never prints.
+      const projComponentKeys = new Set();
+
       await Promise.all([
         // ── Security findings ───────────────────────────────────────
         riskTypes.includes('security')
@@ -96,6 +114,16 @@ async function collectReportData(apiUrl, apiKey, projects, riskTypes, cancelFlag
                 const s = (f.vulnerability?.severity || 'UNASSIGNED').toLowerCase();
                 if (s in sev) sev[s]++; else sev.unassigned++;
                 const c    = f.component || {};
+                // Q37: stamped on the finding itself because secFindings is one
+                // flat array across every project, and a component's origin is
+                // a property of (project, component) — the same component can
+                // be direct in one project and transitive in another.
+                if (wantOrigins) {
+                  const ck = depPaths.componentKey(c);
+                  f._projUuid = proj.uuid;
+                  f._compKey  = ck;
+                  projComponentKeys.add(ck);
+                }
                 const cKey = [c.name, c.group].filter(Boolean).join('-');
                 if (cKey) {
                   const entry = secComponentMap.get(cKey) || { count: 0, projects: new Set() };
@@ -135,7 +163,11 @@ async function collectReportData(apiUrl, apiKey, projects, riskTypes, cancelFlag
                 const pc  = v.policyCondition || {};
                 const pol = pc.policy         || {};
                 const state = (pol.violationState || 'INFO').toUpperCase();
+                const ck    = depPaths.componentKey(c);
+                if (wantOrigins) projComponentKeys.add(ck);
                 licViolations.push({
+                  projUuid:    proj.uuid,   // Q37: origin is per (project, component)
+                  compKey:     ck,
                   projName:    proj.name,
                   projVersion: proj.version || '',
                   component:   [c.name, c.group].filter(Boolean).join('-') || c.name || '',
@@ -182,6 +214,23 @@ async function collectReportData(apiUrl, apiKey, projects, riskTypes, cancelFlag
             })
           : Promise.resolve(),
       ]);
+
+      // Q37: after both category fetches, because the target list is the union
+      // of what Security and License each named — resolving per category would
+      // walk the same project twice and, worse, the second walk's storeResult
+      // would overwrite the first's narrower result (§8.1's transitiveTargets
+      // union, one layer down).
+      //
+      // Through violationSema rather than a semaphore of its own: this is DT
+      // traffic, and §13 caps total upstream concurrency rather than counting
+      // each kind of call separately.
+      if (wantOrigins && !cancelFlag.cancelled && projComponentKeys.size) {
+        await violationSema(async () => {
+          const resolved = await reportOrigins.resolveForProject(
+            conn, proj.uuid, projComponentKeys, cancelFlag);
+          for (const [k, v] of resolved) origins.set(k, v);
+        });
+      }
     })
   );
 
@@ -195,6 +244,7 @@ async function collectReportData(apiUrl, apiKey, projects, riskTypes, cancelFlag
     secFindings, secProjectSummary, secComponentMap, secCweMap,
     licViolations, licProjectSummary,
     opsViolations, opsProjectSummary,
+    origins,
   };
 }
 
@@ -337,7 +387,7 @@ async function runReportJob(userId, reportId, conn, projects, riskTypes, filenam
 
   try {
     const reportData = await collectReportData(
-      conn.apiUrl, conn.apiKey, projects, riskTypes, cancelFlag,
+      conn, projects, riskTypes, cancelFlag,
       (rt) => {
         progress[rt].done++;
         // P13: throttled to at most one write per second, not one per project.

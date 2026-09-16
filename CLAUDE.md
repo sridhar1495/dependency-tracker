@@ -112,6 +112,7 @@ dependency-tracker/
 │   │   ├── reports-db.js caches.js snapshots.js schedules.js scheduler.js
 │   │   ├── dt-fetch.js excel.js cwe.js mail.js reports.js violation-cache.js
 │   │   ├── dependency-path-cache.js dependency-paths.js   # §6.3a — direct/transitive resolution
+│   │   ├── report-origins.js   # §6.7 Q37 — the same two tiers, for a workbook
 │   │   └── branding.js image.js   # title + sign-in background
 │   ├── routes/                 # auth.js profile.js admin.js dt-proxy.js config.js reports.js schedule.js cache.js branding.js dependency-paths.js
 │   ├── package.json            # Dependencies: exceljs, nodemailer, pg
@@ -214,7 +215,7 @@ Inline comments use lettered prefixes to trace design decisions:
 - **O-numbers** — observability notes (`// O3: JSON log format for log aggregators`)
 - **S-numbers** — security rationale (`// S2: token hashed before storage`) — **new in revision 2**
 
-Highest numbers currently in use: **Q36, P20, O5, S34**. When adding logic with a
+Highest numbers currently in use: **Q37, P20, O5, S34**. When adding logic with a
 non-obvious trade-off, add the next number in the appropriate series. Check the
 current maximum before assigning — parallel branches can claim the same number.
 
@@ -762,7 +763,49 @@ if (method === 'GET' && path === '/violation-cache/status') {
 - **The CWE summary adds no upstream call.** `cwes` and `vulnId` are already in
   the `/api/v1/finding` response, and the reference links are derived from the
   identifier — an unrecognised prefix yields an empty cell, never a guessed URL.
-  A test asserts `collectReportData` touches no endpoint but `/api/v1/finding`.
+  The test that pins this once asserted `collectReportData` touches no endpoint
+  but `/api/v1/finding`; **Q37 narrowed that rule rather than deleting it**, and
+  the distinction is the point. The CWE summary still adds nothing. Origin
+  resolution adds exactly one `/api/v1/project/{uuid}` read per project and, when
+  something is transitive, one scoped graph walk — both asserted by count, so a
+  change that starts calling per *finding* still fails.
+
+- **Q37: the workbook answers Direct/Transitive too, and prints the chain.**
+  `lib/report-origins.js` is the report's side of §6.3a's two tiers, and it is a
+  module for the reason `dependency-paths.js`/`dependency-path-cache.js` are:
+  `reports.js` calls it through an imported reference, so `server.test.js` can
+  replace it without a real PostgreSQL, and the cell formatters are pure enough
+  to test without loading `exceljs`. `collectReportData` therefore takes the
+  whole `conn` object rather than a URL and a key — the walk cache is keyed by
+  fingerprint, and without it every report would re-walk graphs another account
+  on the same connection has already paid for (§7.5).
+
+  Five things are load-bearing:
+
+  - **Tier 1 stays live.** §6.3a keeps `getDirectDependencies` uncached so a
+    badge cannot lag behind what DependencyTrack currently reports, and that
+    reasoning does not weaken because the reader is a spreadsheet.
+  - **One walk per project, over the union of both sheets' components.**
+    Resolving per category would walk twice, and the second `storeResult` would
+    **overwrite** the first's narrower result — the same trap §8.1's
+    `transitiveTargets()` union avoids in the dialog. The resolution step
+    therefore runs after both category fetches, not inside either.
+  - **The targets are what the workbook will print** (Q26), never the project's
+    whole component list.
+  - **Four path states, not two.** Blank (Direct), a chain, `No path recorded`
+    (walked, nothing found — an ordinary flat SBOM) and `Not resolved` (no walk
+    result at all). Collapsing the last two would tell a reader a component has
+    no parent when in fact nobody looked.
+  - **`LR_Unique Risks` aggregates to Direct / Transitive / `Mixed`, with no
+    path column.** One component can be a direct dependency of one project and
+    transitive in another, so either single label would be false for half the
+    rows the line covers; and the chains differ per project, so a merged cell
+    could not say which belonged to which.
+
+  Failure is degradation, never a failed report: a Tier-1 error leaves that
+  project's cells blank and logs once, and a workbook built with no `origins`
+  map at all still renders. The operational sheets are deliberately untouched —
+  an operational violation is not about how a component entered the build.
 - **A report name is validated, not sanitised.** It becomes a filename and
   travels in a `Content-Disposition` header, so `validate.validateReportName()`
   refuses what would break either — quotes, path separators, control characters
@@ -1771,7 +1814,9 @@ The frontend never performs uniqueness checks — those are backend-only, via
 | `dependencyPaths.walkGraph(...)` / `.runJob(conn, uuid)` | server | The cached Tier-2 graph walk and its job orchestration |
 | `dependencyPaths.countRoutesFrom(childrenOf, root)` | server | Every distinct route from one root, by Kahn topological DP — saturating, and reporting `acyclic` rather than guessing on a cycle (Q33) |
 | `dependencyPathCache.getMeta` / `.deriveStatus` / `.acquireBuildLock` | server | Row CRUD and the advisory lock behind the walk — the pair split for the reason `caches.js`/`violation-cache.js` are (§6.3a) |
-| `collectReportData(...)` | server | Shared collection core for manual and scheduled reports |
+| `collectReportData(conn, ...)` | server | Shared collection core for manual and scheduled reports. Takes the whole connection because Q37 needs the fingerprint |
+| `reportOrigins.resolveForProject(conn, uuid, keys, cancelFlag)` | server | One project's Direct/Transitive split and the chains behind it, for a workbook (Q37) |
+| `reportOrigins.originCell` / `.pathCell` / `.aggregateOriginCell` | server | Pure workbook cell formatters — the four path states and the `Mixed` aggregate (Q37) |
 | `sendEmail(mailCfg, ...)` | server | Deliver report via nodemailer |
 
 ---
@@ -2148,6 +2193,26 @@ Running the browser checks in CI was on this list and is now the `e2e` job.
   checks the attribute before attaching rather than inside the listener, and
   end to end that a click on the backdrop leaves the dialog open with its rows
   intact while the ✕ still closes it.
+- Report origins (Q37): the four path-cell states, each distinguishable from
+  the others, and that an unresolved row is blank rather than labelled; the
+  aggregate reporting `Mixed` rather than picking a side, and staying blank when
+  nothing resolved. On resolution: an all-direct project starts **no** walk; the
+  walk's target list excludes the direct components and everything the report
+  does not print; a Tier-1 failure yields no entries rather than guesses; no
+  fingerprint means badges without chains; a cancelled job classifies but does
+  not walk; and a walk that did not end `ready` leaves `chains` null rather than
+  empty, which is the boundary between the two sentences the workbook prints.
+  On the wiring: Security and License produce **one** walk over the union of
+  both, and an operational-only report reads no project at all. On the workbook:
+  both columns present and in order, the same component reporting differently in
+  two projects, a missing `origins` map degrading to blank rather than throwing,
+  `LR_Unique Risks` carrying Origin but no path column, and the path column
+  wrapping so a second parent is not hidden behind the row height. The
+  end-to-end tier proves it against the stub's real graph rather than a fixture:
+  a report over a leaf must contain both labels, every row classified, a chain
+  naming the intermediate `carrier-for-…` component, and a second report must
+  issue **no** `dependencyGraph` call at all because the first one's walk is
+  cached by fingerprint.
 - **Authorisation:** every route rejects a missing or invalid token with 401;
   cross-user access returns 404; the profile endpoint ignores login ID and email.
 - Do **not** write tests that require a live DT API.

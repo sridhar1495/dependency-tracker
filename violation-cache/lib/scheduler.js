@@ -230,9 +230,7 @@ async function runScheduledJob(schedule, { manual = false } = {}) {
       ? schedule.riskTypes : ['security', 'license', 'operational'];
     const cancelFlag = { cancelled: false };
 
-    const reportData = await collectReportData(
-      conn.apiUrl, conn.apiKey, projects, riskTypes, cancelFlag
-    );
+    const reportData = await collectReportData(conn, projects, riskTypes, cancelFlag);
     const appTitle = await branding.getTitle();
     const buffer = await buildExcelReport(null, { riskTypes, appTitle, ...reportData });
     fileSize = buffer.length;
