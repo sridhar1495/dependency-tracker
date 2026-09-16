@@ -29,7 +29,7 @@
 // is a sequence, and re-registering an account per assertion would test the
 // registration route forty times and everything else once.
 
-const { test, describe, before, after } = require('node:test');
+const { test, describe, before, after, afterEach } = require('node:test');
 const assert = require('node:assert/strict');
 
 const stackLib = require('./e2e/stack');
@@ -866,6 +866,80 @@ describe('e2e — the dashboard in a real browser', { skip: BROWSER_SKIP }, () =
 
   after(async () => { if (browser) await browser.close(); });
 
+  // A test that fails between opening a modal and closing it leaves the overlay
+  // on screen, and `.modal-overlay.open` covers the whole viewport — so every
+  // later test that clicks anything dies on "intercepts pointer events" after a
+  // full 30s timeout apiece. One real failure then reports as six, and the five
+  // decoys all name a control that has nothing wrong with it. Closing here
+  // costs nothing when the test passed (there is no open modal to close) and
+  // keeps a genuine failure reporting as exactly one failure, with its own
+  // message. It deliberately does not assert — cleanup that can itself fail is
+  // one more way to lose the real error.
+  afterEach(async () => {
+    if (!page || page.isClosed()) return;
+    await page.evaluate(() => {
+      document.querySelectorAll('.modal-overlay.open')
+        .forEach(el => el.classList.remove('open'));
+    }).catch(() => {});
+  });
+
+  /**
+   * The dependency-path walk is asynchronous end to end — a POST that starts a
+   * job, then a 1.5s poll until the row is `ready` — so the only honest wait is
+   * for the chain itself to appear. What a bare waitForSelector cannot say is
+   * WHY it never did: still building, failed upstream, refused to start, or
+   * nothing transitive to resolve are four different faults with one symptom.
+   * #vulnDepPathStatus carries the distinguishing message in every one of those
+   * cases (startDepPathPoll/onVulnDepPathToggle in index.html both write it),
+   * so quote it rather than making the next person re-derive it from CI logs.
+   */
+  async function waitForDepPathChains(ms) {
+    try {
+      await page.waitForSelector('.dep-path-chain', { timeout: ms });
+    } catch (err) {
+      const lines = [];
+      const add = (label, v) => lines.push(`  ${label}: ${typeof v === 'string' ? v : JSON.stringify(v)}`);
+
+      add('#vulnDepPathStatus',
+        await page.locator('#vulnDepPathStatus').textContent().catch(() => '(unreadable)'));
+      add('toggle checked',
+        await page.locator('#vulnDepPathToggle').isChecked().catch(() => '(unreadable)'));
+      add('dialog rows', await page.locator('#vulnDialogRows tr').count().catch(() => -1));
+
+      // What the page believes, and what the route actually answered. The four
+      // states the dialog renders identically — 'none' (no row was ever
+      // written), 'stalled' (the watchdog gave up), 'failed' (the walk threw)
+      // and 'ready' with an empty `paths` — are the whole question here, and
+      // only these two reads tell them apart.
+      const state = await page.evaluate(() => window.__depPathState()).catch(e => ({ unreadable: e.message }));
+      add('page state', state);
+      if (state && state.project) {
+        add('GET dependency-paths', await page.evaluate(async (uuid) => {
+          const r = await fetch(`/violation-cache/dependency-paths/${uuid}`, {
+            headers: { Authorization: `Bearer ${localStorage.getItem('dt_session_token')}` },
+          });
+          const b = await r.json().catch(() => ({}));
+          return {
+            http: r.status, status: b.status, error: b.error, stale: b.stale,
+            totalComponents: b.totalComponents, resolvedComponents: b.resolvedComponents,
+            pathKeys: Object.keys(b.paths || {}).length, routesExact: b.routesExact,
+          };
+        }, state.project).catch(e => ({ unreadable: e.message })));
+      }
+
+      // The server logs its own reason (`Dependency-path walk failed: …`,
+      // `… stalled …`, `… expansion failed for one component: …`) and the
+      // harness has been capturing it all along — it was simply never shown,
+      // which is why two CI runs could fail without naming a cause.
+      const serverLog = (stack.log() || '').split('\n')
+        .filter(l => /[Dd]ependency-path|dependencyGraph/.test(l)).slice(-12);
+      if (serverLog.length) lines.push('  server log:\n    ' + serverLog.join('\n    '));
+
+      err.message += '\n' + lines.join('\n');
+      throw err;
+    }
+  }
+
   test('the auth gate redirects before painting anything', async () => {
     // §8.4: the gate runs in <head>, so a signed-out visitor never sees a
     // dashboard flash.
@@ -938,6 +1012,36 @@ describe('e2e — the dashboard in a real browser', { skip: BROWSER_SKIP }, () =
       're-expanding must restore exactly the rows the collapse hid');
   }, { timeout: 60_000 });
 
+  test('Q35: a group row totals its descendants, through an intermediate group', async () => {
+    // The stub's root 1 is three deep — Group 1 → service-101 → service-201 —
+    // and service-101 is now an intermediate GROUP, not a leaf. So the chain
+    // only reads equal if the rollup climbed through it. Group 2 is two deep,
+    // covering the ordinary case in the same pass.
+    //
+    // Read the rendered cells rather than any internal state: this has to be
+    // what a user actually sees, and the four category columns follow the
+    // select/name/level/isLatest cells, so security.critical is index 4.
+    const byName = await page.evaluate(() => {
+      const out = {};
+      for (const tr of document.querySelectorAll('#tableBody tr')) {
+        const name = tr.querySelector('.proj-name-text');
+        const tds  = tr.querySelectorAll('td');
+        if (name && tds.length > 4) out[name.textContent.trim()] = tds[4].textContent.trim();
+      }
+      return out;
+    });
+
+    for (const n of ['Group 1', 'service-101', 'service-201', 'Group 2', 'service-102']) {
+      assert.ok(n in byName, `row "${n}" missing — got ${JSON.stringify(Object.keys(byName))}`);
+    }
+    assert.equal(byName['service-101'], byName['service-201'],
+      'the intermediate group must equal its single leaf');
+    assert.equal(byName['Group 1'], byName['service-201'],
+      'and the root must equal it too — the rollup has to climb two levels, not one');
+    assert.equal(byName['Group 2'], byName['service-102'],
+      'the ordinary two-level case must still total its leaf');
+  }, { timeout: 60_000 });
+
   test('the vulnerability dialog opens from the eye icon and lists real findings', async () => {
     // The eye icon only appears on a leaf row with at least one finding
     // (CLAUDE.md §8.1 vulnerability dialog rules) — the dt-stub portfolio
@@ -999,13 +1103,15 @@ describe('e2e — the dashboard in a real browser', { skip: BROWSER_SKIP }, () =
     assert.ok(!(await page.locator('.dep-path-chain').count()), 'no chain is shown before the toggle is used');
 
     // Toggling on triggers the walk and shows a chain per Transitive row.
-    // 30s, not 15s: observed flaky under CI resource contention at the
-    // tighter margin — the walk itself is fast (Q26 scopes it to exactly
-    // this dialog's targets), but a loaded runner's Postgres/HTTP round
-    // trips can still eat the difference. Matches the timeout the rest of
-    // this describe block's individual steps already use.
+    // 45s, not 15s and no longer 30s: observed flaky under CI resource
+    // contention at each tighter margin — the walk itself is small (Q26 scopes
+    // it to exactly this dialog's targets, a dozen stub components here), but
+    // a loaded runner's Postgres and HTTP round trips, plus a 1.5s poll
+    // interval, can still eat the difference. This bound is correctness, not
+    // performance: the cache-hit re-toggle below still asserts 3s, which is
+    // the timing claim that actually matters.
     await page.locator('#vulnDepPathToggle').click();
-    await page.waitForSelector('.dep-path-chain', { timeout: 30_000 });
+    await waitForDepPathChains(45_000);
     const chains = await page.locator('.dep-path-chain').allTextContents();
     assert.ok(chains.length > 0);
     for (const chain of chains) {
@@ -1041,7 +1147,11 @@ describe('e2e — the dashboard in a real browser', { skip: BROWSER_SKIP }, () =
 
     await page.locator('#vulnDialog .modal-close').click();
     await page.waitForTimeout(400);
-  }, { timeout: 60_000 });
+    // 90s so the 45s chain wait above cannot be truncated by the test's own
+    // budget: a walk cut off at the outer boundary reports as the test timing
+    // out rather than as the chain never arriving, which loses the one piece
+    // of information worth having.
+  }, { timeout: 90_000 });
 
   test('License Risk shows real violations, filters by origin locally, and shares the dependency-path cache with Security', async () => {
     // dt-stub.js seeds each leaf with two license violations reusing that
@@ -1090,7 +1200,7 @@ describe('e2e — the dashboard in a real browser', { skip: BROWSER_SKIP }, () =
     // component here is the very same one the earlier test already walked,
     // so this must resolve, never read "no path recorded".
     await page.locator('#vulnDepPathToggle').click();
-    await page.waitForSelector('.dep-path-chain', { timeout: 30_000 });
+    await waitForDepPathChains(45_000);
     const chains = await page.locator('.dep-path-chain').allTextContents();
     assert.ok(chains.length > 0);
     assert.ok(!chains.some(t => /No path recorded/.test(t)),
@@ -1108,7 +1218,7 @@ describe('e2e — the dashboard in a real browser', { skip: BROWSER_SKIP }, () =
 
     await page.locator('#vulnDialog .modal-close').click();
     await page.waitForTimeout(400);
-  }, { timeout: 60_000 });
+  }, { timeout: 90_000 });   // as above: room for the 45s chain wait plus a 15s License fetch
 
   test('a clean project (no findings) shows no eye icon at all', async () => {
     // hasVulnerabilities() gates the icon — this is a structural guarantee,

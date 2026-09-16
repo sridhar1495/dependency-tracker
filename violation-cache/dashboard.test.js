@@ -5182,3 +5182,151 @@ describe('project hierarchy — the flat sweep (Q34)', () => {
       'no silent catch: swallowing the failure is what made the two causes indistinguishable');
   });
 });
+
+// ── Q35: group rows roll up their descendants ───────────────────────────────
+// Before this, a group row showed whatever DependencyTrack reported against
+// that project's own uuid. That was a real rollup only for security, and only
+// on a root configured as a v5 Collection Project; the three policy categories
+// come from our own violation crawl bucketed by the uuid each violation
+// carries, so an organisational parent showed zeros over a failing subtree.
+describe('project tree — group-row aggregation (Q35)', () => {
+  const tree = new Function(
+    INDEX_HTML.match(/const CAT_LEVELS = \{[\s\S]*?\n\};/)[0] + '\n'
+    + INDEX_HTML.match(/const CATS = \[[\s\S]*?\];/)[0] + '\n'
+    + INDEX_HTML.match(/const AGG_LEVELS = \{[\s\S]*?\n\};/)[0] + '\n'
+    + 'const nodeMap = new Map();\n'
+    + extractFunction(INDEX_HTML, 'aggregateTree') + '\n'
+    + extractFunction(INDEX_HTML, 'buildTree') + '\n'
+    + 'return { buildTree, aggregateTree, nodeMap };'
+  )();
+
+  /** A leaf project with the §8.6 shape; only the fields under test are set. */
+  const proj = (uuid, parentUuid, n = {}) => ({
+    uuid, name: uuid, parentUuid: parentUuid || null, _dataWarn: n.warn || null,
+    security:   { critical: n.c || 0, high: n.h || 0, medium: 0, low: 0, unassigned: n.su || 0 },
+    operations: { fail: n.of || 0, warn: 0, info: 0, unassigned: n.ou || 0 },
+    license:    { fail: n.lf || 0, warn: 0, info: 0, unassigned: 0 },
+    secpolicy:  { fail: n.pf || 0, warn: 0, info: 0, unassigned: 0 },
+  });
+  const byUuid = (roots, uuid) => tree.nodeMap.get(uuid);
+
+  test('a three-level tree rolls leaves through the middle tier to the root', () => {
+    // root ─┬─ midA ─┬─ leaf1 (c=1, of=2)
+    //       │        └─ leaf2 (c=3, of=4)
+    //       └─ midB ─── leaf3 (c=5, of=6)
+    const roots = tree.buildTree([
+      proj('root'), proj('midA', 'root'), proj('midB', 'root'),
+      proj('leaf1', 'midA', { c: 1, of: 2 }),
+      proj('leaf2', 'midA', { c: 3, of: 4 }),
+      proj('leaf3', 'midB', { c: 5, of: 6 }),
+    ]);
+    assert.equal(byUuid(roots, 'midA').security.critical, 4);
+    assert.equal(byUuid(roots, 'midB').security.critical, 5);
+    assert.equal(byUuid(roots, 'root').security.critical, 9,
+      'the root must total every leaf, not just its direct children');
+    assert.equal(byUuid(roots, 'root').operations.fail, 12);
+    // Leaves are never rewritten — they are the inputs.
+    assert.equal(byUuid(roots, 'leaf2').security.critical, 3);
+  });
+
+  test('all four categories roll up, including levels the table does not render', () => {
+    const roots = tree.buildTree([
+      proj('g'), proj('a', 'g', { c: 1, h: 2, of: 3, lf: 4, pf: 5, su: 6, ou: 7 }),
+      proj('b', 'g', { c: 1, h: 2, of: 3, lf: 4, pf: 5, su: 6, ou: 7 }),
+    ]);
+    const g = byUuid(roots, 'g');
+    assert.equal(g.security.critical, 2);
+    assert.equal(g.security.high, 4);
+    assert.equal(g.operations.fail, 6);
+    assert.equal(g.license.fail, 8);
+    assert.equal(g.secpolicy.fail, 10);
+    // CAT_LEVELS omits `unassigned` for the policy categories, but riskScore()
+    // and the data model both carry it — a stale value here would be invisible
+    // in the table and wrong in every computation that reads it.
+    assert.equal(g.security.unassigned, 12);
+    assert.equal(g.operations.unassigned, 14);
+  });
+
+  test('a group\'s own reported numbers are replaced, never added to', () => {
+    // The double-count trap: a root DT already rolled up reports its
+    // descendants' totals as its own. Adding a computed child sum on top of
+    // that would report 100 + 7 instead of 7.
+    const roots = tree.buildTree([
+      proj('collection', null, { c: 100, of: 100 }),
+      proj('kid', 'collection', { c: 7, of: 7 }),
+    ]);
+    assert.equal(byUuid(roots, 'collection').security.critical, 7);
+    assert.equal(byUuid(roots, 'collection').operations.fail, 7);
+  });
+
+  test('re-running is idempotent — a refetch may restore the rollup repeatedly', () => {
+    // applyViolationData() writes raw per-project counts back over every node
+    // and calls aggregateTree() again; that is only safe if leaves are inputs.
+    const roots = tree.buildTree([
+      proj('r'), proj('m', 'r'), proj('l', 'm', { c: 2, of: 3 }),
+    ]);
+    const first = JSON.parse(JSON.stringify(byUuid(roots, 'r').security));
+    tree.aggregateTree(roots);
+    tree.aggregateTree(roots);
+    assert.deepEqual(byUuid(roots, 'r').security, first);
+    assert.equal(byUuid(roots, 'r').security.critical, 2);
+  });
+
+  test('a group with no children anywhere beneath it totals zero, not its own numbers', () => {
+    const roots = tree.buildTree([proj('g', null, { c: 9 }), proj('empty', 'g')]);
+    assert.equal(byUuid(roots, 'g').security.critical, 0);
+  });
+
+  test('a child missing a category object entirely contributes zero, not NaN', () => {
+    const bare = { uuid: 'x', name: 'x', parentUuid: 'g', security: { critical: 5 } };
+    const roots = tree.buildTree([proj('g'), bare]);
+    const g = byUuid(roots, 'g');
+    assert.equal(g.security.critical, 5);
+    assert.equal(g.operations.fail, 0);
+    assert.equal(Number.isNaN(g.license.fail), false, 'an absent category must not poison the sum');
+  });
+
+  test('multiple independent roots each total only their own subtree', () => {
+    const roots = tree.buildTree([
+      proj('r1'), proj('a', 'r1', { c: 1 }),
+      proj('r2'), proj('b', 'r2', { c: 2 }), proj('c', 'r2', { c: 3 }),
+      proj('lonely', null, { c: 99 }),
+    ]);
+    assert.equal(byUuid(roots, 'r1').security.critical, 1);
+    assert.equal(byUuid(roots, 'r2').security.critical, 5);
+    // A childless top-level project is a leaf, not a group — its own numbers stand.
+    assert.equal(byUuid(roots, 'lonely').security.critical, 99);
+    assert.equal(roots.length, 3);
+  });
+
+  test('a descendant\'s incomplete data is disclosed on every group above it', () => {
+    const roots = tree.buildTree([
+      proj('root'), proj('mid', 'root'),
+      proj('bad', 'mid', { warn: 'Security metrics unavailable' }),
+      proj('good', 'mid', { c: 1 }),
+    ]);
+    assert.match(byUuid(roots, 'mid')._dataWarn, /incomplete/i);
+    assert.match(byUuid(roots, 'root')._dataWarn, /incomplete/i,
+      'the warning must climb the whole chain, not stop at the direct parent');
+    assert.equal(byUuid(roots, 'bad')._dataWarn, 'Security metrics unavailable',
+      'the leaf keeps its own, more specific message');
+  });
+
+  test('a clean subtree leaves no warning behind', () => {
+    const roots = tree.buildTree([proj('g'), proj('k', 'g', { c: 1 })]);
+    assert.equal(byUuid(roots, 'g')._dataWarn, null);
+  });
+
+  test('a self-referencing parent link cannot recurse until the stack dies', () => {
+    // inferParentUuids() refuses to self-reference, but parent links also come
+    // straight from the API, and buildTree would push such a node into its own
+    // children array.
+    const roots = tree.buildTree([proj('a', 'a', { c: 1 }), proj('b', null, { c: 2 })]);
+    assert.equal(byUuid(roots, 'b').security.critical, 2);
+  });
+
+  test('a two-node parent cycle does not hang the build', () => {
+    const roots = tree.buildTree([proj('x', 'y', { c: 1 }), proj('y', 'x', { c: 2 })]);
+    assert.ok(Array.isArray(roots), 'buildTree must still return');
+  });
+});
