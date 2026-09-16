@@ -2320,7 +2320,9 @@ Running the browser checks in CI was on this list and is now the `e2e` job.
   regenerates into a clean checkout, and then the guide is full of broken
   images; only the second direction would have caught that. `USER_GUIDE.md` is
   also required to keep a section per capability and to say on its own face that
-  its images are stub data.
+  its images are stub data — a reader who cannot tell a fixture from a real
+  portfolio will try to reconcile the numbers with their own and conclude the
+  product is broken.
   **Its administration section is tied to `routes/admin.js` by count**: §7.6 is
   a closed allow-list of six writes, and adding a seventh is meant to be a
   decision somebody reads — this makes it a decision somebody also has to
@@ -2330,10 +2332,9 @@ Running the browser checks in CI was on this list and is now the `e2e` job.
   documented only from the administrator's side leaves both sides guessing —
   and must state the two rules that surprise people most: that lowering a limit
   blocks rather than deletes (§7.5), and that a password reset signs the account
-  out (S29) — a reader who cannot tell a fixture from a real
-  portfolio will try to reconcile the numbers with their own and conclude the
-  product is broken. These are cheap and they only catch the mechanical half —
-  a sentence that is merely wrong still needs a reader.
+  out (S29).
+  These are cheap, and they only catch the mechanical half — a sentence that is
+  merely wrong still needs a reader.
 - Do **not** write tests that require a live DT API.
 
 ---
