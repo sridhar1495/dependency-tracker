@@ -1401,6 +1401,43 @@ describe('e2e — the dashboard in a real browser', { skip: BROWSER_SKIP }, () =
     assert.equal(await page.locator('#vulnDialog').evaluate(e => e.classList.contains('open')), false);
   }, { timeout: 60_000 });
 
+  test('Q40: the origin read is issued before the findings crawl, not after it', async () => {
+    // The reported symptom was an Origin column stuck on `…` through the whole
+    // of a project's FIRST open, correct on every one after. That reads like a
+    // memo bug; it was an ordering one — Tier 1 waited on a crawl it shares
+    // nothing with but the project uuid, and the memo only looked like a cure
+    // because it took the crawl out from in front of it.
+    //
+    // Asserting on elapsed time would be flaky, so this asserts on the stub's
+    // own request log instead: with the defect the project read came strictly
+    // after the finding pages, and with the fix it comes first. A project no
+    // earlier test has opened, so there is no memo to hide the ordering.
+    const eyeBtn = page.locator('.vuln-eye-btn').last();
+    await eyeBtn.waitFor({ state: 'visible', timeout: 10_000 });
+    dt.reset();
+    await eyeBtn.click();
+    await page.waitForSelector('#vulnDialogRows tr', { timeout: 20_000 });
+    await page.waitForTimeout(800); // let Tier 1 land
+
+    const calls   = dt.calls();
+    const project = calls.findIndex(c => /\/api\/v1\/project\/[0-9a-f-]+$/.test(c));
+    const finding = calls.findIndex(c => c.includes('/api/v1/finding'));
+    assert.ok(project >= 0, `no Tier-1 project read in: ${calls.join(' | ')}`);
+    assert.ok(finding >= 0, `no finding crawl in: ${calls.join(' | ')}`);
+    assert.ok(project < finding,
+      `Tier 1 must not queue behind the crawl — project at ${project}, finding at ${finding}`);
+
+    // And the column really is populated on this first open, not just ordered.
+    const origins = await page.locator('#vulnDialogRows tr td:nth-child(8)').allTextContents();
+    assert.ok(origins.length > 0, 'the dialog should have rows');
+    assert.ok(origins.every(t => /Direct|Transitive/.test(t)),
+      `every row must be classified on a first open, got: ${JSON.stringify(origins)}`);
+
+    await page.locator('#vulnDialog .modal-close').click();
+    await page.waitForTimeout(300);
+    await restoreViewport();
+  }, { timeout: 60_000 });
+
   test('the dependency-path toggle resolves real Direct/Transitive chains, live and once cached', async () => {
     // dt-stub.js seeds each leaf with a synthetic "carrier" component that is
     // itself direct, with half the leaf's findings reachable only through it —
