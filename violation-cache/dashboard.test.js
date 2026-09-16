@@ -5641,6 +5641,43 @@ describe('the documentation still describes this application', () => {
       'the first image should follow the first step, not precede the guide');
   });
 
+  test('the guide documents every administration write, and none it cannot do', () => {
+    // §7.6 is a closed allow-list, and adding a seventh entry is supposed to be
+    // a decision somebody reads. This makes it a decision somebody also has to
+    // *document*: an administrator capability that exists in routes/admin.js
+    // and nowhere in the guide is one users have no way to ask for.
+    const adminRoutes = fs.readFileSync(path.join(__dirname, 'routes', 'admin.js'), 'utf8');
+    const writes = [...adminRoutes.matchAll(/method === '(?:PUT|POST|DELETE)'/g)].length;
+    const section = GUIDE_MD.slice(GUIDE_MD.indexOf('## 11.'), GUIDE_MD.indexOf('## 12.'));
+    assert.ok(section.length > 0, 'the guide has no administration section');
+
+    // The numbered table in the guide is the user-facing copy of that list.
+    const rows = [...section.matchAll(/^\| \d+ \| /gm)].length;
+    assert.equal(rows, writes,
+      `routes/admin.js handles ${writes} writes; the guide's table lists ${rows}`);
+
+    // And each one has to be explained, not merely listed.
+    for (const topic of ['Report Configuration', 'Reset password', 'Customization',
+                         'sign-in background', 'application title']) {
+      assert.match(section, new RegExp(topic.replace(/ /g, '\\s+'), 'i'),
+        `the administration section never covers: ${topic}`);
+    }
+  });
+
+  test('the guide says what an administration change does to a user', () => {
+    // The question this section is actually asked. A setting documented only
+    // from the administrator's side leaves both sides guessing what happened.
+    const section = GUIDE_MD.slice(GUIDE_MD.indexOf('## 11.'), GUIDE_MD.indexOf('## 12.'));
+    const reaches = [...section.matchAll(/How this reaches the user/g)].length;
+    assert.ok(reaches >= 4,
+      `only ${reaches} administration settings say what the user sees; each group needs one`);
+    // The two rules that surprise people most, stated where they will be read.
+    assert.match(section, /never deletes|cannot create more/i,
+      'the guide must say that lowering a limit blocks rather than deletes (§7.5)');
+    assert.match(section, /signed out/i,
+      'the guide must say a password reset signs the account out (S29)');
+  });
+
   test('the guide says where its screenshots come from', () => {
     // The same promise README.md makes. A reader has to be able to tell a
     // fixture from somebody's real portfolio, or they will try to match the

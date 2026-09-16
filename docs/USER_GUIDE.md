@@ -405,33 +405,157 @@ trail survives, as an audit trail must.
 
 ## 11. For administrators
 
-Sign in with **Administrator login** ticked, using the credentials from
-installation. Then **👤 → 🛡 Administration**.
+Sign in with **Administrator login** ticked, using the credentials created at
+installation — they live in a file on the server, not in the account database,
+so no ordinary account can ever become the administrator. Then
+**👤 → 🛡 Administration**.
 
-![The administration screen](images/administration.png)
+An ordinary user who types the `/admin.html` URL is sent back to the dashboard
+rather than shown a screen whose every request would be refused.
 
-Administration is **mostly read-only**. It can do exactly six things:
+### What administration can and cannot do
 
-| Action | Effect |
+**It is mostly read-only, and what it may change is a closed list of six
+things** — not a general-purpose account editor:
+
+| # | Action | Where |
+|---|---|---|
+| 1 | Set the **default** report limit | Report Configuration |
+| 2 | Set the **default** schedule limit | Report Configuration |
+| 3 | Override **one account's** limits | Users → account → ✎ |
+| 4 | Reset **one account's** password | Users → account → Reset password |
+| 5 | Set the application title | Customization |
+| 6 | Upload or remove the sign-in background | Customization |
+
+Everything else is readable only. Administration **cannot** read anyone's
+DependencyTrack API key, SMTP password, reports, findings or schedules' contents.
+It sees only that a key or password *is stored*.
+
+### The Users section
+
+![The administration screen, with one account's detail open](images/administration.png)
+
+The tiles across the top are the whole installation at a glance: accounts,
+active sessions, how many have a DependencyTrack connection, active schedules,
+stored reports, report storage and violation caches.
+
+Selecting an account opens its detail on the right:
+
+| Panel | Shows |
 |---|---|
-| Set the default report and schedule limits | Applies to every account without an override. |
-| Set one account's limits | `null` returns that account to the default. |
-| Reset one account's password | See below. |
-| Set the application title | Blank restores the built-in name. |
-| Upload a sign-in background | |
-| Remove the background | Restores the animated default. |
+| **Account** | Login ID, email, registered / last sign-in / last updated. |
+| **Session** | Whether they are signed in, from which IP, and when the session expires. |
+| **DependencyTrack** | Whether a connection is configured, its **API URL**, and whether a key is stored — **never the key itself**. |
+| **Reports** | Completed / in progress / failed, storage used, and the limit in force. |
+| **Email** | Whether mail is enabled, the SMTP host, the From address, how many recipients — and that a password is stored, **never the password**. |
 
-It can read account names, quotas, storage use and sign-in history. It **cannot**
-read anyone's DependencyTrack key, SMTP password, reports or findings.
+The administrator's own reserved identity is excluded from this list and from
+the account count. It holds their connection and settings, but nothing
+authenticates against it.
 
-> **A password reset is bounded on purpose.** The account is signed out, and the
-> password you set can only ever be spent replacing itself — the user is required
-> to choose a new one before reaching anything else. It never becomes a working
-> credential for their DependencyTrack connection or their reports. Every reset
-> is written to the audit trail.
+### 1–2. The default limits, and what a user sees
 
-Raising a limit never deletes anything. An account already over a lowered limit
-is simply blocked from creating more.
+**Report Configuration** sets the numbers every account follows unless it has an
+override of its own.
+
+![Setting the default report and schedule limits](images/guide-admin-limits.png)
+
+| Setting | Range | What it bounds |
+|---|---|---|
+| **Default maximum reports per account** | 1–1000 | How many generated reports one account may keep on the server at once (completed **and** in progress). |
+| **Default maximum schedules per account** | 1–100 | How many recurring schedules one account may have. |
+
+**How this reaches the user.** Their **⚙ Settings → Max Report Downloads**
+section shows the number in force and reads *"Set by your administrator. Ask
+them if you need it raised."* — they cannot change it there. On the schedule
+side, the schedule list footer reads *"1 of 5 schedules used"*.
+
+When they hit either limit they get a clear refusal, not a silent failure:
+
+- a new report is refused with the limit named, and they are told to download or
+  clear one,
+- a new schedule is refused the same way.
+
+> **Lowering a limit never deletes anything.** An account already over the new
+> number simply cannot create more until it is back under. This is deliberate:
+> the same change applies to every account at once, and a version of it that
+> trimmed would destroy reports across the whole installation in one click.
+
+The schedule limit is not about disk — a schedule costs almost nothing to store.
+It bounds how much **recurring work** the installation sends upstream, because
+each schedule crawls DependencyTrack on its own timetable.
+
+### 3. Overriding one account
+
+In an account's detail, the ✎ beside **Limit** opens:
+
+![Overriding one account's limits](images/guide-admin-account-limit.png)
+
+The dialog states what the account is allowed now and what the defaults are.
+
+**Leaving a field blank returns that limit to the global default** — which is a
+different thing from typing the default's current value. An account set
+explicitly to 10 stays at 10 when you later raise the default to 20; an account
+left blank moves to 20 with everyone else. That distinction is the entire reason
+the field can be emptied.
+
+**How this reaches the user.** Immediately, on their next page load. Their
+Settings panel shows the new number, and the administration list marks the
+account `10 default` or `25` so you can see at a glance which accounts have been
+singled out.
+
+### 4. Resetting a password
+
+Use this when somebody is locked out. Select the account, then **Reset
+password**.
+
+![The password reset dialog](images/guide-admin-reset.png)
+
+**This is the most privileged thing in the product** — you are choosing a value
+that authenticates as somebody else — so three things bound it, and the dialog
+says so:
+
+1. **They are signed out immediately.** Any live session is revoked, so you
+   cannot silently ride along behind them.
+2. **The password you set can only ever be spent replacing itself.** On their
+   next sign-in they are required to choose their own, and until they do, every
+   other part of the product is closed to them. It never becomes a working
+   credential for their DependencyTrack connection or their reports.
+3. **Every reset is written to the audit trail**, in the same transaction as the
+   change itself.
+
+**How this reaches the user.** They are signed out wherever they were. Signing in
+with the password you gave them lands them on a "choose a new password" screen
+and nowhere else. Once they choose one, they continue straight into the
+dashboard — they are not made to sign in twice.
+
+> You cannot reset your **own** administrator password here. It lives in the
+> credentials file on the server, and changing it means changing that file.
+
+### 5–6. Customization
+
+![Setting the title and the sign-in background](images/guide-admin-branding.png)
+
+| Setting | Notes |
+|---|---|
+| **Application title** | Up to 60 characters. **Save title** applies it; **Reset to default** restores the built-in name. |
+| **Sign-in background** | PNG, JPEG or WebP, up to 5 MB, at least 1280×720 and at most 5000×5000. **Upload image** replaces the animated default; removing it restores the animation. |
+
+**How this reaches the user.** The panel says it plainly: *"These apply to
+everyone. A signed-in user sees a change the next time they load a page."* No
+sign-out is needed.
+
+The title appears in the browser tab, the dashboard header, the sign-in page and
+the footer — and the small logo mark is derived from it, up to three initials, so
+a renamed installation does not keep wearing the old name's badge. The
+background is public by construction: it is on the sign-in page, which anyone who
+can reach the service can already see.
+
+### Storage
+
+The **Storage** section reports filesystem headroom and database size for the
+whole installation. It is read-only, and it is where you look before raising the
+default report limit for everybody.
 
 ---
 
@@ -473,7 +597,25 @@ history on the schedule row. History is kept for 90 days.
 
 **Report or schedule limit reached.**
 Download or clear a report; cancel a schedule; or ask your administrator to
-raise the limit.
+raise the limit. Your current limit is shown in **⚙ Settings**; only an
+administrator can change it.
+
+**You are asked to choose a new password as soon as you sign in.**
+An administrator has reset it. Until you choose your own, nothing else in the
+product is reachable — that is deliberate, so the password they typed can never
+become a working credential for your connection or your reports.
+
+**The dashboard has a different name or background than yesterday.**
+An administrator changed it under Customization. It applies to everyone and
+takes effect on your next page load.
+
+**(Administrator) "Administrator login is disabled."**
+The credentials file was never created — usually a stack started without running
+`install.sh`. It is never created silently at runtime; re-run the installer.
+
+**(Administrator) An account is missing from the Users list.**
+The administrator's own reserved identity is excluded by design, from both the
+list and the account count. Nothing authenticates against it.
 
 ---
 

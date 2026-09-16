@@ -296,7 +296,48 @@ async function main() {
       await admin.evaluate((t) => localStorage.setItem('dt_session_token', t), adminLogin.json.token);
       await admin.goto(`${stack.url}/admin.html`, { waitUntil: 'networkidle' });
       await admin.waitForTimeout(2500);
+
+      // The sections start collapsed, which photographs as four empty bars. A
+      // guide needs what is inside them, so each one is opened for its own
+      // shot and closed again — the panes are tall enough that two open at
+      // once pushes the second below the fold.
+      // `.acc-head` is the toggle; the section itself is what gets shot, so
+      // each image carries its own heading and nothing above it.
+      const accordion = (id) => admin.locator(`#${id} .acc-head`);
+
+      await accordion('accUsers').click();
+      await admin.waitForTimeout(900);
+      await admin.locator('#usersBody tr').first().click().catch(() => {});
+      await admin.waitForTimeout(1200);
       await shoot(admin, 'administration');
+
+      await admin.locator('#btnEditLimit').click().catch(() => {});
+      await admin.waitForTimeout(800);
+      if (await admin.locator('#limitModal.open').count()) {
+        await shootEl(admin, '#limitModal .modal', 'guide-admin-account-limit');
+        await admin.locator('#limitModal .modal-actions .btn').first().click();
+        await admin.waitForTimeout(500);
+      }
+
+      await admin.locator('#btnResetPw').click().catch(() => {});
+      await admin.waitForTimeout(800);
+      if (await admin.locator('#pwModal.open').count()) {
+        await shootEl(admin, '#pwModal .modal', 'guide-admin-reset');
+        await admin.locator('#pwModal .modal-actions .btn').first().click();
+        await admin.waitForTimeout(500);
+      }
+      await accordion('accUsers').click();
+      await admin.waitForTimeout(700);
+
+      await accordion('accReports').click();
+      await admin.waitForTimeout(900);
+      await shootEl(admin, '#accReports', 'guide-admin-limits');
+      await accordion('accReports').click();
+      await admin.waitForTimeout(700);
+
+      await accordion('accBranding').click();
+      await admin.waitForTimeout(900);
+      await shootEl(admin, '#accBranding', 'guide-admin-branding');
     } else {
       log('  (skipped administration — the credentials file was not available)');
     }
