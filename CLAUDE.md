@@ -219,7 +219,7 @@ Inline comments use lettered prefixes to trace design decisions:
 - **O-numbers** — observability notes (`// O3: JSON log format for log aggregators`)
 - **S-numbers** — security rationale (`// S2: token hashed before storage`) — **new in revision 2**
 
-Highest numbers currently in use: **Q39, P20, O5, S34**. When adding logic with a
+Highest numbers currently in use: **Q40, P20, O5, S34**. When adding logic with a
 non-obvious trade-off, add the next number in the appropriate series. Check the
 current maximum before assigning — parallel branches can claim the same number.
 
@@ -1434,6 +1434,19 @@ alone would have been a fix that still wasted the work:
   keeps returning to. Emptied by `applyViolationData()` and `refreshData()` —
   the one funnel every refetch arrives through, and the full hierarchy reload.
 
+**Q40: Tier 1 starts beside the findings crawl, never behind it.**
+`loadVulnOrigins()` used to be fired only once `sharedFindingsFetch()` had
+resolved, so the Origin column's cost was the whole findings crawl plus the one
+project read it never needed to wait for — the two share nothing but the
+project uuid. Every row read `…` for the duration, and the second open looked
+fixed only because the memo had taken the crawl out from in front of it: the
+symptom pointed at the memo and the cause was the ordering. The call is now
+hoisted **above the memo branch**, so it runs once on every path — including
+the `shown.length === 0` early return, which skipped Tier 1 entirely. It stays
+fire-and-forget: awaiting it would put the crawl behind it instead of removing
+the serialisation. Whichever lands first is harmless, because both callees
+guard on `seq` and `renderVulnRows()` reads `_vulnShownFindings` fresh.
+
 **What the memo deliberately does not hold: the Direct/Transitive set.** §6.3a
 keeps Tier 1 uncached on purpose so a badge can never lag behind what
 DependencyTrack currently reports, and a memo that also served the origin set
@@ -2420,6 +2433,15 @@ Running the browser checks in CI was on this list and is now the `e2e` job.
   including an unknown status rendering a plain sentence rather than the word
   `undefined` at a user. Plus a source assertion that the poll counts only the
   not-found answers and routes both decisions through the two helpers.
+- The origin read's placement (Q40): that `loadVulnOrigins` is called **once**
+  in `openVulnDialog`, before the memo branch and before the findings crawl is
+  awaited, and never with `await` — awaiting it would swap one serialisation
+  for the other rather than removing it. The browser tier is what proves it,
+  and it asserts on the stub's own request log rather than on elapsed time,
+  which would be flaky: with the defect the project read came strictly after
+  the finding pages, with the fix it comes first. It opens a project no earlier
+  test has touched, so no memo can hide the ordering, and also checks that
+  every row really is classified on that first open.
 - **Authorisation:** every route rejects a missing or invalid token with 401;
   cross-user access returns 404; the profile endpoint ignores login ID and email.
 - **The documentation, against the application it documents.** Prose drifts

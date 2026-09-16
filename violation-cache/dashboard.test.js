@@ -4515,9 +4515,32 @@ describe('Q36: the findings dialog keeps what it fetched', () => {
     const fn  = extractFunction(INDEX_HTML, 'openVulnDialog');
     const hit = fn.slice(fn.indexOf('const memo = vulnMemoGet(uuid)'),
                          fn.indexOf('await sharedFindingsFetch'));
-    assert.match(hit, /loadVulnOrigins\(uuid, seq\)/);
     assert.ok(!/_vulnDirectKeys\s*=/.test(hit),
       'the memo must never restore a stored Direct/Transitive set');
+
+    // Q40 made this stronger rather than weaker. The call used to sit inside
+    // the memo branch and again after the crawl; it is now hoisted above both,
+    // so it runs on every path — including the `shown.length === 0` early
+    // return, which used to skip Tier 1 altogether.
+    assert.equal((fn.match(/loadVulnOrigins\(uuid, seq\)/g) || []).length, 1,
+      'one unconditional call, not one per branch');
+    assert.ok(fn.indexOf('loadVulnOrigins(uuid, seq)') < fn.indexOf('const memo = vulnMemoGet(uuid)'),
+      'Tier 1 must start before the memo branch, so every path resolves it');
+  });
+
+  test('Q40: Tier 1 does not queue behind the findings crawl', () => {
+    // The reported symptom was an Origin column stuck on `…` for the whole of
+    // the first open, curing itself on the second. That read like a memo bug
+    // and was an ordering one: the origin read waited on a crawl it shares
+    // nothing with but the project uuid, and the memo only looked like a fix
+    // because it removed the crawl from in front of it.
+    const fn = extractFunction(INDEX_HTML, 'openVulnDialog');
+    assert.ok(fn.indexOf('loadVulnOrigins(uuid, seq)') < fn.indexOf('await sharedFindingsFetch'),
+      'the origin read must be started before the findings crawl is awaited');
+    // And it must stay fire-and-forget: awaiting it would swap one serial
+    // ordering for the other rather than removing it.
+    assert.ok(!/await\s+loadVulnOrigins/.test(fn),
+      'awaiting Tier 1 would put the findings crawl behind it instead');
   });
 
   test('only a crawl that finished is remembered', () => {

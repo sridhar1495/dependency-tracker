@@ -4994,8 +4994,26 @@ async function openVulnDialog(uuid) {
 
   const seq = ++_vulnReqSeq;
 
+  // Q40: Tier 1 starts NOW, beside the findings crawl rather than behind it.
+  //
+  // It used to be fired only once the findings crawl below had resolved, which
+  // made the Origin column's cost that crawl PLUS the one project read it
+  // never needed to wait for — the two share nothing but this project's
+  // uuid. On a portfolio whose findings page several times that is seconds of
+  // every row reading `…`, and the second open looked fixed only because the
+  // memo removed the crawl from in front of it. So the symptom pointed at the
+  // memo and the cause was the ordering.
+  //
+  // Both callees already guard on `seq`, and `renderVulnRows()` reads
+  // `_vulnShownFindings` fresh, so whichever lands first is harmless: origins
+  // first re-render an empty table that is still hidden, findings first
+  // re-render with the badges still `…` until this returns. Hoisting it above
+  // the memo branch also covers the `shown.length === 0` early return, which
+  // skipped Tier 1 entirely.
+  loadVulnOrigins(uuid, seq);
+
   // Q36: a fetch this page already completed is rendered straight away. The
-  // Direct/Transitive badges are still resolved live below — only the rows
+  // Direct/Transitive badges are resolved live, above — only the rows
   // themselves come from the memo.
   const memo = vulnMemoGet(uuid);
   if (memo) {
@@ -5012,7 +5030,6 @@ async function openVulnDialog(uuid) {
         noteEl.textContent = `Showing the ${memo.findings.length} most severe of ${memo.total} findings.`;
       }
     }
-    loadVulnOrigins(uuid, seq);
     return;
   }
 
@@ -5042,9 +5059,6 @@ async function openVulnDialog(uuid) {
         noteEl.textContent = `Showing the ${shown.length} most severe of ${total} findings.`;
       }
     }
-
-    // Fire-and-forget: the findings the user came for are already on screen.
-    loadVulnOrigins(uuid, seq);
   } catch (err) {
     if (seq !== _vulnReqSeq) return;
     statusEl.textContent = `Could not load vulnerabilities: ${err.message}`;
