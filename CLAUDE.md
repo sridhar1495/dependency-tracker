@@ -219,7 +219,7 @@ Inline comments use lettered prefixes to trace design decisions:
 - **O-numbers** — observability notes (`// O3: JSON log format for log aggregators`)
 - **S-numbers** — security rationale (`// S2: token hashed before storage`) — **new in revision 2**
 
-Highest numbers currently in use: **Q40, P20, O5, S34**. When adding logic with a
+Highest numbers currently in use: **Q41, P20, O5, S34**. When adding logic with a
 non-obvious trade-off, add the next number in the appropriate series. Check the
 current maximum before assigning — parallel branches can claim the same number.
 
@@ -1244,6 +1244,25 @@ Four rules the panel must keep:
 - **`renderTrend()` returns early while the panel is collapsed.** `clientWidth`
   of a hidden element is zero, and the charts are sized from a measurement — so
   rendering while shut caches every SVG at padding width until the next resize.
+  **A shut panel therefore offers no controls either** (§8.10): the period and
+  metric dropdowns, the two drawing buttons and the "5 of 7 days recorded"
+  caption all describe a chart nobody can see, and a control that silently does
+  nothing is worse than no control. That is also what keeps this early return
+  unreachable by a drawing toggle, which Q41 below relies on.
+- **Q41: a drawing swap fades in, and only when a user swaps the drawing.**
+  Switching combined↔split or line↔bar rebuilds `#trendCharts` wholesale, which
+  snapped. `_trendSwapPending` is set by `toggleTrendSplit()` and
+  `toggleTrendChartType()` and by nothing else, then consumed by the next
+  `renderTrend()` — a period change, a poll, a resize or a fresh series
+  re-renders without it, because an identical chart fading in on every refetch
+  reads as a flicker rather than as feedback. Three things are load-bearing:
+  the animation moves **opacity and transform only**, never a box dimension,
+  for the measurement reason above and in §8.10; the class is removed, a reflow
+  forced and the class re-added, or a second swap in a row animates nothing
+  because the class never left the element; and **every** path out of
+  `renderTrend()` spends the flag — `show()` clears it too, since the controls
+  stay clickable over "Loading…" and a flag surviving that would fade in the
+  first real render instead of the swap that asked for it.
 - **Colours are custom properties inside the SVG**, never hex literals. An SVG
   `fill="var(--critical)"` re-resolves on a theme switch exactly as a div's
   background does, so the charts follow the theme with no JavaScript at all. A
@@ -1394,6 +1413,14 @@ its own visual weight instead of relying on a type-specific heading next to it.
   separate truncation note (Q24, "Showing the 900 most severe of 1200
   findings") already covers anything beyond that, so the two never compete
   to explain the same number.
+  **It also stays on screen while the rows scroll.** The count used to be the
+  first child of the scrolling element itself, so "Showing 12 of 40" left the
+  viewport the moment you reached row 13 — precisely when a reader wants to
+  know how much of the table they are looking at. The scroll now belongs to
+  an inner `.vuln-table-scroll`; `#vulnDialogTableWrap` remains the toggled
+  container and keeps the count and Q30's empty state outside the scroller,
+  so every `wrapEl.hidden` site works unchanged and the empty state never
+  renders indented under a scrollbar.
 
 **Q36: this is the one modal a stray click may not dismiss, and the one whose
 fetch outlives it.** Opening the findings dialog starts a finding crawl against
@@ -1885,6 +1912,28 @@ The frontend never performs uniqueness checks — those are backend-only, via
   var(--surface2);` for this reason — the same card treatment the finding
   row's own path-detail background already uses, so a message reads as
   content rather than as a gap in the page.
+- **The element that scrolls is not the element that is toggled.** Putting
+  `max-height`/`overflow-y` on the container that also holds a caption scrolls
+  the caption away with the content — `.vuln-table-wrap` did exactly that to
+  `#vulnResultCount` (§8.1). Keep the scroll on an inner element
+  (`.vuln-table-scroll`) that wraps **only** the thing that should move, and
+  leave the outer one for `el.hidden` and spacing. Nothing should need to
+  address the scroller from script; if something does, the split is wrong.
+- **A height floor is expressed against the element's own `line-height`, not
+  as a flat pixel count.** `.cfg-textarea` (the account's mail Body and a
+  schedule's Message, the only two users of the class) must show five lines
+  before it scrolls, so it declares `line-height` and floors at
+  `calc(5 * <that>em + <padding>)`. `min-height: 60px` showed barely two, and
+  a pixel count silently stops meaning "five lines" the moment the font size
+  moves. It stays a floor: `resize: vertical` is what lets a user grow it.
+- **An animation on a measured element moves opacity and transform only.**
+  The trend charts are drawn at a pixel width read from their container, so a
+  keyframe touching `width`, `height`, `display`, `margin` or `padding` would
+  have an SVG measured mid-transition and cached at whatever the frame
+  happened to be (Q41, §8.1). A compositor-only animation cannot do that —
+  the same constraint the login page's background already works under — and
+  it needs a `@media (prefers-reduced-motion: reduce)` opt-out like every
+  other motion in this product.
 
 ### 8.11 Utility helpers (do not duplicate)
 
@@ -2442,6 +2491,23 @@ Running the browser checks in CI was on this list and is now the `e2e` job.
   the finding pages, with the fix it comes first. It opens a project no earlier
   test has touched, so no memo can hide the ordering, and also checks that
   every row really is classified on that first open.
+- **Presentation rules, against the page's own source.** These four change
+  nothing the page computes, so no behavioural assertion can see them and each
+  is pinned the way the theme-variable and colour-hex tests already are: that
+  the scroll sits on `.vuln-table-scroll` and neither `overflow` nor
+  `max-height` has crept back onto `.vuln-table-wrap`, that `#vulnResultCount`
+  and Q30's empty state both open **outside** the scroller, and that nothing
+  addresses the scroller by id; that `.cfg-textarea` floors at five of its
+  **own** line-heights, with the multiplier read from the same rule so a
+  disagreeing pair fails, and that it is still a floor rather than a fixed
+  height; that the collapsed panel hides the controls and the caption while
+  leaving the caret, which is what reopens it; and for Q41 that the keyframe
+  names no measured dimension, that the reduced-motion opt-out exists, that
+  exactly the two drawing toggles arm the flag and the period, metric and
+  panel handlers do not, that the class is removed → reflowed → re-added
+  after the charts are rebuilt, and that both `renderTrend()` and its
+  `show()` spend the flag. Each was mutation-checked against the defect it
+  describes.
 - **Authorisation:** every route rejects a missing or invalid token with 401;
   cross-user access returns 404; the profile endpoint ignores login ID and email.
 - **The documentation, against the application it documents.** Prose drifts

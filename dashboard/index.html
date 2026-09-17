@@ -282,10 +282,35 @@
     .trend.collapsed .trend-caret { transform: rotate(-90deg); }
     .trend-sub { font-size: 11px; color: var(--text-muted); font-weight: 400; }
     .trend-controls { display: flex; align-items: center; gap: 6px; margin-left: auto; flex-wrap: wrap; }
+    /* Shut, the panel is a title and a caret. The period and metric
+       dropdowns, the two drawing buttons and the "5 of 7 days recorded"
+       caption all describe a chart nobody can see, and offering controls
+       that silently do nothing is worse than offering none. Hiding them
+       also means renderTrend()'s early return can never be reached by a
+       toggle, which is what lets the swap animation below assume it is
+       always followed by a render. */
+    .trend.collapsed .trend-controls,
+    .trend.collapsed .trend-sub { display: none; }
     .trend-controls select {
       background: var(--surface2); color: var(--text);
       border: 1px solid var(--border); border-radius: 6px;
       padding: 4px 8px; font-size: 12px; font-family: inherit;
+    }
+    /* Q41: the split/combined and line/bar swaps fade in rather than
+       snapping. OPACITY AND TRANSFORM ONLY — never width, height or
+       display. Every chart in here is drawn at a pixel width read from
+       this container (§8.10), so animating a box dimension would have the
+       SVGs measured mid-transition and cached at whatever width the frame
+       happened to be. A compositor-only animation cannot do that, and it
+       is the same constraint the login page's background already works
+       under. */
+    @keyframes trendSwapIn {
+      from { opacity: 0; transform: translateY(6px); }
+      to   { opacity: 1; transform: none; }
+    }
+    .trend-charts.trend-swap { animation: trendSwapIn 220ms ease-out; }
+    @media (prefers-reduced-motion: reduce) {
+      .trend-charts.trend-swap { animation: none; }
     }
     .trend-body { padding: 0 16px 14px; }
     .trend-status {
@@ -595,7 +620,8 @@
        the project/version needs to carry its own visual weight rather than
        relying on being paired with a type-specific heading. */
     .vuln-dialog-project-tag { font-weight: 700; color: var(--accent); }
-    .vuln-table-wrap { max-height: 480px; overflow-y: auto; margin-top: 10px; }
+    .vuln-table-wrap { margin-top: 10px; }
+    .vuln-table-scroll { max-height: 480px; overflow-y: auto; }
     /* table-layout: fixed — a Transitive row's chain used to live inline in
        the Origin cell, so checking the toggle grew that column and reflowed
        every other one on every render. The chain now renders in its own
@@ -1084,7 +1110,14 @@
       background: var(--surface); border: 1px solid var(--border);
       border-radius: var(--radius); color: var(--text); font-size: 13px;
       padding: 7px 10px; outline: none; transition: border-color 0.15s; width: 100%;
-      min-height: 60px; resize: vertical; font-family: inherit;
+      /* Five lines before it scrolls. Expressed against the element's own
+         line-height rather than as a flat pixel count, so it still shows
+         five lines if the font size ever moves. `resize: vertical` stays:
+         this is a floor, not a fixed height. Both users of this class are
+         long-form fields — the account's mail Body and a schedule's
+         Message — and 60px showed barely two lines of either. */
+      line-height: 1.45; min-height: calc(5 * 1.45em + 16px);
+      resize: vertical; font-family: inherit;
     }
     .cfg-textarea:focus { border-color: var(--accent); }
     .cfg-toggle { position: relative; display: inline-block; width: 36px; height: 20px; flex-shrink: 0; cursor: pointer; }
@@ -1436,10 +1469,18 @@
              currently loaded set, not just the initial fetch total — every
              renderVulnRows() call recomputes it alongside the rows. -->
         <p class="vuln-result-count" id="vulnResultCount"></p>
-        <table class="vuln-table" id="vulnDialogTable">
-          <thead id="vulnDialogHead"></thead>
-          <tbody id="vulnDialogRows"></tbody>
-        </table>
+        <!-- The count sits OUTSIDE the scroller on purpose. It used to be the
+             first child of the scrolling element itself, so "Showing 12 of 40"
+             scrolled away the moment you looked at row 13 — exactly when the
+             number is worth reading. The scroll now belongs to
+             .vuln-table-scroll, and .vuln-table-wrap is only the toggled
+             container, so every `wrapEl.hidden` site keeps working unchanged. -->
+        <div class="vuln-table-scroll">
+          <table class="vuln-table" id="vulnDialogTable">
+            <thead id="vulnDialogHead"></thead>
+            <tbody id="vulnDialogRows"></tbody>
+          </table>
+        </div>
         <!-- The Origin filter (Direct/Transitive), unlike the Show dropdown,
              is applied locally inside renderVulnRows() — it can filter every
              row away on its own (every finding here is Direct, say, with
@@ -5636,6 +5677,12 @@ function renderTrend() {
     charts.innerHTML = '';
     legend.hidden = true;
     range.textContent = '';
+    // Q41: a swap requested while the panel had no charts to swap is spent
+    // here, not carried. The controls stay clickable over a "Loading…" or an
+    // error message, and a flag surviving that would fade in the first real
+    // render — an animation the user did not ask for, attached to the wrong
+    // event. Every path out of renderTrend() now consumes the flag.
+    _trendSwapPending = false;
   };
 
   if (_trendError) {
@@ -5667,6 +5714,18 @@ function renderTrend() {
   charts.innerHTML = _trendView.split
     ? TREND_LEVELS.map(l => trendCellHtml(points, rows, [l], TREND_GEOM.splitH, l.label)).join('')
     : trendCellHtml(points, rows, TREND_LEVELS, TREND_GEOM.mainH, '');
+
+  // Q41: restart the swap animation on the freshly built charts. Removing
+  // the class and reading offsetWidth forces the reflow that lets the same
+  // animation replay — without it a second swap in a row does nothing,
+  // because the class never left the element. The flag is cleared whether or
+  // not it was set, so it can never leak into a later render.
+  if (_trendSwapPending) {
+    _trendSwapPending = false;
+    charts.classList.remove('trend-swap');
+    void charts.offsetWidth;
+    charts.classList.add('trend-swap');
+  }
 
   legend.hidden = false;
   legend.innerHTML =
@@ -5931,6 +5990,13 @@ function hideTrendTip() {
 }
 
 // ── Handlers ──────────────────────────────────────────────────────────────
+// Q41: set by the two drawing toggles and read once by the next
+// renderTrend(). It exists so the animation fires when a USER swaps the
+// drawing and not when a poll, a resize or a fresh series re-renders the
+// same one — an identical chart fading in on every refetch reads as a
+// flicker rather than as feedback.
+let _trendSwapPending = false;
+
 function toggleTrendPanel() {
   _trendView.open = !_trendView.open;
   saveTrendView();
@@ -5950,6 +6016,7 @@ function onTrendMetricChange() {
 }
 
 function toggleTrendChartType() {
+  _trendSwapPending = true;
   if (_trendView.split) {
     _trendView.chartSplit = _trendView.chartSplit === 'line' ? 'bar' : 'line';
   } else {
@@ -5960,6 +6027,7 @@ function toggleTrendChartType() {
 }
 
 function toggleTrendSplit() {
+  _trendSwapPending = true;
   _trendView.split = !_trendView.split;
   saveTrendView();
   renderTrend();
