@@ -5814,6 +5814,174 @@ describe('project parsing keeps the collection fields (Q39)', () => {
   });
 });
 
+// ── UI polish: the scroller, the textarea floor, the shut panel, the swap ────
+// Four presentation defects with one thing in common: each is invisible to
+// every assertion that reads behaviour, because none of them changes what the
+// page computes. They are pinned against the page's own source for the same
+// reason the theme-variable and colour-hex tests are.
+
+describe('the findings count does not scroll away with the rows', () => {
+  test('the scroll belongs to .vuln-table-scroll, not to .vuln-table-wrap', () => {
+    const wrapRule   = INDEX_HTML.match(/\.vuln-table-wrap\s*\{[^}]*\}/)[0];
+    const scrollRule = INDEX_HTML.match(/\.vuln-table-scroll\s*\{[^}]*\}/)[0];
+    assert.ok(!/overflow/.test(wrapRule),
+      'the toggled container must not scroll — the count lives in it');
+    assert.ok(!/max-height/.test(wrapRule),
+      'a max-height on the wrap would clip the count along with the rows');
+    assert.match(scrollRule, /overflow-y:\s*auto/);
+    assert.match(scrollRule, /max-height:\s*\d+px/);
+  });
+
+  test('#vulnResultCount sits outside the scrolling element, above it', () => {
+    const wrapAt   = INDEX_HTML.indexOf('id="vulnDialogTableWrap"');
+    const countAt  = INDEX_HTML.indexOf('id="vulnResultCount"', wrapAt);
+    const scrollAt = INDEX_HTML.indexOf('class="vuln-table-scroll"', wrapAt);
+    const tableAt  = INDEX_HTML.indexOf('<table', wrapAt);
+    assert.ok(countAt > wrapAt, 'the count stays inside the toggled wrap');
+    assert.ok(scrollAt > countAt,
+      'the scroller must open AFTER the count, or the count scrolls with the rows');
+    assert.ok(tableAt > scrollAt, 'the table is the scroller\'s content');
+  });
+
+  test('the scroller wraps only the table — the empty state stays outside it', () => {
+    const scrollAt = INDEX_HTML.indexOf('class="vuln-table-scroll"');
+    const closeAt  = INDEX_HTML.indexOf('</div>', INDEX_HTML.indexOf('</table>', scrollAt));
+    const emptyAt  = INDEX_HTML.indexOf('id="vulnEmptyState"');
+    assert.ok(emptyAt > closeAt,
+      'Q30\'s empty state must not be inside the scroller: it replaces the rows, ' +
+      'so nesting it in a max-height box would indent it under a scrollbar');
+  });
+
+  test('every wrapEl.hidden site still addresses the wrap, not the scroller', () => {
+    // The fix deliberately left #vulnDialogTableWrap as the toggled container
+    // so none of these had to change. A future edit that moves the id onto the
+    // scroller would hide the count with the table again.
+    const sites = INDEX_HTML.match(/getElementById\('vulnDialogTableWrap'\)/g) || [];
+    assert.ok(sites.length >= 2, 'the wrap is still what the script toggles');
+    assert.ok(!/getElementById\('vulnTableScroll'\)/.test(INDEX_HTML),
+      'the scroller is presentation only — nothing should need to address it');
+  });
+});
+
+describe('the long-form settings textareas show five lines, not two', () => {
+  test('.cfg-textarea floors its height against its own line-height', () => {
+    const rule = INDEX_HTML.match(/\.cfg-textarea\s*\{[^}]*\}/)[0];
+    const lh = /line-height:\s*([\d.]+)/.exec(rule);
+    assert.ok(lh, '.cfg-textarea must declare its own line-height to compute against');
+    const minH = /min-height:\s*calc\(\s*5\s*\*\s*([\d.]+)em/.exec(rule);
+    assert.ok(minH, 'min-height must be five lines expressed in em, not a flat pixel count');
+    assert.equal(minH[1], lh[1],
+      'the multiplier must use the same line-height the element renders at, ' +
+      'or "five lines" is arithmetic about a different font');
+    assert.ok(!/min-height:\s*60px/.test(rule), 'the old two-line floor is gone');
+  });
+
+  test('it is a floor, not a fixed height', () => {
+    const rule = INDEX_HTML.match(/\.cfg-textarea\s*\{[^}]*\}/)[0];
+    assert.match(rule, /resize:\s*vertical/);
+    assert.ok(!/(^|[^-])height:\s*\d/.test(rule.replace(/min-height|line-height/g, '')),
+      'a fixed height would stop the user growing the field');
+  });
+
+  test('both long-form fields use the class, so one rule covers both', () => {
+    for (const id of ['cfgMailBodyTa', 'cfgSchedMessage']) {
+      const tag = new RegExp(`id="${id}"[^>]*class="[^"]*cfg-textarea`).test(INDEX_HTML)
+        || new RegExp(`class="[^"]*cfg-textarea[^"]*"[^>]*id="${id}"`).test(INDEX_HTML);
+      assert.ok(tag, `${id} must carry .cfg-textarea`);
+    }
+  });
+});
+
+describe('a shut risk-trend panel offers no controls', () => {
+  test('the controls and the "N of M days recorded" caption hide when collapsed', () => {
+    assert.match(INDEX_HTML,
+      /\.trend\.collapsed \.trend-controls,\s*\n\s*\.trend\.collapsed \.trend-sub \{[^}]*display:\s*none/,
+      'both the control row and the caption must be hidden while the panel is shut');
+  });
+
+  test('renderTrend still drives the collapsed class, so the rule has something to match', () => {
+    const fn = extractFunction(INDEX_HTML, 'renderTrend');
+    assert.match(fn, /classList\.toggle\('collapsed', !_trendView\.open\)/);
+  });
+
+  test('the caret is NOT hidden — it is the control that reopens the panel', () => {
+    const caretRule = INDEX_HTML.match(/\.trend\.collapsed \.trend-caret \{[^}]*\}/)[0];
+    assert.ok(!/display:\s*none/.test(caretRule));
+  });
+});
+
+describe('Q41: swapping the chart drawing animates, and only when a user swaps it', () => {
+  test('the animation moves opacity and transform only', () => {
+    const kf = INDEX_HTML.match(/@keyframes trendSwapIn \{[\s\S]*?\n    \}/)[0];
+    const props = (kf.match(/^\s*(?:from|to)\s*\{([^}]*)\}/gm) || []).join(' ');
+    for (const banned of ['width', 'height', 'display', 'margin', 'padding']) {
+      assert.ok(!new RegExp(`\\b${banned}\\s*:`).test(props),
+        `${banned} is a measured dimension — §8.10 sizes every chart from ` +
+        'clientWidth, so animating one would cache an SVG at a mid-transition width');
+    }
+    assert.match(props, /opacity:/);
+    assert.match(props, /transform:/);
+  });
+
+  test('it is disabled under prefers-reduced-motion', () => {
+    const block = INDEX_HTML.match(
+      /@media \(prefers-reduced-motion: reduce\) \{\s*\n\s*\.trend-charts\.trend-swap \{[^}]*\}/);
+    assert.ok(block, 'the swap animation needs a reduced-motion opt-out');
+    assert.match(block[0], /animation:\s*none/);
+  });
+
+  test('only the two drawing toggles arm it', () => {
+    const armed = (INDEX_HTML.match(/_trendSwapPending = true;/g) || []).length;
+    assert.equal(armed, 2, 'exactly toggleTrendSplit and toggleTrendChartType');
+    for (const name of ['toggleTrendSplit', 'toggleTrendChartType']) {
+      assert.match(extractFunction(INDEX_HTML, name), /_trendSwapPending = true;/,
+        `${name} must arm the swap`);
+    }
+    for (const name of ['onTrendPeriodChange', 'onTrendMetricChange', 'toggleTrendPanel']) {
+      assert.ok(!/_trendSwapPending/.test(extractFunction(INDEX_HTML, name)),
+        `${name} is not a drawing swap — a fade there reads as a flicker on every poll`);
+    }
+  });
+
+  test('renderTrend restarts the animation rather than re-adding a class that never left', () => {
+    const fn = extractFunction(INDEX_HTML, 'renderTrend');
+    const removeAt = fn.indexOf("charts.classList.remove('trend-swap')");
+    const reflowAt = fn.indexOf('void charts.offsetWidth');
+    const addAt    = fn.indexOf("charts.classList.add('trend-swap')");
+    assert.ok(removeAt !== -1 && reflowAt > removeAt && addAt > reflowAt,
+      'remove → forced reflow → add, or a second swap in a row animates nothing');
+    const htmlAt = fn.indexOf('charts.innerHTML = _trendView.split');
+    assert.ok(removeAt > htmlAt,
+      'the class must be applied to the freshly built charts, not the outgoing ones');
+  });
+
+  test('every path out of renderTrend consumes the flag', () => {
+    const fn = extractFunction(INDEX_HTML, 'renderTrend');
+    const clears = (fn.match(/_trendSwapPending = false;/g) || []).length;
+    assert.equal(clears, 2,
+      'one in the render path and one in show() — the status paths return early, ' +
+      'and a flag surviving them would fade in the first real render instead');
+    const show = /const show = \(msg\) => \{[\s\S]*?\n  \};/.exec(fn)[0];
+    assert.match(show, /_trendSwapPending = false;/,
+      'a swap clicked over "Loading…" has no charts to swap and must be spent there');
+  });
+
+  test('the collapsed rule is what keeps the panel\'s own early return unreachable by a toggle', () => {
+    // renderTrend() returns before show() is even defined when the panel is
+    // shut, so that path cannot clear the flag. It does not have to: the
+    // buttons that set it are display:none in exactly that state.
+    const openAt  = INDEX_HTML.indexOf('<div class="trend-controls"');
+    const closeAt = INDEX_HTML.indexOf('\n        </div>', openAt);
+    assert.ok(openAt !== -1 && closeAt > openAt);
+    const controls = INDEX_HTML.slice(openAt, closeAt);
+    assert.match(controls, /onclick="toggleTrendSplit\(\)"/);
+    assert.match(controls, /onclick="toggleTrendChartType\(\)"/);
+    // The caption is a sibling of the control row, so the collapsed rule has
+    // to name both — which is exactly what it does.
+    assert.match(INDEX_HTML, /id="trendRange"[^>]*class="trend-sub"|class="trend-sub"[^>]*id="trendRange"/);
+  });
+});
+
 // ── Documentation contracts ──────────────────────────────────────────────────
 // The README and the integration guide are read by people deciding whether to
 // run this and by contributors deciding how. A stale claim there is worse than
