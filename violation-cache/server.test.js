@@ -6853,3 +6853,79 @@ describe('routes — dependency-paths', () => {
     } finally { restoreConn(); restoreCache(); restoreDep(); }
   });
 });
+
+// ── The scheduler's portfolio sweep ──────────────────────────────────────────
+// `runScheduledJob` resolves its stored UUIDs against a live paged sweep of
+// /api/v1/project. Two defects lived in that loop, and both are the kind that
+// look fine in review: it read only ONE of the two page shapes DependencyTrack
+// answers with, and it asked for a portfolio the rest of the product does not
+// use. Neither is reachable from a unit test without a database, so both are
+// pinned against the module's own source — the technique Q34 already uses on
+// `fetchAllProjects`, for the same reason.
+
+describe("the scheduler's project sweep (page shape and portfolio)", () => {
+  const SRC = {
+    scheduler: fs.readFileSync(path.join(__dirname, 'lib', 'scheduler.js'), 'utf8'),
+    cache:     fs.readFileSync(path.join(__dirname, 'lib', 'violation-cache.js'), 'utf8'),
+  };
+
+  /** The `const batch = …;` line out of a module's paged sweep. */
+  function batchExpr(src) {
+    const m = /const batch = ([^;]+);/.exec(src);
+    assert.ok(m, 'the sweep still assigns a `batch` from the page');
+    return m[1].replace(/\s+/g, ' ').trim();
+  }
+
+  test('it asks for the same portfolio the rest of the product does', () => {
+    const url = /`\/api\/v1\/project\?[^`]*`/.exec(SRC.scheduler);
+    assert.ok(url, 'the sweep still builds its URL as a template literal');
+    assert.match(url[0], /onlyRoot=false/, 'descendants, not roots');
+    assert.match(url[0], /excludeInactive=true/,
+      'an archived project is not in the portfolio anywhere else in this product, '
+      + 'so a scheduled workbook must not cover one');
+  });
+
+  test('it reads BOTH page shapes DependencyTrack answers with', () => {
+    const expr = batchExpr(SRC.scheduler);
+    assert.match(expr, /Array\.isArray\(json\)/, 'v4 answers with a bare array');
+    assert.match(expr, /json\?\.values/,
+      'v5 enforces pagination and may wrap the page as {values,total} (CLAUDE.md §8.7)');
+  });
+
+  test('the two sweeps in this service read a page identically', () => {
+    // This is the guard that would have caught the original defect: the
+    // violation-cache sweep already read both shapes and the scheduler's did
+    // not, so one worked on a v5 server and the other reported the whole
+    // portfolio missing. Two copies of one parsing rule need a test that they
+    // are still one rule.
+    assert.equal(batchExpr(SRC.scheduler), batchExpr(SRC.cache),
+      'scheduler.js and violation-cache.js must read a project page the same way');
+  });
+
+  test('the expression itself handles every shape, including neither', () => {
+    // Evaluated from the module's real source rather than retyped, so the test
+    // cannot pass against a version of the rule the file no longer contains.
+    const read = new Function('json', `return ${batchExpr(SRC.scheduler)};`);
+    const rows = [{ uuid: 'a' }, { uuid: 'b' }];
+
+    assert.deepEqual(read(rows), rows, 'v4: a bare array');
+    assert.deepEqual(read({ values: rows, total: 2 }), rows, 'v5: the {values,total} envelope');
+    assert.deepEqual(read({ total: 0 }), [], 'an envelope with no values is empty, not a crash');
+    assert.deepEqual(read(null), [], 'a null body is empty, not a crash');
+    assert.deepEqual(read({ values: 'nope' }), [], 'a non-array `values` is not trusted');
+  });
+
+  test('a v5 page no longer ends the sweep on its first iteration', () => {
+    // The defect in one line: with `Array.isArray(json) ? json : []`, a v5
+    // envelope yielded an empty batch, `batch.length < 500` broke the loop
+    // immediately, `projects` stayed empty, and every scheduled run failed
+    // with "None of the selected projects were found in DependencyTrack" —
+    // a portfolio-wide outage reported as a selection problem.
+    const old = new Function('json', 'return Array.isArray(json) ? json : [];');
+    const now = new Function('json', `return ${batchExpr(SRC.scheduler)};`);
+    const page = { values: new Array(500).fill(0).map((_, i) => ({ uuid: `u${i}` })), total: 900 };
+
+    assert.equal(old(page).length, 0, 'the defect: a full v5 page read as empty');
+    assert.equal(now(page).length, 500, 'the fix: a full page, so the loop pages on');
+  });
+});
