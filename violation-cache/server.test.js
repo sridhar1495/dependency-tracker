@@ -7298,21 +7298,47 @@ describe('theme validation', () => {
 describe('theme CSS generation (S35)', () => {
   const theme = require('./lib/theme');
 
-  test('it emits only token declarations, at the pages\' own specificity', () => {
+  test('it emits only token declarations, mutually exclusive per scheme', () => {
     const css = theme.toCss({ dark: { accent: '#123456' }, light: { bg: '#ffffff' } });
-    assert.match(css, /^:root \{$/m);
+    // Q49 correction: the dark block excludes light mode explicitly — a bare
+    // `:root` would also match <html> when data-theme="light", and this
+    // stylesheet loading after the page's own <style> would then let it beat
+    // the page's OWN light-mode declarations for any property dark sets and
+    // light does not. See 'a dark-only theme does not leak into light mode'.
+    assert.match(css, /^:root:not\(\[data-theme="light"\]\) \{$/m);
     assert.match(css, /^:root\[data-theme="light"\] \{$/m);
     assert.match(css, /^ {2}--accent: #123456;$/m);
-    // Q49: raising specificity would make the theme un-overridable by the
-    // light block that follows it in the page.
     assert.doesNotMatch(css, /!important/);
     assert.doesNotMatch(css, /html:root/);
   });
 
+  test('a dark-only theme does not leak into light mode', () => {
+    // The regression this guards: an earlier version scoped the dark block as
+    // a bare `:root`, unconditional — so in light mode it and the page's own
+    // `[data-theme="light"]` block had EQUAL specificity, and the theme file,
+    // being later in the document, won regardless of which mode was active.
+    // A dark-only theme (documented as "fine and common") would then silently
+    // overwrite every light-mode colour it never mentioned. This is provable
+    // from the generated text alone: the dark block's own selector must
+    // exclude data-theme="light", so it can never compete with that rule for
+    // any property at all, in any browser's cascade.
+    const css = theme.toCss({ dark: { bg: '#071b24', accent: '#00b8a9' } });
+    const darkBlock = /:root:not\(\[data-theme="light"\]\) \{([\s\S]*?)\n\}/.exec(css);
+    assert.ok(darkBlock, 'the dark block must be present and exclude light mode');
+    assert.match(darkBlock[1], /--bg: #071b24;/);
+    assert.match(darkBlock[1], /--accent: #00b8a9;/);
+    assert.doesNotMatch(css, /^:root \{/m,
+      'an unscoped :root would out-specificity nothing but out-ORDER the page\'s own light block');
+  });
+
   test('an omitted scheme emits no block at all', () => {
+    // Not "no mention of data-theme=light anywhere" — the dark block's own
+    // selector now legitimately names it, as the :not() it excludes. What
+    // must be absent is an actual LIGHT rule: no `:root[data-theme="light"] {`
+    // opening brace, which is what would still be a rule to reason about.
     const css = theme.toCss({ dark: { accent: '#123456' } });
-    assert.doesNotMatch(css, /data-theme="light"/,
-      'an empty block would still be a rule that has to be reasoned about');
+    assert.doesNotMatch(css, /^:root\[data-theme="light"\] \{/m,
+      'an empty light block would still be a rule that has to be reasoned about');
   });
 
   test('the output is rebuilt from the allow-list, never from the input', () => {

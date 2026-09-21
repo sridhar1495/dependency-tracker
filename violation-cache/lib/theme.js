@@ -280,8 +280,19 @@ function toCss(doc) {
     }
     lines.push('}');
   };
-  // Same specificity as the pages' own blocks, and after them — Q49.
-  block(':root', doc && doc.dark);
+  // Q49 correction: the dark block is scoped with :not([data-theme="light"]),
+  // and that scoping is load-bearing, not cosmetic. A bare `:root { --x: … }`
+  // matches <html> regardless of data-theme, and this stylesheet as a whole
+  // loads AFTER the page's own <style> — so in light mode, an unscoped dark
+  // rule and the page's own `[data-theme="light"] { --x: … }` have EQUAL
+  // specificity and the theme file, being later in the document, wins
+  // unconditionally. A dark-only theme (explicitly documented as "fine and
+  // common" — §USER_GUIDE) would then silently overwrite every LIGHT-mode
+  // colour it never mentioned, for every visitor in light mode: the opposite
+  // of "an omitted property keeps its built-in value". `:not()` closes that
+  // by making the two blocks mutually exclusive outright, so neither can
+  // shadow the other's own scheme's fallback — no specificity race to win.
+  block(':root:not([data-theme="light"])', doc && doc.dark);
   block(':root[data-theme="light"]', doc && doc.light);
   return lines.join('\n') + '\n';
 }

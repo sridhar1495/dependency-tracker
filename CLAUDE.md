@@ -2178,10 +2178,25 @@ are load-bearing:
 - **The built-in blocks are never removed or rewritten.** They *are* the
   fallback, so a theme that fails to load leaves a correct page rather than an
   unstyled one.
-- **The generated block must not raise specificity.** `:root` and
-  `:root[data-theme="light"]`, never `html:root` and never `!important` — a
-  theme that won by force could not itself be overridden by the light block
-  that follows it, which is how a dark-only theme would leak into light mode.
+- **The dark block excludes light mode explicitly** —
+  `:root:not([data-theme="light"])`, never a bare `:root` — and this is not
+  cosmetic. A bare `:root` matches `<html>` regardless of `data-theme`, and
+  this stylesheet as a whole loads *after* the page's own `<style>`; in light
+  mode an unscoped dark block and the page's own
+  `[data-theme="light"] { … }` then have **equal specificity**, so the theme
+  file — being later in the document — wins regardless of which scheme is
+  active. A dark-only theme, explicitly documented as "fine and common"
+  (§8.12 below, USER_GUIDE §10–11), would silently overwrite every
+  light-mode colour it never mentioned, for every visitor in light mode: the
+  exact opposite of "an omitted property keeps its built-in value." `:not()`
+  makes the two blocks mutually exclusive outright, so there is no
+  specificity race to win in the first place. This shipped broken once —
+  found by looking at a real screenshot, not by a test, because the offline
+  suite's only asymmetric-theme case set the *same* property in both schemes
+  and so never exercised the one branch that leaks. Never `html:root` and
+  never `!important` either: either would make the block un-overridable by
+  the light rule that follows it in the *theme's own* file, which is a
+  narrower version of the same mistake.
 - **It is a `<link>` in `<head>`, after the page's own `<style>`, never a
   stylesheet inserted by script.** A render-blocking link is exactly the
   behaviour wanted; a stylesheet appended by JavaScript would repaint the page
@@ -2867,13 +2882,22 @@ Running the browser checks in CI was on this list and is now the `e2e` job.
   was unreachable, because an oversized file necessarily holds unknown keys and
   the list filled with ten of those instead; and a rejection capped at ten
   problems, since a wall of errors reads as a crash.
-  On the generator: only token declarations, at the pages' own specificity,
-  with no `!important` and no raised selector; an omitted scheme emitting no
-  block at all; **five hostile values driven straight at it with validation
-  bypassed** — each would close the block, start a rule or end the stylesheet
-  if the input were echoed — and a key the allow-list does not know never being
-  written; and byte-identical output regardless of key order, so the same
-  theme does not produce a new etag.
+  On the generator: only token declarations, with no `!important` and no
+  raised selector; **the dark block's own selector excludes
+  `[data-theme="light"]`, asserted on the generated text itself** — a dark-only
+  theme (`{ dark: {...} }`, no `light` key at all) still emits
+  `:root:not([data-theme="light"])`, never a bare `:root`, which is the exact
+  regression that once let it leak into light mode (found from a real
+  screenshot, not a test — the CI browser tier's own theme case sets the same
+  property in both schemes, so it never exercised the asymmetric branch);
+  an omitted scheme emitting no block at all — checked as no *opening brace*
+  for that block, since the dark selector legitimately names
+  `data-theme="light"` now as the thing it excludes; **five hostile values
+  driven straight at it with validation bypassed** — each would close the
+  block, start a rule or end the stylesheet if the input were echoed — and a
+  key the allow-list does not know never being written; and byte-identical
+  output regardless of key order, so the same theme does not produce a new
+  etag.
   On the template: every key present in both halves; that it **validates
   against our own validator**, since a starting point the service rejects is
   worse than none; that its light half really differs while `on-accent`
