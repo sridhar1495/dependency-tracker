@@ -368,6 +368,14 @@
       .topbar { height: 52px; }
       .split { padding: 8px; }
     }
+    /* Q47: an uploaded icon replaces the initials in the same box, so the
+       header geometry never moves between the two. `contain`, not `cover`:
+       a mark is cropped by cover, and an operator's logo losing its edges is
+       worse than a little letterboxing inside an already near-square box. */
+    .has-icon {
+      background-size: contain; background-repeat: no-repeat; background-position: center;
+      color: transparent; font-size: 0;
+    }
   </style>
 </head>
 <body>
@@ -493,6 +501,51 @@
                   Remove
                 </button>
               </div>
+            </div>
+          </div>
+
+          <div class="branding-row">
+            <div class="branding-label">
+              <h3>Application icon</h3>
+              <p class="hint">
+                Replaces the initials beside the application name, on every screen.
+                PNG, JPEG or WebP; 64&times;512&nbsp;px, near-square, 256&nbsp;KB at most.
+                SVG is not accepted &mdash; it is XML, it can carry script, and this
+                image is served to anyone who can reach the sign-in page.
+              </p>
+            </div>
+            <div class="branding-control">
+              <div class="branding-state" id="iconState">Using the title&rsquo;s initials</div>
+              <div class="err" id="iconErr"></div>
+              <div class="branding-actions">
+                <input type="file" id="iconFile" accept="image/png,image/jpeg,image/webp"
+                       style="display:none" onchange="uploadIcon()">
+                <button class="btn primary" id="iconChoose" onclick="document.getElementById('iconFile').click()">
+                  Upload icon
+                </button>
+                <button class="btn danger" id="iconRemove" onclick="removeIcon()" style="display:none">
+                  Remove
+                </button>
+              </div>
+            </div>
+          </div>
+
+          <div class="branding-row">
+            <div class="branding-label">
+              <h3>Risk trend panel</h3>
+              <p class="hint">
+                The chart above the project table, for every user. Hiding it does
+                not stop history being recorded &mdash; turn it back on and the line
+                is unbroken rather than gapped for the time it was off.
+              </p>
+            </div>
+            <div class="branding-control">
+              <label class="cfg-toggle" title="Show or hide the risk trend panel">
+                <input type="checkbox" id="trendEnabled" onchange="saveTrendEnabled()">
+                <span class="cfg-toggle-slider"></span>
+              </label>
+              <div class="branding-state" id="trendState">Visible to all users</div>
+              <div class="err" id="trendErr"></div>
             </div>
           </div>
         </section>
@@ -763,7 +816,7 @@
     const b = await readBranding();
     if (b && typeof b.title === 'string' && b.title.trim()) title = b.title.trim();
     document.title = 'Administration — ' + title;
-    if ($('brandMark')) $('brandMark').textContent = brandInitials(title);
+    applyBrandMark($('brandMark'), title, b && b.icon);
     return title;
   }
 
@@ -1300,7 +1353,12 @@
       : `Up to ${b.limits.titleMax} characters. Leave blank to use the default.`;
     $('brandingBadge').textContent =
       (b.titleIsDefault ? 'default title' : 'custom title') +
-      (b.background ? ' · custom background' : '');
+      (b.background ? ' · custom background' : '') +
+      (b.icon ? ' · custom icon' : '');
+    renderIconState(b.icon);
+    // Absent on an older server reads as ON, the same rule the dashboard uses:
+    // the panel existed before the switch did.
+    renderTrendState(b.trendEnabled !== false);
 
     const prev = $('bgPreview');
     if (b.background) {
@@ -1379,6 +1437,94 @@
 
   function saveAppTitle()  { return putTitle($('appTitle').value); }
   function resetAppTitle() { $('appTitle').value = ''; return putTitle(''); }
+
+  // ── The application icon (Q47) ─────────────────────────────────────────
+  function renderIconState(icon) {
+    $('iconState').textContent = icon
+      ? `Custom icon — ${icon.width}×${icon.height}`
+      : 'Using the title\u2019s initials';
+    $('iconRemove').style.display = icon ? '' : 'none';
+  }
+
+  async function uploadIcon() {
+    const input = $('iconFile');
+    const file  = input.files && input.files[0];
+    $('iconErr').textContent = '';
+    if (!file) return;
+    // An instant answer for the obvious case; the server inspects the bytes
+    // and is the authority on format, dimensions and aspect.
+    if (file.size > 256 * 1024) {
+      $('iconErr').textContent =
+        `That icon is ${Math.round(file.size / 1024)} KB. The maximum is 256 KB.`;
+      input.value = '';
+      return;
+    }
+    $('iconChoose').disabled = true;
+    try {
+      const r = await apiFetch('/admin/branding/icon', {
+        method:  'POST',
+        headers: { 'Content-Type': file.type || 'application/octet-stream' },
+        body:    file,
+      });
+      const bd = await r.json().catch(() => ({}));
+      if (!r.ok) { $('iconErr').textContent = bd.error || 'Could not upload the icon.'; return; }
+      renderIconState(bd.icon);
+      await applyBranding();   // the header mark updates without a reload
+    } catch (e) {
+      $('iconErr').textContent = `Could not upload the icon: ${e.message}`;
+    } finally {
+      $('iconChoose').disabled = false;
+      input.value = '';
+    }
+  }
+
+  async function removeIcon() {
+    $('iconErr').textContent = '';
+    try {
+      const r = await apiFetch('/admin/branding/icon', { method: 'DELETE' });
+      if (!r.ok) {
+        const bd = await r.json().catch(() => ({}));
+        $('iconErr').textContent = bd.error || 'Could not remove the icon.';
+        return;
+      }
+      renderIconState(null);
+      await applyBranding();
+    } catch (e) {
+      $('iconErr').textContent = `Could not remove the icon: ${e.message}`;
+    }
+  }
+
+  // ── The risk-trend panel (Q48) ─────────────────────────────────────────
+  function renderTrendState(enabled) {
+    $('trendEnabled').checked = enabled;
+    $('trendState').textContent = enabled
+      ? 'Visible to all users'
+      : 'Hidden \u2014 history is still being recorded';
+  }
+
+  async function saveTrendEnabled() {
+    const enabled = $('trendEnabled').checked;
+    $('trendErr').textContent = '';
+    try {
+      const r = await apiFetch('/admin/trend', {
+        method:  'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body:    JSON.stringify({ enabled }),
+      });
+      const bd = await r.json().catch(() => ({}));
+      if (!r.ok) {
+        $('trendErr').textContent = bd.error || 'Could not save the setting.';
+        // Put the switch back where the server still has it, so the control
+        // never shows a state that was not stored.
+        $('trendEnabled').checked = !enabled;
+        return;
+      }
+      renderTrendState(bd.trendEnabled);
+    } catch (e) {
+      $('trendErr').textContent = `Could not save the setting: ${e.message}`;
+      $('trendEnabled').checked = !enabled;
+    }
+  }
 
   async function uploadBackground() {
     const input = $('bgFile');
@@ -1481,6 +1627,29 @@
   window.reloadAll             = reloadAll;
   window.backToDashboard       = backToDashboard;
   window.clearSelection        = clearSelection;
+  /**
+   * Q47: draw the logo mark — the uploaded icon, or the title's initials.
+   *
+   * The icon wins when one is configured, and the initials are the fallback
+   * rather than a placeholder to be replaced: an installation that uploads
+   * nothing keeps exactly the mark it has today. The `?v=` is the image's own
+   * sha256, so the URL is immutable and the browser re-fetches precisely when
+   * the administrator changes the file — the same rule the sign-in background
+   * already follows.
+   */
+  function applyBrandMark(el, title, icon) {
+    if (!el) return;
+    if (icon && icon.version) {
+      el.textContent = '';
+      el.classList.add('has-icon');
+      el.style.backgroundImage = `url('/branding/icon?v=${encodeURIComponent(icon.version)}')`;
+    } else {
+      el.classList.remove('has-icon');
+      el.style.backgroundImage = '';
+      el.textContent = brandInitials(title);
+    }
+  }
+
   window.closeLimitModal       = closeLimitModal;
   window.confirmLimit          = confirmLimit;
   window.closePwModal          = closePwModal;
@@ -1489,6 +1658,9 @@
   window.saveAppTitle          = saveAppTitle;
   window.resetAppTitle         = resetAppTitle;
   window.uploadBackground      = uploadBackground;
+  window.uploadIcon            = uploadIcon;
+  window.removeIcon            = removeIcon;
+  window.saveTrendEnabled      = saveTrendEnabled;
   window.removeBackground      = removeBackground;
 
   boot();

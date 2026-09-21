@@ -1057,6 +1057,20 @@ describe('e2e — the public surface', { skip: SKIP }, () => {
     const r = await api.get('/branding');
     assert.equal(r.status, 200);
     assert.doesNotMatch(JSON.stringify(r.json), /user|account|email|count/i);
+    assert.equal(r.json.trendEnabled, true, 'an untouched installation shows the panel');
+    assert.ok(!('icon' in r.json) || r.json.icon === null || r.json.icon.version,
+      'the icon is metadata or absent — never bytes on this route');
+  });
+
+  test('/branding/icon reaches the backend rather than the SPA fallback', async () => {
+    // Q47 + §9.1: `location /branding` is a prefix, so the icon is covered —
+    // but a route that is NOT covered fails by serving index.html where JSON
+    // was expected, which is a much more confusing symptom than a 404. This
+    // asserts the shape of the miss, with no icon configured.
+    const r = await api.get('/branding/icon');
+    assert.equal(r.status, 404, 'no icon uploaded, so a real 404 from the service');
+    assert.doesNotMatch(r.text || '', /<!DOCTYPE|<html/i,
+      'HTML here means the request fell through to the single-page fallback');
   });
 
   test('everything else is authenticated by default', async () => {
@@ -1642,6 +1656,88 @@ describe('e2e — the dashboard in a real browser', { skip: BROWSER_SKIP }, () =
     const rowCount = await page.locator('#tableBody tr').count();
     assert.ok(iconCount < rowCount, 'at least one row (a group, or a clean leaf) must have no icon');
   });
+
+  test('Q45: the tile counts the projects the collection root actually counts', async () => {
+    // The stub's Collection 4 counts only service-402 (critical 3, latest) and
+    // not service-401 (critical 5, stale). Q39 made the ROW obey that; the
+    // tile's project count kept walking allProjects, so one tile disagreed
+    // with itself — a figure that honoured the aggregation over a count that
+    // did not. This is the only assertion that reads both halves of one tile
+    // off the rendered page.
+    await page.locator('#searchInput').fill('');
+    await page.waitForTimeout(400);
+    await restoreViewport();
+
+    const card = await page.evaluate(() => {
+      const el = [...document.querySelectorAll('.summary-card')]
+        .find(e => /Critical/i.test(e.textContent));
+      return { value: el.querySelector('.value').textContent.trim(),
+               sub: el.querySelector('.sub').textContent,
+               all: el.textContent };
+    });
+    const counted = await page.evaluate(() => [...window.__countedLeafUuids()]);
+    const names = await page.evaluate((u) => u.map(x => (window.__allProjects()
+      .find(p => p.uuid === x) || {}).name), counted);
+
+    assert.ok(names.includes('service-402'), 'the latest child is counted');
+    assert.ok(!names.includes('service-401'),
+      `the stale child must not be counted — got ${JSON.stringify(names)}`);
+    assert.ok(!/\bof \d/.test(card.all),
+      'nothing is filtered, so no "of N" denominator should be drawn');
+
+    // The other half of the same tile, read off the page: the "N projects"
+    // sub-line must fold the identical set the figure above it does. Counting
+    // it here independently is what makes the two halves provably one set —
+    // the defect was that they were two.
+    const expected = await page.evaluate(() => {
+      const counted = window.__countedLeafUuids();
+      return window.__allProjects().filter(p => counted.has(p.uuid)
+        && ((p.security.critical || 0) + (p.operations.fail || 0)
+          + (p.license.fail || 0) + ((p.secpolicy && p.secpolicy.fail) || 0)) > 0).length;
+    });
+    const rendered = Number(/(\d+)\s*projects/.exec(card.sub)[1]);
+    assert.equal(rendered, expected,
+      `the tile's project count must fold the counted leaves (${rendered} vs ${expected})`);
+  }, { timeout: 60_000 });
+
+  test('Q46: filtering moves the tiles and names the portfolio total beside them', async () => {
+    // Before this the tiles described the whole portfolio regardless of what
+    // the table was showing, so filtering to one team left four headline
+    // numbers answering a question nobody had asked.
+    const before = await page.evaluate(() => {
+      const el = [...document.querySelectorAll('.summary-card')]
+        .find(e => /Critical/i.test(e.textContent));
+      return parseInt(el.querySelector('.value').textContent.trim(), 10);
+    });
+
+    await page.locator('#searchInput').fill('service-402');
+    await page.waitForTimeout(500);
+
+    const after = await page.evaluate(() => {
+      const el = [...document.querySelectorAll('.summary-card')]
+        .find(e => /Critical/i.test(e.textContent));
+      return {
+        value: parseInt(el.querySelector('.value').textContent.trim(), 10),
+        of: [...el.querySelectorAll('.card-of')].map(s => s.textContent.trim()).join('|'),
+      };
+    });
+
+    assert.ok(after.value < before,
+      `filtering to one project must narrow the tile (${after.value} vs ${before})`);
+    assert.match(after.of, new RegExp(`of ${before}`),
+      `the portfolio total must stay visible beside it — got "${after.of}"`);
+
+    await page.locator('#searchInput').fill('');
+    await page.waitForTimeout(500);
+    const restored = await page.evaluate(() => {
+      const el = [...document.querySelectorAll('.summary-card')]
+        .find(e => /Critical/i.test(e.textContent));
+      return { value: parseInt(el.querySelector('.value').textContent.trim(), 10),
+               of: [...el.querySelectorAll('.card-of')].map(s => s.textContent.trim()).join('') };
+    });
+    assert.equal(restored.value, before, 'clearing the filter restores the portfolio figure');
+    assert.equal(restored.of, '', 'and drops the denominator, which now has nothing to contrast');
+  }, { timeout: 60_000 });
 
   test('the trend chart agrees with the KPI card above it', async () => {
     // The reason the default metric is the tile arithmetic: two different

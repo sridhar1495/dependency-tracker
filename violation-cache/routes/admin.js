@@ -261,6 +261,18 @@ async function handle({ method, path: parsedPath, req, res, principal }) {
               updatedAt: b.background.updatedAt,
             }
           : null,
+        icon: b.icon
+          ? {
+              version:   b.icon.etag,
+              mimeType:  b.icon.mimeType,
+              width:     b.icon.width,
+              height:    b.icon.height,
+              byteSize:  b.icon.byteSize,
+              updatedAt: b.icon.updatedAt,
+            }
+          : null,
+        trendEnabled: b.trendEnabled,
+        iconLimits: image.ICON_LIMITS,
         limits: {
           maxBytes:  image.MAX_BYTES,
           minWidth:  image.MIN_WIDTH,
@@ -354,6 +366,77 @@ async function handle({ method, path: parsedPath, req, res, principal }) {
   // ── DELETE /admin/branding/background ───────────────────────────────────
   // Removing the upload is how the animated background comes back; it is not
   // a separate setting, so there is no way to end up with neither.
+  // ── The application icon (Q47) ────────────────────────────────────────
+  // Mirrors the background's pair exactly, with the icon's own, much narrower
+  // bounds — small, near-square and raster-only, because it is fetched on
+  // every page load and drawn in a 32px box.
+  if (method === 'POST' && parsedPath === '/admin/branding/icon') {
+    if (!requireAdmin(principal, res)) return true;
+    let buf;
+    try {
+      buf = await readBuffer(req, image.ICON_LIMITS.maxBytes + 1024);
+    } catch (e) {
+      jsonReply(res, 413, {
+        error: `The icon is larger than ${image.humanSize(image.ICON_LIMITS.maxBytes)}.`,
+        code: 'BODY_TOO_LARGE',
+      });
+      return true;
+    }
+    try {
+      // The declared Content-Type is ignored; inspect() decides from the bytes.
+      const meta = image.inspect(buf, image.ICON_LIMITS);
+      await branding.putIcon({ bytes: buf, ...meta });
+      const b = await branding.get();
+      log('info', 'Application icon updated', { bytes: buf.length, ...meta });
+      jsonReply(res, 200, {
+        icon: { version: b.icon.etag, width: b.icon.width, height: b.icon.height },
+      });
+    } catch (e) {
+      if (e.code === 'IMAGE_INVALID') {
+        jsonReply(res, 400, { error: e.message, code: 'IMAGE_INVALID' });
+        return true;
+      }
+      log('error', `Icon upload failed: ${e.message}`);
+      jsonReply(res, 500, { error: 'Could not store the icon.', code: 'INTERNAL' });
+    }
+    return true;
+  }
+
+  if (method === 'DELETE' && parsedPath === '/admin/branding/icon') {
+    if (!requireAdmin(principal, res)) return true;
+    try {
+      await branding.clearIcon();
+      log('info', 'Application icon cleared — the mark falls back to the title initials');
+      jsonReply(res, 200, { icon: null });
+    } catch (e) {
+      log('error', `Clearing the icon failed: ${e.message}`);
+      jsonReply(res, 500, { error: 'Could not clear the icon.', code: 'INTERNAL' });
+    }
+    return true;
+  }
+
+  // ── The risk-trend panel (Q48) ────────────────────────────────────────
+  // Display only. Snapshots keep being captured while it is off, so turning it
+  // back on shows unbroken history rather than a gap.
+  if (method === 'PUT' && parsedPath === '/admin/trend') {
+    if (!requireAdmin(principal, res)) return true;
+    try {
+      const body = await readJson(req, res);
+      if (body === null) return true;        // readJson already replied
+      if (!body || typeof body.enabled !== 'boolean') {
+        jsonReply(res, 400, { error: 'enabled must be true or false.', code: 'VALIDATION_FAILED' });
+        return true;
+      }
+      await branding.setTrendEnabled(body.enabled);
+      log('info', 'Risk-trend panel toggled', { enabled: body.enabled });
+      jsonReply(res, 200, { trendEnabled: body.enabled });
+    } catch (e) {
+      log('error', `Toggling the trend panel failed: ${e.message}`);
+      jsonReply(res, 500, { error: 'Could not save the setting.', code: 'INTERNAL' });
+    }
+    return true;
+  }
+
   if (method === 'DELETE' && parsedPath === '/admin/branding/background') {
     if (!requireAdmin(principal, res)) return true;
     try {

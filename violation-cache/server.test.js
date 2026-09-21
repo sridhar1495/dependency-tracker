@@ -3216,8 +3216,8 @@ describe('routes — the administration listing exposes no secrets', () => {
   // list is the contract: adding a fourth write means changing this line, in a
   // diff somebody has to read.
   // The closed list of administration writes. It grew from three to six when
-  // customisation was added, and that growth is the point of the list: adding
-  // a seventh means editing this set in a diff somebody reads.
+  // customisation was added and then to nine, and that growth is the point of
+  // the list: adding a tenth means editing this set in a diff somebody reads.
   const ALLOWED_WRITES = new Set([
     'PUT /admin/settings',
     'PUT /admin/users/:loginId/settings',
@@ -3225,13 +3225,22 @@ describe('routes — the administration listing exposes no secrets', () => {
     'PUT /admin/branding',
     'POST /admin/branding/background',
     'DELETE /admin/branding/background',
+    // Six to nine. Weighed on the same bar the previous three cleared: each
+    // changes how the product LOOKS or what it SHOWS, never what an account is
+    // or what it may reach, and none reads another principal's data. The icon
+    // pair mirrors the background pair exactly; the trend switch hides a panel
+    // and does not stop the snapshots behind it being captured.
+    'POST /admin/branding/icon',
+    'DELETE /admin/branding/icon',
+    'PUT /admin/trend',
   ]);
 
-  test('only the three intended writes are handled', async () => {
+  test('only the intended writes are handled', async () => {
     const paths = [
       '/admin/users', '/admin/overview', '/admin/storage', '/admin/settings',
       '/admin/users/alice', '/admin/users/alice/settings', '/admin/users/alice/password',
-      '/admin/branding', '/admin/branding/background',
+      '/admin/branding', '/admin/branding/background', '/admin/branding/icon',
+      '/admin/trend',
     ];
     const restore = stub(usersMod, {
       detailForAdmin: async () => { throw new Error('must not reach the data layer'); },
@@ -4326,6 +4335,37 @@ describe('reports — the CWE summary sheet', () => {
 // ── Image inspection ─────────────────────────────────────────────────────────
 // The uploaded background is served from our own origin to unauthenticated
 // visitors, so what the bytes ARE matters more than what the uploader said.
+// ── The public-route list ────────────────────────────────────────────────────
+// §12: routes are authenticated by default and a public one is an explicit
+// decision. server.js may not be imported (§10.4), so this reads its source —
+// which is the right level anyway: the claim is about the list, not about a
+// handler's behaviour.
+describe('the set of public routes is a closed list', () => {
+  const SERVER_JS = fs.readFileSync(path.join(__dirname, 'server.js'), 'utf8');
+
+  test('exactly the justified paths are public', () => {
+    const block = SERVER_JS.match(/const PUBLIC_PATHS = new Set\(\[([\s\S]*?)\n\]\);/)[1]
+      .replace(/\/\/[^\n]*/g, '');   // an apostrophe in a comment is not a path
+    const paths = [...block.matchAll(/'([^']+)'/g)].map(m => m[1]).sort();
+    assert.deepEqual(paths, [
+      '/auth/check-availability',
+      '/auth/login',
+      '/auth/register',
+      '/branding',
+      '/branding/background',
+      '/branding/icon',
+      '/healthz',
+    ], 'a new public route is a security decision — justify it in the PR and here');
+  });
+
+  test('the icon is public for the same reason the background is (S32)', () => {
+    // The sign-in page draws the logo mark before any token exists, so
+    // apiFetch would redirect to the sign-in page from the sign-in page.
+    assert.match(SERVER_JS, /'\/branding\/icon',\s*\/\/[^\n]*Q47/,
+      'the entry carries its own reason beside it, not three comments away');
+  });
+});
+
 describe('branding — image inspection', () => {
   // Minimal but real headers: enough bytes for sniffing and dimension parsing.
   function pngOf(w, h, pad = 0) {

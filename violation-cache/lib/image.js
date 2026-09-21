@@ -129,12 +129,22 @@ function dimensions(buf, mime) {
  * @returns {{ mimeType: string, width: number, height: number, byteSize: number }}
  * @throws {Error} code IMAGE_INVALID, with a message naming the specific problem
  */
-function inspect(buf) {
+function inspect(buf, limits = {}) {
+  // The bounds are a parameter, defaulting to the full-page background's. An
+  // icon is a different picture with different failure modes — 1280x720 is the
+  // minimum that does not look blurred stretched across a sign-in page, and
+  // the minimum that would ruin a 32px logo mark is nothing like it — so the
+  // caller supplies its own and the message still names which bound was missed.
+  const L = {
+    maxBytes: MAX_BYTES, minWidth: MIN_WIDTH, minHeight: MIN_HEIGHT,
+    maxWidth: MAX_WIDTH, maxHeight: MAX_HEIGHT, label: 'image',
+    ...limits,
+  };
   const fail = (msg) => { throw Object.assign(new Error(msg), { code: 'IMAGE_INVALID' }); };
 
   if (!Buffer.isBuffer(buf) || buf.length === 0) fail('No image was received.');
-  if (buf.length > MAX_BYTES) {
-    fail(`The image is ${humanSize(buf.length)}. The maximum is ${humanSize(MAX_BYTES)}.`);
+  if (buf.length > L.maxBytes) {
+    fail(`The ${L.label} is ${humanSize(buf.length)}. The maximum is ${humanSize(L.maxBytes)}.`);
   }
 
   const mimeType = sniff(buf);
@@ -146,18 +156,43 @@ function inspect(buf) {
   }
   const { width, height } = size;
 
-  if (width < MIN_WIDTH || height < MIN_HEIGHT) {
-    fail(`The image is ${width}×${height}. The minimum is ${MIN_WIDTH}×${MIN_HEIGHT}, ` +
-         'or it will look blurred stretched across the page.');
+  if (width < L.minWidth || height < L.minHeight) {
+    fail(`The ${L.label} is ${width}×${height}. The minimum is ${L.minWidth}×${L.minHeight}, `
+         + (L.tooSmallHint || 'or it will look blurred stretched across the page.'));
   }
-  if (width > MAX_WIDTH || height > MAX_HEIGHT) {
-    fail(`The image is ${width}×${height}. The maximum is ${MAX_WIDTH}×${MAX_HEIGHT}.`);
+  if (width > L.maxWidth || height > L.maxHeight) {
+    fail(`The ${L.label} is ${width}×${height}. The maximum is ${L.maxWidth}×${L.maxHeight}.`);
+  }
+
+  // An icon is drawn in a square box, so a wide banner would be letterboxed
+  // into it with the name unreadable. Refused with the ratio named rather than
+  // cropped: cropping decides for the operator which half of their mark to
+  // discard.
+  if (L.maxAspect) {
+    const ratio = Math.max(width / height, height / width);
+    if (ratio > L.maxAspect) {
+      fail(`The ${L.label} is ${width}×${height}, which is too far from square `
+           + `(at most ${L.maxAspect}:1). It is drawn in a square box.`);
+    }
   }
 
   return { mimeType, width, height, byteSize: buf.length };
 }
 
+// The application icon's own envelope. Small on purpose: it is fetched by
+// every page load including the sign-in screen, and it is never drawn larger
+// than the header's logo mark.
+const ICON_LIMITS = {
+  label: 'icon',
+  maxBytes: 256 * 1024,
+  minWidth: 64,  minHeight: 64,
+  maxWidth: 512, maxHeight: 512,
+  maxAspect: 1.25,
+  tooSmallHint: 'or it will look blurred in the header.',
+};
+
 module.exports = {
   sniff, dimensions, inspect, humanSize,
   MAX_BYTES, MIN_WIDTH, MIN_HEIGHT, MAX_WIDTH, MAX_HEIGHT, ALLOWED_MIME,
+  ICON_LIMITS,
 };

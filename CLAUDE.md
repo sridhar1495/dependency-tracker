@@ -219,7 +219,7 @@ Inline comments use lettered prefixes to trace design decisions:
 - **O-numbers** — observability notes (`// O3: JSON log format for log aggregators`)
 - **S-numbers** — security rationale (`// S2: token hashed before storage`) — **new in revision 2**
 
-Highest numbers currently in use: **Q44, P20, O5, S34**. When adding logic with a
+Highest numbers currently in use: **Q48, P20, O5, S34**. When adding logic with a
 non-obvious trade-off, add the next number in the appropriate series. Check the
 current maximum before assigning — parallel branches can claim the same number.
 
@@ -1145,11 +1145,14 @@ a **closed list of three**, not a general-purpose account editor:
 | `PUT /admin/branding` | The application title; empty restores the built-in default |
 | `POST /admin/branding/background` | Upload the sign-in background |
 | `DELETE /admin/branding/background` | Restore the animated background |
+| `POST /admin/branding/icon` | Upload the application icon (Q47) |
+| `DELETE /admin/branding/icon` | Restore the title-initials mark |
+| `PUT /admin/trend` | Show or hide the risk-trend panel for every user (Q48) |
 
 Everything else about an account stays readable only. A test asserts exactly
-these **six** are handled and every other method/path combination is not — a
+these **nine** are handled and every other method/path combination is not — a
 blanket ban that had to be deleted would have stopped protecting anything, so
-the allow-list is the contract and adding a seventh means editing it in a
+the allow-list is the contract and adding a tenth means editing it in a
 diff somebody reads.
 
 The schedule limit rides on the two settings routes that already existed rather
@@ -1157,10 +1160,19 @@ than adding a seventh — it is the same kind of decision about the same rows,
 made by the same principal. That is what the allow-list is for: a new capability
 has to justify a new entry, and this one did not need one.
 
-The list went from three to six when customisation landed, and the three
-additions were weighed rather than waved through: they change how the product
-*looks*, never what an account is or what it may reach, and none of them reads
-another principal's data. That is the bar a seventh has to clear too.
+The list went from three to six when customisation landed, then to nine: the
+icon pair (Q47) mirrors the background pair exactly, and the trend switch
+(Q48) hides a panel. Every one of the six additions was weighed on the same
+bar rather than waved through — they change how the product *looks* or what it
+*shows*, never what an account is or what it may reach, and none of them reads
+another principal's data. That is the bar a tenth has to clear too.
+
+**The trend switch is display only.** `risk_snapshots` keeps being written by
+every completed violation-cache build while the panel is hidden, so turning it
+back on shows unbroken history rather than a gap for the period it was off. A
+snapshot is one row per connection per day, swept at
+`SNAPSHOT_RETENTION_DAYS`, so capturing through an off period costs nothing
+worth saving — and a gap in a year-long graph is not recoverable later.
 
 **S29 — the password reset is the most privileged thing in the service**, because
 the administrator chooses a value that authenticates as somebody else. Three
@@ -1258,6 +1270,30 @@ feature there were *five* different names in the product — three `<title>` tag
 a login heading and a footer that read "Internal Security Dashboard". The logo
 mark is derived from the title (up to three initials) rather than a fixed glyph,
 so a renamed installation does not keep wearing the old product's badge.
+
+**Q47: the mark can also be an uploaded icon, and the initials stay the
+fallback.** Derived initials are a good default and not a brand, so
+`branding_assets` gains an `app_icon` kind (migration 016) rather than a second
+table — one upload path, one serving path, one cache rule, and the same S32
+refusal of SVG, which matters more here because the sign-in page draws the mark
+before anybody holds a token. `applyBrandMark(el, title, icon)` is hand-mirrored
+in all three pages beside `brandInitials`, and a test asserts the three agree —
+the same duplication class §8.8 already accepts. Four rules:
+
+- **The URL carries the ETag** (`/branding/icon?v=<etag>`), so the response is
+  `immutable` and a changed icon is a different URL. Nothing has to guess a
+  cache lifetime, and nobody sees the previous operator's mark after an upload.
+- **The initials render when there is no icon, and when the icon fails to
+  load.** A header with an empty square in it reads as a broken page; a header
+  with initials reads as a header.
+- **The bounds are the icon's own, not the background's** (`ICON_LIMITS` in
+  `lib/image.js`): 256 KB, 64–512 px, and — unlike the background — an aspect
+  bound, because the mark is drawn in a square box. A wide banner is **refused
+  with the ratio named, never cropped**: cropping decides for the operator
+  which half of their mark to discard. `inspect(buf, limits)` takes the
+  envelope as an argument so the defaults are provably untouched.
+- **The icon is public** (§12), for the same reason the title and the sign-in
+  background are: anyone who can reach the sign-in page can already see it.
 
 `login.html` and `admin.html` reuse the same CSS custom properties and form
 classes as `index.html` so the three are visually identical. Duplicating a small
@@ -1610,7 +1646,10 @@ Flat, module-scoped globals, no reactive framework.
 | `treeRoots` | `TreeNode[]` | Rendered hierarchy |
 | `nodeMap` | `Map<uuid, TreeNode>` | Fast UUID lookup |
 | `expandedUuids` | `Set<uuid>` | Open group rows |
-| `summaryTotals` | object | Computed once after load |
+| `summaryTotals` | object | The whole portfolio's tile figures, computed once after load |
+| `countedLeafUuids` | `Set<uuid>` | Q45 — the leaves the roll-up actually counted, recomputed by `buildTree()`. What the filter draws from and what the tiles fold |
+| `filteredTotals` | object \| null | Q46 — the tile figures for the current filter, or `null` when nothing is filtered. `null` is what tells "no filter" from "matched nothing" |
+| `_trendEnabled` | boolean | Q48 — the administrator's switch, read from `/branding`. `false` hides the panel and stops `loadTrend()` fetching |
 | `flatView` | boolean | Hierarchy vs flat toggle |
 | `selectedProjectUuids` | `Set<uuid>` | Checkbox-selected for report |
 | `_configPanelDirty` | boolean | Unsaved changes in config panel |
@@ -1870,6 +1909,56 @@ safe: a cross-file test reads `index.html`'s real source and asserts the two
 including one that exists in neither. `summarise()` kept its signature because
 a root-only list is a portfolio in which every project is its own root with no
 children, so the roll-up is a no-op and no caller's contract moved.
+
+**Q45: the table and the tiles draw from the leaves the roll-up counted, not
+from every leaf.** Q39 made a group row obey its own `collectionLogic`, and
+stopped there. Everything *else* on the screen kept reading `allProjects`: the
+filter listed a stale version the group row does not count, and the KPI tiles'
+project counts walked the whole portfolio while the figures directly above them
+came from `treeRoots` — so one tile disagreed with itself, a "3 critical / 5
+projects" where only one of those numbers obeyed the aggregation.
+
+`computeCountedLeaves(roots)` is the fix and it is eleven lines: a
+`collectionChildren()`-guided descent that records the **leaves** it reaches,
+run at the end of `buildTree()` so the set is recomputed whenever the hierarchy
+is — a refetch can never leave it stale. Four things are load-bearing:
+
+- **It descends through `collectionChildren()`, the same function the roll-up
+  itself uses.** Anything else would be a second, drifting answer to "which
+  children does this parent count", which is precisely the contradiction Q39
+  exists to remove.
+- **It records leaves, never groups.** A group is not a DependencyTrack project
+  with findings of its own on this screen (Q35, Q42) — its figures *are* its
+  counted descendants', so including it would double every total that folded
+  the set.
+- **A group is still shown in the tree view.** `applyFilters()` draws from
+  `parentUuids.has(p.uuid) || countedLeafUuids.has(p.uuid)` there, and from the
+  counted set alone in flat view. A group is structure, not data: dropping it
+  would orphan the descendants that *did* count. Flat view has no structure to
+  preserve, so it shows exactly what the tiles fold.
+- **`computeSummaryTotals()` is now a thin caller of `computeTotalsFor(leaves)`,
+  and the project-count pass folds that same argument.** Splitting the fold out
+  is what makes the two halves of a tile provably the same set — the second bug
+  above was only possible because the counts had their own loop over
+  `allProjects`. A test folds the counted leaves and the roll-up separately and
+  asserts they agree, because if that ever stops being true a card contradicts
+  the row beneath it.
+
+**Q46: a filtered table gets filtered tiles, with the portfolio total beside
+them.** The tiles described the whole portfolio regardless of what the table was
+showing, so filtering to one team left four headline numbers answering a
+question nobody had asked. `filteredTotals` is `computeTotalsFor()` over the
+filtered rows — intersected with `countedLeafUuids`, so the tiles and the table
+fold the identical set — and `renderSummary()` reads `filteredTotals ||
+summaryTotals`.
+
+`null` rather than "the totals happen to match" is what distinguishes *no
+filter* from *a filter that matched nothing*: the second must read 0, and a
+falsy-totals fallback would show the portfolio's numbers over an empty table.
+The portfolio figure is then appended as a quieter `of N` (`.card-of`, muted and
+smaller than `.value`), drawn only while filtering **and** only where the two
+differ — `of 12` beside `12` is noise, and on an unfiltered screen it is a
+second number with nothing to contrast against.
 
 - `applyFilters()` always operates on `allProjects`, never on a previous result.
   Parent rows are auto-included when a child matches.
@@ -2607,6 +2696,35 @@ Running the browser checks in CI was on this list and is now the `e2e` job.
   one and not the anchor — "the rule was applied" and "the rule was ignored"
   produce visibly different workbooks — and a `latest_all` schedule arms with
   no stored anchors at all.
+- The counted leaf set (Q45): that a `LATEST` group's stale child is **not** in
+  it while the latest one is; that a portfolio with no collection logic still
+  counts every leaf, since v4 and organisational parents must be untouched by
+  this; that `buildTree()` recomputes it, so a refetch cannot leave it stale;
+  and the invariant the whole change rests on — **folding the counted leaves
+  gives the same figures as folding `treeRoots`**, asserted directly, because
+  if that ever stops being true a card contradicts the row beneath it. Plus a
+  source check that `applyFilters()` keeps groups in the tree view and drops
+  them in flat view.
+- The filtered tiles (Q46): that `filteredTotals` is `null` while nothing is
+  filtered — the distinction between "no filter" and "matched nothing", which
+  a falsy-totals fallback would collapse into showing the portfolio over an
+  empty table; that it folds the **intersection** with the counted set, so the
+  tiles and the table see one set; that the `of N` denominator comes from
+  `summaryTotals` and is drawn only when it differs; and, against the page's
+  own CSS, that it is smaller and quieter than the value it qualifies, since
+  context that reads as the reported number is worse than no context.
+- The application icon (Q47): that `ICON_LIMITS` is a genuinely narrower
+  envelope than the background's and that the background's defaults are
+  **unchanged** — `inspect(buf, limits)` taking the envelope as an argument is
+  what makes that provable; that SVG is refused for the icon exactly as for the
+  background, checked against both migrations' SQL as well (S32); that an
+  aspect far from square is refused **with the ratio named** while a 2:1 page
+  background still passes, so the bound cannot leak across; and that all three
+  pages' `applyBrandMark` falls back to the initials, prefers the icon, and
+  puts the ETag in the URL.
+- The public-route list, against `server.js`'s own source: exactly seven paths,
+  compared as a set. A new public route is a security decision (§12), so it
+  fails until somebody writes it down here too.
 - **Authorisation:** every route rejects a missing or invalid token with 401;
   cross-user access returns 404; the profile endpoint ignores login ID and email.
 - **The documentation, against the application it documents.** Prose drifts
@@ -2692,10 +2810,11 @@ Running the browser checks in CI was on this list and is now the `e2e` job.
 - **Authentication is mandatory on every backend route.** New routes are
   authenticated by default; a public route must be listed explicitly and justified.
   The list is `/auth/register`, `/auth/check-availability`, `/auth/login`,
-  `/branding` and `/branding/background` (**S32**), which the sign-in page needs
+  `/branding`, `/branding/background` and `/branding/icon` (**S32**), which the
+  sign-in page needs
   before a token exists, and `/healthz` (**S33**). Branding on a sign-in screen is public by construction:
   anyone who can reach the page can already see it. They return the title and the
-  image and nothing else — no account, no setting, no count.
+  images and nothing else — no account, no setting, no count.
   **`/healthz` returns `{"status":"ok"}` and nothing else** — no account, no
   setting, no count, no version, so it discloses exactly what a closed port
   would. It is answered in `server.js` before route dispatch rather than in a

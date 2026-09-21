@@ -29,6 +29,10 @@ const { query } = require('../db/pool');
 const DEFAULT_TITLE = 'Software Composition Analysis - Risk Dashboard';
 
 const BACKGROUND_KIND = 'login_background';
+// Q47: the logo mark is the title's initials unless an icon is uploaded. A
+// second `kind` rather than a second table — one upload path, one serving
+// path, one cache rule (migration 016).
+const ICON_KIND = 'app_icon';
 
 // { title, background } — background is metadata only, never the bytes.
 let _cache = null;
@@ -49,14 +53,21 @@ function invalidate() {
 async function get() {
   if (_cache) return _cache;
 
-  const [settings, asset] = await Promise.all([
-    query('SELECT app_title AS "appTitle" FROM app_settings WHERE id = TRUE'),
+  const [settings, asset, icon] = await Promise.all([
+    query('SELECT app_title AS "appTitle", trend_enabled AS "trendEnabled" '
+          + 'FROM app_settings WHERE id = TRUE'),
     // Never SELECT * here: this table holds a bytea column (CLAUDE.md §5.1).
     query(
       `SELECT mime_type AS "mimeType", etag, width, height,
               byte_size AS "byteSize", updated_at AS "updatedAt"
          FROM branding_assets WHERE kind = $1`,
       [BACKGROUND_KIND]
+    ),
+    query(
+      `SELECT mime_type AS "mimeType", etag, width, height,
+              byte_size AS "byteSize", updated_at AS "updatedAt"
+         FROM branding_assets WHERE kind = $1`,
+      [ICON_KIND]
     ),
   ]);
 
@@ -67,6 +78,12 @@ async function get() {
     // it is showing their value or the built-in one.
     titleIsDefault: !(typeof stored === 'string' && stored.trim()),
     background: asset.rows[0] || null,
+    icon: icon.rows[0] || null,
+    // Q48: the administrator may hide the risk-trend panel. Absent on a row
+    // written before migration 016, so it reads as ON — the panel existed
+    // before the switch did, and a column default must never turn a working
+    // feature off for an installation that never asked.
+    trendEnabled: settings.rows[0] ? settings.rows[0].trendEnabled !== false : true,
   };
   return _cache;
 }
@@ -131,9 +148,49 @@ async function clearBackground() {
   return get();
 }
 
+/** The icon's bytes, or null. Read on its own so `get()` never carries them. */
+async function getIconBytes() {
+  const { rows } = await query(
+    'SELECT bytes, mime_type AS "mimeType", etag FROM branding_assets WHERE kind = $1',
+    [ICON_KIND]
+  );
+  return rows[0] || null;
+}
+
+async function putIcon({ bytes, mimeType, width, height }) {
+  const etag = crypto.createHash('sha256').update(bytes).digest('hex');
+  await query(
+    `INSERT INTO branding_assets (kind, bytes, mime_type, etag, width, height, byte_size)
+          VALUES ($1, $2, $3, $4, $5, $6, $7)
+     ON CONFLICT (kind) DO UPDATE
+            SET bytes = EXCLUDED.bytes, mime_type = EXCLUDED.mime_type,
+                etag = EXCLUDED.etag, width = EXCLUDED.width,
+                height = EXCLUDED.height, byte_size = EXCLUDED.byte_size`,
+    [ICON_KIND, bytes, mimeType, etag, width, height, bytes.length]
+  );
+  invalidate();
+}
+
+/** Remove the icon. The mark falls back to the title's initials. */
+async function clearIcon() {
+  await query('DELETE FROM branding_assets WHERE kind = $1', [ICON_KIND]);
+  invalidate();
+}
+
+/** Show or hide the risk-trend panel for every user (Q48). */
+async function setTrendEnabled(enabled) {
+  await query(
+    `INSERT INTO app_settings (id, trend_enabled) VALUES (TRUE, $1)
+     ON CONFLICT (id) DO UPDATE SET trend_enabled = EXCLUDED.trend_enabled`,
+    [enabled === true]
+  );
+  invalidate();
+}
+
 module.exports = {
   get, getTitle, setTitle,
   getBackgroundBytes, putBackground, clearBackground,
+  getIconBytes, putIcon, clearIcon, setTrendEnabled,
   invalidate,
-  DEFAULT_TITLE, BACKGROUND_KIND,
+  DEFAULT_TITLE, BACKGROUND_KIND, ICON_KIND,
 };
