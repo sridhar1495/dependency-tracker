@@ -18,6 +18,7 @@
 
 const { query, tx } = require('../db/pool');
 const validate = require('./validate');
+const scheduleSelection = require('./schedule-selection');
 
 /** Comma-separated string or array → trimmed, de-duplicated address list. */
 function toAddressList(value) {
@@ -51,6 +52,7 @@ const SCHEDULE_COLUMNS = `
   last_run_at AS "lastRunAt", last_run_status AS "lastRunStatus",
   last_run_error AS "lastRunError", failure_notification AS "failureNotification",
   report_name AS "reportName", created_at AS "createdAt",
+  selection_mode AS "selectionMode",
   to_addrs AS "toAddrs", cc_addrs AS "ccAddrs", subject, body
 `;
 
@@ -243,6 +245,17 @@ function normalise(input) {
     out.reportName = trimmed === '' ? null : trimmed;
   }
 
+  // How the stored `schedule_projects` rows are to be read (migration 015).
+  // The list is the resolver's, so a mode this service cannot resolve can never
+  // be written — the database CHECK says the same thing a second time, which is
+  // §5.4's rule rather than belt-and-braces.
+  if (input.selectionMode !== undefined) {
+    if (!scheduleSelection.isMode(input.selectionMode)) {
+      throw fail('Unknown project selection mode.', 'selectionMode');
+    }
+    out.selectionMode = input.selectionMode;
+  }
+
   return out;
 }
 
@@ -258,6 +271,7 @@ const WRITABLE = [
   ['enabled', 'enabled'], ['frequency', 'frequency'], ['hour', 'hour'], ['minute', 'minute'],
   ['weekDays', 'week_days'], ['monthDay', 'month_day'], ['riskTypes', 'risk_types'],
   ['name', 'name'], ['reportName', 'report_name'],
+  ['selectionMode', 'selection_mode'],
   ['toAddrs', 'to_addrs'], ['ccAddrs', 'cc_addrs'], ['subject', 'subject'],
   ['body', 'body'],
 ];
@@ -510,13 +524,46 @@ async function startRun(userId, scheduleId) {
   return rows[0].id;
 }
 
-async function completeRun(runId, { status, error, fileSizeBytes }) {
+/**
+ * Close a run, recording what it actually covered.
+ *
+ * `resolvedProjects` is the list, not just the count, because a rule-driven
+ * schedule's covered set moves on its own and the two directions are not
+ * equally safe: growth is benign, shrinkage is a blind spot nobody notices,
+ * because the workbook still arrives and still looks healthy. The list is what
+ * lets the NEXT run diff itself against this one and name the projects that
+ * left. A count alone answers "12 became 9" but not "which three".
+ */
+async function completeRun(runId, { status, error, fileSizeBytes, resolvedProjects }) {
+  const list = Array.isArray(resolvedProjects) ? resolvedProjects : null;
   await query(
     `UPDATE schedule_runs
-        SET finished_at = now(), status = $2, error = $3, file_size_bytes = $4
+        SET finished_at = now(), status = $2, error = $3, file_size_bytes = $4,
+            resolved_project_count = $5, resolved_projects = $6
       WHERE id = $1`,
-    [runId, status, error || null, fileSizeBytes || null]
+    [runId, status, error || null, fileSizeBytes || null,
+     list ? list.length : null, list ? JSON.stringify(list) : null]
   );
+}
+
+/**
+ * What the previous finished run of this schedule covered, for the drift diff.
+ *
+ * Only a run that actually produced a report is a baseline: comparing against a
+ * failed one would report every project as "new" the run after any failure.
+ */
+async function lastResolvedProjects(scheduleId, beforeRunId) {
+  if (!scheduleId) return null;
+  const { rows } = await query(
+    `SELECT resolved_projects
+       FROM schedule_runs
+      WHERE schedule_id = $1 AND id <> $2
+        AND status = 'success' AND resolved_projects IS NOT NULL
+      ORDER BY started_at DESC
+      LIMIT 1`,
+    [scheduleId, beforeRunId]
+  );
+  return rows.length ? rows[0].resolved_projects : null;
 }
 
 /**
@@ -572,6 +619,7 @@ async function purgeRunsOlderThan(days = 90) {
 
 module.exports = {
   list, get, countForUser, getProjects, create, update, remove, removeAll,
+  lastResolvedProjects,
   setProjects, arm, disable, claimDue, claimOne, claimForManualRun,
   finishRun, releaseStaleClaims,
   ackNotification, startRun, completeRun, recentRuns, runStats, purgeRunsOlderThan,

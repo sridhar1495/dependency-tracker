@@ -44,6 +44,10 @@ function forClient(row, projects) {
     monthDay:            row.monthDay,
     riskTypes:           row.riskTypes || [],
     reportName:          row.reportName || '',
+    // How the stored project rows are to be read (migration 015). Absent on a
+    // row written before it, so the resolver's default stands in rather than
+    // an undefined reaching the browser.
+    selectionMode:       row.selectionMode || 'fixed',
     // NULL means "use the account's list", which is not the same as an empty
     // one. The browser needs to tell those apart to show "using account
     // default" rather than "nobody", so null is passed through as null.
@@ -223,7 +227,10 @@ async function handle({ method, path: parsedPath, req, res, principal }) {
     try {
       const row = await schedulesDb.get(userId, id);
       if (!row) { notFound(res); return true; }
-      if (!row.projectCount) {
+      // 'latest_all' stores no anchors by design, so an empty project list
+      // stopped meaning "not configured yet" with migration 015. Gating on the
+      // count alone would leave that mode permanently unstartable.
+      if (!row.projectCount && row.selectionMode !== 'latest_all') {
         jsonReply(res, 400, {
           error: 'No projects are selected — choose them before starting this schedule.',
           code: 'NO_PROJECTS',
@@ -276,7 +283,7 @@ async function handle({ method, path: parsedPath, req, res, principal }) {
     try {
       const row = await schedulesDb.get(userId, id);
       if (!row) { notFound(res); return true; }
-      if (!row.projectCount) {
+      if (!row.projectCount && row.selectionMode !== 'latest_all') {
         jsonReply(res, 400, {
           error: 'No projects are selected for this schedule.', code: 'NO_PROJECTS',
         });

@@ -3064,7 +3064,7 @@ describe('index.html pause, send now and history', () => {
       'clicking the toggle must not also drill into the schedule');
     // A schedule with no projects cannot be armed, so offering to resume it
     // would be offering something that fails.
-    assert.match(fn, /sc\.projectCount \? '' : 'disabled'/);
+    assert.match(fn, /\(sc\.projectCount \|\| mode === 'latest_all'\) \? '' : 'disabled'/);
   });
 
   test('a failed toggle puts the switch back where the server says it is', () => {
@@ -6176,5 +6176,173 @@ describe('the documentation still describes this application', () => {
     const code = src.replace(/\/\/[^\n]*/g, '').replace(/\/\*[\s\S]*?\*\//g, '');
     assert.ok(!/https?:\/\/(?!127\.0\.0\.1|localhost)/.test(code),
       'no hard-coded external host may appear in the screenshot tool');
+  });
+});
+
+// ── Latest-only scheduling: the page's copy of the resolver (PR 2) ───────────
+// `lib/schedule-selection.js` is hand-mirrored in index.html so the editor can
+// preview a rule without a round trip. Same duplication class as
+// collectionChildren()/componentKeyOf()/the CWE cell, and the same guard: the
+// two copies are driven from one table and must answer identically.
+
+describe('schedule selection — the page copy agrees with the server (Q43)', () => {
+  const server = require('./lib/schedule-selection');
+  const projectTree = require('./lib/project-tree');
+  // The page's copies, extracted from its real source. `collectionChildren`
+  // comes along because schedLeavesUnder calls it — which is the point: the
+  // preview descends by the very function the dashboard's roll-up uses.
+  const page = new Function(
+    extractFunction(INDEX_HTML, 'collectionChildren') + '\n'
+    + extractFunction(INDEX_HTML, 'schedIsLeaf') + '\n'
+    + extractFunction(INDEX_HTML, 'schedLeavesUnder') + '\n'
+    + extractFunction(INDEX_HTML, 'schedPromoteAnchors') + '\n'
+    + extractFunction(INDEX_HTML, 'schedResolve') + '\n'
+    + "const SCHED_MODES = ['fixed', 'latest_under', 'latest_all'];\n"
+    + 'return { schedResolve, schedPromoteAnchors };'
+  )();
+
+  const P = (uuid, parent, extra = {}) => ({
+    uuid, name: uuid, version: '1.0', parent: parent ? { uuid: parent } : null, ...extra,
+  });
+  const L = { isLatest: true };
+  const PORTFOLIO = [
+    P('g1', null, { collectionLogic: 'AGGREGATE_DIRECT_CHILDREN' }),
+    P('a1', 'g1'), P('a2', 'g1', L),
+    P('g1a', 'g1', { collectionLogic: 'AGGREGATE_LATEST_VERSION_CHILDREN' }),
+    P('b1', 'g1a'), P('b2', 'g1a', L),
+    P('g2', null, { collectionLogic: 'AGGREGATE_LATEST_VERSION_CHILDREN' }),
+    P('c1', 'g2', L), P('g2a', 'g2'), P('d1', 'g2a', L),
+    P('g3', null, { collectionLogic: 'AGGREGATE_DIRECT_CHILDREN_WITH_TAG', collectionTag: 'prod' }),
+    P('e1', 'g3', { isLatest: true, tags: ['prod'] }), P('f1', 'g3', L),
+    P('solo', null, L),
+  ];
+  // The page resolves against the tree it already holds, so the test builds the
+  // same one the dashboard would and indexes it the way nodeMap is.
+  const roots = projectTree.buildTree(PORTFOLIO);
+  const byUuid = new Map();
+  (function index(list) {
+    for (const n of list) { byUuid.set(n.uuid, n); index(n.children); }
+  })(roots);
+
+  const CASES = [
+    ['fixed', ['a1', 'a2', 'a1']],
+    ['latest_under', ['g1']],
+    ['latest_under', ['g1a']],
+    ['latest_under', ['g2']],
+    ['latest_under', ['g3']],
+    ['latest_under', ['g1', 'g1a']],
+    ['latest_under', ['solo']],
+    ['latest_under', ['a1']],
+    ['latest_under', ['ghost']],
+    ['latest_under', []],
+    ['latest_all', []],
+    ['nonsense', ['a1']],
+  ];
+
+  test('both copies resolve every mode to the same projects', () => {
+    for (const [mode, anchors] of CASES) {
+      const s = server.resolveProjects({ mode, anchorUuids: anchors, portfolio: PORTFOLIO });
+      const p = page.schedResolve(mode, anchors, roots, byUuid);
+      assert.deepEqual(p.uuids, s.uuids, `${mode} ${JSON.stringify(anchors)}`);
+      assert.deepEqual(p.perAnchor, s.perAnchor, `perAnchor: ${mode} ${JSON.stringify(anchors)}`);
+      assert.equal(p.mode, s.mode, `mode fallback: ${JSON.stringify(mode)}`);
+    }
+  });
+
+  test('both copies promote a leaf anchor to the same parent', () => {
+    for (const anchors of [['a1'], ['a1', 'a2'], ['g1'], ['g1a'], ['solo'], ['ghost'], ['b1', 'a1']]) {
+      assert.deepEqual(
+        page.schedPromoteAnchors(anchors, byUuid),
+        server.promoteAnchors(anchors, PORTFOLIO),
+        JSON.stringify(anchors));
+    }
+  });
+
+  test('the page descends by collectionChildren, not by every child', () => {
+    // The one assertion that would still hold if the mirror were copied rather
+    // than kept in step: d1 is latest but sits under a group g2 does not count.
+    const p = page.schedResolve('latest_under', ['g2'], roots, byUuid);
+    assert.deepEqual(p.uuids, ['c1']);
+    assert.ok(page.schedResolve('latest_all', [], roots, byUuid).uuids.includes('d1'),
+      'and latest_all still reaches it, which is the documented asymmetry');
+  });
+});
+
+describe('latest-only scheduling — the editor and the list (PR 2)', () => {
+  test('the mode control offers exactly the three modes the resolver knows', () => {
+    const server = require('./lib/schedule-selection');
+    const block = INDEX_HTML.slice(INDEX_HTML.indexOf('id="cfgSchedMode"'));
+    const opts = [...block.slice(0, block.indexOf('</select>'))
+      .matchAll(/<option value="([^"]+)"/g)].map(m => m[1]);
+    assert.deepEqual(opts, server.SELECTION_MODES,
+      'a mode in the dropdown the server cannot resolve is a 400 nobody can explain');
+  });
+
+  test('the control sits above the preview it drives, inside the schedule editor', () => {
+    const modeAt = INDEX_HTML.indexOf('id="cfgSchedMode"');
+    const prevAt = INDEX_HTML.indexOf('id="cfgSchedProjects"');
+    assert.ok(modeAt !== -1 && prevAt > modeAt, 'the preview reads the control above it');
+  });
+
+  test('changing the mode marks the drill-down dirty, not the settings panel', () => {
+    // §8.1: the schedule editor's own handlers call markSchedDirty(). Calling
+    // markConfigDirty() here would claim Settings had unsaved changes.
+    const fn = extractFunction(INDEX_HTML, 'onSchedModeChange');
+    assert.match(fn, /markSchedDirty\(\)/);
+    assert.ok(!/markConfigDirty/.test(fn));
+    assert.match(fn, /renderSchedPreview\(\)/);
+  });
+
+  test('the handler is window-exported, or the onchange silently does nothing', () => {
+    assert.match(INDEX_HTML, /window\.onSchedModeChange\s*=\s*onSchedModeChange/);
+  });
+
+  test('openScheduleEditor sets the mode BEFORE rendering the preview that reads it', () => {
+    const fn = extractFunction(INDEX_HTML, 'openScheduleEditor');
+    const setAt = fn.indexOf("getElementById('cfgSchedMode').value");
+    const renderAt = fn.indexOf('renderSchedPreview()');
+    assert.ok(setAt !== -1 && renderAt > setAt,
+      'rendering first would preview whichever mode the last schedule left behind');
+  });
+
+  test('a schedule stored before migration 015 falls back to fixed, not to blank', () => {
+    const fn = extractFunction(INDEX_HTML, 'openScheduleEditor');
+    assert.match(fn.replace(/\s+/g, ' '),
+      /SCHED_MODES\.includes\(sc\.selectionMode\)\) \? sc\.selectionMode : 'fixed'/);
+  });
+
+  test('readScheduleEditor sends the mode', () => {
+    assert.match(extractFunction(INDEX_HTML, 'readScheduleEditor'),
+      /selectionMode:\s*document\.getElementById\('cfgSchedMode'\)\.value/);
+  });
+
+  test('all four projectCount gates are mode-aware, so latest_all is usable', () => {
+    // latest_all stores no anchors by design. Each of these four used to test
+    // the count alone, which would have left that mode listed as broken,
+    // un-toggleable and never armed.
+    const list = extractFunction(INDEX_HTML, 'renderScheduleList');
+    assert.match(list, /mode === 'latest_all'\s*\n?\s*\?\s*'All latest in the portfolio'/,
+      'the list row names the rule instead of a count that was true once');
+    assert.match(list, /\(sc\.projectCount \|\| mode === 'latest_all'\) \? '' : 'disabled'/,
+      'the enable toggle');
+    assert.match(extractFunction(INDEX_HTML, 'saveScheduleEditor'),
+      /d\.schedule\.selectionMode === 'latest_all'/, 'arm-on-save');
+    assert.match(extractFunction(INDEX_HTML, 'schedPreviewHtml'),
+      /mode === 'latest_all'/, 'the editor preview');
+  });
+
+  test('the preview names the anchors, the count, and anything resolving to nothing', () => {
+    const fn = extractFunction(INDEX_HTML, 'schedPreviewHtml');
+    assert.match(fn, /right now/, 'the wording says the number is a snapshot of a rule');
+    assert.match(fn, /Promoted from/, 'promotion widens the selection and must say so');
+    assert.match(fn, /Nothing marked latest under/, 'a dead anchor is visible at save time');
+    assert.match(fn, /escHtml\(/, 'project names reach this from SBOM metadata (§12)');
+  });
+
+  test('the preview needs no network — it reads the portfolio already in memory', () => {
+    const fn = extractFunction(INDEX_HTML, 'schedPreviewHtml')
+      + extractFunction(INDEX_HTML, 'renderSchedPreview');
+    assert.ok(!/apiFetch|fetch\(/.test(fn),
+      'a control that costs a round trip per keystroke is one people stop using');
   });
 });

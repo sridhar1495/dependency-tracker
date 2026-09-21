@@ -414,6 +414,71 @@ Everything else lives inside the editor, below the delivery fields:
 > due at 09:00 run one after another rather than opening five simultaneous
 > crawls against your single DependencyTrack connection.
 
+### Projects included: a fixed list, or a rule
+
+The **Projects included** dropdown decides how the projects you picked are
+read. It is the answer to a problem fixed lists have: every release changes
+which version DependencyTrack marks as *latest*, so a schedule built by ticking
+boxes has to be deleted and rebuilt each time — and until somebody does, it
+quietly keeps reporting the **previous** release.
+
+| Setting | What each run covers |
+|---|---|
+| **These projects** | Exactly the projects you ticked. The original behaviour, and the default — your existing schedules are unchanged. |
+| **Latest versions under these** | The projects you ticked become **anchors**. Each run descends from them and takes the current latest release beneath each one. |
+| **All latest in the portfolio** | Every project marked latest, anywhere. No selection is stored at all. |
+
+Under the dropdown, the editor tells you what the rule resolves to **right
+now** — the anchors it will descend from, how many projects that is today, and
+a warning for any anchor with nothing marked latest beneath it. Check that line
+before saving: it is also how you find out how large *All latest* is for your
+own portfolio.
+
+Three things are worth knowing before you choose a rule.
+
+**It follows your DependencyTrack collection settings, level by level.** If a
+group is configured to aggregate "latest version children", the schedule counts
+exactly the children that group's own row on the dashboard counts. That is
+deliberate: the report covers precisely the projects the screen is summarising,
+so the two can never contradict each other. One consequence follows from it —
+under "latest version children" a child that is itself a *group* is excluded,
+because it has no version of its own, so a branch of sub-groups under such a
+parent is not reached. The preview will show you a smaller number than you
+expected if this applies to you.
+
+**Picking a specific version anchors to its parent.** Ticking
+`service-401 v1.2` and choosing a latest rule means "the latest release here",
+so the schedule anchors on that project's parent group. Because a parent also
+holds its siblings, this **widens** what the schedule covers — the editor says
+so explicitly when it happens.
+
+**Groups are never reported on, only descended through.** A group row's numbers
+on the dashboard are the sum of its children's, so it has no findings of its
+own to report.
+
+### When the covered set changes
+
+A rule-driven schedule adjusts itself: a new branch appears and is picked up, a
+deleted one drops out, a new release replaces the old one. Growth is harmless.
+A set getting *smaller* is the one to watch, because nothing about a narrower
+report looks wrong — it still arrives and still looks healthy.
+
+So every run after the first compares itself to the one before and adds a line
+to the covering email:
+
+> Projects covered: 9 (was 12 — 3 no longer covered: payments-api 2.4,
+> auth-svc 1.9, billing-worker 3.1)
+
+Removed projects are **named**; newly covered ones are only counted, because a
+new project is self-evident in the workbook it appears in while a missing one
+is not. The run history records the number covered each time, so you can see
+drift there too.
+
+There is a ceiling on how many projects one run may cover (250 by default, set
+by your administrator). A run over it is **refused rather than trimmed** — a
+workbook silently covering the first 250 of 400 projects would not say on its
+face that it was partial.
+
 Scheduled reports are built in memory and emailed. They never appear in your
 Reports list and are never written to disk.
 
