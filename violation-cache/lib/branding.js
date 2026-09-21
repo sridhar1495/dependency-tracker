@@ -39,11 +39,16 @@ let _cache = null;
 // Bytes are held separately: the metadata is wanted on every page load, the
 // bytes only by whoever is actually rendering the image.
 let _bytesCache = null;
+// Q49: the theme is read on EVERY page load, including the sign-in page, and
+// it is one row that changes when an administrator uploads a file. Caching the
+// rendered stylesheet here is what keeps that read off the database entirely.
+let _themeCache = null;
 
 /** Drop the cache. Called by every writer here, and by tests. */
 function invalidate() {
   _cache = null;
   _bytesCache = null;
+  _themeCache = null;
 }
 
 /**
@@ -53,7 +58,7 @@ function invalidate() {
 async function get() {
   if (_cache) return _cache;
 
-  const [settings, asset, icon] = await Promise.all([
+  const [settings, asset, icon, theme] = await Promise.all([
     query('SELECT app_title AS "appTitle", trend_enabled AS "trendEnabled" '
           + 'FROM app_settings WHERE id = TRUE'),
     // Never SELECT * here: this table holds a bytea column (CLAUDE.md §5.1).
@@ -69,6 +74,9 @@ async function get() {
          FROM branding_assets WHERE kind = $1`,
       [ICON_KIND]
     ),
+    // Metadata only — `css` and `doc` are wanted by one route each, not by
+    // every sign-in page render, so they are read separately below.
+    query('SELECT name, etag FROM app_themes WHERE id = TRUE'),
   ]);
 
   const stored = settings.rows[0] && settings.rows[0].appTitle;
@@ -84,6 +92,10 @@ async function get() {
     // before the switch did, and a column default must never turn a working
     // feature off for an installation that never asked.
     trendEnabled: settings.rows[0] ? settings.rows[0].trendEnabled !== false : true,
+    // Q49: the pages emit the <link> only when there is something to link to.
+    // The etag is in the URL, so a changed theme is a different URL and the
+    // response can be immutable.
+    theme: theme.rows[0] || null,
   };
   return _cache;
 }
@@ -187,8 +199,58 @@ async function setTrendEnabled(enabled) {
   invalidate();
 }
 
+// ── The administrator's colour theme (Q49) ───────────────────────────────────
+
+/**
+ * The generated stylesheet `/branding/theme.css` serves, or null.
+ *
+ * Cached including the absence, so an installation with no theme does not
+ * query on every page load — the same reasoning `getBackgroundBytes` uses.
+ */
+async function getThemeCss() {
+  if (_themeCache !== null) return _themeCache.etag ? _themeCache : null;
+  const { rows } = await query('SELECT css, etag FROM app_themes WHERE id = TRUE');
+  _themeCache = rows[0] || { etag: null };
+  return rows[0] || null;
+}
+
+/** The stored document itself, for the administration screen and its download. */
+async function getThemeDoc() {
+  const { rows } = await query('SELECT name, doc, etag, updated_at AS "updatedAt" '
+                               + 'FROM app_themes WHERE id = TRUE');
+  return rows[0] || null;
+}
+
+/**
+ * Store a validated document and the stylesheet it renders to.
+ *
+ * Both are written together, by the caller that validated the one and
+ * generated the other, so the served CSS can never be the output of a
+ * different version of the generator than the document was checked against.
+ */
+async function putTheme({ name, doc, css }) {
+  const etag = crypto.createHash('sha256').update(css).digest('hex');
+  await query(
+    `INSERT INTO app_themes (id, name, doc, css, etag, updated_at)
+          VALUES (TRUE, $1, $2, $3, $4, now())
+     ON CONFLICT (id) DO UPDATE
+            SET name = EXCLUDED.name, doc = EXCLUDED.doc, css = EXCLUDED.css,
+                etag = EXCLUDED.etag, updated_at = EXCLUDED.updated_at`,
+    [name || null, JSON.stringify(doc), css, etag]
+  );
+  invalidate();
+  return etag;
+}
+
+/** Remove the theme. Every page falls back to its own built-in blocks. */
+async function clearTheme() {
+  await query('DELETE FROM app_themes WHERE id = TRUE');
+  invalidate();
+}
+
 module.exports = {
   get, getTitle, setTitle,
+  getThemeCss, getThemeDoc, putTheme, clearTheme,
   getBackgroundBytes, putBackground, clearBackground,
   getIconBytes, putIcon, clearIcon, setTrendEnabled,
   invalidate,

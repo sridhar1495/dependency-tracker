@@ -89,6 +89,34 @@
       --low-bg:       rgba(29,78,216,0.10);
       --ok:           #15803d;
       --ok-bg:        rgba(21,128,61,0.08);
+
+      /* Q49: what reads ON a filled accent or critical surface. White by
+         default and unchanged by this refactor — the token exists so a themed
+         installation CAN fix its own contrast, not so ours moves. */
+      --on-accent:    #ffffff;
+      --on-critical:  #ffffff;
+      --accent-hover: #4f46e5;
+
+      /* The two column-group captions the table draws in their own colour. */
+      --cat-operations: #a78bfa;
+      --cat-secpolicy:  #06b6d4;
+
+      --code:            #a5f3fc;
+      --scrollbar:       var(--border);
+      --scrollbar-hover: var(--text-muted);
+
+      --on-accent:    #ffffff;
+      --on-critical:  #ffffff;
+      --accent-hover: #4043c4;
+
+      /* Darker than the dark scheme's: violet-300 and cyan-500 measure about
+         2.3:1 and 2.8:1 on white, which is unreadable for caption text. */
+      --cat-operations: #7c3aed;
+      --cat-secpolicy:  #0e7490;
+
+      --code:            #1d4ed8;
+      --scrollbar:       #8899bb;
+      --scrollbar-hover: #5c6a85;
     }
 
     html, body { height: 100%; }
@@ -125,7 +153,7 @@
        Same square as login.html's .auth-logo, so the two pages match. */
     .topbar-mark {
       width: 28px; height: 28px; border-radius: 7px;
-      background: var(--accent); color: #fff;
+      background: var(--accent); color: var(--on-accent);
       display: flex; align-items: center; justify-content: center;
       font-size: 11px; font-weight: 700; letter-spacing: .3px;
       flex-shrink: 0;
@@ -182,8 +210,8 @@
     }
     .btn:hover { background: var(--border); border-color: var(--accent); }
     .btn:disabled { opacity: 0.5; cursor: not-allowed; pointer-events: none; }
-    .btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
-    .btn.primary:hover { background: #4f46e5; }
+    .btn.primary { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
+    .btn.primary:hover { background: var(--accent-hover); }
     .btn.primary:disabled { opacity: 0.5; cursor: not-allowed; pointer-events: none; }
     .btn.export {
       background: rgba(34,197,94,0.12); border-color: rgba(34,197,94,0.35); color: var(--ok);
@@ -445,7 +473,7 @@
     .ms-badge {
       display: inline-flex; align-items: center; justify-content: center;
       min-width: 18px; height: 18px; padding: 0 4px;
-      background: var(--accent); color: #fff;
+      background: var(--accent); color: var(--on-accent);
       border-radius: 9px; font-size: 10px; font-weight: 700;
     }
     .ms-panel {
@@ -522,9 +550,9 @@
       border-bottom: 1px solid var(--border);
     }
     .th-group.security   { color: var(--high);  border-left: 3px solid var(--high); }
-    .th-group.operations { color: #a78bfa;       border-left: 3px solid #a78bfa; }
+    .th-group.operations { color: var(--cat-operations); border-left: 3px solid var(--cat-operations); }
     .th-group.license    { color: var(--medium); border-left: 3px solid var(--medium); }
-    .th-group.secpolicy  { color: #06b6d4;       border-left: 3px solid #06b6d4; }
+    .th-group.secpolicy  { color: var(--cat-secpolicy);  border-left: 3px solid var(--cat-secpolicy); }
 
     .th-col {
       background: var(--surface2); padding: 10px;
@@ -788,7 +816,7 @@
       display: block; background: var(--bg); border: 1px solid var(--border);
       border-radius: 6px; padding: 10px 14px;
       font-size: 12px; font-family: 'Courier New', monospace;
-      color: #a5f3fc; margin: 8px 0 14px; white-space: pre;
+      color: var(--code); margin: 8px 0 14px; white-space: pre;
     }
     .modal-close {
       float: right; background: none; border: none;
@@ -821,11 +849,10 @@
     /* ── Scrollbar ────────────────────────────────────────────────────────── */
     ::-webkit-scrollbar { width: 6px; height: 6px; }
     ::-webkit-scrollbar-track { background: transparent; }
-    ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
-    ::-webkit-scrollbar-thumb:hover { background: var(--text-muted); }
-    /* Light mode: border is #c8d0e0 which is near-invisible on white — use a solid mid-tone */
-    [data-theme="light"] ::-webkit-scrollbar-thumb { background: #8899bb; }
-    [data-theme="light"] ::-webkit-scrollbar-thumb:hover { background: #5c6a85; }
+    /* The light scheme's --border is near-invisible on white, so --scrollbar
+       carries its own mid-tone there rather than inheriting (Q49). */
+    ::-webkit-scrollbar-thumb { background: var(--scrollbar); border-radius: 3px; }
+    ::-webkit-scrollbar-thumb:hover { background: var(--scrollbar-hover); }
 
     /* Light mode scroll shadow: dark rgba is too faint on white — use a visible blue-gray */
     [data-theme="light"] .table-wrap {
@@ -835,9 +862,6 @@
         linear-gradient(to right, rgba(100,120,160,0.25), transparent),
         linear-gradient(to left,  rgba(100,120,160,0.25), transparent);
     }
-
-    /* ── Modal code block — adapt for light theme ────────────────────────── */
-    [data-theme="light"] .modal code { color: #1d4ed8; }
 
     /* ── Toast notifications ────────────────────────────────────────────── */
     #toastContainer {
@@ -962,11 +986,11 @@
     }
     .pf-danger-zone h3 { font-size: 12px; color: var(--critical); margin-bottom: 6px; }
     .pf-danger-zone p  { font-size: 11.5px; color: var(--text-muted); line-height: 1.5; margin-bottom: 8px; }
-    .btn.danger { background: var(--critical); border-color: var(--critical); color: #fff; }
+    .btn.danger { background: var(--critical); border-color: var(--critical); color: var(--on-critical); }
     .btn.danger:hover { filter: brightness(1.1); }
     #reportsBadge {
       position: absolute; top: -4px; right: -4px;
-      background: var(--critical); color: #fff;
+      background: var(--critical); color: var(--on-critical);
       font-size: 10px; font-weight: 700; border-radius: 8px;
       padding: 1px 5px; display: none;
     }
@@ -1132,7 +1156,7 @@
     }
     .cfg-toggle-slider::before {
       content: ''; position: absolute; width: 14px; height: 14px;
-      left: 3px; top: 3px; background: #fff; border-radius: 50%;
+      left: 3px; top: 3px; background: var(--on-accent); border-radius: 50%;
       transition: transform 0.2s;
     }
     .cfg-toggle input:checked + .cfg-toggle-slider { background: var(--accent); }
@@ -1147,7 +1171,7 @@
       border: 1px solid var(--border); background: var(--surface); color: var(--text-muted);
       transition: background 0.15s, color 0.15s, border-color 0.15s;
     }
-    .cfg-weekday input:checked + span { background: var(--accent); color: #fff; border-color: var(--accent); }
+    .cfg-weekday input:checked + span { background: var(--accent); color: var(--on-accent); border-color: var(--accent); }
     .cfg-weekday:hover span { border-color: var(--accent); }
     @media (max-width: 768px) { .cfg-panel { width: 100%; } }
     /* Q47: an uploaded icon replaces the initials in the same box, so the
@@ -1159,6 +1183,14 @@
       color: transparent; font-size: 0;
     }
   </style>
+  <!-- Q49: the administrator's colour theme. It comes AFTER this page's own
+       inline stylesheet, at the same specificity, so a property it sets wins and one it
+       omits keeps the built-in value — per property, from the cascade itself,
+       with no merge logic anywhere. A render-blocking <link> rather than a
+       stylesheet inserted by script: the latter would repaint after the page
+       was already visible, which is the flash §8.4 exists to prevent. The
+       route answers 200 with an empty sheet when nothing is configured. -->
+  <link rel="stylesheet" href="/branding/theme.css">
 </head>
 <body>
 

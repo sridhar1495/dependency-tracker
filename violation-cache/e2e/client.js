@@ -36,8 +36,20 @@ function makeClient(baseUrl) {
     request(p, { method: 'DELETE', headers: bearer(token), body: body ? JSON.stringify(body) : undefined });
   const get = (p, token) => request(p, { headers: bearer(token) });
 
+  /**
+   * A GET whose body is not JSON — a stylesheet, an image, an error page.
+   * `headers` comes back as a plain lower-cased object so a test can index it
+   * rather than remembering that fetch's Headers needs .get().
+   */
+  const raw = async (p, token) => {
+    const res = await fetch(baseUrl + p, { headers: bearer(token) });
+    const headers = {};
+    res.headers.forEach((v, k) => { headers[k] = v; });
+    return { status: res.status, text: await res.text(), headers };
+  };
+
   return {
-    baseUrl, request, get, post, put, del, bearer,
+    baseUrl, request, get, post, put, del, bearer, raw,
 
     /** Register an account. Returns the response. */
     register: (u) => post('/auth/register', u),

@@ -1320,6 +1320,89 @@ describe('multi-tenant data access', { skip: !ENABLED && 'TEST_DATABASE_URL not 
       (e) => e.code === '23514', 'S32 applies to the icon exactly as to the background');
   });
 
+  // ── The colour theme (migration 017, Q49) ──────────────────────────────
+
+  test('the theme round-trips as a document AND as the CSS it renders to', async () => {
+    const themeLib = require('./lib/theme');
+    try {
+      assert.equal(await branding.getThemeCss(), null, 'nothing configured to begin with');
+
+      const doc = themeLib.validate({ version: 1, name: 'Contoso',
+        dark: { accent: '#7c5cff' }, light: { accent: '#4c3fd0' } }).doc;
+      const css = themeLib.toCss(doc);
+      const etag = await branding.putTheme({ name: doc.name, doc, css });
+
+      const served = await branding.getThemeCss();
+      assert.equal(served.css, css, 'what is served is what was generated on save');
+      assert.equal(served.etag, etag);
+
+      const stored = await branding.getThemeDoc();
+      assert.equal(stored.name, 'Contoso');
+      // jsonb round-trips as an object, not as a string the caller has to parse.
+      assert.equal(stored.doc.dark.accent, '#7c5cff');
+      assert.deepEqual(themeLib.schemesOf(stored.doc), ['dark', 'light']);
+    } finally {
+      await branding.clearTheme();
+    }
+  });
+
+  test('it is a singleton — replacing moves the etag and keeps one row', async () => {
+    const themeLib = require('./lib/theme');
+    try {
+      const first = await branding.putTheme({
+        name: 'A', doc: { dark: { accent: '#111111' } },
+        css: themeLib.toCss({ dark: { accent: '#111111' } }) });
+      const second = await branding.putTheme({
+        name: 'B', doc: { dark: { accent: '#222222' } },
+        css: themeLib.toCss({ dark: { accent: '#222222' } }) });
+      assert.notEqual(second, first, 'the etag must move, or browsers keep the old sheet');
+      const { rows } = await pool.query('SELECT count(*)::int AS n FROM app_themes');
+      assert.equal(rows[0].n, 1, 'one theme, replaced in place');
+      assert.equal((await branding.getThemeDoc()).name, 'B');
+    } finally {
+      await branding.clearTheme();
+    }
+  });
+
+  test('the database refuses a second row and an over-long name', async () => {
+    try {
+      await branding.putTheme({ name: 'x', doc: { dark: {} }, css: '/* */' });
+      // The singleton CHECK is `id = TRUE`, so there is no second id to take.
+      await assert.rejects(
+        () => pool.query(
+          `INSERT INTO app_themes (id, name, doc, css, etag) VALUES (FALSE, 'x', '{}', '', 'e')`),
+        (e) => e.code === '23514', 'only one theme may exist');
+      await assert.rejects(
+        () => pool.query('UPDATE app_themes SET name = $1 WHERE id = TRUE', ['x'.repeat(61)]),
+        (e) => e.code === '23514', 'the name bound belongs in the database too');
+    } finally {
+      await branding.clearTheme();
+    }
+  });
+
+  test('clearing it returns every page to its built-in colours', async () => {
+    await branding.putTheme({ name: null, doc: { dark: { accent: '#333333' } },
+                              css: ':root { --accent: #333333; }' });
+    await branding.clearTheme();
+    assert.equal(await branding.getThemeCss(), null);
+    assert.equal(await branding.getThemeDoc(), null);
+    // And /branding stops advertising one, so the pages emit no <link>.
+    assert.equal((await branding.get()).theme, null);
+  });
+
+  test('017 replays cleanly', async () => {
+    // §5.3: idempotent at the file level, so a partially-applied state can
+    // recover. CREATE TABLE IF NOT EXISTS is the whole mechanism here, but the
+    // replay is what proves it rather than the reading of it.
+    const sql = fs.readFileSync(
+      path.join(__dirname, 'db', 'migrations', '017_app_theme.sql'), 'utf8');
+    await pool.query(sql);
+    await pool.query(sql);
+    const { rows } = await pool.query(
+      `SELECT count(*)::int AS n FROM pg_constraint WHERE conname = 'app_themes_name_len'`);
+    assert.equal(rows[0].n, 1, 'one constraint, not stacked');
+  });
+
   test('the trend switch defaults on and round-trips', async () => {
     assert.equal((await branding.get()).trendEnabled, true,
       'an installation that has never touched it shows the panel');

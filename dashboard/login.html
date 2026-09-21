@@ -36,6 +36,21 @@
       --medium:       #eab308;
       --medium-bg:    rgba(234,179,8,0.12);
       --radius:       8px;
+      /* Q49: what reads ON a filled accent surface. White by default and
+         unchanged by this refactor — the token exists so a themed
+         installation CAN fix its own contrast, not so ours moves. */
+      --on-accent:    #ffffff;
+      /* The decorative blobs and the logo gradient's far stop. Identical in
+         both schemes: they sit behind the card, not on it. */
+      --login-blob-1: #6366f1;
+      --login-blob-2: #8b5cf6;
+      --login-blob-3: #06b6d4;
+      --login-blob-4: #3b82f6;
+      --login-blob-admin-1: #f59e0b;
+      --login-blob-admin-2: #ef4444;
+      --login-blob-admin-3: #f97316;
+      --login-blob-admin-4: #eab308;
+      --logo-gradient-end:  #8b5cf6;
     }
     [data-theme="light"] {
       --bg:           #f0f2f8;
@@ -47,6 +62,7 @@
       --critical-bg:  rgba(239,68,68,0.10);
       --ok-bg:        rgba(34,197,94,0.10);
       --medium-bg:    rgba(234,179,8,0.12);
+      --on-accent:    #ffffff;
     }
 
     body {
@@ -98,16 +114,16 @@
     .blob.b4 { animation-duration: 30s; animation-delay: -15s; animation-direction: reverse; }
 
     /* User: indigo / violet / cyan. */
-    #bgUser  .b1 { width: 46vmax; height: 46vmax; top: -12vmax; left: -10vmax; background: #6366f1; }
-    #bgUser  .b2 { width: 38vmax; height: 38vmax; bottom: -14vmax; right: -8vmax; background: #8b5cf6; }
-    #bgUser  .b3 { width: 30vmax; height: 30vmax; top: 45%; left: 55%; background: #06b6d4; opacity: 0.35; }
-    #bgUser  .b4 { width: 24vmax; height: 24vmax; top: 8%; right: 18%; background: #3b82f6; opacity: 0.3; }
+    #bgUser  .b1 { width: 46vmax; height: 46vmax; top: -12vmax; left: -10vmax; background: var(--login-blob-1); }
+    #bgUser  .b2 { width: 38vmax; height: 38vmax; bottom: -14vmax; right: -8vmax; background: var(--login-blob-2); }
+    #bgUser  .b3 { width: 30vmax; height: 30vmax; top: 45%; left: 55%; background: var(--login-blob-3); opacity: 0.35; }
+    #bgUser  .b4 { width: 24vmax; height: 24vmax; top: 8%; right: 18%; background: var(--login-blob-4); opacity: 0.3; }
 
     /* Administrator: amber / rose — deliberately a different temperature. */
-    #bgAdmin .b1 { width: 46vmax; height: 46vmax; top: -14vmax; right: -10vmax; background: #f59e0b; }
-    #bgAdmin .b2 { width: 38vmax; height: 38vmax; bottom: -12vmax; left: -8vmax; background: #ef4444; }
-    #bgAdmin .b3 { width: 30vmax; height: 30vmax; top: 50%; left: 20%; background: #f97316; opacity: 0.35; }
-    #bgAdmin .b4 { width: 24vmax; height: 24vmax; top: 12%; left: 42%; background: #eab308; opacity: 0.3; }
+    #bgAdmin .b1 { width: 46vmax; height: 46vmax; top: -14vmax; right: -10vmax; background: var(--login-blob-admin-1); }
+    #bgAdmin .b2 { width: 38vmax; height: 38vmax; bottom: -12vmax; left: -8vmax; background: var(--login-blob-admin-2); }
+    #bgAdmin .b3 { width: 30vmax; height: 30vmax; top: 50%; left: 20%; background: var(--login-blob-admin-3); opacity: 0.35; }
+    #bgAdmin .b4 { width: 24vmax; height: 24vmax; top: 12%; left: 42%; background: var(--login-blob-admin-4); opacity: 0.3; }
 
     @keyframes drift {
       0%,100% { transform: translate(0, 0) scale(1); }
@@ -189,9 +205,9 @@
     .auth-brand .sub { font-size: 12.5px; color: var(--text-muted); margin-top: 4px; }
     .auth-logo {
       width: 44px; height: 44px; border-radius: 11px; margin: 0 auto 12px;
-      background: linear-gradient(135deg, var(--accent), #8b5cf6);
+      background: linear-gradient(135deg, var(--accent), var(--logo-gradient-end));
       display: flex; align-items: center; justify-content: center;
-      font-size: 21px; font-weight: 700; color: #fff;
+      font-size: 21px; font-weight: 700; color: var(--on-accent);
     }
     .auth-title { font-size: 16px; font-weight: 600; margin-bottom: 16px; }
 
@@ -226,7 +242,7 @@
     }
     .btn:hover:not(:disabled) { border-color: var(--accent); }
     .btn:disabled { opacity: 0.5; cursor: not-allowed; }
-    .btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; }
+    .btn.primary { background: var(--accent); border-color: var(--accent); color: var(--on-accent); font-weight: 600; }
     .btn.primary:hover:not(:disabled) { filter: brightness(1.1); }
     .btn.block { width: 100%; margin-top: 20px; }
 
@@ -341,6 +357,14 @@
       color: transparent; font-size: 0;
     }
   </style>
+  <!-- Q49: the administrator's colour theme. It comes AFTER this page's own
+       inline stylesheet, at the same specificity, so a property it sets wins and one it
+       omits keeps the built-in value — per property, from the cascade itself,
+       with no merge logic anywhere. A render-blocking <link> rather than a
+       stylesheet inserted by script: the latter would repaint after the page
+       was already visible, which is the flash §8.4 exists to prevent. The
+       route answers 200 with an empty sheet when nothing is configured. -->
+  <link rel="stylesheet" href="/branding/theme.css">
 </head>
 <body>
 
