@@ -67,7 +67,12 @@ async function sendEmail(mailCfg, attachment, overrides = {}) {
     from:    mailCfg.from,
     to:      (overrides.to || mailCfg.to).join(', '),
     subject: overrides.subject || mailCfg.subject || defaultSubject,
-    text:    overrides.body    || mailCfg.body    || defaultBody,
+    // A covering note is APPENDED rather than substituted: it reports what this
+    // run covered (§6.8's drift line), which is not a replacement for whatever
+    // the account or the schedule chose to say.
+    text:    (overrides.body || mailCfg.body || defaultBody)
+             + (typeof overrides.coverNote === 'string' && overrides.coverNote.trim()
+                ? `\n\n${overrides.coverNote.trim()}` : ''),
   };
   const cc = (overrides.cc || mailCfg.cc || []);
   if (cc.length) msg.cc = cc.join(', ');

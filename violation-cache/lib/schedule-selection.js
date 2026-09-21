@@ -202,7 +202,53 @@ function resolveProjects({ mode, anchorUuids, portfolio } = {}) {
   return { mode: useMode, uuids, perAnchor };
 }
 
+// ── Drift ────────────────────────────────────────────────────────────────────
+/** How many removed projects the drift line names before it starts counting. */
+const MAX_DRIFT_NAMES = 10;
+
+/**
+ * One line naming how this run's covered set differs from the last one's.
+ *
+ * Q44: growth and shrinkage are not equally safe, so the covering email says
+ * which happened. A branch that is deleted, un-marked `isLatest` or archived
+ * quietly narrows the report, and nobody notices an absence — the workbook
+ * still arrives and still looks healthy. The project-summary sheets do list
+ * what was covered, but comparing two months' workbooks by hand is precisely
+ * the work this product exists to remove.
+ *
+ * Removals are named and additions are counted. That asymmetry is deliberate:
+ * a project that stopped being covered is the thing somebody has to go and
+ * look at, while a new one is self-evident in the workbook it appears in.
+ *
+ * @returns {string|null} null when nothing changed, or when there is no
+ *   baseline — a first run has not drifted from anything, and saying so would
+ *   put a line on every first report that reads like a warning.
+ */
+function describeDrift(previous, current) {
+  if (!Array.isArray(previous) || !Array.isArray(current)) return null;
+  const label = (p) => (p && p.name ? `${p.name}${p.version ? ` ${p.version}` : ''}` : (p && p.uuid) || '');
+  const before = new Map(previous.filter(p => p && p.uuid).map(p => [p.uuid, p]));
+  const after = new Map(current.filter(p => p && p.uuid).map(p => [p.uuid, p]));
+
+  const removed = [...before.keys()].filter(u => !after.has(u)).map(u => label(before.get(u)));
+  const added = [...after.keys()].filter(u => !before.has(u)).length;
+  if (!removed.length && !added) return null;
+
+  const parts = [`Projects covered: ${after.size} (was ${before.size}`];
+  if (removed.length) {
+    removed.sort();
+    // Capped, because a reorganisation can drop dozens and an unreadable wall
+    // of names is skipped rather than read. What is hidden is admitted.
+    const shown = removed.slice(0, MAX_DRIFT_NAMES);
+    const more = removed.length - shown.length;
+    parts.push(` — ${removed.length} no longer covered: ${shown.join(', ')}`);
+    if (more) parts.push(`, +${more} more`);
+  }
+  if (added) parts.push(`${removed.length ? '; ' : ' — '}${added} newly covered`);
+  return `${parts.join('')})`;
+}
+
 module.exports = {
-  SELECTION_MODES, DEFAULT_MODE, isMode,
-  isLeafNode, promoteAnchors, resolveProjects,
+  SELECTION_MODES, DEFAULT_MODE, isMode, MAX_DRIFT_NAMES,
+  isLeafNode, promoteAnchors, resolveProjects, describeDrift,
 };

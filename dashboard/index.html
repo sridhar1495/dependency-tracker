@@ -1719,6 +1719,17 @@
       <input id="cfgSchedName" class="cfg-input" maxlength="120" style="margin-bottom:4px"
              placeholder="Leave blank to name it automatically" oninput="markSchedDirty()" />
       <div class="field-error" id="cfgSchedNameErr"></div>
+      <label class="cfg-label" for="cfgSchedMode">Projects included</label>
+      <select id="cfgSchedMode" class="cfg-input" style="margin-bottom:4px;cursor:pointer"
+              onchange="onSchedModeChange()">
+        <option value="fixed">These projects</option>
+        <option value="latest_under">Latest versions under these</option>
+        <option value="latest_all">All latest in the portfolio</option>
+      </select>
+      <!-- Live, recomputed from the portfolio already in memory on every change
+           of the control above: a rule you cannot see the result of before
+           saving is one nobody can check. It is also how an operator finds out
+           how large "all latest" actually is for their own installation. -->
       <div id="cfgSchedProjects" style="font-size:11px;color:var(--text-muted);margin-top:8px"></div>
     </div>
 
@@ -2472,9 +2483,17 @@ function renderScheduleList() {
       : 'Not scheduled';
     // A schedule with no projects cannot be armed, so say what to do about it
     // rather than leaving a row that silently never fires.
-    const projects = sc.projectCount
-      ? `${sc.projectCount} project${sc.projectCount === 1 ? '' : 's'}`
-      : '<span style="color:var(--high)">No projects — re-select from the toolbar</span>';
+    // A rule-driven schedule covers a set that moves on its own, so the list
+    // says which rule rather than a count that was true once. 'latest_all'
+    // stores no anchors at all, which is why the count is not the test here.
+    const mode = sc.selectionMode || 'fixed';
+    const projects = mode === 'latest_all'
+      ? 'All latest in the portfolio'
+      : (sc.projectCount
+        ? (mode === 'latest_under'
+          ? `Latest under ${sc.projectCount} anchor${sc.projectCount === 1 ? '' : 's'}`
+          : `${sc.projectCount} project${sc.projectCount === 1 ? '' : 's'}`)
+        : '<span style="color:var(--high)">No projects — re-select from the toolbar</span>');
     // Where the report goes, so the list answers the question the per-schedule
     // recipients exist for without opening each one.
     const goesTo = (sc.to && sc.to.length)
@@ -2489,7 +2508,7 @@ function renderScheduleList() {
     // also open the editor — hence stopPropagation on the row click.
     const toggle = `<label class="cfg-toggle" style="transform:scale(0.8)" title="${sc.enabled ? 'Pause' : 'Resume'}"
              onclick="event.stopPropagation()">
-        <input type="checkbox" ${sc.enabled ? 'checked' : ''} ${sc.projectCount ? '' : 'disabled'}
+        <input type="checkbox" ${sc.enabled ? 'checked' : ''} ${(sc.projectCount || mode === 'latest_all') ? '' : 'disabled'}
                onchange="toggleSchedule('${sc.id}', this.checked)">
         <span class="cfg-toggle-slider"></span>
       </label>`;
@@ -2950,16 +2969,12 @@ async function openScheduleEditor(id = null, projects = null) {
   document.getElementById('cfgSchedDeleteBtn').hidden = !sc;
   document.getElementById('cfgSchedRunNowBtn').disabled = !sc;
 
-  const projEl = document.getElementById('cfgSchedProjects');
-  if (projects) {
-    projEl.textContent = `${projects.length} project${projects.length === 1 ? '' : 's'} will be included.`;
-  } else if (sc) {
-    projEl.textContent = sc.projectCount
-      ? `${sc.projectCount} project${sc.projectCount === 1 ? '' : 's'} included.`
-      : 'No projects yet — re-select them from the toolbar.';
-  } else {
-    projEl.textContent = '';
-  }
+  // The mode is populated BEFORE the preview reads it. A schedule written
+  // before migration 015 has no selectionMode, so the resolver's default
+  // stands in rather than an empty dropdown.
+  document.getElementById('cfgSchedMode').value =
+    (sc && SCHED_MODES.includes(sc.selectionMode)) ? sc.selectionMode : 'fixed';
+  renderSchedPreview();
 
   // A new schedule defaults to 09:00 in the READER's day, so the field opens on
   // a sensible local time. Defaulting the stored UTC fields instead would
@@ -3261,6 +3276,7 @@ function readScheduleEditor() {
     riskTypes,
     reportName: String(reportName).trim(),
     to, cc, subject, mailBody, ccEnabled,
+    selectionMode: document.getElementById('cfgSchedMode').value,
     enabled:    true,
   };
 }
@@ -3291,7 +3307,8 @@ async function saveScheduleEditor() {
     // cannot be armed — the list says so rather than the save failing.
     const id = (d.schedule && d.schedule.id) || editing;
     let armed = null;
-    if (id && d.schedule && d.schedule.projectCount) {
+    if (id && d.schedule
+        && (d.schedule.projectCount || d.schedule.selectionMode === 'latest_all')) {
       const ar = await apiFetch(`/violation-cache/schedules/${encodeURIComponent(id)}/arm`, { method: 'POST' });
       const ad = await ar.json().catch(() => ({}));
       if (ar.ok) armed = ad.nextRun;
@@ -3321,6 +3338,159 @@ async function saveScheduleEditor() {
     // Saving keeps the editor open, so the label goes back to the editor's.
     if (btn) { btn.disabled = false; btn.textContent = 'Save schedule'; }
   }
+}
+
+// ── Which projects a schedule covers (mirrors lib/schedule-selection.js) ─────
+// Hand-mirrored, like collectionChildren()/componentKeyOf()/the CWE cell: §3
+// forbids a bundler and there is no build step, so a page cannot require() a
+// lib module. A cross-file test drives both copies from one table and asserts
+// they answer identically.
+//
+// The page has an advantage the server does not: `treeRoots` and `nodeMap` are
+// already built, and `collectionChildren()` is already here — so the preview
+// reuses the dashboard's own hierarchy rather than rebuilding one.
+
+const SCHED_MODES = ['fixed', 'latest_under', 'latest_all'];
+
+function schedIsLeaf(node) {
+  return !node || !Array.isArray(node.children) || node.children.length === 0;
+}
+
+/** Every leaf under `node` that its own level's collectionLogic counts (Q43). */
+function schedLeavesUnder(node, out, seen) {
+  if (!node || seen.has(node)) return out;
+  seen.add(node);
+  if (schedIsLeaf(node)) { out.push(node); return out; }
+  for (const kid of collectionChildren(node)) schedLeavesUnder(kid, out, seen);
+  return out;
+}
+
+/** Replace a leaf anchor with its parent. Widens, so the editor says it did. */
+function schedPromoteAnchors(anchorUuids, byUuid) {
+  const out = [];
+  const seen = new Set();
+  for (const uuid of anchorUuids || []) {
+    const node = byUuid.get(uuid);
+    let target = uuid;
+    if (node && schedIsLeaf(node) && node.parentUuid && byUuid.has(node.parentUuid)) {
+      target = node.parentUuid;
+    }
+    if (!seen.has(target)) { seen.add(target); out.push(target); }
+  }
+  return out;
+}
+
+/** The server's resolveProjects(), against the tree this page already holds. */
+function schedResolve(mode, anchorUuids, roots, byUuid) {
+  const useMode = SCHED_MODES.includes(mode) ? mode : 'fixed';
+  const anchors = Array.isArray(anchorUuids) ? anchorUuids : [];
+
+  if (useMode === 'fixed') {
+    const seen = new Set();
+    const uuids = anchors.filter(u => (seen.has(u) ? false : (seen.add(u), true)));
+    return { mode: useMode, uuids, perAnchor: uuids.map(uuid => ({ uuid, count: 1 })) };
+  }
+
+  if (useMode === 'latest_all') {
+    // No anchor, so no level's collectionLogic applies — deliberately NOT the
+    // per-level rule latest_under uses.
+    const uuids = [];
+    const seen = new Set();
+    const walk = (node) => {
+      if (!node || seen.has(node)) return;
+      seen.add(node);
+      if (schedIsLeaf(node)) { if (node.isLatest === true) uuids.push(node.uuid); return; }
+      for (const kid of node.children) walk(kid);
+    };
+    for (const root of roots || []) walk(root);
+    return { mode: useMode, uuids, perAnchor: [] };
+  }
+
+  const uuids = [];
+  const claimed = new Set();
+  const perAnchor = [];
+  for (const anchorUuid of anchors) {
+    const node = byUuid.get(anchorUuid);
+    if (!node) { perAnchor.push({ uuid: anchorUuid, count: 0 }); continue; }
+    let count = 0;
+    for (const leaf of schedLeavesUnder(node, [], new Set())) {
+      if (leaf.isLatest !== true) continue;
+      count++;
+      if (!claimed.has(leaf.uuid)) { claimed.add(leaf.uuid); uuids.push(leaf.uuid); }
+    }
+    perAnchor.push({ uuid: anchorUuid, count });
+  }
+  return { mode: useMode, uuids, perAnchor };
+}
+
+/** The anchors the editor currently holds — pending from the toolbar, or stored. */
+function schedCurrentAnchors(sc) {
+  if (_schedPendingProjects) return _schedPendingProjects.map(p => p.uuid);
+  return (sc && Array.isArray(sc.projectUuids)) ? sc.projectUuids : [];
+}
+
+/**
+ * Describe what the editor's current mode resolves to, right now.
+ *
+ * Three things it must say, because each is a different question: how many
+ * projects a run would cover, WHICH anchors it descends from (promotion widens
+ * the selection, so the rows ticked and the anchors used are not the same
+ * list), and whether any anchor currently resolves to nothing — the case that
+ * would otherwise become a quietly narrower report months later.
+ */
+function schedPreviewHtml(mode, anchorUuids) {
+  if (!Array.isArray(allProjects) || allProjects.length === 0) {
+    return 'Connect DependencyTrack to preview which projects this covers.';
+  }
+  if (mode === 'fixed') {
+    const n = anchorUuids.length;
+    return n
+      ? `${n} project${n === 1 ? '' : 's'} included.`
+      : '<span style="color:var(--high)">No projects — re-select them from the toolbar.</span>';
+  }
+  if (mode === 'latest_all') {
+    const r = schedResolve('latest_all', [], treeRoots, nodeMap);
+    return `Every project marked latest &rarr; <strong>${r.uuids.length} right now</strong>.`;
+  }
+
+  const promoted = schedPromoteAnchors(anchorUuids, nodeMap);
+  if (promoted.length === 0) {
+    return '<span style="color:var(--high)">No anchors — re-select them from the toolbar.</span>';
+  }
+  const r = schedResolve('latest_under', promoted, treeRoots, nodeMap);
+  const names = promoted.map(u => (nodeMap.get(u) ? nodeMap.get(u).name : u));
+  const widened = promoted.length !== anchorUuids.length
+    || promoted.some((u, i) => u !== anchorUuids[i]);
+  const empty = r.perAnchor.filter(a => a.count === 0)
+    .map(a => (nodeMap.get(a.uuid) ? nodeMap.get(a.uuid).name : a.uuid));
+
+  let html = `${promoted.length} anchor${promoted.length === 1 ? '' : 's'}: `
+    + `${escHtml(names.join(', '))} &rarr; <strong>${r.uuids.length} project`
+    + `${r.uuids.length === 1 ? '' : 's'} right now</strong>.`;
+  if (widened) {
+    html += `<br><span style="color:var(--text-muted)">Promoted from `
+      + `${anchorUuids.length} selected version${anchorUuids.length === 1 ? '' : 's'} — `
+      + `a parent also holds its siblings.</span>`;
+  }
+  if (empty.length) {
+    html += `<br><span style="color:var(--high)">&#9888; Nothing marked latest under: `
+      + `${escHtml(empty.join(', '))}</span>`;
+  }
+  return html;
+}
+
+/** Re-render the preview. The control changes nothing until Save. */
+function onSchedModeChange() {
+  markSchedDirty();
+  renderSchedPreview();
+}
+
+function renderSchedPreview() {
+  const el = document.getElementById('cfgSchedProjects');
+  if (!el) return;
+  const modeEl = document.getElementById('cfgSchedMode');
+  const sc = _schedEditingId ? _schedules.find(x => x.id === _schedEditingId) : null;
+  el.innerHTML = schedPreviewHtml(modeEl ? modeEl.value : 'fixed', schedCurrentAnchors(sc));
 }
 
 /** Cancel one schedule. Deletes it — the list holds what is live, not husks. */
@@ -7692,6 +7862,7 @@ window.onMailToggle           = onMailToggle;
 window.updateSchedToggleState = updateSchedToggleState;
 window.onSchedFreqChange      = onSchedFreqChange;
 window.onSchedTimeChange      = onSchedTimeChange;
+window.onSchedModeChange = onSchedModeChange;
 window.openScheduleEditor     = openScheduleEditor;
 window.closeScheduleEditor    = closeScheduleEditor;
 window.saveScheduleEditor     = saveScheduleEditor;

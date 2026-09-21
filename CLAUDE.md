@@ -219,7 +219,7 @@ Inline comments use lettered prefixes to trace design decisions:
 - **O-numbers** — observability notes (`// O3: JSON log format for log aggregators`)
 - **S-numbers** — security rationale (`// S2: token hashed before storage`) — **new in revision 2**
 
-Highest numbers currently in use: **Q41, P20, O5, S34**. When adding logic with a
+Highest numbers currently in use: **Q44, P20, O5, S34**. When adding logic with a
 non-obvious trade-off, add the next number in the appropriate series. Check the
 current maximum before assigning — parallel branches can claim the same number.
 
@@ -299,7 +299,7 @@ await tx(async (client) => {
 | `app_settings` | Service-wide settings the administrator owns (singleton row) |
 | `user_settings` | Per-user report and schedule limits — `NULL` means "follow the global default" |
 | `mail_settings` | Per-user SMTP connection **and default recipients** |
-| `schedules`, `schedule_projects`, `schedule_runs` | Scheduled reports, **any number per user** (migration 009). `report_name` `NULL` means "generate one"; `name` is the label in the settings list and a different field. `schedule_runs.schedule_id` is `ON DELETE SET NULL` so cancelling never erases the record that it ran. `to_addrs`/`cc_addrs`/`subject`/`body` are delivery overrides — `NULL` means "use the account's" (migrations 010, 011). An empty `cc_addrs` means "copy nobody"; an empty `to_addrs` is refused |
+| `schedules`, `schedule_projects`, `schedule_runs` | Scheduled reports, **any number per user** (migration 009). `report_name` `NULL` means "generate one"; `name` is the label in the settings list and a different field. `schedule_runs.schedule_id` is `ON DELETE SET NULL` so cancelling never erases the record that it ran. `to_addrs`/`cc_addrs`/`subject`/`body` are delivery overrides — `NULL` means "use the account's" (migrations 010, 011). An empty `cc_addrs` means "copy nobody"; an empty `to_addrs` is refused. `selection_mode` (migration 015) says how the `schedule_projects` rows are READ: `fixed` = the projects themselves (the default, so nothing existing changed), `latest_under` = **anchors** to descend from, `latest_all` = ignored entirely, which is why an empty project list stopped meaning "not configured yet". `schedule_runs.resolved_project_count`/`resolved_projects` record what each run actually covered, because under a rule that set moves on its own |
 | `reports`, `report_file_chunks` | Report metadata and file bytes |
 | `violation_caches` | Shared violation cache, keyed by connection fingerprint |
 | `risk_snapshots` | One row per connection per day, written when a violation-cache build completes; the history behind the trend view (migration 012). Keyed by fingerprint for the same reason the cache is, so accounts sharing a connection share one series. Stores the severity counts and the policy counts **separately** — "critical" means two different things in this product and a schema that accretes history must not decide which one a graph plots. **No foreign key to `violation_caches`**: a cache row is a 24-hour artefact that housekeeping deletes as a matter of routine, and a cascade would let that destroy a year of measurements |
@@ -970,6 +970,48 @@ if (method === 'GET' && path === '/violation-cache/status') {
   portfolio the violation cache and the dashboard use. It omitted
   `excludeInactive`, so a scheduled workbook could cover archived projects that
   appear nowhere on the screen the report is meant to summarise.
+- **A schedule may store a RULE rather than a list** (migration 015,
+  `lib/schedule-selection.js`). `selection_mode` is `fixed`, `latest_under` or
+  `latest_all`, resolved fresh on every run against the sweep above — which is
+  the whole point: every release moves which version DependencyTrack marks
+  `isLatest`, and a frozen list had to be rebuilt by hand each time, silently
+  reporting the previous release until somebody did.
+  - **The resolver is pure and the cap is not in it.** How many projects a run
+    may crawl is a deployment concern with `SCHEDULE_MAX_RESOLVED_PROJECTS`
+    behind it; a fold that reads `process.env` is neither pure nor testable, so
+    the scheduler applies the ceiling to what the resolver returns. It
+    **refuses, never truncates**: a workbook quietly covering the first 250 of
+    400 projects says nothing on its face about the 150 it left out (§13).
+  - **Q42: a group is traversed, never reported on.** A group row's figures on
+    the dashboard are its children's sum rather than its own (Q35), the three
+    policy categories come from our own violation crawl bucketed by uuid so an
+    organisational parent has nothing to report, and including one would put
+    findings in the workbook that the dashboard row does not account for. The
+    cost is inherited from Q35 rather than introduced here: a group carrying
+    its **own** SBOM has its own findings excluded from both.
+  - **Q43: the descent applies `collectionChildren()` at every level**, not just
+    the anchor's — the same function the dashboard's roll-up uses (Q39), already
+    hand-mirrored in `index.html`. So a report covers exactly the projects the
+    group row on screen is summarising, which is the contradiction this exists
+    to prevent. A consequence to know rather than discover: under `LATEST` a
+    child that is itself a group is excluded (§8.7), so anchoring on a
+    "latest only" parent containing sub-groups stops at its direct latest
+    leaves. **`latest_all` deliberately does NOT use that rule** — with no
+    anchor there is no parent whose configuration could say which children to
+    count, and rolling up from every root would silently drop everything
+    beneath a `LATEST` root, which is the opposite of what "all latest" means.
+  - **Q44: the covering email names what left.** Growth and shrinkage are not
+    equally safe. Growth is benign; shrinkage is a blind spot, because a
+    deleted branch or an un-marked `isLatest` narrows the report while the
+    workbook still arrives and still looks healthy. `describeDrift()` diffs
+    against the last **successful** run — a failed one as baseline would report
+    every project as newly covered the run after any failure — and **names
+    removals while merely counting additions**: a project that stopped being
+    covered is what somebody has to go and look at.
+  - **Promotion of a leaf anchor to its parent lives in the resolver**, not the
+    browser, so the editor's preview and the run cannot disagree about what was
+    anchored. It **widens** the selection (a parent also holds its siblings), so
+    the editor says that it did rather than doing it silently.
 - Scheduled reports are built in memory and emailed; they are never written to disk.
 
 ### 6.9 Email (`nodemailer`)
@@ -2533,6 +2575,38 @@ Running the browser checks in CI was on this list and is now the `e2e` job.
   non-array `values`. A regression test pins the defect itself: a full v5 page
   read the old way yields 0 rows and ends the sweep, read the new way yields
   500 and pages on.
+- Latest-only scheduling (§6.8, migration 015): the resolver across all four
+  collection modes **composed per level**, with `latest_under` and `latest_all`
+  deliberately disagreeing about a latest project under an uncounted group —
+  that disagreement is the design, so it is asserted rather than left implicit;
+  groups traversed but never returned, tested against a group that **is** marked
+  latest, because otherwise the leaves-only rule holds only by accident (a
+  versioned collection project is a real DT shape, and mutation testing is what
+  surfaced this); an empty `collectionTag` matching nothing; a leaf anchor
+  resolving to itself; `perAnchor` reporting zero for a dead branch and for an
+  anchor DT no longer knows; promotion widening to the parent, leaving a group
+  alone **nested or not**, and passing an unknown anchor through rather than
+  swallowing it. **And the two copies against each other**: `index.html`'s
+  mirror is driven from one table of modes and anchors and must answer
+  identically, `uuids` and `perAnchor` alike — the same cross-file guard
+  `collectionChildren` and `componentKeyOf` already carry.
+  On the page: that the dropdown offers exactly the modes the resolver knows,
+  that the mode is set **before** the preview that reads it, that the handler
+  marks the drill-down dirty rather than Settings (§8.1) and is
+  window-exported, that a row written before migration 015 falls back to
+  `fixed`, that the preview issues no network call, and that **all four
+  `projectCount` gates** are mode-aware — the list label, the enable toggle,
+  arm-on-save and the preview — since `latest_all` stores no anchors and each
+  gate alone would have left it listed as broken and never armed.
+  The database tier pins the CHECK constraint, each mode round-tripping, the
+  resolved list reading back as objects, a run that never resolved storing NULL
+  rather than an empty array, and that the drift baseline is the last
+  **successful** run and never the asking run itself. The end-to-end tier is
+  what proves it joined up: a schedule anchored on the stub's real `LATEST`
+  collection root delivers a workbook covering its latest child, not its stale
+  one and not the anchor — "the rule was applied" and "the rule was ignored"
+  produce visibly different workbooks — and a `latest_all` schedule arms with
+  no stored anchors at all.
 - **Authorisation:** every route rejects a missing or invalid token with 401;
   cross-user access returns 404; the profile endpoint ignores login ID and email.
 - **The documentation, against the application it documents.** Prose drifts
@@ -2707,6 +2781,7 @@ aspirations, and each is verifiable.
 | `REPORT_CONCURRENCY` | server | Max parallel project fetches (default 5) |
 | `SCHEDULER_CONCURRENCY` | server | Scheduled reports building at once, across all accounts (default 5). One account's own schedules always run one at a time regardless. Upstream load is this × `REPORT_CONCURRENCY` |
 | `VIOLATION_CONCURRENCY` | server | Max parallel violation fetches (default 3) |
+| `SCHEDULE_MAX_RESOLVED_PROJECTS` | server | The most projects one scheduled run may cover (default 250). Only a schedule storing a **rule** can reach it — a rule grows on its own as branches appear under its anchors. Over the limit the run is refused, never truncated |
 | `LOG_FORMAT` | server | `text` (default) or `json` |
 | `TEST_DATABASE_URL` | tests | Enables the database integration tier |
 

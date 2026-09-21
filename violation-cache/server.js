@@ -167,7 +167,10 @@ reports.configure({
 // How many scheduled reports may build at once, across all accounts. The total
 // load this puts on DependencyTrack is this times reportConcurrency, so the two
 // are read from the same place and tuned together.
-scheduler.configure({ schedulerConcurrency: cfg.schedulerConcurrency });
+scheduler.configure({
+  schedulerConcurrency: cfg.schedulerConcurrency,
+  scheduleMaxResolvedProjects: cfg.scheduleMaxResolvedProjects,
+});
 
 // Context handed to every route module. Per-user values are never put here —
 // module scope holds only genuinely global state (CLAUDE.md §7.5).

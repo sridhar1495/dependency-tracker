@@ -3137,3 +3137,112 @@ describe('dependency-path cache', { skip: !ENABLED && 'TEST_DATABASE_URL not set
     await pool.query('DELETE FROM dependency_paths WHERE fingerprint = $1', [conn.fingerprint]);
   });
 });
+
+// ── Latest-only scheduling: migration 015 against a real PostgreSQL ──────────
+describe('schedule selection mode (migration 015)',
+  { skip: !ENABLED && 'TEST_DATABASE_URL not set' }, () => {
+  let pool, users, schedules, dtCrypto;
+
+  before(async () => {
+    pool = require('./db/pool');
+    if (!pool.isReady()) {
+      const url = new URL(DB_URL);
+      process.env.POSTGRES_HOST     = url.hostname;
+      process.env.POSTGRES_PORT     = url.port || '5432';
+      process.env.POSTGRES_USER     = decodeURIComponent(url.username);
+      process.env.POSTGRES_PASSWORD = decodeURIComponent(url.password) || 'x';
+      process.env.POSTGRES_DB       = url.pathname.replace(/^\//, '');
+      const { parseConfig } = require('./lib/config');
+      pool.init(parseConfig(process.env).db);
+      await migrate({ pool: pool.getPool(), dir: MIGRATIONS_DIR });
+    }
+    users     = require('./lib/users');
+    schedules = require('./lib/schedules');
+    dtCrypto  = require('./lib/crypto');
+  });
+
+  let owner;
+  before(async () => {
+    owner = await users.create({
+      loginId: 'selmode', email: 'selmode@example.com',
+      firstName: 'Sel', lastName: 'Mode',
+      passwordHash: await dtCrypto.hashPassword('correcthorsebattery'),
+    });
+  });
+  after(async () => { if (owner) await users.deleteById(owner.id); });
+
+  const mk = (over = {}) => schedules.create(owner.id, {
+    name: 'test', frequency: 'daily', hour: 9, minute: 0,
+    riskTypes: ['security'], enabled: true, ...over,
+  });
+
+  test('an existing schedule defaults to fixed, so nothing changes what it covers', async () => {
+    const sc = await mk();
+    const fresh = await schedules.get(owner.id, sc.id);
+    assert.equal(fresh.selectionMode, 'fixed');
+  });
+
+  test('the database refuses a mode the resolver cannot resolve', async () => {
+    const sc = await mk();
+    await assert.rejects(
+      () => pool.query('UPDATE schedules SET selection_mode = $2 WHERE id = $1', [sc.id, 'latest']),
+      /schedules_selection_mode/,
+      'the CHECK is the second statement of the rule, after normalise()');
+  });
+
+  test('each valid mode round-trips', async () => {
+    for (const mode of require('./lib/schedule-selection').SELECTION_MODES) {
+      const sc = await mk({ selectionMode: mode });
+      assert.equal((await schedules.get(owner.id, sc.id)).selectionMode, mode, mode);
+    }
+  });
+
+  test('a run records the projects it covered, and reads back as objects', async () => {
+    const sc = await mk({ selectionMode: 'latest_under' });
+    const runId = await schedules.startRun(owner.id, sc.id);
+    const covered = [
+      { uuid: '11111111-1111-4111-8111-111111111111', name: 'alpha', version: '1.0' },
+      { uuid: '22222222-2222-4222-8222-222222222222', name: 'beta', version: '2.0' },
+    ];
+    await schedules.completeRun(runId, { status: 'success', fileSizeBytes: 10, resolvedProjects: covered });
+    const { rows } = await pool.query(
+      'SELECT resolved_project_count, resolved_projects FROM schedule_runs WHERE id = $1', [runId]);
+    assert.equal(rows[0].resolved_project_count, 2);
+    assert.deepEqual(rows[0].resolved_projects, covered, 'jsonb round-trips without a parse step');
+  });
+
+  test('a run that resolved nothing stores NULL, not an empty array', async () => {
+    const sc = await mk();
+    const runId = await schedules.startRun(owner.id, sc.id);
+    await schedules.completeRun(runId, { status: 'failed', error: 'nope' });
+    const { rows } = await pool.query(
+      'SELECT resolved_project_count FROM schedule_runs WHERE id = $1', [runId]);
+    assert.equal(rows[0].resolved_project_count, null,
+      'a run that never resolved is different from one that resolved zero');
+  });
+
+  test('the drift baseline is the last SUCCESSFUL run, not merely the last one', async () => {
+    const sc = await mk({ selectionMode: 'latest_all' });
+    const good = await schedules.startRun(owner.id, sc.id);
+    const first = [{ uuid: '33333333-3333-4333-8333-333333333333', name: 'gamma', version: '1' }];
+    await schedules.completeRun(good, { status: 'success', resolvedProjects: first });
+
+    // A failure in between must not become the baseline, or the run after any
+    // failure would report every project as newly covered.
+    const bad = await schedules.startRun(owner.id, sc.id);
+    await schedules.completeRun(bad, { status: 'failed', error: 'x', resolvedProjects: [] });
+
+    const now = await schedules.startRun(owner.id, sc.id);
+    assert.deepEqual(await schedules.lastResolvedProjects(sc.id, now), first);
+  });
+
+  test('the baseline excludes the run asking for it', async () => {
+    const sc = await mk({ selectionMode: 'latest_all' });
+    const runId = await schedules.startRun(owner.id, sc.id);
+    await schedules.completeRun(runId, {
+      status: 'success', resolvedProjects: [{ uuid: 'u', name: 'n', version: '1' }],
+    });
+    assert.equal(await schedules.lastResolvedProjects(sc.id, runId), null,
+      'a run must not diff against itself');
+  });
+});

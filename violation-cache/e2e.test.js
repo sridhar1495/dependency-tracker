@@ -1849,3 +1849,87 @@ describe('e2e — the dashboard in a real browser', { skip: BROWSER_SKIP }, () =
     assert.deepEqual(errors, []);
   });
 });
+
+// ── Latest-only scheduling, end to end (PR 2) ────────────────────────────────
+describe('e2e — a latest-only schedule delivers the projects the rule resolves to',
+  { skip: SKIP }, () => {
+  // The unit tests prove the resolver; this proves the whole path — a stored
+  // rule, resolved against a live sweep at run time, reaching an inbox with the
+  // right projects in it. The stub's Collection 4 is a real
+  // AGGREGATE_LATEST_VERSION_CHILDREN root over a stale child and a latest one,
+  // so "the rule was applied" and "the rule was ignored" produce visibly
+  // different workbooks rather than the same one.
+  let token, collection, latestChild, staleChild;
+
+  before(async () => {
+    if (!ENABLED) return;
+    token = await api.signUp(account('latestonly'));
+    await api.saveConnection(token, { apiUrl: dt.url, apiKey: dt.apiKey });
+    await api.saveMail(token, {
+      enabled: true, from: 'dashboard@example.com', to: 'latestonly@example.com',
+      subject: 'Latest only', body: 'Attached.',
+      smtp: { host: stack.smtp.host, port: stack.smtp.port, secure: false, user: 'u', pass: 'p' },
+    });
+    const all = await (await fetch(`${dt.url}/api/v1/project?onlyRoot=false`,
+      { headers: { 'X-Api-Key': dt.apiKey } })).json();
+    const list = Array.isArray(all) ? all : all.values;
+    collection  = list.find(p => p.collectionLogic === 'AGGREGATE_LATEST_VERSION_CHILDREN');
+    assert.ok(collection, 'the stub must still carry a LATEST collection root');
+    const kids = list.filter(p => p.parent && p.parent.uuid === collection.uuid);
+    latestChild = kids.find(p => p.isLatest === true);
+    staleChild  = kids.find(p => p.isLatest !== true);
+    assert.ok(latestChild && staleChild, 'and a latest child beside a stale one');
+  }, { timeout: 60_000 });
+
+  test('an anchored rule covers the latest child and not the stale one', async () => {
+    const created = await api.createSchedule(token, {
+      name: 'latest-under', frequency: 'daily', hour: 9, minute: 0,
+      riskTypes: ['security'],
+      selectionMode: 'latest_under',
+      // The ANCHOR, not the target. Nothing here names service-402.
+      projects: [{ uuid: collection.uuid, name: collection.name, version: collection.version || '' }],
+    });
+    assert.ok(created.status < 300, `${created.status} ${JSON.stringify(created.json)}`);
+    assert.equal(created.json.schedule.selectionMode, 'latest_under',
+      'the mode must survive the round trip, or the run resolves as fixed');
+
+    const r = await api.post(
+      `/violation-cache/schedules/${created.json.schedule.id}/run-now`, {}, token);
+    assert.ok(r.status < 300, `Send now answered ${r.status} ${JSON.stringify(r.json)}`);
+
+    const mail = await stack.smtp.waitFor('latestonly@example.com', 120_000);
+    assert.ok(mail, 'the scheduled report never reached SMTP');
+    const bytes = xlsxFromMime(mail.data);
+    assert.ok(bytes, 'no xlsx attachment was found in the delivered message');
+    const wb = new (require('exceljs').Workbook)();
+    await wb.xlsx.load(bytes);
+
+    const ws = wb.getWorksheet('SV_Project Summary');
+    assert.ok(ws, 'the workbook must carry the security project summary');
+    const names = [];
+    ws.eachRow((row, n) => { if (n > 1) names.push(String(row.getCell(2).value || '')); });
+
+    assert.ok(names.includes(latestChild.name),
+      `the latest child ${latestChild.name} must be covered; got ${JSON.stringify(names)}`);
+    assert.ok(!names.includes(staleChild.name),
+      `the stale child ${staleChild.name} must NOT be covered; got ${JSON.stringify(names)}`);
+    assert.ok(!names.includes(collection.name),
+      'the anchor is traversed, never reported on (Q42)');
+  }, { timeout: 180_000 });
+
+  test('a rule schedule arms with no stored anchors at all (latest_all)', async () => {
+    // latest_all stores nothing in schedule_projects, which used to mean "not
+    // configured yet" — the route would refuse to arm it and it would never run.
+    const created = await api.createSchedule(token, {
+      name: 'latest-all', frequency: 'daily', hour: 10, minute: 0,
+      riskTypes: ['security'], selectionMode: 'latest_all', projects: [],
+    });
+    assert.ok(created.status < 300, `${created.status} ${JSON.stringify(created.json)}`);
+    assert.equal(created.json.schedule.projectCount, 0, 'no anchors are stored by design');
+
+    const armed = await api.post(
+      `/violation-cache/schedules/${created.json.schedule.id}/arm`, {}, token);
+    assert.ok(armed.status < 300,
+      `arming a latest_all schedule answered ${armed.status} ${JSON.stringify(armed.json)}`);
+  }, { timeout: 60_000 });
+});

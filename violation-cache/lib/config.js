@@ -23,6 +23,7 @@ const DEFAULTS = {
   REPORT_CONCURRENCY:        '5',
   VIOLATION_CONCURRENCY:     '3',
   SCHEDULER_CONCURRENCY:     '5',
+  SCHEDULE_MAX_RESOLVED_PROJECTS: '250',
   VIOLATION_JOB_STALL_MINUTES: '15',
   SNAPSHOT_RETENTION_DAYS:   '400',
   POSTGRES_HOST:             'dt-postgres',
@@ -113,6 +114,12 @@ function parseConfig(env) {
     // knowing where DT's knee is buys 5xx responses and retries, not speed.
     // Capped at 50 for the same reason the other two are.
     schedulerConcurrency: positiveInt(env, 'SCHEDULER_CONCURRENCY', { min: 1, max: 50 }),
+    // How many projects one scheduled run may resolve to. A rule-driven
+    // schedule grows on its own as branches are added under its anchors, so
+    // this is what keeps §13's "no unbounded upstream work" true for a
+    // selection nobody is editing.
+    scheduleMaxResolvedProjects:
+      positiveInt(env, 'SCHEDULE_MAX_RESOLVED_PROJECTS', { min: 1, max: 5000 }),
 
     // How long a violation-cache build may go WITHOUT advancing a page before it
     // is presumed wedged. This is not a cap on how long a build may take: a

@@ -26,6 +26,7 @@ const branding = require('./branding');
 // the single rule for what a report is called, shared with the manual path.
 const reports = require('./reports');
 const { collectReportData } = reports;
+const scheduleSelection = require('./schedule-selection');
 const schedulesDb = require('./schedules');
 const mailSettings = require('./mail-settings');
 const dtConnections = require('./dt-connections');
@@ -40,12 +41,27 @@ const STALE_CLAIM_MINS  = 45;      // longer than the 30-minute report watchdog
 const FALLBACK_CONCURRENCY = 5;
 let _maxConcurrent = FALLBACK_CONCURRENCY;
 
+// How many projects one run may resolve to (SCHEDULE_MAX_RESOLVED_PROJECTS,
+// default 250). A fixed list is bounded by whoever built it; a RULE is not —
+// a branch added under an anchor grows the set with nobody touching the
+// schedule, which is the unbounded upstream work §13 forbids. The limit
+// REFUSES rather than truncates: a workbook quietly covering the first 250 of
+// 400 projects says nothing on its face about the 150 it left out.
+const FALLBACK_MAX_RESOLVED = 250;
+let _maxResolvedProjects = FALLBACK_MAX_RESOLVED;
+
 /** Set the pool ceiling. Called once from the boot sequence. */
-function configure({ schedulerConcurrency } = {}) {
+function configure({ schedulerConcurrency, scheduleMaxResolvedProjects } = {}) {
   if (Number.isInteger(schedulerConcurrency) && schedulerConcurrency > 0) {
     _maxConcurrent = schedulerConcurrency;
   }
+  if (Number.isInteger(scheduleMaxResolvedProjects) && scheduleMaxResolvedProjects > 0) {
+    _maxResolvedProjects = scheduleMaxResolvedProjects;
+  }
 }
+
+/** The resolution ceiling currently in force, for the config route to report. */
+function maxResolvedProjects() { return _maxResolvedProjects; }
 function maxConcurrent() { return _maxConcurrent; }
 
 let _pollTimer    = null;
@@ -193,6 +209,10 @@ async function runScheduledJob(schedule, { manual = false } = {}) {
   const scheduleId = schedule.id;
   const runId      = await schedulesDb.startRun(userId, scheduleId);
   let fileSize     = null;
+  // Hoisted so the failure path can record what a run was covering when it
+  // died — a rule that resolved to the wrong set is exactly the thing somebody
+  // reading a failed run needs to see.
+  let resolved     = null;
 
   try {
     const conn = await dtConnections.getResolved(userId);
@@ -201,12 +221,20 @@ async function runScheduledJob(schedule, { manual = false } = {}) {
     }
 
     const selected = await schedulesDb.getProjects(userId, scheduleId);
-    if (selected.length === 0) throw new Error('No projects are selected for this schedule.');
+    const mode = scheduleSelection.isMode(schedule.selectionMode)
+      ? schedule.selectionMode : scheduleSelection.DEFAULT_MODE;
+    // 'latest_all' stores no anchors at all, so an empty list stopped meaning
+    // "not configured yet" the moment migration 015 landed. Every other mode
+    // still needs something to start from.
+    if (selected.length === 0 && mode !== 'latest_all') {
+      throw new Error('No projects are selected for this schedule.');
+    }
 
-    // Resolve stored UUIDs against live DT data — a project may have been
-    // removed since the schedule was created.
-    const wanted = new Set(selected.map(p => p.uuid));
-    const projects = [];
+    // The whole portfolio, then resolve. A rule cannot be resolved page by page
+    // — `latest_under` has to see a project's descendants before it knows
+    // whether to count it — so the sweep collects first and decides after. It
+    // is still ONE paged sweep, never a request per parent (Q34).
+    const portfolio = [];
     let page = 1;
     while (true) {
       // `excludeInactive=true` matches the violation-cache sweep and the
@@ -226,17 +254,43 @@ async function runScheduledJob(schedule, { manual = false } = {}) {
       // reported as a selection problem. Q34 is the same defect one layer
       // up, found the same way.
       const batch = Array.isArray(json) ? json : (Array.isArray(json?.values) ? json.values : []);
-      for (const p of batch) {
-        if (wanted.has(p.uuid)) projects.push({ uuid: p.uuid, name: p.name, version: p.version || '' });
-      }
+      for (const p of batch) portfolio.push(p);
       if (batch.length < 500) break;
       page++;
     }
+
+    const anchors = selected.map(p => p.uuid);
+    const resolution = scheduleSelection.resolveProjects({ mode, anchorUuids: anchors, portfolio });
+    const byUuid = new Map(portfolio.map(p => [p.uuid, p]));
+    const projects = resolution.uuids
+      .filter(uuid => byUuid.has(uuid))
+      .map((uuid) => {
+        const p = byUuid.get(uuid);
+        return { uuid, name: p.name, version: p.version || '' };
+      });
+    resolved = projects;
+
     if (projects.length === 0) {
-      throw new Error('None of the selected projects were found in DependencyTrack.');
+      // Said in the mode's own terms. "None of the selected projects were
+      // found" is true for `fixed` and actively misleading for a rule, where
+      // nothing was selected in the first place — the anchors resolved to
+      // nothing, which is a different thing to go and look at.
+      throw new Error(mode === 'fixed'
+        ? 'None of the selected projects were found in DependencyTrack.'
+        : 'This schedule\'s project rule currently matches no projects in DependencyTrack.');
+    }
+    // §13 forbids unbounded upstream work, and a rule can grow without anyone
+    // touching the schedule. Refused rather than truncated: a report that
+    // quietly covers the first N of 400 projects is worse than one that does
+    // not arrive, because nothing on it says it is partial.
+    if (projects.length > _maxResolvedProjects) {
+      throw new Error(
+        `This schedule resolves to ${projects.length} projects, over the limit of `
+        + `${_maxResolvedProjects}. Narrow the selection, or ask your administrator to raise `
+        + 'SCHEDULE_MAX_RESOLVED_PROJECTS.');
     }
     log('info', 'Scheduled report starting', {
-      userId, scheduleId, selected: selected.length, resolved: projects.length,
+      userId, scheduleId, mode, anchors: anchors.length, resolved: projects.length,
     });
 
     const riskTypes  = (schedule.riskTypes && schedule.riskTypes.length)
@@ -254,7 +308,20 @@ async function runScheduledJob(schedule, { manual = false } = {}) {
       // The same naming rule manual reports use. A schedule with a name sends
       // it verbatim on every run; without one it keeps the timestamped form.
       const filename = reports.reportFilename(schedule.reportName, 'scheduled_report');
-      await sendEmail(mail, { filename, content: buffer }, { appTitle });
+      // Only a rule-driven schedule can drift: a fixed list covers what it was
+      // told to, and a diff line on one would be noise on every run.
+      let coverNote = null;
+      if (mode !== 'fixed') {
+        try {
+          const previous = await schedulesDb.lastResolvedProjects(scheduleId, runId);
+          coverNote = scheduleSelection.describeDrift(previous, projects);
+        } catch (e) {
+          // A missing diff costs a line in an email. Failing the report over it
+          // would be a strictly worse trade for everyone the report is for.
+          log('warn', `Could not compute schedule drift: ${e.message}`, { userId, scheduleId });
+        }
+      }
+      await sendEmail(mail, { filename, content: buffer }, { appTitle, coverNote });
       log('info', 'Scheduled report emailed', {
         userId, scheduleId, bytes: buffer.length,
         // Recipient counts, never addresses — a log line is not the place for
@@ -267,7 +334,9 @@ async function runScheduledJob(schedule, { manual = false } = {}) {
         { userId, scheduleId });
     }
 
-    await schedulesDb.completeRun(runId, { status: 'success', fileSizeBytes: fileSize });
+    await schedulesDb.completeRun(runId, {
+      status: 'success', fileSizeBytes: fileSize, resolvedProjects: resolved,
+    });
     await schedulesDb.finishRun(scheduleId, {
       status: 'success', nextRunAt: nextRunAfter(schedule, manual),
     });
@@ -275,7 +344,9 @@ async function runScheduledJob(schedule, { manual = false } = {}) {
 
   } catch (err) {
     log('error', `Scheduled report failed: ${err.message}`, { userId, scheduleId });
-    await schedulesDb.completeRun(runId, { status: 'failed', error: err.message, fileSizeBytes: fileSize });
+    await schedulesDb.completeRun(runId, {
+      status: 'failed', error: err.message, fileSizeBytes: fileSize, resolvedProjects: resolved,
+    });
     await schedulesDb.finishRun(scheduleId, {
       status: 'failed', error: err.message, nextRunAt: nextRunAfter(schedule, manual),
     });
@@ -425,8 +496,8 @@ function isRunning() { return _running > 0; }
 function runningCount() { return _running; }
 
 module.exports = {
-  configure, maxConcurrent,
+  configure, maxConcurrent, maxResolvedProjects,
   calcNextRun, nextRunAfter, applyScheduleRecipients, runScheduledJob,
   fill, tick, start, stop, isRunning, runningCount,
-  POLL_INTERVAL_MS, STALE_CLAIM_MINS, FALLBACK_CONCURRENCY,
+  POLL_INTERVAL_MS, STALE_CLAIM_MINS, FALLBACK_CONCURRENCY, FALLBACK_MAX_RESOLVED,
 };
