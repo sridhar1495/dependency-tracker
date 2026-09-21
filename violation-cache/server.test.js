@@ -6929,3 +6929,200 @@ describe("the scheduler's project sweep (page shape and portfolio)", () => {
     assert.equal(now(page).length, 500, 'the fix: a full page, so the loop pages on');
   });
 });
+
+// ── Which projects a schedule covers (PR 2) ──────────────────────────────────
+// `lib/schedule-selection.js` turns a stored RULE into the list of projects one
+// run reports on. Pure, so every mode is driven here with no database.
+
+describe('schedule selection — resolving a rule to projects', () => {
+  const sel = require('./lib/schedule-selection');
+
+  // One portfolio, exercising all four collection modes at two depths.
+  //
+  //  g1  DIRECT          svcA1(-)  svcA2(latest)  g1a LATEST → svcB1(-) svcB2(latest)
+  //  g2  LATEST          svcC1(latest)  svcC2(-)  g2a(group, not latest) → svcD1(latest)
+  //  g3  WITH_TAG 'prod' svcE(latest, tag prod)   svcF(latest, no tag)
+  //  solo                a childless top-level project, marked latest
+  const P = (uuid, parent, extra = {}) => ({
+    uuid, name: uuid, version: '1.0', parent: parent ? { uuid: parent } : null, ...extra,
+  });
+  const LATEST = { isLatest: true };
+  const PORTFOLIO = [
+    P('g1', null, { collectionLogic: 'AGGREGATE_DIRECT_CHILDREN' }),
+    P('svcA1', 'g1'),
+    P('svcA2', 'g1', LATEST),
+    P('g1a', 'g1', { collectionLogic: 'AGGREGATE_LATEST_VERSION_CHILDREN' }),
+    P('svcB1', 'g1a'),
+    P('svcB2', 'g1a', LATEST),
+    // A GROUP that is itself marked latest. DependencyTrack allows a collection
+    // project to carry a version, so "is a leaf" and "is latest" are genuinely
+    // independent — without this the leaves-only rule would only ever be tested
+    // incidentally, by groups happening not to be latest.
+    P('g1b', 'g1', { isLatest: true, collectionLogic: 'AGGREGATE_DIRECT_CHILDREN' }),
+    P('svcG', 'g1b', LATEST),
+
+    P('g2', null, { collectionLogic: 'AGGREGATE_LATEST_VERSION_CHILDREN' }),
+    P('svcC1', 'g2', LATEST),
+    P('svcC2', 'g2'),
+    P('g2a', 'g2'),                       // a GROUP: no version, so DT says not-latest
+    P('svcD1', 'g2a', LATEST),
+
+    P('g3', null, { collectionLogic: 'AGGREGATE_DIRECT_CHILDREN_WITH_TAG', collectionTag: 'prod' }),
+    P('svcE', 'g3', { isLatest: true, tags: ['prod'] }),
+    P('svcF', 'g3', LATEST),
+
+    P('solo', null, LATEST),
+  ];
+  const resolve = (mode, anchorUuids) =>
+    sel.resolveProjects({ mode, anchorUuids, portfolio: PORTFOLIO }).uuids.sort();
+
+  test('fixed returns exactly what was stored, deduped, without reading the portfolio', () => {
+    const r = sel.resolveProjects({ mode: 'fixed', anchorUuids: ['x', 'y', 'x'], portfolio: null });
+    assert.deepEqual(r.uuids, ['x', 'y'], 'a fixed schedule is not resolved against anything');
+  });
+
+  test('an unknown mode falls back to fixed rather than resolving something else', () => {
+    for (const bad of ['latest', 'LATEST_ALL', '', null, undefined, 7]) {
+      const r = sel.resolveProjects({ mode: bad, anchorUuids: ['x'], portfolio: PORTFOLIO });
+      assert.equal(r.mode, 'fixed', JSON.stringify(bad));
+      assert.deepEqual(r.uuids, ['x']);
+    }
+  });
+
+  test('latest_all is every leaf marked latest, and no group', () => {
+    assert.deepEqual(resolve('latest_all', []),
+      ['solo', 'svcA2', 'svcB2', 'svcC1', 'svcD1', 'svcE', 'svcF', 'svcG'],
+      'g1b is marked latest but is a group, so it is descended into, not reported');
+  });
+
+  test('latest_under descends through a group and applies each level\'s OWN logic', () => {
+    // g1 is DIRECT, so g1a is counted; g1a is LATEST, so only svcB2 of its own.
+    assert.deepEqual(resolve('latest_under', ['g1']), ['svcA2', 'svcB2', 'svcG']);
+  });
+
+  test('under LATEST a child GROUP is excluded, and takes its subtree with it', () => {
+    // g2a has no version, so DT reports isLatest:false — the documented cost of
+    // matching what the dashboard shows for that same row (§8.7).
+    assert.deepEqual(resolve('latest_under', ['g2']), ['svcC1'],
+      'svcD1 is latest but sits under a group g2 does not count');
+  });
+
+  test('the two modes deliberately disagree about svcD1, and that is the design', () => {
+    // latest_all has no anchor, so no level's collectionLogic applies to it.
+    assert.ok(resolve('latest_all', []).includes('svcD1'), 'reached by "every latest leaf"');
+    assert.ok(!resolve('latest_under', ['g2']).includes('svcD1'), 'not counted by g2 itself');
+  });
+
+  test('WITH_TAG counts only tagged children', () => {
+    assert.deepEqual(resolve('latest_under', ['g3']), ['svcE']);
+  });
+
+  test('an empty collectionTag under WITH_TAG matches nothing, not everything', () => {
+    const portfolio = PORTFOLIO.map(p =>
+      (p.uuid === 'g3' ? { ...p, collectionTag: '' } : p));
+    const r = sel.resolveProjects({ mode: 'latest_under', anchorUuids: ['g3'], portfolio });
+    assert.deepEqual(r.uuids, [], 'the parent asked to filter; summing it all is not a fallback');
+  });
+
+  test('groups never appear in the result — leaves only (Q42)', () => {
+    const all = resolve('latest_all', []).concat(resolve('latest_under', ['g1', 'g2', 'g3']));
+    for (const group of ['g1', 'g1a', 'g1b', 'g2', 'g2a', 'g3']) {
+      assert.ok(!all.includes(group), `${group} is traversed, never reported on`);
+    }
+    // g1b is the one that matters: it IS marked latest, so only the leaf rule
+    // keeps it out. Every other group here would be excluded anyway.
+    assert.ok(all.includes('svcG'), 'its child is reported, which is how we know it was descended into');
+  });
+
+  test('an anchor that is itself a leaf resolves to itself when latest', () => {
+    assert.deepEqual(resolve('latest_under', ['solo']), ['solo']);
+    assert.deepEqual(resolve('latest_under', ['svcA1']), [], 'a leaf that is not latest yields nothing');
+  });
+
+  test('overlapping anchors yield each project once, but each anchor reports its own count', () => {
+    const r = sel.resolveProjects({
+      mode: 'latest_under', anchorUuids: ['g1', 'g1a'], portfolio: PORTFOLIO,
+    });
+    assert.deepEqual(r.uuids.sort(), ['svcA2', 'svcB2', 'svcG'], 'svcB2 once, not twice');
+    assert.deepEqual(r.perAnchor, [{ uuid: 'g1', count: 3 }, { uuid: 'g1a', count: 1 }],
+      'a shared subtree still counts under the second anchor');
+  });
+
+  test('perAnchor reports zero for a branch with nothing latest, and for a missing anchor', () => {
+    const portfolio = PORTFOLIO.map(p => (p.uuid === 'svcA2' ? { ...p, isLatest: false } : p));
+    const r = sel.resolveProjects({
+      mode: 'latest_under', anchorUuids: ['g1a', 'nope'], portfolio,
+    });
+    assert.deepEqual(r.perAnchor, [{ uuid: 'g1a', count: 1 }, { uuid: 'nope', count: 0 }],
+      'an anchor DT no longer knows must read as zero, not vanish');
+  });
+
+  test('a cyclic parent link terminates rather than exhausting the stack', () => {
+    // buildTree() refuses a self-reference outright, so this one still roots.
+    const selfRef = [P('a', 'a', LATEST)];
+    assert.deepEqual(sel.resolveProjects({
+      mode: 'latest_all', anchorUuids: [], portfolio: selfRef,
+    }).uuids, ['a'], 'a project that claims to be its own parent is simply a root');
+
+    // A two-node cycle has no root at all — each is the other's child — so it
+    // is unreachable from the tree rather than walked. The `seen` guards in the
+    // descent are defence behind that, not the thing doing the work here.
+    const pair = [P('a', 'b'), P('b', 'a', LATEST)];
+    const r = sel.resolveProjects({ mode: 'latest_under', anchorUuids: ['a'], portfolio: pair });
+    assert.deepEqual(r.uuids, []);
+    assert.deepEqual(r.perAnchor, [{ uuid: 'a', count: 0 }],
+      'unreachable reads as zero, the same as an anchor DT no longer knows');
+  });
+
+  test('a malformed portfolio yields nothing rather than throwing', () => {
+    for (const bad of [null, undefined, [], [null], [{}], [{ uuid: null }]]) {
+      assert.doesNotThrow(() => sel.resolveProjects({
+        mode: 'latest_all', anchorUuids: [], portfolio: bad,
+      }), JSON.stringify(bad));
+    }
+  });
+});
+
+describe('schedule selection — promoting a leaf anchor to its parent', () => {
+  const sel = require('./lib/schedule-selection');
+  const P = (uuid, parent, extra = {}) => ({
+    uuid, name: uuid, parent: parent ? { uuid: parent } : null, ...extra,
+  });
+  const PORTFOLIO = [
+    P('g1', null), P('svcA1', 'g1'), P('svcA2', 'g1'),
+    P('g1a', 'g1'), P('svcC1', 'g1a'),
+    P('g2', null), P('svcB1', 'g2'),
+    P('solo', null),
+  ];
+  const promote = (ids) => sel.promoteAnchors(ids, PORTFOLIO);
+
+  test('a leaf is promoted to its parent', () => {
+    assert.deepEqual(promote(['svcA1']), ['g1']);
+  });
+
+  test('several leaves of one parent collapse to that parent once', () => {
+    assert.deepEqual(promote(['svcA1', 'svcA2']), ['g1'],
+      'promotion widens the selection, which is why the editor shows what it did');
+  });
+
+  test('a group is already an anchor and is left alone, nested or not', () => {
+    assert.deepEqual(promote(['g1', 'svcB1']), ['g1', 'g2']);
+    // g1a HAS a parent, so only the leaf test keeps it where it is. Promoting
+    // it to g1 would silently widen the schedule to g1's other branches.
+    assert.deepEqual(promote(['g1a']), ['g1a']);
+  });
+
+  test('a childless top-level project stays itself — there is nothing to promote to', () => {
+    assert.deepEqual(promote(['solo']), ['solo'],
+      'dropping it would silently empty the schedule');
+  });
+
+  test('an anchor the portfolio does not contain is passed through untouched', () => {
+    assert.deepEqual(promote(['ghost']), ['ghost'],
+      'resolution reports it as zero; promotion must not swallow it first');
+  });
+
+  test('order is preserved and duplicates removed', () => {
+    assert.deepEqual(promote(['svcB1', 'svcA1', 'g2', 'svcA2']), ['g2', 'g1']);
+  });
+});
