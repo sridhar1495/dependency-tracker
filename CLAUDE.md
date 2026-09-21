@@ -955,6 +955,21 @@ if (method === 'GET' && path === '/violation-cache/status') {
   swept at 90 days, so `runStats()` returns `retentionDays` alongside the counts
   and the screen says "in the last 90 days". An unqualified total would shrink
   every month with nothing to explain it.
+- **A scheduled run resolves its stored UUIDs against a live paged sweep, and
+  that sweep must read a page exactly the way `violation-cache.js` does.** It
+  did not: it read `Array.isArray(json) ? json : []`, so on a DependencyTrack
+  that wraps a page as `{values,total}` (§8.7 — v5 enforces pagination) the
+  first batch came back empty, `batch.length < 500` ended the loop, and **every
+  scheduled run failed** with "None of the selected projects were found in
+  DependencyTrack" — a portfolio-wide outage reported as a selection problem.
+  Q34 is the identical defect one layer up, and it is why both shapes are read
+  in both places now. There are exactly two full project sweeps in this service
+  and a test asserts their page-reading expressions are still byte-identical;
+  a third sweep either reuses that rule or adds itself to that test.
+- **The sweep asks for `onlyRoot=false&excludeInactive=true`**, the same
+  portfolio the violation cache and the dashboard use. It omitted
+  `excludeInactive`, so a scheduled workbook could cover archived projects that
+  appear nowhere on the screen the report is meant to summarise.
 - Scheduled reports are built in memory and emailed; they are never written to disk.
 
 ### 6.9 Email (`nodemailer`)
@@ -2508,6 +2523,16 @@ Running the browser checks in CI was on this list and is now the `e2e` job.
   after the charts are rebuilt, and that both `renderTrend()` and its
   `show()` spend the flag. Each was mutation-checked against the defect it
   describes.
+- The scheduler's project sweep (§6.8): that it asks for `onlyRoot=false` and
+  `excludeInactive=true`; that it reads **both** page shapes; that its
+  page-reading expression is still identical to `violation-cache.js`'s — the
+  cross-file guard that would have caught the original defect, since one sweep
+  read both shapes and the other did not; and that the expression, evaluated
+  from the module's own source rather than retyped, handles a bare array, the
+  `{values,total}` envelope, an envelope with no values, `null` and a
+  non-array `values`. A regression test pins the defect itself: a full v5 page
+  read the old way yields 0 rows and ends the sweep, read the new way yields
+  500 and pages on.
 - **Authorisation:** every route rejects a missing or invalid token with 401;
   cross-user access returns 404; the profile endpoint ignores login ID and email.
 - **The documentation, against the application it documents.** Prose drifts

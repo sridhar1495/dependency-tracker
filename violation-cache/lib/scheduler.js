@@ -209,10 +209,23 @@ async function runScheduledJob(schedule, { manual = false } = {}) {
     const projects = [];
     let page = 1;
     while (true) {
+      // `excludeInactive=true` matches the violation-cache sweep and the
+      // dashboard's own: an archived project is not part of the portfolio
+      // anywhere else in this product, so reporting on one here made a
+      // scheduled workbook cover rows the screen does not show.
       const { json } = await dtGetWithRetry(
-        `/api/v1/project?pageSize=500&pageNumber=${page}&onlyRoot=false`, conn.apiUrl, conn.apiKey
+        `/api/v1/project?pageSize=500&pageNumber=${page}&onlyRoot=false&excludeInactive=true`,
+        conn.apiUrl, conn.apiKey
       );
-      const batch = Array.isArray(json) ? json : [];
+      // Both page shapes, exactly as `violation-cache.js` reads them. v4
+      // answers with a bare array; v5 enforces pagination and may wrap the
+      // page as `{values,total}` (CLAUDE.md §8.7). Reading only the array
+      // meant a v5 server yielded an empty batch on page 1, the loop broke
+      // immediately, and EVERY scheduled run died on the "none of the
+      // selected projects were found" line below — a portfolio-wide outage
+      // reported as a selection problem. Q34 is the same defect one layer
+      // up, found the same way.
+      const batch = Array.isArray(json) ? json : (Array.isArray(json?.values) ? json.values : []);
       for (const p of batch) {
         if (wanted.has(p.uuid)) projects.push({ uuid: p.uuid, name: p.name, version: p.version || '' });
       }
