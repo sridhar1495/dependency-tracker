@@ -523,7 +523,7 @@ rather than shown a screen whose every request would be refused.
 
 ### What administration can and cannot do
 
-**It is mostly read-only, and what it may change is a closed list of six
+**It is mostly read-only, and what it may change is a closed list of eleven
 things** — not a general-purpose account editor:
 
 | # | Action | Where |
@@ -537,6 +537,8 @@ things** — not a general-purpose account editor:
 | 7 | Upload the application icon | Customization |
 | 8 | Remove the icon, returning to the initials mark | Customization |
 | 9 | Show or hide the risk-trend panel for everyone | Customization |
+| 10 | Upload a colour theme | Customization |
+| 11 | Remove the theme, returning to the built-in colours | Customization |
 
 Everything else is readable only. Administration **cannot** read anyone's
 DependencyTrack API key, SMTP password, reports, findings or schedules' contents.
@@ -702,6 +704,75 @@ rest of the screen is unchanged, and no setting of theirs is lost.
 still stores that day's snapshot, so turning the panel back on shows an
 unbroken line rather than a gap for the period it was off. This matters because
 a gap cannot be filled in later — the measurement it needed is gone.
+
+### 10–11. The colour theme
+
+**Customization → Colour theme** applies one palette to the whole installation —
+the dashboard, the administration screen and the sign-in page.
+
+**How this reaches a user:** every screen changes colour. Nothing else moves: no
+setting of theirs is lost, and **each person still chooses dark or light for
+themselves**. A theme defines *both* schemes; the switch in the header picks
+which one that person sees.
+
+**The file is JSON, not CSS,** and it looks like this:
+
+```json
+{
+  "version": 1,
+  "name": "Contoso",
+  "dark":  { "accent": "#7c5cff", "surface": "#141824" },
+  "light": { "accent": "#4c3fd0" }
+}
+```
+
+**It may be partial, and that is the normal way to use it.** Set only the
+colours you want to change; everything you leave out keeps its built-in value,
+one property at a time. Supplying only `dark` is fine and common — a colour that
+reads well on a dark background often does not read on white, so there is no
+obligation to invent a light one.
+
+Use **Download template** to start from a file containing every colour at its
+built-in value, then delete the lines you do not want to change. The property
+names are the same in both schemes:
+
+| Group | Properties |
+|---|---|
+| Surfaces and text | `bg`, `surface`, `surface2`, `border`, `text`, `text-muted` |
+| Accent | `accent`, `accent-hover`, `on-accent` |
+| Severity | `critical`, `high`, `medium`, `low`, `ok`, and each one's `-bg` tint |
+| Table and code | `cat-operations`, `cat-secpolicy`, `code`, `scrollbar`, `scrollbar-hover` |
+| Sign-in page | `login-blob-1`…`4`, `login-blob-admin-1`…`4`, `logo-gradient-end` |
+
+Values are `#rgb`, `#rrggbb` or `rgba(r,g,b,a)`. Colour names like `red`,
+gradients and `var(...)` are not accepted.
+
+**Layout is deliberately not themeable.** Row heights, the header height and
+corner radii are read by the table's measured geometry, so changing them would
+break the layout rather than restyle it.
+
+**A file with a mistake in it is refused whole, and every problem is named:**
+
+```
+✗ Theme not applied
+    dark.acccent is not a theme property
+    light.surface: "#12345" is not a colour
+```
+
+Nothing is applied and nothing is changed. That is deliberate — applying the
+half that parsed would leave you with a theme that "didn't work" and no way to
+tell which line was ignored.
+
+**Download current** saves whatever is stored now, so a theme can be copied to
+another installation. **Restore built-in** removes it and every screen goes back
+to the colours the product ships with; the file itself is not kept, so keep your
+own copy or download it first.
+
+> **Why JSON rather than a stylesheet.** The theme is served to anyone who can
+> reach the sign-in page, before they have signed in. A stylesheet can load
+> external resources and cover the page; a fixed list of colour properties
+> cannot. The service renders the CSS itself from the names and values it
+> recognises.
 
 ### Storage
 

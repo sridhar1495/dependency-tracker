@@ -1218,8 +1218,20 @@ describe('login.html presentation', () => {
   test('the two backgrounds use visibly different colours', () => {
     // Indigo family for a user, amber/rose for the administrator. If these ever
     // converge the toggle stops communicating anything.
-    assert.match(LOGIN_HTML, /#bgUser\s+\.b1[^}]*#6366f1/);
-    assert.match(LOGIN_HTML, /#bgAdmin\s+\.b1[^}]*#f59e0b/);
+    //
+    // The rules name tokens since Q49, so the claim is resolved one hop: the
+    // blob must reference its own token, and the two tokens must hold
+    // different values. Asserting the reference alone would pass with both
+    // tokens set to the same colour, which is exactly the failure above.
+    const valueOf = (token) => {
+      const m = new RegExp('--' + token + ':\\s*([^;]+);').exec(LOGIN_HTML);
+      assert.ok(m, `--${token} must be declared`);
+      return m[1].trim();
+    };
+    assert.match(LOGIN_HTML, /#bgUser\s+\.b1[^}]*var\(--login-blob-1\)/);
+    assert.match(LOGIN_HTML, /#bgAdmin\s+\.b1[^}]*var\(--login-blob-admin-1\)/);
+    assert.notEqual(valueOf('login-blob-1'), valueOf('login-blob-admin-1'),
+      'the user and administrator backgrounds must not be the same colour');
   });
 
   test('the animation is disabled for prefers-reduced-motion', () => {
@@ -1299,7 +1311,13 @@ describe('admin.html is a self-contained page', () => {
     // so it cannot live in the IIFE at the end of the document.
     assert.equal((ADMIN_HTML.match(/<script>/g) || []).length, 2);
     assert.doesNotMatch(ADMIN_HTML, /<script[^>]+src=/, 'no external script — there is no build step');
-    assert.doesNotMatch(ADMIN_HTML, /<link[^>]+stylesheet/, 'no external stylesheet either');
+    // Exactly one external stylesheet, and it is the administrator's theme
+    // (Q49). That is not a relaxation of the single-file rule either: the
+    // theme is generated per installation and cannot be inlined into a static
+    // file, and the cascade is the whole mechanism — see §8.1.
+    const links = ADMIN_HTML.match(/<link[^>]+stylesheet[^>]*>/g) || [];
+    assert.equal(links.length, 1, 'only the theme may be an external stylesheet');
+    assert.match(links[0], /href="\/branding\/theme\.css"/);
   });
 
   test('all logic is wrapped in an IIFE', () => {
@@ -1316,14 +1334,9 @@ describe('admin.html is a self-contained page', () => {
   });
 
   test('no colour is hard-coded inside a component rule', () => {
-    // Component rules must use the variables. The :root and [data-theme] blocks
-    // are where literals belong (CLAUDE.md §8.10).
-    const withoutThemeBlocks = ADMIN_HTML
-      .replace(/:root \{[\s\S]*?\n    \}/, '')
-      .replace(/\[data-theme="light"\] \{[\s\S]*?\n    \}/, '');
-    const styleOnly = /<style>([\s\S]*?)<\/style>/.exec(withoutThemeBlocks)[1];
-    const hexes = styleOnly.match(/#[0-9a-fA-F]{3,8}\b/g) || [];
-    assert.deepEqual(hexes.filter(h => h.toLowerCase() !== '#fff' && h.toLowerCase() !== '#ffffff'), [],
+    // Kept here for admin.html's own suite; the real guard now covers all
+    // three pages and no longer exempts white — see 'every colour is a token'.
+    assert.deepEqual(hardCodedColours(ADMIN_HTML), [],
       'component rules must use custom properties');
   });
 
@@ -2110,7 +2123,7 @@ describe('nginx routes every backend path to the service', () => {
 
   test('every top-level backend prefix has a location block', () => {
     for (const p of ['/auth/', '/admin/', '/profile', '/violation-cache/', '/branding']) {
-      assert.match(NGINX, new RegExp(`location ${p.replace(/\//g, '\\/')}`),
+      assert.match(NGINX, new RegExp(`location (\\^~ )?${p.replace(/\//g, '\\/')}`),
         `${p} must be proxied, or the SPA fallback swallows it`);
     }
   });
@@ -2121,11 +2134,13 @@ describe('nginx routes every backend path to the service', () => {
     const SERVER = fs.readFileSync(path.join(__dirname, 'server.js'), 'utf8');
     const block = /const PUBLIC_PATHS = new Set\(\[([\s\S]*?)\]\);/.exec(SERVER);
     assert.ok(block, 'server.js must declare its public paths');
-    const paths = [...block[1].matchAll(/'([^']+)'/g)].map(m => m[1]);
+    // Comments stripped first: an apostrophe in one ("the logo mark's bytes")
+    // opens a spurious quote and the next path reads as prose.
+    const paths = [...block[1].replace(/\/\/[^\n]*/g, '').matchAll(/'([^']+)'/g)].map(m => m[1]);
     assert.ok(paths.includes('/branding'), 'branding must be public for the sign-in page');
     for (const p of paths) {
       const prefix = '/' + p.split('/')[1];
-      assert.match(NGINX, new RegExp(`location ${prefix.replace(/\//g, '\\/')}`),
+      assert.match(NGINX, new RegExp(`location (\\^~ )?${prefix.replace(/\//g, '\\/')}`),
         `${p} is public but nginx has no block for ${prefix}`);
     }
   });
@@ -2147,7 +2162,7 @@ describe('nginx routes every backend path to the service', () => {
   test('the background keeps its immutable caching through the proxy', () => {
     // The image URL is content-addressed; a no-store override here would make
     // every sign-in re-download it.
-    const brandBlock = /location \/branding \{[\s\S]*?\n    \}/.exec(NGINX);
+    const brandBlock = /location \^~ \/branding \{[\s\S]*?\n    \}/.exec(NGINX);
     assert.ok(brandBlock);
     assert.doesNotMatch(brandBlock[0], /no-store/);
   });
@@ -2577,16 +2592,17 @@ describe('admin.html schedule limit', () => {
     assert.equal((fn.match(/apiFetch\('\/admin\/settings'/g) || []).length, 1);
   });
 
-  test('the administration allow-list is still exactly nine method/path pairs', () => {
+  test('the administration allow-list is still exactly eleven method/path pairs', () => {
     // CLAUDE.md §7.6 — the list is the contract, and it grows only in a diff
-    // somebody reads. Six to nine: the icon pair mirrors the background pair,
-    // and the trend switch hides a panel. Each changes how the product LOOKS
-    // or what it SHOWS, never what an account is or what it may reach — the
-    // same bar the branding three cleared. The schedule limit, by contrast,
-    // rode on the settings routes that already existed rather than adding one.
+    // somebody reads. Six to nine to eleven: the icon pair mirrors the
+    // background pair, the trend switch hides a panel, and the theme pair
+    // changes colours. Each changes how the product LOOKS or what it SHOWS,
+    // never what an account is or what it may reach — the same bar the
+    // branding three cleared. The schedule limit, by contrast, rode on the
+    // settings routes that already existed rather than adding one.
     const adminRoute = fs.readFileSync(path.join(__dirname, 'routes', 'admin.js'), 'utf8');
     const writes = [...adminRoute.matchAll(/method === '(PUT|POST|DELETE)'/g)].length;
-    assert.equal(writes, 9, `expected nine write handlers, found ${writes}`);
+    assert.equal(writes, 11, `expected eleven write handlers, found ${writes}`);
   });
 });
 
@@ -3314,12 +3330,12 @@ describe('the documents describe the behaviour the code has', () => {
       'the README must say the installer does not ask for it');
   });
 
-  test('the administration allow-list is stated as nine everywhere it is stated', () => {
+  test('the administration allow-list is stated as eleven everywhere it is stated', () => {
     const adminSrc = fs.readFileSync(path.join(__dirname, 'routes', 'admin.js'), 'utf8');
     const writes = [...adminSrc.matchAll(/method === '(PUT|POST|DELETE)'/g)].length;
-    assert.equal(writes, 9);
-    assert.match(README, /exactly nine things/);
-    for (const stale of [/exactly three things/, /exactly six things/]) {
+    assert.equal(writes, 11);
+    assert.match(README, /exactly eleven things/);
+    for (const stale of [/exactly three things/, /exactly six things/, /exactly nine things/]) {
       assert.doesNotMatch(README, stale, 'the README states a count the routes no longer have');
     }
   });
@@ -6360,6 +6376,64 @@ describe('latest-only scheduling — the editor and the list (PR 2)', () => {
   });
 });
 
+// ── Theme tokens (Q49) ──────────────────────────────────────────────────────
+/**
+ * Every colour literal in a page's stylesheet that is NOT inside a token
+ * declaration block. Comments are stripped first: §8.10's own rules explain
+ * themselves in prose that names the very hexes they forbid.
+ */
+function hardCodedColours(src) {
+  let style = [...src.matchAll(/<style[^>]*>([\s\S]*?)<\/style>/g)].map(m => m[1]).join('\n');
+  for (const blk of style.match(/(?::root|\[data-theme="light"\])\s*\{[\s\S]*?\n    \}/g) || []) {
+    style = style.replace(blk, '');
+  }
+  style = style.replace(/\/\*[\s\S]*?\*\//g, '');
+  return style.match(/#[0-9a-fA-F]{3,8}\b/g) || [];
+}
+
+describe('every colour is a token', () => {
+  // §8.10 has always said "never hard-code a colour hex inside a component
+  // rule". It was enforced against admin.html alone, which is exactly why
+  // admin.html was the clean one and the other two had accumulated 28 literals
+  // between them. White was exempt, and that exemption is where 16 of them
+  // hid: `color: #fff` on a filled accent is not a neutral choice, it is "the
+  // readable colour against THAT fill", and it stops being readable the moment
+  // an operator themes the accent pale.
+  for (const [name, src] of [['index.html', INDEX_HTML], ['login.html', LOGIN_HTML],
+                             ['admin.html', ADMIN_HTML]]) {
+    test(`${name} hard-codes no colour in a component rule`, () => {
+      assert.deepEqual(hardCodedColours(src), [],
+        `${name}: every colour belongs to :root or [data-theme="light"]`);
+    });
+  }
+
+  test('white on a filled surface is a token, not a literal', () => {
+    // The specific regression this replaced: --on-accent and --on-critical
+    // exist so a theme can fix its own contrast. If they are ever inlined back
+    // to #fff the test above catches it — this one states why they exist.
+    for (const [name, src] of [['index.html', INDEX_HTML], ['login.html', LOGIN_HTML],
+                               ['admin.html', ADMIN_HTML]]) {
+      assert.match(src, /--on-accent:\s*#ffffff;/, `${name} declares --on-accent`);
+      assert.match(src, /color: var\(--on-accent\)/, `${name} uses it`);
+    }
+    assert.match(INDEX_HTML, /--on-critical:\s*#ffffff;/);
+  });
+
+  test('a light scheme value only exists where the two schemes differ', () => {
+    // --on-accent is white in both on purpose: the token is there to be
+    // overridden, not because our own value moves. --code and --scrollbar are
+    // the opposite — they carried their own light values as component rules
+    // under [data-theme="light"] before this, and those values survive.
+    const light = /\[data-theme="light"\] \{[\s\S]*?\n    \}/.exec(INDEX_HTML)[0];
+    for (const t of ['code', 'scrollbar', 'scrollbar-hover', 'cat-operations', 'cat-secpolicy']) {
+      assert.match(light, new RegExp('--' + t + ':'), `--${t} must differ in the light scheme`);
+    }
+    // And the rules that used to hold those values are gone, not duplicated.
+    assert.doesNotMatch(INDEX_HTML, /\[data-theme="light"\] \.modal code/);
+    assert.doesNotMatch(INDEX_HTML, /\[data-theme="light"\] ::-webkit-scrollbar/);
+  });
+});
+
 // ── The pages parse ─────────────────────────────────────────────────────────
 // Every other test in this file extracts ONE function by name and reasons
 // about it, so a page can be syntactically broken and every one of them still
@@ -6614,5 +6688,189 @@ describe('Q48: the administrator\'s risk-trend switch', () => {
     const fn = extractFunction(ADMIN_HTML, 'saveTrendEnabled');
     assert.match(fn, /\$\('trendEnabled'\)\.checked = !enabled;/,
       'a control must never show a state that was not stored');
+  });
+});
+
+// ── The administrator theme, on the pages (Q49) ──────────────────────────────
+
+describe('the theme reaches every page', () => {
+  const theme = require('./lib/theme');
+  const PAGES = [['index.html', INDEX_HTML], ['login.html', LOGIN_HTML], ['admin.html', ADMIN_HTML]];
+
+  test('every page links the generated stylesheet', () => {
+    for (const [name, src] of PAGES) {
+      assert.match(src, /<link rel="stylesheet" href="\/branding\/theme\.css">/,
+        `${name} must link the theme`);
+    }
+  });
+
+  test('the link comes AFTER the page\'s own <style>, or it would never win', () => {
+    // Q49's whole mechanism is cascade order at equal specificity. A link
+    // placed above the built-in blocks loses every property it sets, silently.
+    for (const [name, src] of PAGES) {
+      assert.ok(src.indexOf('href="/branding/theme.css"') > src.lastIndexOf('</style>'),
+        `${name}: the theme link must follow the inline stylesheet`);
+    }
+  });
+
+  test('it is a <link>, never a stylesheet inserted by script', () => {
+    // §8.4: the shell is hidden behind .booting until the session check
+    // answers. A stylesheet appended by JavaScript would repaint the page
+    // after it became visible, which is the flash that gate exists to prevent.
+    for (const [name, src] of PAGES) {
+      assert.doesNotMatch(src, /createElement\(['"]link['"]\)/,
+        `${name} must not build the theme link at runtime`);
+      assert.doesNotMatch(src, /theme\.css['"`]\s*;?\s*\n?\s*document\.head/,
+        `${name} must not inject the theme`);
+    }
+  });
+
+  test('the built-in blocks survive — they are the fallback', () => {
+    // A theme that fails to load, or sets three properties out of forty, must
+    // leave a correct page. That only holds while every page still declares
+    // its own :root.
+    for (const [name, src] of PAGES) {
+      assert.match(src, /\n {4}:root \{/, `${name} keeps its built-in :root`);
+      assert.match(src, /\[data-theme="light"\] \{/, `${name} keeps its light scheme`);
+    }
+  });
+
+  test('every token the pages use is one the theme can set', () => {
+    // The cross-layer check this feature rests on: a token declared in a page
+    // but absent from lib/theme.js's allow-list is one an operator can see and
+    // cannot change, with nothing to say so. Geometry is excluded by design.
+    const GEOMETRY = new Set(['header-h', 'row-h', 'radius', 'th-group-h', 'grid-line']);
+    const missing = [];
+    for (const [name, src] of PAGES) {
+      const root = /\n {4}:root \{[\s\S]*?\n {4}\}/.exec(src)[0];
+      for (const m of root.matchAll(/^\s+--([a-z0-9-]+):/gm)) {
+        const key = m[1];
+        if (GEOMETRY.has(key)) continue;
+        if (!(key in theme.TOKENS)) missing.push(`${name}: --${key}`);
+      }
+    }
+    assert.deepEqual(missing, [],
+      'these are declared on a page but cannot be themed — add them to lib/theme.js');
+  });
+
+  test('the allow-list invents no token no page declares', () => {
+    // The other direction: a key in the allow-list that no page reads is a
+    // property an operator can set to no effect, which is worse than not
+    // offering it.
+    const declared = new Set();
+    for (const [, src] of PAGES) {
+      for (const m of src.matchAll(/^\s+--([a-z0-9-]+):/gm)) declared.add(m[1]);
+    }
+    const orphans = Object.keys(theme.TOKENS).filter(k => !declared.has(k));
+    assert.deepEqual(orphans, [],
+      'these can be set and change nothing — remove them or use them');
+  });
+
+  test('the built-in values in lib/theme.js match what index.html ships', () => {
+    // The template is "every key at its built-in value", so a drift here hands
+    // operators a template that silently restyles their installation the
+    // moment they upload it unchanged.
+    const root = /\n {4}:root \{[\s\S]*?\n {4}\}/.exec(INDEX_HTML)[0];
+    const page = {};
+    for (const m of root.matchAll(/^\s+--([a-z0-9-]+):\s*([^;]+);/gm)) {
+      page[m[1]] = m[2].trim();
+    }
+    const wrong = [];
+    for (const [key, value] of Object.entries(theme.TOKENS)) {
+      if (!(key in page)) continue;                       // login-only tokens
+      if (page[key].startsWith('var(')) continue;         // --scrollbar aliases --border
+      if (page[key] !== value) wrong.push(`--${key}: page ${page[key]} vs theme ${value}`);
+    }
+    assert.deepEqual(wrong, [], 'lib/theme.js and index.html disagree on a built-in colour');
+  });
+});
+
+describe('the administration screen\'s theme controls', () => {
+  test('every customisation control is inside the accordion body', () => {
+    // Not a style nit: `.acc-body { display: none }` is what a closed
+    // accordion is, so a control placed after its closing </div> is always
+    // visible, un-indented, and outside the card. Three of them were — the
+    // icon, the trend switch and, until this was caught in a screenshot, the
+    // theme. Nothing behavioural could see it, because every one of them
+    // worked perfectly.
+    const body = /<div class="acc-body" id="accBrandingBody">([\s\S]*?)\n {10}<\/div>/
+      .exec(ADMIN_HTML);
+    assert.ok(body, 'the Customization accordion body must be findable');
+    for (const id of ['appTitle', 'bgPreview', 'iconState', 'themeState', 'trendEnabled']) {
+      assert.ok(body[1].includes(`id="${id}"`),
+        `#${id} is outside the accordion, so it shows even when the section is shut`);
+    }
+  });
+
+  test('the toggle switch is defined on this page, not only used', () => {
+    // The three pages share class NAMES, not a stylesheet (§8.1). `.cfg-toggle`
+    // was written into admin.html's markup without ever being declared in its
+    // <style>, so the trend switch rendered as a bare checkbox.
+    for (const cls of ['.cfg-toggle', '.cfg-toggle-slider']) {
+      assert.match(ADMIN_HTML, new RegExp(cls.replace('.', '\\.') + '[\\s,{]'),
+        `${cls} is used in the markup and must be styled here too`);
+    }
+    assert.match(ADMIN_HTML, /\.cfg-toggle input:checked \+ \.cfg-toggle-slider \{/,
+      'without the checked rule the switch never moves');
+  });
+
+  test('the section explains that partial files are the point', () => {
+    assert.match(ADMIN_HTML, /Colour theme/);
+    assert.match(ADMIN_HTML, /partial/i,
+      'an operator who thinks they must supply all forty colours will not try');
+    assert.match(ADMIN_HTML, /dark or light/i,
+      'a theme defines both schemes; each person still picks one');
+  });
+
+  test('all four controls exist and are window-exported', () => {
+    for (const fn of ['uploadTheme', 'removeTheme', 'downloadTheme', 'downloadThemeTemplate']) {
+      assert.match(ADMIN_HTML, new RegExp(`window\\.${fn}\\s*=`), `${fn} must be exported`);
+      assert.match(ADMIN_HTML, new RegExp(`function ${fn}\\(`), `${fn} must exist`);
+    }
+  });
+
+  test('the state line names which scheme is customised', () => {
+    // "A theme is loaded" leaves an operator who set only dark wondering why
+    // light looks untouched. It IS untouched — that is the feature — but only
+    // if the screen says so.
+    const fn = extractFunction(ADMIN_HTML, 'renderThemeState');
+    assert.match(fn, /schemes\.length === 2/);
+    assert.match(fn, /is the built-in/);
+    assert.match(fn, /Using the built-in colours/);
+  });
+
+  test('problems render through textContent, never innerHTML', () => {
+    // The strings quote the operator's own file back at them, keys and values
+    // included (§12).
+    const fn = extractFunction(ADMIN_HTML, 'showThemeProblems');
+    assert.match(fn, /textContent = p;/);
+    // `.innerHTML`, not the bare word: the comment above the line says "never
+    // innerHTML", and a test that cannot tell a warning from the defect it
+    // warns about is one that fails on its own documentation.
+    assert.doesNotMatch(fn, /\.innerHTML/);
+  });
+
+  test('the template rides along with the state, so downloading costs no request', () => {
+    const fn = extractFunction(ADMIN_HTML, 'loadTheme');
+    assert.match(fn, /bd\.template/);
+    const dl = extractFunction(ADMIN_HTML, 'downloadThemeTemplate');
+    assert.doesNotMatch(dl, /apiFetch|fetch\(/,
+      'a button that needs the network to hand over a constant is one that fails offline');
+  });
+
+  test('the export serves what is stored, not what was typed', () => {
+    const fn = extractFunction(ADMIN_HTML, 'renderThemeState');
+    assert.match(fn, /_themeDoc = theme && theme\.doc/);
+    assert.match(extractFunction(ADMIN_HTML, 'downloadTheme'), /_themeDoc/);
+  });
+
+  test('both download buttons are hidden until there is something to download', () => {
+    const fn = extractFunction(ADMIN_HTML, 'renderThemeState');
+    assert.match(fn, /themeRemove'\)\.hidden = !theme/);
+    assert.match(fn, /themeExport'\)\.hidden = !theme/);
+  });
+
+  test('loadTheme runs at boot beside the other reads', () => {
+    assert.match(ADMIN_HTML, /loadUsers\(\), loadSettings\(\), loadBranding\(\), loadTheme\(\)/);
   });
 });

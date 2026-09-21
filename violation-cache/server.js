@@ -113,6 +113,7 @@ const PUBLIC_PATHS = new Set([
   '/branding',                 // application title + background/icon metadata
   '/branding/background',      // the background image bytes
   '/branding/icon',            // the logo mark's bytes — Q47, same reasoning
+  '/branding/theme.css',       // the generated colour theme — Q49, same reasoning
   // S33: the container healthcheck. It returns {"status":"ok"} and nothing
   // else — no account, no setting, no count, no version, so it discloses
   // exactly what a closed TCP port would. It is public because the probe runs

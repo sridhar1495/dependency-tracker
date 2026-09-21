@@ -1001,6 +1001,56 @@ describe('e2e — administration', { skip: SKIP }, () => {
     assert.equal((await api.get('/admin/overview', userToken)).status, 403);
   });
 
+  // ── The colour theme (Q49) ────────────────────────────────────────────
+  // The one claim no unit test can make: that a PARTIAL upload really does
+  // leave the omitted properties at their built-in values, in a real browser,
+  // through the real cascade — which is the entire mechanism.
+  test('a partial theme overrides what it sets and nothing else', async () => {
+    const put = await api.put('/admin/theme', {
+      version: 1, name: 'E2E', dark: { accent: '#123456' },
+    }, adminToken);
+    assert.equal(put.status, 200, JSON.stringify(put.json));
+    try {
+      const css = await api.raw('/branding/theme.css');
+      assert.equal(css.status, 200);
+      assert.match(css.headers['content-type'], /^text\/css/);
+      assert.match(css.text, /--accent: #123456;/);
+      // The omitted properties are simply absent — there is no merge step and
+      // no defaults table, so nothing can write a stale value here.
+      assert.doesNotMatch(css.text, /--bg:/);
+      assert.doesNotMatch(css.text, /data-theme="light"/,
+        'no light half was supplied, so no light block is emitted');
+      assert.equal(css.headers['cache-control'], 'no-cache');
+    } finally {
+      assert.equal((await api.del('/admin/theme', adminToken)).status, 200);
+    }
+  });
+
+  test('the stylesheet is public — the sign-in page needs it before a token', async () => {
+    // S32, the same reasoning as the icon and the background.
+    const r = await api.raw('/branding/theme.css');
+    assert.equal(r.status, 200, 'no token was sent and it must still answer');
+    assert.match(r.text, /No theme configured/, 'an empty sheet, not a 404');
+  });
+
+  test('a file with a bad key is refused whole, naming it', async () => {
+    const r = await api.put('/admin/theme', {
+      version: 1, dark: { acccent: '#123456', bg: '#000000' },
+    }, adminToken);
+    assert.equal(r.status, 400);
+    assert.match(r.json.problems.join(' '), /dark\.acccent/);
+    // And nothing was stored — the valid half must not be half-applied.
+    const after = await api.raw('/branding/theme.css');
+    assert.match(after.text, /No theme configured/);
+  });
+
+  test('an ordinary account cannot change the theme', async () => {
+    assert.equal((await api.put('/admin/theme',
+      { version: 1, dark: { accent: '#000000' } }, userToken)).status, 403);
+    assert.equal((await api.del('/admin/theme', userToken)).status, 403);
+    assert.equal((await api.get('/admin/theme', userToken)).status, 403);
+  });
+
   test('the write allow-list is closed', async () => {
     // §7.6: exactly six writes are handled, and adding a seventh means editing
     // the list in a diff somebody reads.
@@ -1910,6 +1960,50 @@ describe('e2e — the dashboard in a real browser', { skip: BROWSER_SKIP }, () =
     }), true);
     await page.click('#themeBtn'); await page.waitForTimeout(300);
   }, { timeout: 60_000 });
+
+  test('Q49: a partial theme resolves through the cascade, in a real browser', async () => {
+    // The one claim no unit test can make. Everything else about this feature
+    // is provable with a stub; that an OMITTED property still computes to the
+    // built-in value is a fact about the browser's cascade, and it is the
+    // whole reason there is no merge logic anywhere in the codebase.
+    const adminToken = (await api.login(stack.admin.loginId, stack.admin.password,
+      { isAdmin: true, force: true })).json.token;
+
+    const read = async () => {
+      // A signed-out visitor on the sign-in page: the theme has to reach the
+      // one screen that renders before anybody holds a token.
+      const visitor = await browser.newPage();
+      try {
+        await visitor.goto(`${stack.url}/login.html`, { waitUntil: 'networkidle' });
+        return await visitor.evaluate(() => {
+          const cs = getComputedStyle(document.documentElement);
+          return {
+            accent: cs.getPropertyValue('--accent').trim(),
+            bg:     cs.getPropertyValue('--bg').trim(),
+          };
+        });
+      } finally { await visitor.close(); }
+    };
+
+    const before = await read();
+    assert.ok(before.accent && before.bg, 'the built-in tokens must resolve to begin with');
+
+    const put = await api.put('/admin/theme',
+      { version: 1, name: 'E2E', dark: { accent: '#123456' } }, adminToken);
+    assert.equal(put.status, 200, JSON.stringify(put.json));
+    try {
+      const after = await read();
+      assert.equal(after.accent, '#123456', 'the supplied property must win');
+      assert.equal(after.bg, before.bg,
+        'an omitted property must keep its built-in value — this is the feature');
+    } finally {
+      assert.equal((await api.del('/admin/theme', adminToken)).status, 200);
+    }
+
+    const restored = await read();
+    assert.equal(restored.accent, before.accent,
+      'removing the theme must return every property, not only the ones it set');
+  }, { timeout: 90_000 });
 
   test('an ordinary account cannot reach the administration screen', async () => {
     // §8.4: being signed in is not enough, so the page is not shown at all.

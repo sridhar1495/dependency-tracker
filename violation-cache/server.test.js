@@ -3216,8 +3216,9 @@ describe('routes — the administration listing exposes no secrets', () => {
   // list is the contract: adding a fourth write means changing this line, in a
   // diff somebody has to read.
   // The closed list of administration writes. It grew from three to six when
-  // customisation was added and then to nine, and that growth is the point of
-  // the list: adding a tenth means editing this set in a diff somebody reads.
+  // customisation was added, then to nine, then to eleven, and that growth is
+  // the point of the list: adding a twelfth means editing this set in a diff
+  // somebody reads.
   const ALLOWED_WRITES = new Set([
     'PUT /admin/settings',
     'PUT /admin/users/:loginId/settings',
@@ -3233,6 +3234,12 @@ describe('routes — the administration listing exposes no secrets', () => {
     'POST /admin/branding/icon',
     'DELETE /admin/branding/icon',
     'PUT /admin/trend',
+    // Nine to eleven. The colour theme (Q49) clears the same bar the icon
+    // pair did: it changes how the product LOOKS, never what an account is or
+    // what it may reach, and it reads no principal's data. GET /admin/theme is
+    // a READ and so is deliberately not here — the list is about writes.
+    'PUT /admin/theme',
+    'DELETE /admin/theme',
   ]);
 
   test('only the intended writes are handled', async () => {
@@ -3240,7 +3247,7 @@ describe('routes — the administration listing exposes no secrets', () => {
       '/admin/users', '/admin/overview', '/admin/storage', '/admin/settings',
       '/admin/users/alice', '/admin/users/alice/settings', '/admin/users/alice/password',
       '/admin/branding', '/admin/branding/background', '/admin/branding/icon',
-      '/admin/trend',
+      '/admin/trend', '/admin/theme',
     ];
     const restore = stub(usersMod, {
       detailForAdmin: async () => { throw new Error('must not reach the data layer'); },
@@ -4354,6 +4361,7 @@ describe('the set of public routes is a closed list', () => {
       '/branding',
       '/branding/background',
       '/branding/icon',
+      '/branding/theme.css',
       '/healthz',
     ], 'a new public route is a security decision — justify it in the PR and here');
   });
@@ -7165,4 +7173,336 @@ describe('schedule selection — promoting a leaf anchor to its parent', () => {
   test('order is preserved and duplicates removed', () => {
     assert.deepEqual(promote(['svcB1', 'svcA1', 'g2', 'svcA2']), ['g2', 'g1']);
   });
+});
+
+// ── The administrator's colour theme (Q49, Q50, Q51, S35) ────────────────────
+
+describe('theme validation', () => {
+  const theme = require('./lib/theme');
+  const ok = (over = {}) => ({ version: 1, dark: { accent: '#7c5cff' }, ...over });
+
+  test('a complete-enough document is accepted and normalised', () => {
+    const r = theme.validate({ version: 1, name: 'Contoso',
+      dark: { accent: '#7C5CFF', bg: '#FFF' }, light: { accent: 'rgba(10, 20, 30, 0.5)' } });
+    assert.ok(r.ok, JSON.stringify(r.errors));
+    assert.equal(r.doc.name, 'Contoso');
+    assert.equal(r.doc.dark.accent, '#7c5cff', 'hex is lower-cased');
+    assert.equal(r.doc.dark.bg, '#fff', 'a three-digit hex stays three digits');
+    assert.equal(r.doc.light.accent, 'rgba(10,20,30,0.5)', 'rgba is re-serialised, not echoed');
+  });
+
+  test('either scheme may be omitted entirely — that is the common case', () => {
+    // An operator with a brand colour usually has one that reads on dark and
+    // does not read on white. Demanding both would make the honest partial
+    // upload the hard path.
+    assert.ok(theme.validate({ version: 1, dark: { accent: '#123456' } }).ok);
+    assert.ok(theme.validate({ version: 1, light: { accent: '#123456' } }).ok);
+  });
+
+  test('a document that sets nothing is refused rather than stored empty', () => {
+    const r = theme.validate({ version: 1 });
+    assert.equal(r.ok, false);
+    assert.match(r.errors.join(' '), /sets nothing/);
+  });
+
+  for (const [label, value] of [
+    ['a named colour',   'rebeccapurple'],
+    ['a var()',          'var(--accent)'],
+    ['a calc()',         'calc(1px)'],
+    ['a url()',          'url(http://example.com/x.png)'],
+    ['a gradient',       'linear-gradient(red, blue)'],
+    ['a five-digit hex', '#12345'],
+    ['rgb out of range', 'rgb(300,0,0)'],
+    ['alpha out of range', 'rgba(0,0,0,2)'],
+    ['a number',         255],
+    ['an object',        { r: 1 }],
+    ['an empty string',  ''],
+  ]) {
+    test(`${label} is refused, naming the key`, () => {
+      const r = theme.validate({ version: 1, dark: { accent: value } });
+      assert.equal(r.ok, false, `${label} must not be accepted`);
+      assert.match(r.errors.join(' '), /dark\.accent/,
+        'the message must name the key the operator has to go and fix');
+    });
+  }
+
+  test('an unknown key is refused by name, not ignored', () => {
+    // Q51: the usual argument for ignoring one is forward compatibility. Here
+    // the far likelier cause is a typo, and discarding it silently produces a
+    // theme that "didn't work" with nothing to explain why.
+    const r = theme.validate({ version: 1, dark: { acccent: '#123456' } });
+    assert.equal(r.ok, false);
+    assert.match(r.errors.join(' '), /dark\.acccent is not a theme property/);
+  });
+
+  test('a top-level key that is not a scheme is refused', () => {
+    const r = theme.validate({ version: 1, drak: { accent: '#123456' } });
+    assert.equal(r.ok, false);
+    assert.match(r.errors.join(' '), /"drak" is not part of a theme/);
+  });
+
+  test('geometry is not themeable', () => {
+    // --row-h and --header-h are read by measured layout, not by a paint.
+    for (const key of ['radius', 'row-h', 'header-h']) {
+      assert.ok(!(key in theme.TOKENS), `${key} must not be a theme property`);
+      assert.equal(theme.validate({ version: 1, dark: { [key]: '4px' } }).ok, false);
+    }
+  });
+
+  test('the version must be the one this code understands', () => {
+    for (const v of [undefined, 0, 2, '1', null]) {
+      const r = theme.validate({ version: v, dark: { accent: '#123456' } });
+      assert.equal(r.ok, false, `version ${JSON.stringify(v)} must be refused`);
+      assert.match(r.errors.join(' '), /"version" must be 1/);
+    }
+  });
+
+  test('the name is bounded and optional', () => {
+    assert.equal(theme.validate(ok({ name: 'x'.repeat(61) })).ok, false);
+    assert.equal(theme.validate(ok({ name: 'x'.repeat(60) })).doc.name.length, 60);
+    assert.equal(theme.validate(ok()).doc.name, null, 'no name is not an error');
+    assert.equal(theme.validate(ok({ name: 42 })).ok, false);
+  });
+
+  test('the property ceiling is enforced across both schemes together', () => {
+    const many = {};
+    for (let i = 0; i < 120; i++) many['k' + i] = '#000000';
+    const r = theme.validate({ version: 1, dark: many, light: many });
+    assert.equal(r.ok, false);
+    // And it is the ONLY thing reported. Checked after per-key validation the
+    // ceiling was unreachable — an oversized file necessarily holds keys the
+    // allow-list does not know, so the list filled with ten "not a theme
+    // property" lines and the size was never mentioned at all.
+    assert.deepEqual(r.errors, [
+      'A theme may set at most 200 properties; this one sets 240.',
+    ]);
+  });
+
+  test('a rejection lists at most ten problems', () => {
+    const bad = {};
+    for (let i = 0; i < 40; i++) bad['k' + i] = 'nope';
+    const r = theme.validate({ version: 1, dark: bad });
+    assert.equal(r.ok, false);
+    assert.ok(r.errors.length <= 10, `got ${r.errors.length} — a wall of errors reads as a crash`);
+  });
+
+  test('a non-object file is refused with one sentence', () => {
+    for (const v of [null, [], 'a string', 7]) {
+      const r = theme.validate(v);
+      assert.equal(r.ok, false);
+      assert.equal(r.errors.length, 1);
+    }
+  });
+});
+
+describe('theme CSS generation (S35)', () => {
+  const theme = require('./lib/theme');
+
+  test('it emits only token declarations, at the pages\' own specificity', () => {
+    const css = theme.toCss({ dark: { accent: '#123456' }, light: { bg: '#ffffff' } });
+    assert.match(css, /^:root \{$/m);
+    assert.match(css, /^:root\[data-theme="light"\] \{$/m);
+    assert.match(css, /^ {2}--accent: #123456;$/m);
+    // Q49: raising specificity would make the theme un-overridable by the
+    // light block that follows it in the page.
+    assert.doesNotMatch(css, /!important/);
+    assert.doesNotMatch(css, /html:root/);
+  });
+
+  test('an omitted scheme emits no block at all', () => {
+    const css = theme.toCss({ dark: { accent: '#123456' } });
+    assert.doesNotMatch(css, /data-theme="light"/,
+      'an empty block would still be a rule that has to be reasoned about');
+  });
+
+  test('the output is rebuilt from the allow-list, never from the input', () => {
+    // S35: even with validation bypassed entirely, nothing an operator wrote
+    // can escape a declaration. Each of these would close the block, start a
+    // new rule, or end the stylesheet if it were concatenated verbatim.
+    for (const hostile of [
+      '#000; } body { display: none } :root { --x: #000',
+      'red</style><script>alert(1)</script>',
+      '#000;\n}\n@import url(http://evil.example/x.css);\n:root{--y:#000',
+      'expression(alert(1))',
+      '#000 /* */ ; color: red',
+    ]) {
+      const css = theme.toCss({ dark: { accent: hostile } });
+      assert.doesNotMatch(css, /<\/style>|<script|@import|expression\(|body\s*\{/i,
+        `escaped: ${hostile}`);
+      // The declaration is simply absent — normaliseColour returned null.
+      assert.doesNotMatch(css, /--accent:/);
+    }
+  });
+
+  test('a key the allow-list does not know is never written', () => {
+    const css = theme.toCss({ dark: { accent: '#123456', 'evil; }': '#000000' } });
+    assert.match(css, /--accent: #123456;/);
+    assert.doesNotMatch(css, /evil/);
+  });
+
+  test('declarations are ordered, so the same theme renders byte-identically', () => {
+    const a = theme.toCss({ dark: { bg: '#111111', accent: '#222222' } });
+    const b = theme.toCss({ dark: { accent: '#222222', bg: '#111111' } });
+    assert.equal(a, b, 'key order in the uploaded file must not change the etag');
+  });
+});
+
+describe('the theme template', () => {
+  const theme = require('./lib/theme');
+
+  test('it covers every accepted key, in both schemes', () => {
+    const t = theme.template();
+    assert.equal(t.version, theme.FORMAT_VERSION);
+    for (const key of Object.keys(theme.TOKENS)) {
+      assert.ok(key in t.dark,  `${key} missing from the dark half`);
+      assert.ok(key in t.light, `${key} missing from the light half`);
+    }
+  });
+
+  test('it validates — an operator can upload it unchanged', () => {
+    // The whole point of shipping a template is that it is a working starting
+    // point. One that our own validator rejects is worse than none.
+    const r = theme.validate(theme.template());
+    assert.ok(r.ok, JSON.stringify(r.errors));
+  });
+
+  test('its light half really differs from its dark half', () => {
+    const t = theme.template();
+    assert.notEqual(t.dark.bg, t.light.bg, 'a template with one palette teaches the wrong thing');
+    assert.equal(t.dark['on-accent'], t.light['on-accent'],
+      'white on a filled accent is deliberately the same in both');
+  });
+
+  test('schemesOf names which halves a document customises', () => {
+    assert.deepEqual(theme.schemesOf({ dark: { accent: '#000000' } }), ['dark']);
+    assert.deepEqual(theme.schemesOf({ dark: { accent: '#000000' }, light: { bg: '#fff' } }),
+      ['dark', 'light']);
+    assert.deepEqual(theme.schemesOf({ dark: {} }), [], 'an empty block customises nothing');
+    assert.deepEqual(theme.schemesOf(null), []);
+  });
+});
+
+describe('routes — the theme', () => {
+  const routeAdminMod = require('./routes/admin');
+  const themeLib = require('./lib/theme');
+
+  const pub = (path, headers = {}) => ({
+    method: 'GET', url: path, path,
+    req: Object.assign(mockReq(''), { headers }),
+    res: makeRes(),
+  });
+  const adminCtx = (method, path, body) => ({
+    method, url: path, path, res: makeRes(),
+    principal: asAdmin(), req: mockReq(body === undefined ? '' : JSON.stringify(body)),
+  });
+
+  test('/branding/theme.css is public and answers 200 with no theme configured', async () => {
+    // A 404 would put a failed request in every console on every installation
+    // that never set a theme, and would say nothing an empty sheet does not.
+    const restore = stub(brandingMod, { getThemeCss: async () => null });
+    try {
+      const ctx = pub('/branding/theme.css');
+      assert.equal(await routeBranding.handle(ctx), true);
+      assert.equal(ctx.res.statusCode, 200);
+      assert.match(ctx.res.headers['Content-Type'], /^text\/css/);
+      assert.match(ctx.res.body.toString(), /No theme configured/);
+    } finally { restore(); }
+  });
+
+  test('it revalidates rather than claiming to be immutable', async () => {
+    // The URL carries no version — the pages are static files with no
+    // templating to stamp one in — so a year-long cache would hide every later
+    // change. `no-cache` means "revalidate", and the usual answer is a 304.
+    const restore = stub(brandingMod, {
+      getThemeCss: async () => ({ css: ':root { --accent: #123456; }\n', etag: 'abc' }),
+    });
+    try {
+      const ctx = pub('/branding/theme.css');
+      assert.equal(await routeBranding.handle(ctx), true);
+      assert.equal(ctx.res.headers['Cache-Control'], 'no-cache');
+      assert.doesNotMatch(ctx.res.headers['Cache-Control'], /immutable/);
+      assert.equal(ctx.res.headers.ETag, '"abc"');
+      assert.equal(ctx.res.headers['X-Content-Type-Options'], 'nosniff');
+
+      const again = pub('/branding/theme.css', { 'if-none-match': '"abc"' });
+      assert.equal(await routeBranding.handle(again), true);
+      assert.equal(again.res.statusCode, 304);
+    } finally { restore(); }
+  });
+
+  test('a rejected upload names every problem and stores nothing', async () => {
+    let stored = false;
+    const restore = stub(brandingMod, { putTheme: async () => { stored = true; return 'x'; } });
+    try {
+      const ctx = adminCtx('PUT', '/admin/theme',
+        { version: 1, dark: { acccent: '#123456', bg: 'rebeccapurple' } });
+      assert.equal(await routeAdminMod.handle(ctx), true);
+      assert.equal(ctx.res.statusCode, 400);
+      assert.equal(ctx.res.json.code, 'VALIDATION_FAILED');
+      assert.equal(ctx.res.json.problems.length, 2);
+      assert.match(ctx.res.json.problems.join(' '), /dark\.acccent/);
+      assert.match(ctx.res.json.problems.join(' '), /dark\.bg/);
+      assert.equal(stored, false, 'a refused file must not be half-applied');
+    } finally { restore(); }
+  });
+
+  test('an accepted upload stores the document and the CSS together', async () => {
+    let saved = null;
+    const restore = stub(brandingMod, {
+      putTheme: async (v) => { saved = v; return 'etag-1'; },
+    });
+    try {
+      const ctx = adminCtx('PUT', '/admin/theme',
+        { version: 1, name: 'Contoso', dark: { accent: '#7C5CFF' } });
+      assert.equal(await routeAdminMod.handle(ctx), true);
+      assert.equal(ctx.res.statusCode, 200);
+      assert.deepEqual(ctx.res.json.theme.schemes, ['dark']);
+      // The two are written by one call, so the served sheet can never be a
+      // different generator's output than the document was checked against.
+      assert.equal(saved.name, 'Contoso');
+      assert.equal(saved.doc.dark.accent, '#7c5cff');
+      assert.equal(saved.css, themeLib.toCss(saved.doc));
+    } finally { restore(); }
+  });
+
+  test('the read serves the stored document and the template in one call', async () => {
+    const restore = stub(brandingMod, {
+      getThemeDoc: async () => ({ name: 'Contoso', doc: { dark: { accent: '#7c5cff' } },
+                                  etag: 'e1', updatedAt: new Date(0) }),
+    });
+    try {
+      const ctx = adminCtx('GET', '/admin/theme');
+      assert.equal(await routeAdminMod.handle(ctx), true);
+      assert.equal(ctx.res.statusCode, 200);
+      assert.deepEqual(ctx.res.json.theme.schemes, ['dark']);
+      assert.equal(ctx.res.json.theme.doc.dark.accent, '#7c5cff');
+      assert.ok(ctx.res.json.template.dark.accent, 'the template rides along');
+      assert.ok(ctx.res.json.limits.tokens.includes('accent'));
+    } finally { restore(); }
+  });
+
+  test('deleting it restores the built-in colours', async () => {
+    let cleared = false;
+    const restore = stub(brandingMod, { clearTheme: async () => { cleared = true; } });
+    try {
+      const ctx = adminCtx('DELETE', '/admin/theme');
+      assert.equal(await routeAdminMod.handle(ctx), true);
+      assert.equal(ctx.res.statusCode, 200);
+      assert.equal(ctx.res.json.theme, null);
+      assert.equal(cleared, true);
+    } finally { restore(); }
+  });
+
+  for (const [method, path] of [['PUT', '/admin/theme'], ['DELETE', '/admin/theme'],
+                                ['GET', '/admin/theme']]) {
+    test(`${method} ${path} is administrator-only`, async () => {
+      const ctx = {
+        method, url: path, path, res: makeRes(),
+        principal: { kind: 'user', userId: 'u1' },
+        req: mockReq('{}'),
+      };
+      assert.equal(await routeAdminMod.handle(ctx), true);
+      assert.equal(ctx.res.statusCode, 403);
+    });
+  }
 });

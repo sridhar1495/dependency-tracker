@@ -57,6 +57,10 @@
 
       --header-h:     64px;
       --radius:       8px;
+      /* Q49: what reads ON a filled accent surface. White by default and
+         unchanged by this refactor — the token exists so a themed
+         installation CAN fix its own contrast, not so ours moves. */
+      --on-accent:    #ffffff;
     }
 
     [data-theme="light"] {
@@ -78,6 +82,7 @@
       --low-bg:       rgba(29,78,216,0.10);
       --ok:           #15803d;
       --ok-bg:        rgba(21,128,61,0.08);
+      --on-accent:    #ffffff;
     }
 
     * { margin: 0; padding: 0; box-sizing: border-box; }
@@ -107,12 +112,36 @@
     /* Initials of the configured title, same square as index.html and login.html. */
     .brand-mark {
       width: 26px; height: 26px; border-radius: 7px;
-      background: var(--accent); color: #fff;
+      background: var(--accent); color: var(--on-accent);
       display: flex; align-items: center; justify-content: center;
       font-size: 10.5px; font-weight: 700; letter-spacing: .3px; flex-shrink: 0;
     }
 
     /* ── Customization ───────────────────────────────────────────────────── */
+    /* The switch, hand-mirrored from index.html (§8.1): the three pages share
+       classes, not a stylesheet, and this one was declared without ever being
+       defined here — so it rendered as a bare checkbox. */
+    .cfg-toggle { position: relative; display: inline-block; width: 36px; height: 20px; flex-shrink: 0; cursor: pointer; }
+    .cfg-toggle input { opacity: 0; width: 0; height: 0; }
+    .cfg-toggle-slider {
+      position: absolute; inset: 0; background: var(--border);
+      border-radius: 20px; cursor: pointer; transition: background 0.2s;
+    }
+    .cfg-toggle-slider::before {
+      content: ''; position: absolute; width: 14px; height: 14px;
+      left: 3px; top: 3px; background: var(--on-accent); border-radius: 50%;
+      transition: transform 0.2s;
+    }
+    .cfg-toggle input:checked + .cfg-toggle-slider { background: var(--accent); }
+    .cfg-toggle input:checked + .cfg-toggle-slider::before { transform: translateX(16px); }
+    .cfg-toggle input:disabled + .cfg-toggle-slider { opacity: 0.35; cursor: not-allowed; }
+    /* The status line under a customisation control: what is in force right
+       now, a step above .hint's explanatory grey but below a heading. */
+    .branding-state {
+      margin-top: 8px; font-size: 13px; color: var(--text);
+    }
+    .branding-toggle-row { display: flex; align-items: center; gap: 12px; margin-top: 10px; }
+    .branding-toggle-row .branding-state { margin-top: 0; }
     .branding-actions { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 10px; }
     .bg-preview {
       margin-top: 8px; border: 1px solid var(--border); border-radius: 8px;
@@ -158,7 +187,7 @@
     }
     .btn:hover:not(:disabled) { background: var(--border); }
     .btn:disabled { opacity: .5; cursor: not-allowed; }
-    .btn.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+    .btn.primary { background: var(--accent); border-color: var(--accent); color: var(--on-accent); }
     .btn.primary:hover:not(:disabled) { filter: brightness(1.1); }
     .btn.danger { border-color: var(--critical); color: var(--critical); }
     .btn.danger:hover:not(:disabled) { background: var(--critical-bg); }
@@ -238,8 +267,8 @@
     table.grid tr:last-child td { border-bottom: none; }
     tr.row { cursor: pointer; }
     tr.row:hover { background: var(--surface2); }
-    tr.row.selected { background: var(--accent); color: #fff; }
-    tr.row.selected .muted, tr.row.selected .pill-inherit { color: #fff; opacity: .85; }
+    tr.row.selected { background: var(--accent); color: var(--on-accent); }
+    tr.row.selected .muted, tr.row.selected .pill-inherit { color: var(--on-accent); opacity: .85; }
     .chev { color: var(--text-muted); text-align: right; }
 
     .dot { display: inline-block; width: 7px; height: 7px; border-radius: 50%; margin-right: 6px; }
@@ -376,7 +405,26 @@
       background-size: contain; background-repeat: no-repeat; background-position: center;
       color: transparent; font-size: 0;
     }
-  </style>
+      /* Q51: a rejected theme lists every problem it found, each naming its own
+       key. One line of "the file was not accepted" would send an operator
+       hunting through forty properties for a typo the service already knows
+       the name of. */
+    .theme-problems {
+      margin: 6px 0 0; padding: 8px 10px 8px 26px;
+      list-style: disc; border: 1px solid var(--critical);
+      border-radius: var(--radius); background: var(--critical-bg);
+      font-size: 12px; color: var(--text); line-height: 1.6;
+    }
+    .theme-problems li { margin: 0; }
+</style>
+  <!-- Q49: the administrator's colour theme. It comes AFTER this page's own
+       inline stylesheet, at the same specificity, so a property it sets wins and one it
+       omits keeps the built-in value — per property, from the cascade itself,
+       with no merge logic anywhere. A render-blocking <link> rather than a
+       stylesheet inserted by script: the latter would repaint after the page
+       was already visible, which is the flash §8.4 exists to prevent. The
+       route answers 200 with an empty sheet when nothing is configured. -->
+  <link rel="stylesheet" href="/branding/theme.css">
 </head>
 <body>
   <div id="bootGate" aria-live="polite">
@@ -502,19 +550,15 @@
                 </button>
               </div>
             </div>
-          </div>
 
-          <div class="branding-row">
-            <div class="branding-label">
-              <h3>Application icon</h3>
-              <p class="hint">
+            <div class="field" style="margin-top:18px">
+              <label class="label">Application icon</label>
+              <div class="hint">
                 Replaces the initials beside the application name, on every screen.
                 PNG, JPEG or WebP; 64&times;512&nbsp;px, near-square, 256&nbsp;KB at most.
                 SVG is not accepted &mdash; it is XML, it can carry script, and this
                 image is served to anyone who can reach the sign-in page.
-              </p>
-            </div>
-            <div class="branding-control">
+              </div>
               <div class="branding-state" id="iconState">Using the title&rsquo;s initials</div>
               <div class="err" id="iconErr"></div>
               <div class="branding-actions">
@@ -528,23 +572,57 @@
                 </button>
               </div>
             </div>
-          </div>
 
-          <div class="branding-row">
-            <div class="branding-label">
-              <h3>Risk trend panel</h3>
-              <p class="hint">
+
+            <div class="field" style="margin-top:18px">
+              <label class="label">Colour theme</label>
+              <div class="hint">
+                One theme for the whole installation, applied to every screen and to
+                the sign-in page. Each person still chooses dark or light for
+                themselves &mdash; a theme defines <em>both</em>.
+              </div>
+              <div class="hint">
+                The file is JSON, not CSS, and it may be <strong>partial</strong>:
+                set only the colours you want to change and the rest keep their
+                built-in values, one property at a time. Start from the template
+                rather than from a blank file.
+              </div>
+              <div class="branding-state" id="themeState">Using the built-in colours</div>
+              <div class="err" id="themeErr"></div>
+              <ul class="theme-problems" id="themeProblems" hidden></ul>
+              <div class="branding-actions">
+                <input type="file" id="themeFile" accept="application/json,.json"
+                       style="display:none" onchange="uploadTheme()">
+                <button class="btn primary" id="themeChoose"
+                        onclick="document.getElementById('themeFile').click()">
+                  Upload theme
+                </button>
+                <button class="btn" id="themeTemplate" onclick="downloadThemeTemplate()">
+                  Download template
+                </button>
+                <button class="btn" id="themeExport" onclick="downloadTheme()" hidden>
+                  Download current
+                </button>
+                <button class="btn danger" id="themeRemove" onclick="removeTheme()" hidden>
+                  Restore built-in
+                </button>
+              </div>
+            </div>
+
+            <div class="field" style="margin-top:18px">
+              <label class="label">Risk trend panel</label>
+              <div class="hint">
                 The chart above the project table, for every user. Hiding it does
                 not stop history being recorded &mdash; turn it back on and the line
                 is unbroken rather than gapped for the time it was off.
-              </p>
-            </div>
-            <div class="branding-control">
-              <label class="cfg-toggle" title="Show or hide the risk trend panel">
-                <input type="checkbox" id="trendEnabled" onchange="saveTrendEnabled()">
-                <span class="cfg-toggle-slider"></span>
-              </label>
-              <div class="branding-state" id="trendState">Visible to all users</div>
+              </div>
+              <div class="branding-toggle-row">
+                <label class="cfg-toggle" title="Show or hide the risk trend panel">
+                  <input type="checkbox" id="trendEnabled" onchange="saveTrendEnabled()">
+                  <span class="cfg-toggle-slider"></span>
+                </label>
+                <div class="branding-state" id="trendState">Visible to all users</div>
+              </div>
               <div class="err" id="trendErr"></div>
             </div>
           </div>
@@ -1494,6 +1572,149 @@
     }
   }
 
+
+  // ── The colour theme (Q49) ─────────────────────────────────────────────
+  // `_themeTemplate` is fetched once with the state, so "Download template"
+  // costs no round trip and works while the network is busy. `_themeDoc` is
+  // whatever is currently stored, for "Download current" — the document is
+  // already in hand, so exporting it is a Blob rather than a request.
+  let _themeTemplate = null;
+  let _themeDoc      = null;
+
+  function renderThemeState(theme) {
+    _themeDoc = theme && theme.doc ? theme.doc : null;
+    const schemes = (theme && theme.schemes) || [];
+    // Say WHICH half is customised. "A theme is loaded" leaves an operator who
+    // set only dark wondering why light looks untouched — it is untouched, and
+    // that is the feature, but only if the screen says so.
+    let label;
+    if (!theme) {
+      label = 'Using the built-in colours';
+    } else {
+      // Goes through textContent below, so the name needs no escaping.
+      const named = theme.name ? `\u201c${theme.name}\u201d` : 'A theme';
+      const which = schemes.length === 2
+        ? 'dark and light customised'
+        : schemes.length === 1
+          ? `${schemes[0]} customised, ${schemes[0] === 'dark' ? 'light' : 'dark'} is the built-in`
+          : 'nothing customised';
+      label = `${named} \u2014 ${which}`;
+    }
+    $('themeState').textContent = label;
+    $('themeRemove').hidden = !theme;
+    $('themeExport').hidden = !theme;
+  }
+
+  function showThemeProblems(problems) {
+    const ul = $('themeProblems');
+    ul.textContent = '';
+    if (!problems || problems.length === 0) { ul.hidden = true; return; }
+    for (const p of problems) {
+      const li = document.createElement('li');
+      li.textContent = p;               // never innerHTML: these quote the file
+      ul.appendChild(li);
+    }
+    ul.hidden = false;
+  }
+
+  function downloadJson(obj, filename) {
+    const blob = new Blob([JSON.stringify(obj, null, 2)], { type: 'application/json' });
+    const url  = URL.createObjectURL(blob);
+    const a    = document.createElement('a');
+    a.href = url; a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    // Revoking immediately can race the download in some browsers; a tick is
+    // enough and the object is small.
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  }
+
+  function downloadThemeTemplate() {
+    if (!_themeTemplate) { $('themeErr').textContent = 'The template is not loaded yet.'; return; }
+    downloadJson(_themeTemplate, 'theme-template.json');
+  }
+
+  function downloadTheme() {
+    if (!_themeDoc) return;
+    downloadJson(_themeDoc, 'theme.json');
+  }
+
+  async function uploadTheme() {
+    const input = $('themeFile');
+    const file  = input.files && input.files[0];
+    $('themeErr').textContent = '';
+    showThemeProblems(null);
+    if (!file) return;
+
+    $('themeChoose').disabled = true;
+    try {
+      const text = await file.text();
+      let parsed;
+      try {
+        parsed = JSON.parse(text);
+      } catch (_) {
+        // Caught here rather than server-side so the message can name the file
+        // rather than "the request body", which is not what the operator sent.
+        $('themeErr').textContent = 'That file is not valid JSON.';
+        return;
+      }
+      const r = await apiFetch('/admin/theme', {
+        method:  'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body:    JSON.stringify(parsed),
+      });
+      const bd = await r.json().catch(() => ({}));
+      if (!r.ok) {
+        $('themeErr').textContent = bd.error || 'Could not save the theme.';
+        showThemeProblems(bd.problems);
+        return;
+      }
+      renderThemeState(bd.theme);
+      // The theme is a stylesheet this page already links, so it does not
+      // repaint on its own — a reload is the honest way to show the result.
+      location.reload();
+    } catch (e) {
+      $('themeErr').textContent = `Could not save the theme: ${e.message}`;
+    } finally {
+      $('themeChoose').disabled = false;
+      input.value = '';
+    }
+  }
+
+  async function removeTheme() {
+    $('themeErr').textContent = '';
+    showThemeProblems(null);
+    // No confirmation, matching the two sibling controls beside it: the hint
+    // already says the file is not kept, and re-uploading is the whole undo.
+    try {
+      const r = await apiFetch('/admin/theme', { method: 'DELETE' });
+      if (!r.ok) {
+        const bd = await r.json().catch(() => ({}));
+        $('themeErr').textContent = bd.error || 'Could not clear the theme.';
+        return;
+      }
+      renderThemeState(null);
+      location.reload();
+    } catch (e) {
+      $('themeErr').textContent = `Could not clear the theme: ${e.message}`;
+    }
+  }
+
+  async function loadTheme() {
+    try {
+      const r = await apiFetch('/admin/theme');
+      if (!r.ok) return;
+      const bd = await r.json();
+      _themeTemplate = bd.template || null;
+      renderThemeState(bd.theme);
+    } catch (_) {
+      // The rest of the screen must still work. The state line keeps saying
+      // "built-in", which is what an operator sees when nothing is configured
+      // — so the failure mode is a stale label, not a broken page.
+    }
+  }
+
   // ── The risk-trend panel (Q48) ─────────────────────────────────────────
   function renderTrendState(enabled) {
     $('trendEnabled').checked = enabled;
@@ -1595,7 +1816,7 @@
   }
 
   async function reloadAll() {
-    await Promise.all([loadUsers(), loadSettings(), loadBranding()]);
+    await Promise.all([loadUsers(), loadSettings(), loadBranding(), loadTheme()]);
     if ($('accStorage').classList.contains('open')) await loadStorage();
   }
 
@@ -1661,6 +1882,10 @@
   window.uploadIcon            = uploadIcon;
   window.removeIcon            = removeIcon;
   window.saveTrendEnabled      = saveTrendEnabled;
+  window.uploadTheme           = uploadTheme;
+  window.removeTheme           = removeTheme;
+  window.downloadTheme         = downloadTheme;
+  window.downloadThemeTemplate = downloadThemeTemplate;
   window.removeBackground      = removeBackground;
 
   boot();

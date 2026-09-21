@@ -51,6 +51,7 @@ const auth        = require('../lib/auth');
 const disk        = require('../lib/disk');
 const branding    = require('../lib/branding');
 const image       = require('../lib/image');
+const theme       = require('../lib/theme');
 
 /**
  * Administrator-only guard.
@@ -433,6 +434,97 @@ async function handle({ method, path: parsedPath, req, res, principal }) {
     } catch (e) {
       log('error', `Toggling the trend panel failed: ${e.message}`);
       jsonReply(res, 500, { error: 'Could not save the setting.', code: 'INTERNAL' });
+    }
+    return true;
+  }
+
+  // ── The colour theme (Q49) ────────────────────────────────────────────
+  // GET is a read and so is deliberately NOT on §7.6's allow-list, which
+  // covers writes. It serves the stored document (for "Download current") and
+  // the built-in template (for "Download template") in one call, because the
+  // screen shows the state and both buttons together and a second round trip
+  // would buy nothing.
+  if (method === 'GET' && parsedPath === '/admin/theme') {
+    if (!requireAdmin(principal, res)) return true;
+    try {
+      const stored = await branding.getThemeDoc();
+      jsonReply(res, 200, {
+        theme: stored
+          ? {
+              name: stored.name || null,
+              version: stored.etag,
+              updatedAt: stored.updatedAt,
+              schemes: theme.schemesOf(stored.doc),
+              doc: stored.doc,
+            }
+          : null,
+        template: theme.template(),
+        limits: {
+          maxBytes: theme.MAX_BYTES,
+          maxProperties: theme.MAX_PROPERTIES,
+          maxName: theme.MAX_NAME,
+          tokens: Object.keys(theme.TOKENS),
+        },
+      });
+    } catch (e) {
+      log('error', `Theme read failed: ${e.message}`);
+      jsonReply(res, 500, { error: 'Could not read the theme.', code: 'INTERNAL' });
+    }
+    return true;
+  }
+
+  // Q51: the whole file is refused when any part of it is wrong, with every
+  // problem named. Applying the valid half would leave an operator with a
+  // theme that "didn't work" and nothing to explain why — the likeliest cause
+  // of an unknown key here is a typo, not a future format.
+  if (method === 'PUT' && parsedPath === '/admin/theme') {
+    if (!requireAdmin(principal, res)) return true;
+    try {
+      // The default 64 KB body limit is exactly theme.MAX_BYTES; a complete
+      // theme is under 2 KB, so the ceiling is a bound, not a budget.
+      const body = await readJson(req, res);
+      if (body === null) return true;        // readJson already replied
+
+      const result = theme.validate(body);
+      if (!result.ok) {
+        jsonReply(res, 400, {
+          error: 'The theme file was not accepted.',
+          code: 'VALIDATION_FAILED',
+          problems: result.errors,
+        });
+        return true;
+      }
+
+      // S35: the CSS is rendered here, by the same code path that validated
+      // the document, and stored beside it — so the stylesheet served can
+      // never be a different generator's output than the document was checked
+      // against.
+      const css = theme.toCss(result.doc);
+      const etag = await branding.putTheme({ name: result.doc.name, doc: result.doc, css });
+      const schemes = theme.schemesOf(result.doc);
+      log('info', 'Theme saved', {
+        schemes: schemes.join(','),
+        properties: schemes.reduce((n, sc) => n + Object.keys(result.doc[sc]).length, 0),
+      });
+      jsonReply(res, 200, {
+        theme: { name: result.doc.name || null, version: etag, schemes, doc: result.doc },
+      });
+    } catch (e) {
+      log('error', `Saving the theme failed: ${e.message}`);
+      jsonReply(res, 500, { error: 'Could not save the theme.', code: 'INTERNAL' });
+    }
+    return true;
+  }
+
+  if (method === 'DELETE' && parsedPath === '/admin/theme') {
+    if (!requireAdmin(principal, res)) return true;
+    try {
+      await branding.clearTheme();
+      log('info', 'Theme cleared — every page falls back to its built-in colours');
+      jsonReply(res, 200, { theme: null });
+    } catch (e) {
+      log('error', `Clearing the theme failed: ${e.message}`);
+      jsonReply(res, 500, { error: 'Could not clear the theme.', code: 'INTERNAL' });
     }
     return true;
   }

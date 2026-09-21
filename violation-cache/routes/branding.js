@@ -3,10 +3,12 @@
 'use strict';
 
 // ── Branding (public) ────────────────────────────────────────────────────────
-//   GET /branding             title + background metadata
+//   GET /branding             title + background, icon and theme metadata
 //   GET /branding/background  the uploaded image bytes
+//   GET /branding/icon        the logo mark's bytes
+//   GET /branding/theme.css   the administrator's generated colour theme
 //
-// S32: these two are the only unauthenticated routes outside /auth, and the
+// S32: these four are the only unauthenticated routes outside /auth, and the
 // justification is that the sign-in page needs them BEFORE a token exists —
 // branding on a sign-in screen is public by construction, since anyone who can
 // reach the page can see it. They expose nothing else: no account, no setting,
@@ -16,6 +18,10 @@
 const { log } = require('../lib/log');
 const { jsonReply } = require('../lib/http-util');
 const branding = require('../lib/branding');
+
+// Served when no theme is configured — see the route below for why this is a
+// 200 rather than a 404.
+const EMPTY_THEME_CSS = '/* No theme configured. */\n';
 
 async function handle(ctx) {
   const { method, path, res } = ctx;
@@ -42,6 +48,10 @@ async function handle(ctx) {
         // more sensitive than the title beside it — it says whether a panel is
         // on screen, not what is in it.
         trendEnabled: b.trendEnabled,
+        // Q49: the version is what the pages put in the stylesheet's URL, so
+        // it is immutable and a changed theme is a different URL. `null` means
+        // "emit no <link> at all" — the built-in blocks are the fallback.
+        theme: b.theme ? { version: b.theme.etag, name: b.theme.name || null } : null,
       });
     } catch (e) {
       // The sign-in page must render even when this fails, so the failure is
@@ -51,7 +61,7 @@ async function handle(ctx) {
       log('warn', 'Branding read failed; serving defaults', { err: e.message });
       jsonReply(res, 200, {
         title: branding.DEFAULT_TITLE, titleIsDefault: true, background: null, icon: null,
-        trendEnabled: true,
+        trendEnabled: true, theme: null,
       });
     }
     return true;
@@ -87,6 +97,51 @@ async function handle(ctx) {
     } catch (e) {
       log('error', 'Icon read failed', { err: e.message });
       jsonReply(res, 500, { error: 'Could not read the icon.', code: 'INTERNAL' });
+    }
+    return true;
+  }
+
+  // S32/Q49: public, for exactly the reason the icon and the background are —
+  // the sign-in page must be themed and it renders before any token exists.
+  // Returns `text/css` and nothing else: no account, no setting, no count.
+  //
+  // The bytes are text THIS SERVICE generated from an allow-list of token
+  // names and colours it re-serialised itself (S35, lib/theme.js), never text
+  // an operator wrote. A 404 is the ordinary state and costs the page nothing:
+  // the built-in :root blocks are the fallback by construction.
+  if (method === 'GET' && path === '/branding/theme.css') {
+    try {
+      const theme = await branding.getThemeCss();
+      // No theme configured is the ordinary state, and it answers 200 with an
+      // empty sheet rather than 404. The pages link this unconditionally, so a
+      // 404 would put a failed request in every console on every installation
+      // that never set a theme — and it would say nothing a zero-length
+      // stylesheet does not. The built-in :root blocks are the fallback.
+      const css = theme ? theme.css : EMPTY_THEME_CSS;
+      const etag = `"${theme ? theme.etag : 'none'}"`;
+
+      if (ctx.req.headers['if-none-match'] === etag) {
+        res.writeHead(304, { ETag: etag, 'Cache-Control': 'no-cache' });
+        res.end();
+        return true;
+      }
+      const body = Buffer.from(css, 'utf8');
+      // `no-cache` means "revalidate", not "do not store": the browser keeps
+      // the bytes and sends If-None-Match, so the usual answer is a ~100-byte
+      // 304. It cannot be `immutable` like the icon's, because this URL
+      // carries no version — the pages are static files with no templating to
+      // stamp one in, and a year-long cache would hide every later change.
+      res.writeHead(200, {
+        'Content-Type':   'text/css; charset=utf-8',
+        'Content-Length': body.length,
+        ETag:             etag,
+        'Cache-Control':  'no-cache',
+        'X-Content-Type-Options': 'nosniff',
+      });
+      res.end(body);
+    } catch (e) {
+      log('error', 'Theme read failed', { err: e.message });
+      jsonReply(res, 500, { error: 'Could not read the theme.', code: 'INTERNAL' });
     }
     return true;
   }

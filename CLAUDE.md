@@ -114,7 +114,8 @@ dependency-tracker/
 │   │   ├── dependency-path-cache.js dependency-paths.js   # §6.3a — direct/transitive resolution
 │   │   ├── project-tree.js     # §8.7 Q39 — the server's copy of the hierarchy roll-up
 │   │   ├── report-origins.js   # §6.7 Q37 — the same two tiers, for a workbook
-│   │   └── branding.js image.js   # title + sign-in background
+│   │   ├── branding.js image.js   # title, sign-in background, icon
+│   │   └── theme.js            # §8.12 Q49 — the administrator's colour theme
 │   ├── routes/                 # auth.js profile.js admin.js dt-proxy.js config.js reports.js schedule.js cache.js branding.js dependency-paths.js
 │   ├── package.json            # Dependencies: exceljs, nodemailer, pg
 │   ├── Dockerfile
@@ -219,7 +220,7 @@ Inline comments use lettered prefixes to trace design decisions:
 - **O-numbers** — observability notes (`// O3: JSON log format for log aggregators`)
 - **S-numbers** — security rationale (`// S2: token hashed before storage`) — **new in revision 2**
 
-Highest numbers currently in use: **Q48, P20, O5, S34**. When adding logic with a
+Highest numbers currently in use: **Q51, P20, O5, S35**. When adding logic with a
 non-obvious trade-off, add the next number in the appropriate series. Check the
 current maximum before assigning — parallel branches can claim the same number.
 
@@ -304,7 +305,8 @@ await tx(async (client) => {
 | `violation_caches` | Shared violation cache, keyed by connection fingerprint |
 | `risk_snapshots` | One row per connection per day, written when a violation-cache build completes; the history behind the trend view (migration 012). Keyed by fingerprint for the same reason the cache is, so accounts sharing a connection share one series. Stores the severity counts and the policy counts **separately** — "critical" means two different things in this product and a schema that accretes history must not decide which one a graph plots. **No foreign key to `violation_caches`**: a cache row is a 24-hour artefact that housekeeping deletes as a matter of routine, and a cascade would let that destroy a year of measurements |
 | `dependency_paths` | One row per connection per project, the cached result of walking that project's DependencyTrack dependency graph (migration 013) — see §6.3a. Keyed by `(fingerprint, project_uuid)` for the same sharing reason as every other cache here. Holds only the expensive, opt-in half (the graph walk); the cheap Direct/Transitive classification is never stored — see §6.3a for why. `paths` entries carry `chains`, a parallel `routeCounts`, and `rootsTotal` **only when the display cap is hiding parents** (Q33). `routes_exact` (migration 014) says whether those counts are answers or floors, and is a column because it describes the whole walk — migration 013's own comment still documents the original one-chain shape, since a merged migration is never edited (§5.3) |
-| `branding_assets` | The administrator's sign-in background. Bytes live here, **not** on `app_settings`, because the administration listing cross-joins that table |
+| `branding_assets` | The administrator's sign-in background and application icon (migration 016). Bytes live here, **not** on `app_settings`, because the administration listing cross-joins that table |
+| `app_themes` | The administrator's colour theme (migration 017), singleton. Holds the validated **document** and the **stylesheet it renders to**: the document is what the screen shows back and what the download button serves, the CSS is what the public route serves on every page load. Rendering per request would put a template render on the hottest path in the product; rendering at boot would let a change to the generator apply itself to a theme nobody re-reviewed |
 | `schema_migrations` | Migration ledger |
 
 ### 5.6 What remains on disk
@@ -1148,9 +1150,11 @@ a **closed list of three**, not a general-purpose account editor:
 | `POST /admin/branding/icon` | Upload the application icon (Q47) |
 | `DELETE /admin/branding/icon` | Restore the title-initials mark |
 | `PUT /admin/trend` | Show or hide the risk-trend panel for every user (Q48) |
+| `PUT /admin/theme` | Upload a colour theme; partial files are the normal case (Q49) |
+| `DELETE /admin/theme` | Restore the built-in colours |
 
 Everything else about an account stays readable only. A test asserts exactly
-these **nine** are handled and every other method/path combination is not — a
+these **eleven** are handled and every other method/path combination is not — a
 blanket ban that had to be deleted would have stopped protecting anything, so
 the allow-list is the contract and adding a tenth means editing it in a
 diff somebody reads.
@@ -1160,12 +1164,17 @@ than adding a seventh — it is the same kind of decision about the same rows,
 made by the same principal. That is what the allow-list is for: a new capability
 has to justify a new entry, and this one did not need one.
 
-The list went from three to six when customisation landed, then to nine: the
-icon pair (Q47) mirrors the background pair exactly, and the trend switch
-(Q48) hides a panel. Every one of the six additions was weighed on the same
-bar rather than waved through — they change how the product *looks* or what it
-*shows*, never what an account is or what it may reach, and none of them reads
-another principal's data. That is the bar a tenth has to clear too.
+The list went from three to six when customisation landed, then to nine, then
+to eleven: the icon pair (Q47) mirrors the background pair exactly, the trend
+switch (Q48) hides a panel, and the theme pair (Q49) changes colours. Every
+one of the eight additions was weighed on the same bar rather than waved
+through — they change how the product *looks* or what it *shows*, never what
+an account is or what it may reach, and none of them reads another
+principal's data. That is the bar a twelfth has to clear too.
+
+**`GET /admin/theme` is deliberately not on the list**, and neither is any
+other read. The allow-list is about writes; adding reads to it would dilute
+the one thing it is for.
 
 **The trend switch is display only.** `risk_snapshots` keeps being written by
 every completed violation-cache build while the panel is hidden, so turning it
@@ -2004,7 +2013,12 @@ The frontend never performs uniqueness checks — those are backend-only, via
   room for seven dates on the combined chart and for two in a small multiple.
 - Accent colour `--accent: #6366f1`. Severity colours are variables
   (`--critical`, `--high`, …).
-- Never hard-code a colour hex inside a component rule.
+- **Never hard-code a colour hex inside a component rule — including white.**
+  A test enforces this on **all three pages** since Q49; it used to run against
+  `admin.html` alone, with `#fff` exempt, and that is precisely how 28 literals
+  accumulated in the other two. Text drawn on a filled accent or critical
+  surface uses `--on-accent` / `--on-critical`, not `#fff`: they are white in
+  both schemes and exist so a themed installation can fix its own contrast.
 - Responsive breakpoints: 1200 px → 900 px → 768 px. `login.html` adds 640 px
   (the name pair stacks) and **height** breakpoints at 720 px and 560 px.
   Browser zoom shrinks the CSS viewport, and it shortens it before it narrows
@@ -2133,7 +2147,116 @@ The frontend never performs uniqueness checks — those are backend-only, via
 | `reportOrigins.resolveForProject(conn, uuid, keys, cancelFlag)` | server | One project's Direct/Transitive split and the chains behind it, for a workbook (Q37) |
 | `reportOrigins.originCell` / `.pathCell` | server | Pure workbook cell formatters — the four path states of one row (Q37) |
 | `reportOrigins.aggregateOriginCell` / `.aggregatePathCell` | server | The `LR_Unique Risks` pair: `Mixed` when a component is direct in one project and transitive in another, and a path cell grouped by chain with the projects that share each one (Q37) |
+| `theme.validate(doc)` | server | Q51 — accept a theme document or name every problem in it |
+| `theme.toCss(doc)` / `.template()` | server | S35 — render the stylesheet from the allow-list; the every-key-at-its-default starting file |
 | `sendEmail(mailCfg, ...)` | server | Deliver report via nodemailer |
+
+### 8.12 The administrator's colour theme (Q49)
+
+One palette for the whole installation, uploaded as a file. It is **not** per
+user: a person still chooses dark or light for themselves and nothing else, so
+`dt_theme` and `toggleTheme()` are untouched by this feature.
+
+**Q49 — partial overrides need no merge logic, because the cascade is the merge.**
+The obvious implementation loads the stored theme, merges it over a table of
+defaults and emits a complete set. That is a merge function, a defaults table
+duplicated outside the stylesheet, and a drift risk the moment somebody adds a
+token to `:root` and forgets the table. None of it is necessary:
+
+```html
+<style> :root { --bg: #0f1117; --accent: #6366f1; /* …built-in… */ } </style>
+…
+<link rel="stylesheet" href="/branding/theme.css">   <!-- :root { --accent: … } -->
+```
+
+A property the theme supplies wins because it comes later; one it omits keeps
+the built-in value because nothing overrode it. The fallback is **per
+property**, which is the requirement stated exactly — and a token added to
+`:root` later is themeable with no change to `lib/theme.js` at all. Four things
+are load-bearing:
+
+- **The built-in blocks are never removed or rewritten.** They *are* the
+  fallback, so a theme that fails to load leaves a correct page rather than an
+  unstyled one.
+- **The generated block must not raise specificity.** `:root` and
+  `:root[data-theme="light"]`, never `html:root` and never `!important` — a
+  theme that won by force could not itself be overridden by the light block
+  that follows it, which is how a dark-only theme would leak into light mode.
+- **It is a `<link>` in `<head>`, after the page's own `<style>`, never a
+  stylesheet inserted by script.** A render-blocking link is exactly the
+  behaviour wanted; a stylesheet appended by JavaScript would repaint the page
+  *after* the boot gate made it visible, which is the flash §8.4 exists to
+  prevent. A test asserts the ordering on all three pages, because a link
+  placed above the built-in blocks loses every property it sets, silently.
+- **The URL carries no version, so the route revalidates rather than claiming
+  to be immutable.** The pages are static files with no templating to stamp a
+  hash into the href, so `Cache-Control: no-cache` plus an ETag is the honest
+  answer: the browser keeps the bytes and the usual response is a ~100-byte
+  304. This is the one branding asset that differs from the icon's rule, and
+  the reason is the missing version, not a change of mind.
+
+**Q50 — the stored artefact is JSON, and that is a security decision.**
+Accepting raw CSS would mean serving operator-authored CSS from our own origin
+to unauthenticated visitors on the sign-in page. CSS can load external
+resources (`@import`, `url()`), can position and cover elements, and can
+exfiltrate attribute values through selector-triggered fetches. We already
+refuse SVG for the icon (S32) for a *weaker* version of this reason — a
+stylesheet is strictly more dangerous than an image. So the format is a fixed
+key set with a narrow value grammar, and `lib/theme.js` never parses CSS.
+
+Keys are token names **without** the `--` prefix; the prefix is ours, and
+asking an operator to type CSS syntax inside a JSON file invites them to think
+the rest of it is CSS too. **Geometry is deliberately absent** (`--header-h`,
+`--row-h`, `--radius`): it is layout, read by the sticky header and the
+measured table, so theming it would turn a colour feature into a layout feature
+with its own failure modes. `--radius` alone can be added later with no format
+change, which is what `version` is for.
+
+**Q51 — validation refuses, it never repairs.** Two value grammars (hex and
+`rgba()`) and nothing else: no named colours, no `hsl()`, no `var()`, no
+`calc()`, no gradients. A value that does not match is rejected **with its key
+named**, not dropped and not coerced — an operator who typed `#12345` and got a
+page with one silently-ignored property would go looking for the bug in the
+wrong place. An unknown **key** is refused the same way: the usual argument for
+ignoring one is forward compatibility, but here the far likelier cause is a
+typo (`acccent`), and discarding it silently produces a theme that "didn't
+work" with nothing to explain why. The whole file is refused, never half of it.
+
+**The property ceiling is checked first, and returns on its own.** Left until
+after per-key validation it was unreachable: a document with more than 200
+properties necessarily contains keys the allow-list does not know, so the error
+list filled with ten "not a theme property" lines and the size — the actual
+problem — was never mentioned. Size is about work, not spelling.
+
+**S35 — the stylesheet is built from a fixed template, never from the input.**
+The key written is the *allow-list's* spelling, and the value has already been
+re-serialised from its parsed components by `normaliseColour`. Nothing the
+operator supplied is concatenated into the output verbatim, so even a mistake
+in validation could not carry a `}`, an `@import` or a `</style>` through — a
+test drives five such values at the generator with validation bypassed.
+
+**The template is every key at its built-in value**, not a four-key example: it
+teaches the whole surface and edits down. A test asserts the template validates
+against our own validator, because a starting point our own service rejects is
+worse than none, and another asserts `lib/theme.js`'s built-in values still
+match what `index.html` ships — a drift there would hand operators a template
+that silently restyles their installation the moment they upload it unchanged.
+
+**Two cross-file tests pin the token surface in both directions**: a token
+declared on a page but missing from the allow-list is one an operator can see
+and cannot change, and a key in the allow-list that no page reads is one they
+can set to no effect. Both are worse than a smaller feature.
+
+**The §8.10 no-hard-coded-colour rule now covers all three pages, and white is
+no longer exempt.** It was enforced against `admin.html` alone, which is
+exactly why `admin.html` was the clean one and the other two had accumulated 28
+literals between them — and the white exemption is where 16 of those hid.
+`color: #fff` on a filled accent is not a neutral choice: it is "the readable
+colour against *that* fill", and it stops being readable the moment an operator
+themes the accent pale. Hence `--on-accent` and `--on-critical`, white in both
+schemes by design — they exist to be overridden, not because our own value
+moves.
+
 
 ---
 
@@ -2158,6 +2281,14 @@ The frontend never performs uniqueness checks — those are backend-only, via
   level silently disappears from exactly the responses that carry data.
   `X-Frame-Options` is deliberately absent — the dashboard is documented as
   iframe-embeddable, which is also why CORS is open (§12).
+- **`/branding` is `location ^~`, and the modifier is load-bearing.** nginx
+  evaluates regex locations *before* a plain prefix match, so the static-asset
+  block (`~* \.(js|css|png|…)$`) would win for `/branding/theme.css` and serve
+  it from the dashboard's own document root, where it does not exist. `^~` says
+  "if this prefix is the longest match, do not consider the regexes", which
+  also protects any future `/branding/<name>.png`. The symptom would be a 404
+  for a path nobody thinks of as a file, so this was found by reading the
+  template rather than by a failing request.
 - SPA routing: `try_files $uri $uri/ /index.html`; `login.html` served directly.
 - There is **no `/api/*` block and no `/dt-config` block**. DependencyTrack is
   per-user, reached through `/violation-cache/dt/`; forwarding `/api/*` to one
@@ -2725,6 +2856,56 @@ Running the browser checks in CI was on this list and is now the `e2e` job.
 - The public-route list, against `server.js`'s own source: exactly seven paths,
   compared as a set. A new public route is a security decision (§12), so it
   fails until somebody writes it down here too.
+- The colour theme (Q49, Q50, Q51, S35). On the validator: both accepted
+  grammars; every rejected one (a named colour, `var()`, `calc()`, `url()`, a
+  gradient, a five-digit hex, `rgb` and alpha out of range, a number, an
+  object, an empty string), each asserted to **name its key**; an unknown key
+  refused by name rather than ignored; a top-level key that is not a scheme;
+  geometry refused, so a colour feature cannot quietly become a layout one;
+  every rejected `version`; the name bound; a ceiling breach reported **on its
+  own**, which is the bug that check had — placed after per-key validation it
+  was unreachable, because an oversized file necessarily holds unknown keys and
+  the list filled with ten of those instead; and a rejection capped at ten
+  problems, since a wall of errors reads as a crash.
+  On the generator: only token declarations, at the pages' own specificity,
+  with no `!important` and no raised selector; an omitted scheme emitting no
+  block at all; **five hostile values driven straight at it with validation
+  bypassed** — each would close the block, start a rule or end the stylesheet
+  if the input were echoed — and a key the allow-list does not know never being
+  written; and byte-identical output regardless of key order, so the same
+  theme does not produce a new etag.
+  On the template: every key present in both halves; that it **validates
+  against our own validator**, since a starting point the service rejects is
+  worse than none; that its light half really differs while `on-accent`
+  deliberately does not.
+  **And the token surface in both directions** — a token declared on a page but
+  absent from the allow-list is one an operator can see and cannot change; a
+  key in the allow-list no page reads is one they can set to no effect — plus
+  that `lib/theme.js`'s built-in values still equal `index.html`'s, or the
+  template silently restyles an installation the moment it is uploaded
+  unchanged.
+  On the pages: that all three link the stylesheet, that the link comes
+  **after** the inline `<style>` (above it, every property is lost silently),
+  that no page builds the link at runtime, and that every page still declares
+  its own `:root` — the fallback only exists while they do.
+  On the routes: the public sheet answering **200 with an empty body** when
+  nothing is configured rather than a 404 in every console on every
+  installation; `no-cache` rather than `immutable`, because the URL carries no
+  version; a refused upload storing nothing; an accepted one storing the
+  document and the CSS **together**; and all three administrator routes
+  refusing an ordinary account.
+  The database tier pins the singleton CHECK, the name bound, both columns
+  round-tripping with `doc` coming back as an object, the etag moving on
+  replace, and migration 017 replaying cleanly.
+  **The end-to-end tier is the only place the mechanism itself is provable.** A
+  partial upload is read back in a real browser, on `login.html`, by a
+  *signed-out* visitor — `--accent` must become the supplied value while `--bg`
+  still computes to the built-in one, and removing the theme must restore both.
+  No unit test can make that claim: it is a fact about the cascade, and the
+  cascade is why there is no merge logic anywhere in this feature.
+- The §8.10 colour rule, now on all three pages with white no longer exempt
+  (Q49). Comments are stripped first — those rules explain themselves in prose
+  that names the very hexes they forbid.
 - **Authorisation:** every route rejects a missing or invalid token with 401;
   cross-user access returns 404; the profile endpoint ignores login ID and email.
 - **The documentation, against the application it documents.** Prose drifts
@@ -2810,11 +2991,15 @@ Running the browser checks in CI was on this list and is now the `e2e` job.
 - **Authentication is mandatory on every backend route.** New routes are
   authenticated by default; a public route must be listed explicitly and justified.
   The list is `/auth/register`, `/auth/check-availability`, `/auth/login`,
-  `/branding`, `/branding/background` and `/branding/icon` (**S32**), which the
+  `/branding`, `/branding/background`, `/branding/icon` and
+  `/branding/theme.css` (**S32**), which the
   sign-in page needs
   before a token exists, and `/healthz` (**S33**). Branding on a sign-in screen is public by construction:
   anyone who can reach the page can already see it. They return the title and the
-  images and nothing else — no account, no setting, no count.
+  images, the colour theme and nothing else — no account, no setting, no count.
+  The stylesheet is text **this service generated** from an allow-list of token
+  names and colours it re-serialised itself (S35, §8.12), never text an
+  operator wrote.
   **`/healthz` returns `{"status":"ok"}` and nothing else** — no account, no
   setting, no count, no version, so it discloses exactly what a closed port
   would. It is answered in `server.js` before route dispatch rather than in a
