@@ -1018,7 +1018,11 @@ describe('e2e — administration', { skip: SKIP }, () => {
       // The omitted properties are simply absent — there is no merge step and
       // no defaults table, so nothing can write a stale value here.
       assert.doesNotMatch(css.text, /--bg:/);
-      assert.doesNotMatch(css.text, /data-theme="light"/,
+      // Not "no mention of data-theme=light anywhere" — the dark block's own
+      // selector now legitimately names it, as the :not() it excludes (Q49:
+      // that scoping is what stops a dark-only theme leaking into light
+      // mode). What must be absent is an actual light RULE.
+      assert.doesNotMatch(css.text, /^:root\[data-theme="light"\] \{/m,
         'no light half was supplied, so no light block is emitted');
       assert.equal(css.headers['cache-control'], 'no-cache');
     } finally {
@@ -2003,6 +2007,57 @@ describe('e2e — the dashboard in a real browser', { skip: BROWSER_SKIP }, () =
     const restored = await read();
     assert.equal(restored.accent, before.accent,
       'removing the theme must return every property, not only the ones it set');
+  }, { timeout: 90_000 });
+
+  test('Q49: a dark-only theme does not leak into light mode', async () => {
+    // The regression this exists for shipped once: the generated dark block
+    // was a bare `:root`, unconditional, and this stylesheet loads AFTER the
+    // page's own <style> — so in light mode an unscoped dark rule and the
+    // page's OWN `[data-theme="light"] { … }` have equal specificity, and the
+    // theme file, being later in the document, won regardless of which
+    // scheme was active. A dark-only theme — the case the user guide calls
+    // "fine and common" — silently overwrote every light-mode colour it never
+    // mentioned. It was found from a real screenshot, not a test: the
+    // existing browser case above sets the same property in both schemes, so
+    // it never exercised the one branch that leaks. This is the fact only a
+    // real browser's cascade can prove, the same reasoning the test above is
+    // built on.
+    const adminToken = (await api.login(stack.admin.loginId, stack.admin.password,
+      { isAdmin: true, force: true })).json.token;
+
+    const readLight = async () => {
+      const visitor = await browser.newPage();
+      try {
+        await visitor.goto(`${stack.url}/login.html`, { waitUntil: 'networkidle' });
+        await visitor.evaluate(() => localStorage.setItem('dt_theme', 'light'));
+        await visitor.reload({ waitUntil: 'networkidle' });
+        return await visitor.evaluate(() => {
+          const cs = getComputedStyle(document.documentElement);
+          return {
+            theme: document.documentElement.getAttribute('data-theme'),
+            bg:     cs.getPropertyValue('--bg').trim(),
+            accent: cs.getPropertyValue('--accent').trim(),
+          };
+        });
+      } finally { await visitor.close(); }
+    };
+
+    const before = await readLight();
+    assert.equal(before.theme, 'light', 'the visitor must actually be in light mode for this to prove anything');
+
+    // Dark-only: no `light` key in the document at all.
+    const put = await api.put('/admin/theme',
+      { version: 1, name: 'dark-only', dark: { accent: '#123456' } }, adminToken);
+    assert.equal(put.status, 200, JSON.stringify(put.json));
+    try {
+      const after = await readLight();
+      assert.equal(after.accent, before.accent,
+        'a DARK-only theme must not touch light mode at all — --accent must stay the built-in light value');
+      assert.equal(after.bg, before.bg,
+        'and every other light-mode property must be equally untouched');
+    } finally {
+      assert.equal((await api.del('/admin/theme', adminToken)).status, 200);
+    }
   }, { timeout: 90_000 });
 
   test('an ordinary account cannot reach the administration screen', async () => {

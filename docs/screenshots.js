@@ -201,11 +201,20 @@ async function main() {
     await restoreViewport(page);
 
     // ── 6. Generating a report ──────────────────────────────────────────────
+    // Named explicitly, not `.first()`: the first data-leaf="1" checkbox in
+    // DOM order belongs to Collection 4's stale child (Q39's fixture), which
+    // Q45's roll-up deliberately excludes from `filtered` — checking it left
+    // generateReport() with nothing to report on and a silent "No projects
+    // shown" toast the dropdown timeout never explained. service-102 sits
+    // under Group 2, a plain root with no collectionLogic and no children of
+    // its own, so it is always counted. (service-101 looks equally plain by
+    // name but is itself a group — Q35's three-deep branch hangs service-201
+    // off it — so its own checkbox is data-leaf="0", not "1".)
     log('6. Reports');
-    await page.locator('#tableBody .proj-select-cb[data-leaf="1"]').first().check();
+    await page.locator('#tableBody tr:has-text("service-102") .proj-select-cb[data-leaf="1"]').check();
     await pause(page, 400);
     await page.locator('#genReportBtn').click();
-    await pause(page, 400);
+    await page.waitForSelector('#rptDropMenu.open', { timeout: 5_000 });
     await page.locator('.rpt-drop-item:has-text("Generate Report")').click();
     await page.waitForSelector('#reportOptionsModal.open', { timeout: 15_000 });
     await page.locator('#rptOptLicense').check();
@@ -248,7 +257,7 @@ async function main() {
 
     // ── 8. Scheduling a report ──────────────────────────────────────────────
     log('8. Schedules');
-    await page.locator('#tableBody .proj-select-cb[data-leaf="1"]').first().check();
+    await page.locator('#tableBody tr:has-text("service-102") .proj-select-cb[data-leaf="1"]').check();
     await pause(page, 400);
     await page.locator('#genReportBtn').click();
     await pause(page, 400);
@@ -338,6 +347,78 @@ async function main() {
       await accordion('accBranding').click();
       await admin.waitForTimeout(900);
       await shootEl(admin, '#accBranding', 'guide-admin-branding');
+
+      // ── 11. The colour theme, actually applied ────────────────────────────
+      // Everything above is the built-in palette. This is the one place the
+      // product proves a THEMED installation, not just the control that sets
+      // one — for docs/THEME_TOKENS.md, which maps each token to the region
+      // it paints and needs a real "after" to point at. Deliberately partial
+      // (Q49): several tokens are left at their built-in value, so the same
+      // pair of images is also the evidence that an omitted property keeps
+      // its default rather than falling back to black.
+      //
+      // Both the "before" and "after" shots are forced to dark explicitly —
+      // never left to whatever this browser reports for prefers-color-scheme
+      // (headless Chromium's default is "light", which every OTHER image in
+      // this file inherits without asking). Dark is the product's own
+      // designed default — :root itself, before any [data-theme] override —
+      // and it is the richer half of this demo theme (nine properties against
+      // three), so showing it is the point. Capturing dedicated "before"
+      // shots here, in the SAME forced scheme as the "after" ones, is what
+      // keeps the comparison isolated to the theme alone: reusing the
+      // existing dashboard.png/login.png (both captured in whatever this
+      // browser's default turned out to be) would silently vary the colour
+      // SCHEME at the same time as the theme, which is a different question.
+      log('11. The colour theme, applied');
+      await page.evaluate(() => localStorage.setItem('dt_theme', 'dark'));
+      await page.reload({ waitUntil: 'networkidle' });
+      await page.waitForSelector('#tableBody tr', { timeout: 30_000 });
+      await pause(page, 1500);
+      await shoot(page, 'theme-demo-dashboard-before');
+
+      const visitor = await browser.newPage({ viewport: VIEWPORT });
+      await visitor.goto(`${stack.url}/login.html`, { waitUntil: 'networkidle' });
+      await visitor.evaluate(() => localStorage.setItem('dt_theme', 'dark'));
+      await visitor.reload({ waitUntil: 'networkidle' });
+      await pause(visitor, 900);
+      await shoot(visitor, 'theme-demo-login-before');
+
+      const themeUpload = await api.put('/admin/theme', {
+        version: 1,
+        name: 'Ocean (doc demo)',
+        dark: {
+          bg: '#071b24', surface: '#0d2b38', surface2: '#113649',
+          border: '#1c5068', text: '#eaf6fb', 'text-muted': '#8fb9c9',
+          accent: '#00b8a9', 'accent-hover': '#00a396', critical: '#ff5470',
+        },
+        light: {
+          bg: '#eefbf9', surface: '#ffffff', accent: '#00897b',
+        },
+      }, adminLogin.json.token);
+      if (themeUpload.status === 200) {
+        // The signed-in user, reloaded: the stylesheet link already exists on
+        // every page, so a normal reload is enough to pick up the new
+        // colours. A full reload re-runs the boot gate (§8.4), and it needs
+        // longer to settle than an in-page state change does — 1200ms here
+        // once left the topbar mid-repaint (still its pre-reload background)
+        // while the rest of the page had already picked up the new
+        // stylesheet.
+        await page.reload({ waitUntil: 'networkidle' });
+        await page.waitForSelector('#tableBody tr', { timeout: 30_000 });
+        await pause(page, 2500);
+        await shoot(page, 'theme-demo-dashboard');
+
+        // A visitor who has never signed in: the theme is public (S32) for
+        // exactly this reason, and this is the claim the e2e browser tier
+        // proves — a signed-out session computes the theme's colours too.
+        await visitor.reload({ waitUntil: 'networkidle' });
+        await pause(visitor, 900);
+        await shoot(visitor, 'theme-demo-login');
+
+        await api.del('/admin/theme', adminLogin.json.token);
+      } else {
+        log(`  (skipped theme demo — PUT /admin/theme answered ${themeUpload.status})`);
+      }
     } else {
       log('  (skipped administration — the credentials file was not available)');
     }

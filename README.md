@@ -278,6 +278,7 @@ reconstructing the earlier screens afterwards would mean faking it.
 | Document | For |
 |---|---|
 | [`docs/USER_GUIDE.md`](docs/USER_GUIDE.md) | Using the dashboard, step by step, with a screenshot per screen. |
+| [`docs/THEME_TOKENS.md`](docs/THEME_TOKENS.md) | Every colour theme property, mapped to the part of the product it paints, with before/after screenshots. |
 | [`docs/DASHBOARD_INTEGRATION.md`](docs/DASHBOARD_INTEGRATION.md) | Embedding the dashboard elsewhere, and how its numbers are derived. |
 | [`docs/PERFORMANCE.md`](docs/PERFORMANCE.md) | Query plans and load evidence. |
 | [`CLAUDE.md`](CLAUDE.md) | Architecture, conventions and the reasoning behind them — for contributors. |

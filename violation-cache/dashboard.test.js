@@ -3150,6 +3150,7 @@ const INSTALL_MD = fs.readFileSync(path.join(__dirname, '..', 'docs', 'INSTALLAT
 const INTEGRATION_MD = fs.readFileSync(path.join(__dirname, '..', 'docs', 'DASHBOARD_INTEGRATION.md'), 'utf8');
 const PERF_MD   = fs.readFileSync(path.join(__dirname, '..', 'docs', 'PERFORMANCE.md'), 'utf8');
 const GUIDE_MD  = fs.readFileSync(path.join(__dirname, '..', 'docs', 'USER_GUIDE.md'), 'utf8');
+const THEME_TOKENS_MD = fs.readFileSync(path.join(__dirname, '..', 'docs', 'THEME_TOKENS.md'), 'utf8');
 const SERVER_SRC = fs.readFileSync(path.join(__dirname, 'server.js'), 'utf8');
 
 /** Every `/violation-cache/...` and `/admin/...` path the route modules answer. */
@@ -6025,6 +6026,11 @@ describe('the documentation still describes this application', () => {
   const ILLUSTRATED = [
     ['README.md', README, REPO],
     ['docs/USER_GUIDE.md', GUIDE_MD, path.join(REPO, 'docs')],
+    // Q49: the token-to-region map needs real screenshots to point at, so it
+    // is illustrated too, and it earns the same three guards as the other two
+    // — an image it embeds must exist and be a real PNG, must carry alt text,
+    // and must be one docs/screenshots.js actually writes.
+    ['docs/THEME_TOKENS.md', THEME_TOKENS_MD, path.join(REPO, 'docs')],
   ];
   const imageRefs = (md) => [...md.matchAll(/!\[[^\]]*\]\(([^)]+)\)/g)].map(m => m[1]);
 

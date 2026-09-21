@@ -747,6 +747,21 @@ names are the same in both schemes:
 Values are `#rgb`, `#rrggbb` or `rgba(r,g,b,a)`. Colour names like `red`,
 gradients and `var(...)` are not accepted.
 
+**Not sure which property paints which part of the screen?**
+[`docs/THEME_TOKENS.md`](THEME_TOKENS.md) maps every one of them to the exact
+control, pill or panel it affects, with a before/after screenshot — the
+question this table's group names alone cannot answer. Here is that same
+before/after, from a demo theme that sets only nine of the forty properties:
+
+| Built-in colours | A partial theme applied |
+|---|---|
+| ![The dashboard with the built-in palette, dark mode](images/theme-demo-dashboard-before.png) | ![The dashboard with a partial theme applied, dark mode](images/theme-demo-dashboard.png) |
+
+Notice what stayed the same: the severity pills, the column headings and the
+sign-in page's background shapes are untouched, because the demo file never
+mentions them. That is the partial-upload behaviour described above, shown
+rather than only stated.
+
 **Layout is deliberately not themeable.** Row heights, the header height and
 corner radii are read by the table's measured geometry, so changing them would
 break the layout rather than restyle it.
