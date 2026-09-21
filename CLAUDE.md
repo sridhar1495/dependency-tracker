@@ -220,7 +220,7 @@ Inline comments use lettered prefixes to trace design decisions:
 - **O-numbers** — observability notes (`// O3: JSON log format for log aggregators`)
 - **S-numbers** — security rationale (`// S2: token hashed before storage`) — **new in revision 2**
 
-Highest numbers currently in use: **Q51, P20, O5, S35**. When adding logic with a
+Highest numbers currently in use: **Q52, P20, O5, S35**. When adding logic with a
 non-obvious trade-off, add the next number in the appropriate series. Check the
 current maximum before assigning — parallel branches can claim the same number.
 
@@ -307,6 +307,7 @@ await tx(async (client) => {
 | `dependency_paths` | One row per connection per project, the cached result of walking that project's DependencyTrack dependency graph (migration 013) — see §6.3a. Keyed by `(fingerprint, project_uuid)` for the same sharing reason as every other cache here. Holds only the expensive, opt-in half (the graph walk); the cheap Direct/Transitive classification is never stored — see §6.3a for why. `paths` entries carry `chains`, a parallel `routeCounts`, and `rootsTotal` **only when the display cap is hiding parents** (Q33). `routes_exact` (migration 014) says whether those counts are answers or floors, and is a column because it describes the whole walk — migration 013's own comment still documents the original one-chain shape, since a merged migration is never edited (§5.3) |
 | `branding_assets` | The administrator's sign-in background and application icon (migration 016). Bytes live here, **not** on `app_settings`, because the administration listing cross-joins that table |
 | `app_themes` | The administrator's colour theme (migration 017), singleton. Holds the validated **document** and the **stylesheet it renders to**: the document is what the screen shows back and what the download button serves, the CSS is what the public route serves on every page load. Rendering per request would put a template render on the hottest path in the product; rendering at boot would let a change to the generator apply itself to a theme nobody re-reviewed |
+| `default_mail_settings` | The administrator's installation-wide default SMTP server (migration 018), singleton, the same shape as `mail_settings` minus recipients/subject/body — those stay per-user even when the connection is shared (§6.9, Q52). Encrypted the same way `mail_settings.smtp_pass_*` is |
 | `schema_migrations` | Migration ledger |
 
 ### 5.6 What remains on disk
@@ -1024,6 +1025,55 @@ if (method === 'GET' && path === '/violation-cache/status') {
   and discarded so the stored password is not overwritten.
 - Never return a password in any HTTP response.
 
+**Q52: an installation-wide default SMTP server (migration 018,
+`lib/default-mail-settings.js`) is a fallback for the whole connection, never a
+per-property merge.** Most installations have exactly one mail server every
+account would use anyway, and asking each new user to find and enter it before
+they can receive a single report was friction with no isolation benefit — the
+per-user table (§5.5) already gave every account its own recipients, subject
+and body, which is the half that actually needs to be per-user.
+
+- **The trigger is `mail_settings.smtp_host = ''`, and only that.**
+  `mailSettings.getResolved()`/`getForClient()` reach for the default when an
+  account is `enabled` but has never typed in its own host; an account with
+  any host of its own, however that turns out, is never touched by a later
+  change to the default. This is deliberately not Q49's per-property cascade
+  — a mail server is either complete or it is not, and merging one account's
+  host with another's port would produce a connection nobody configured.
+- **The client-facing shape never writes the default's values into the
+  account's own fields.** `getForClient()` returns `usingDefault` and a
+  separate `defaultSmtp` (host/port/from only, no secret) precisely so the
+  frontend can show a placeholder — "Using the installation's default mail
+  server (host:port)" — without populating `smtp.host` itself. Populating it
+  would mean the very next bare Save resubmits the default's host as this
+  account's own, permanently opting this account out of ever inheriting a
+  later change — the same failure a schedule's delivery override fields
+  avoid by staying `NULL` rather than a copied value (§6.8).
+- **`applyDefaultFallback(smtp, from)` is the one function both the resolver
+  and `routes/config.js`'s test-email route call**, so "what a scheduled
+  report will actually send with" and "what Send Test Email verifies" cannot
+  disagree. Without the second call site, testing from the account's own
+  Settings panel — which always sends the live, on-screen (genuinely blank)
+  host — would refuse with "SMTP host is not configured" for an account a
+  real scheduled report sends from without any trouble.
+- **From falls back independently of the rest of the connection.** An
+  account may set its own reply-from address while still borrowing the
+  installation's server; `from = row.fromAddr || def.from` inside the same
+  fallback keeps that case correct without a second trigger condition.
+- **A decryption failure degrades the fallback, never a request.** Same
+  reasoning as an account's own unreadable password (§7.7): `getResolved()`
+  on `lib/default-mail-settings.js` catches the error and returns `null`
+  rather than throwing, so a key rotation that breaks the installation
+  default costs every relying account a blank connection (a visible "SMTP
+  host is not configured"), not a 500.
+- **`mailSettings.countReliantOnDefault()`** — enabled accounts with no host
+  of their own — is what lets the administration screen say how many
+  accounts a change here actually touches, the same reasoning
+  `appSettings.accountsOverDefault()` gives the report ceiling (§7.6).
+  Clearing the default **never deletes anything**: an affected account
+  simply needs its own server before its next report can send, the identical
+  "refuses, never deletes" rule §7.5 applies to every other quota.
+
 ---
 
 ## 7. Authentication & Multi-Tenancy
@@ -1137,7 +1187,7 @@ is a correctness bug, not a style issue.
 ### 7.6 Administration writes
 
 Administration was read-only by design. It is not any more, and what it may do is
-a **closed list of three**, not a general-purpose account editor:
+a **closed list of thirteen**, not a general-purpose account editor:
 
 | Route | Effect |
 |---|---|
@@ -1152,25 +1202,30 @@ a **closed list of three**, not a general-purpose account editor:
 | `PUT /admin/trend` | Show or hide the risk-trend panel for every user (Q48) |
 | `PUT /admin/theme` | Upload a colour theme; partial files are the normal case (Q49) |
 | `DELETE /admin/theme` | Restore the built-in colours |
+| `PUT /admin/mail` | Set the installation's default SMTP server (Q52) |
+| `DELETE /admin/mail` | Clear it — every account needs its own server again |
 
 Everything else about an account stays readable only. A test asserts exactly
-these **eleven** are handled and every other method/path combination is not — a
-blanket ban that had to be deleted would have stopped protecting anything, so
-the allow-list is the contract and adding a tenth means editing it in a
-diff somebody reads.
+these **thirteen** are handled and every other method/path combination is not
+— a blanket ban that had to be deleted would have stopped protecting
+anything, so the allow-list is the contract and adding a fourteenth means
+editing it in a diff somebody reads.
 
 The schedule limit rides on the two settings routes that already existed rather
 than adding a seventh — it is the same kind of decision about the same rows,
 made by the same principal. That is what the allow-list is for: a new capability
 has to justify a new entry, and this one did not need one.
 
-The list went from three to six when customisation landed, then to nine, then
-to eleven: the icon pair (Q47) mirrors the background pair exactly, the trend
-switch (Q48) hides a panel, and the theme pair (Q49) changes colours. Every
-one of the eight additions was weighed on the same bar rather than waved
-through — they change how the product *looks* or what it *shows*, never what
-an account is or what it may reach, and none of them reads another
-principal's data. That is the bar a twelfth has to clear too.
+The list went from three to six when customisation landed, then to nine, to
+eleven, then to thirteen: the icon pair (Q47) mirrors the background pair
+exactly, the trend switch (Q48) hides a panel, the theme pair (Q49) changes
+colours, and the mail pair (Q52) sets an installation-wide connection every
+account may already reach on its own if it knows the server. Every one of
+the ten additions was weighed on the same bar rather than waved through —
+they change how the product *looks*, what it *shows*, or a shared
+*connection*, never what an account is or what it may reach, and none of
+them reads another principal's data. That is the bar a fourteenth has to
+clear too.
 
 **`GET /admin/theme` is deliberately not on the list**, and neither is any
 other read. The allow-list is about writes; adding reads to it would dilute
@@ -2582,6 +2637,30 @@ Running the browser checks in CI was on this list and is now the `e2e` job.
   clears back to it, an empty `to_addrs` is refused by the database, and the
   merge is checked against a real SMTP conversation so the assertion is about
   which addresses reach `RCPT TO` rather than which object was built.
+- The installation default SMTP server (Q52): an out-of-range port is
+  rejected before any query, on both the per-user and the installation-wide
+  module; the password placeholder round-trips identically to an account's
+  own; an enabled account with a blank host resolves to the default's
+  connection **as one unit** — host, port, TLS, user and password together,
+  never a per-property merge — while an account with any host of its own is
+  untouched however the default changes later; a disabled account never
+  falls back even with both a blank host and a default configured (no
+  surprise emails); a disabled or cleared default degrades to an empty
+  connection rather than throwing; an account's own From address wins even
+  while borrowing the default's server; and `countReliantOnDefault()` counts
+  only enabled accounts with no host of their own, changing by exactly one
+  when a single account's host is set or cleared. The client-facing shape is
+  pinned separately: `smtp.host`/`from` stay the account's own genuinely
+  blank values — never the default's — so a bare Save cannot freeze today's
+  default into that account's row, and `usingDefault`/`defaultSmtp` are what
+  let the frontend show a placeholder instead. `applyDefaultFallback()` is
+  asserted to be the single function both `getResolved()` and
+  `routes/config.js`'s test-email route call, so "what a scheduled report
+  sends with" and "what Send Test Email verifies" cannot drift apart. The
+  end-to-end tier proves the whole path joined up: an account with mail
+  enabled and no host of its own gets a real message through the SMTP stub
+  once an administrator configures the default, and stops the moment it is
+  cleared.
 - Risk snapshots: the fold sums the same projects for both halves and never
   yields `NaN` from a missing upstream metric; a day nobody refreshed comes back
   `captured: false` rather than as the previous day carried forward; the upsert
@@ -3116,7 +3195,9 @@ aspirations, and each is verifiable.
 Neither the report limit nor the schedule limit is an environment variable. It is service configuration
 the administrator owns at runtime, held in `app_settings` and edited from the
 administration screen — an operator should not have to restart a container to
-change a quota.
+change a quota. The installation-wide default SMTP server (Q52) follows the
+same rule: it lives in `default_mail_settings`, set from the administration
+screen, never from `.env`.
 
 `DT_API_INTERNAL_URL`, `DT_API_KEY` and `DT_FRONTEND_URL` are **no longer read at
 request time**. They survive in `.env` only so an installation upgrading from the

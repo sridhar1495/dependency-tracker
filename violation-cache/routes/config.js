@@ -283,6 +283,15 @@ async function handle({ method, path: parsedPath, req, res, principal }) {
           to:   mailSettings.toAddressArray(body.to),
           cc:   mailSettings.toAddressArray(body.cc),
         };
+        // A blank host here is not necessarily "not configured" — it is also
+        // what the form legitimately shows while this account relies on the
+        // installation default (CLAUDE.md §6.9), and "Send Test Email" tests
+        // what is actually on screen. Without this, the test would refuse
+        // with "SMTP host is not configured" for an account a real scheduled
+        // report would send from without any trouble.
+        const withDefault = await mailSettings.applyDefaultFallback(mailCfg.smtp, mailCfg.from);
+        mailCfg.smtp = withDefault.smtp;
+        mailCfg.from = withDefault.from;
       } else {
         const stored = await mailSettings.getResolved(userId);
         if (!stored || !stored.enabled) {

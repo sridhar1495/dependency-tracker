@@ -1645,6 +1645,12 @@
       <div id="cfgMailBody" style="display:none">
 
         <div class="cfg-sub-title" style="margin-top:0;border-top:none;padding-top:0">SMTP Configuration</div>
+        <!-- Shown only while this account has no host of its own AND the
+             administrator has configured one for the installation (§6.9).
+             Leaving Host blank is what keeps inheriting it — typing anything
+             here, including the value this note names, switches this account
+             to its own server from then on. -->
+        <div id="cfgMailDefaultNote" style="display:none;font-size:11px;color:var(--text-muted);margin-bottom:6px"></div>
         <div class="cfg-row">
           <div style="flex:1">
             <label class="cfg-label" style="margin-top:0">Host</label>
@@ -2484,6 +2490,27 @@ async function loadConfigFromServer() {
       document.getElementById('cfgMailCc').value      = (m.cc || []).join(', ');
       document.getElementById('cfgMailSubject').value = m.subject || '';
       document.getElementById('cfgMailBodyTa').value  = m.body || '';
+
+      // §6.9: the installation's default SMTP server, when this account has
+      // none of its own. The fields above stay genuinely blank — only the
+      // placeholder text and this note say what will actually be used, so a
+      // Save with nothing typed here keeps inheriting rather than freezing
+      // today's default into this account's own row.
+      const note = document.getElementById('cfgMailDefaultNote');
+      if (m.usingDefault && m.defaultSmtp) {
+        note.style.display = '';
+        note.textContent = `Using the installation's default mail server `
+          + `(${m.defaultSmtp.host}:${m.defaultSmtp.port}). `
+          + 'Fill in a host below to use your own instead.';
+        document.getElementById('cfgSmtpHost').placeholder = m.defaultSmtp.host;
+        document.getElementById('cfgSmtpPort').placeholder = String(m.defaultSmtp.port);
+        if (m.defaultSmtp.from) document.getElementById('cfgMailFrom').placeholder = m.defaultSmtp.from;
+      } else {
+        note.style.display = 'none';
+        document.getElementById('cfgSmtpHost').placeholder = 'smtp.gmail.com';
+        document.getElementById('cfgSmtpPort').placeholder = '587';
+        document.getElementById('cfgMailFrom').placeholder = 'alerts@company.com';
+      }
     }
 
     // Schedules. A user owns any number of them, so the panel renders a list
@@ -2623,7 +2650,12 @@ function updateSchedToggleState() {
   const from        = document.getElementById('cfgMailFrom').value.trim();
   const to          = document.getElementById('cfgMailTo').value.trim();
   const hint        = document.getElementById('cfgSchedHint');
-  if (hint) hint.style.display = (mailEnabled && host && from && to) ? 'none' : '';
+  // A blank Host/From here can still be usable — the installation default
+  // (§6.9) — as long as neither has been typed over, which is what would
+  // actually replace it. usingDefault is read live rather than cached at
+  // load, because typing a host is what turns this account's own server on.
+  const usingDefault = !host && !from && _appConfig && _appConfig.mail && _appConfig.mail.usingDefault;
+  if (hint) hint.style.display = (mailEnabled && (host || usingDefault) && (from || usingDefault) && to) ? 'none' : '';
 }
 
 /* These two edit the SCHEDULE, so they mark the schedule dirty, not Settings.
@@ -3018,6 +3050,29 @@ async function reloadSchedules() {
 }
 
 /**
+ * Fetch one schedule's full detail and merge it into `_schedules`.
+ *
+ * The list route only ever attaches a project COUNT (one cheap aggregate
+ * query per row, §13) — never the project/anchor uuids, which would mean
+ * joining every schedule's rows on every Settings open. `GET /schedules/:id`
+ * is the one route that does carry `projectUuids`, so the editor fetches it
+ * lazily, only for the schedule somebody actually opened.
+ */
+async function schedLoadDetail(id) {
+  try {
+    const r = await apiFetch(`/violation-cache/schedules/${encodeURIComponent(id)}`);
+    if (!r.ok) return null;
+    const d = await r.json();
+    if (!d.schedule) return null;
+    const i = _schedules.findIndex(s => s.id === id);
+    if (i >= 0) _schedules[i] = d.schedule; else _schedules.push(d.schedule);
+    return d.schedule;
+  } catch (_) {
+    return null;
+  }
+}
+
+/**
  * Open the schedule editor as a drill-down over the settings panel.
  *
  * One is open at a time by construction: there is a single view, so there is no
@@ -3033,7 +3088,21 @@ async function openScheduleEditor(id = null, projects = null) {
   _schedEditingId       = id;
   _schedPendingProjects = projects;
   _schedEditorOpen      = true;
-  const sc = id ? _schedules.find(s => s.id === id) : null;
+  let sc = id ? _schedules.find(s => s.id === id) : null;
+
+  // A brand-new schedule (`projects` just handed down from the toolbar) has
+  // nothing saved yet to fetch. Every other existing schedule does — and the
+  // list-cached row above never carries its projectUuids (see
+  // schedLoadDetail), so without this an editor reopened on a saved schedule
+  // reads its anchor/project list as empty and shows a false "no projects"
+  // warning even though the row's own count is correct.
+  if (id && !projects) {
+    const fresh = await schedLoadDetail(id);
+    // Superseded: the user switched to a different schedule while this was
+    // in flight, and that call owns the DOM now.
+    if (_schedEditingId !== id) return;
+    if (fresh) sc = fresh;
+  }
 
   document.getElementById('cfgPanelTitle').textContent = sc
     ? (sc.name || 'Schedule')
@@ -3399,10 +3468,19 @@ async function saveScheduleEditor() {
     if (id) {
       _schedEditingId = id;
       _schedPendingProjects = null;
-      const fresh = _schedules.find(x => x.id === id);
+      // reloadSchedules() re-fetched the LIST, which — like the cached row
+      // this editor opened from — carries no projectUuids (schedLoadDetail).
+      // Without this, the preview kept showing whatever was last rendered
+      // from _schedPendingProjects, which saveScheduleEditor just cleared, so
+      // the very next re-render (a mode change, a reopen) would read an empty
+      // anchor list and flash the "no anchors" warning over a schedule that
+      // has plenty.
+      const detail = await schedLoadDetail(id);
+      const fresh = detail || _schedules.find(x => x.id === id);
       if (fresh) document.getElementById('cfgPanelTitle').textContent = fresh.name || 'Schedule';
       document.getElementById('cfgSchedDeleteBtn').hidden = false;
       document.getElementById('cfgSchedRunNowBtn').disabled = false;
+      if (_schedEditingId === id) renderSchedPreview();
       loadRunHistory(id);
     }
     showToast(
@@ -3649,12 +3727,17 @@ async function scheduleReports() {
   const cfg = _appConfig || {};
 
   // ── Validation: a schedule needs somewhere to send the report ─────────────
-  const mailOk = !!(cfg.mail && cfg.mail.enabled && cfg.mail.smtp && cfg.mail.smtp.host
+  // A host of this account's own is not the only way to satisfy this — the
+  // installation's default SMTP server (§6.9) does too, and usingDefault is
+  // what getForClient() sets when that fallback is what will actually be used.
+  const hasHost = !!(cfg.mail && cfg.mail.smtp
+    && (cfg.mail.smtp.host || cfg.mail.usingDefault));
+  const mailOk = !!(cfg.mail && cfg.mail.enabled && hasHost
                     && (cfg.mail.to || []).length > 0);
   if (!mailOk) {
     const missing = [];
     if (!cfg.mail || !cfg.mail.enabled)  missing.push('• Email is not enabled');
-    if (cfg.mail && cfg.mail.enabled && !(cfg.mail.smtp && cfg.mail.smtp.host)) missing.push('• SMTP host is not configured');
+    if (cfg.mail && cfg.mail.enabled && !hasHost) missing.push('• SMTP host is not configured');
     if (cfg.mail && cfg.mail.enabled && !(cfg.mail.to || []).length) missing.push('• No recipients (To) configured');
     const openSettings = await showConfirm(
       'Email Not Configured',

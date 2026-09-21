@@ -8,19 +8,31 @@
 //   GET /admin/storage                    disk and database usage
 //   GET /admin/users/:loginId             one account's detail
 //   GET /admin/settings                   service-wide settings
-//   PUT /admin/settings                   change the default report limit
+//   PUT /admin/settings                   change the default report/schedule limits
 //   PUT /admin/users/:loginId/settings    set or clear one account's limit
 //   POST /admin/users/:loginId/password   reset one account's password
-//   GET  /admin/branding                  title and background, with limits
+//   GET  /admin/branding                  title, background and icon, with limits
 //   PUT  /admin/branding                  set or clear the application title
 //   POST /admin/branding/background       upload the sign-in background
 //   DELETE /admin/branding/background     restore the animated background
+//   POST /admin/branding/icon             upload the application icon
+//   DELETE /admin/branding/icon           restore the title-initials mark
+//   PUT  /admin/trend                     show or hide the risk-trend panel
+//   GET  /admin/theme                     the stored colour theme and the template
+//   PUT  /admin/theme                     upload a colour theme
+//   DELETE /admin/theme                   restore the built-in colours
+//   GET  /admin/mail                      the installation's default SMTP server
+//   PUT  /admin/mail                      set the default SMTP server
+//   DELETE /admin/mail                    clear it — every account needs its own again
 //
-// This area WAS read-only. It is not any more, and the SIX writes above are the
-// whole of what it can do — deliberately a closed list rather than a
-// general-purpose account editor. The three branding writes were added
-// knowingly: they change how the product looks, never what an account is or
-// what it may reach, and none of them reads another principal's data.
+// This area WAS read-only. It is not any more, and the THIRTEEN writes above
+// (every PUT/POST/DELETE; the GETs are reads and are not counted — CLAUDE.md
+// §7.6) are the whole of what it can do — deliberately a closed list rather
+// than a general-purpose account editor. Each one was weighed on the same bar:
+// it changes how the product looks, what it shows, or an installation-wide
+// connection every account may already reach on its own if it knows the
+// server — never what an account IS, and none of them reads another
+// principal's data.
 //
 // Everything else about an account is still only readable: there is no route
 // here that deletes an account, edits a name, disconnects a session on its own,
@@ -52,6 +64,8 @@ const disk        = require('../lib/disk');
 const branding    = require('../lib/branding');
 const image       = require('../lib/image');
 const theme       = require('../lib/theme');
+const defaultMail = require('../lib/default-mail-settings');
+const mailSettings = require('../lib/mail-settings');
 
 /**
  * Administrator-only guard.
@@ -525,6 +539,63 @@ async function handle({ method, path: parsedPath, req, res, principal }) {
     } catch (e) {
       log('error', `Clearing the theme failed: ${e.message}`);
       jsonReply(res, 500, { error: 'Could not clear the theme.', code: 'INTERNAL' });
+    }
+    return true;
+  }
+
+  // ── The installation-wide default SMTP server (migration 018) ──────────
+  // GET is a read and so is deliberately NOT on §7.6's allow-list, the same
+  // reasoning GET /admin/theme is exempt for.
+  if (method === 'GET' && parsedPath === '/admin/mail') {
+    if (!requireAdmin(principal, res)) return true;
+    try {
+      const [def, reliant] = await Promise.all([
+        defaultMail.getForAdmin(),
+        mailSettings.countReliantOnDefault(),
+      ]);
+      jsonReply(res, 200, { mail: def, accountsReliant: reliant });
+    } catch (e) {
+      log('error', `Default mail read failed: ${e.message}`);
+      jsonReply(res, 500, { error: 'Could not read the default mail settings.', code: 'INTERNAL' });
+    }
+    return true;
+  }
+
+  if (method === 'PUT' && parsedPath === '/admin/mail') {
+    if (!requireAdmin(principal, res)) return true;
+    const body = await readJson(req, res);
+    if (body === null) return true;
+    try {
+      const saved = await defaultMail.save(body);
+      const reliant = await mailSettings.countReliantOnDefault();
+      log('info', 'Default mail settings changed', {
+        enabled: saved.enabled, host: saved.smtp.host || null, accountsReliant: reliant,
+      });
+      jsonReply(res, 200, { mail: saved, accountsReliant: reliant });
+    } catch (e) {
+      if (e.code === 'VALIDATION_FAILED') {
+        jsonReply(res, 400, { error: e.message, code: 'VALIDATION_FAILED', field: e.field });
+        return true;
+      }
+      log('error', `Saving the default mail settings failed: ${e.message}`);
+      jsonReply(res, 500, { error: 'Could not save the default mail settings.', code: 'INTERNAL' });
+    }
+    return true;
+  }
+
+  if (method === 'DELETE' && parsedPath === '/admin/mail') {
+    if (!requireAdmin(principal, res)) return true;
+    try {
+      // The count is taken before clearing — afterwards every one of these
+      // accounts is still "enabled with no host", but the number describes who
+      // this action actually affects, not who is left in that state by it.
+      const reliant = await mailSettings.countReliantOnDefault();
+      await defaultMail.clear();
+      log('info', 'Default mail settings cleared', { accountsAffected: reliant });
+      jsonReply(res, 200, { mail: null, accountsAffected: reliant });
+    } catch (e) {
+      log('error', `Clearing the default mail settings failed: ${e.message}`);
+      jsonReply(res, 500, { error: 'Could not clear the default mail settings.', code: 'INTERNAL' });
     }
     return true;
   }

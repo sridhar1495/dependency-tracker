@@ -64,7 +64,7 @@ dep-service-201-2` — and says when there is more than one way in.
 |---|---|
 | ![Risk trend](docs/images/risk-trend.png) | **Risk trend.** Critical/high/medium/low over the last week, month or year. A day nobody refreshed carries the previous reading, drawn dashed and shaded so it cannot be mistaken for a measurement. |
 | ![Settings](docs/images/settings.png) | **Settings.** Your own DependencyTrack connection, mail, and schedules. The API key is write-only — it is never returned to a browser. |
-| ![Administration](docs/images/administration.png) | **Administration.** Accounts, quotas, storage headroom and branding. It can do exactly eleven things and read nothing sensitive. |
+| ![Administration](docs/images/administration.png) | **Administration.** Accounts, quotas, storage headroom, branding and a default mail server. It can do exactly thirteen things and read nothing sensitive. |
 | ![Sign-in](docs/images/login.png) | **Sign-in.** Registration and sign-in, with the administrator-configurable title and background. |
 
 </details>
@@ -209,16 +209,16 @@ screen of their own at `/admin.html`: the account list with each account's
 limits, a detail pane, the service-wide defaults, storage headroom for the
 volume the database sits on, and the sign-in branding.
 
-Beyond reading it can do exactly eleven things — set the default report and
+Beyond reading it can do exactly thirteen things — set the default report and
 schedule limits, set one account's limits, reset one account's password, change
 the application title, upload or remove the sign-in background, upload or remove
-the application icon, show or hide the risk-trend panel, and upload or remove a
-colour theme. Everything else about an account is readable only: **no
-administrator route can read anybody's DependencyTrack key, SMTP password or
-report contents.**
+the application icon, show or hide the risk-trend panel, upload or remove a
+colour theme, and set or clear an installation-wide default SMTP server.
+Everything else about an account is readable only: **no administrator route
+can read anybody's DependencyTrack key, SMTP password or report contents.**
 
-That list is a contract, not a summary. A test asserts those eleven method/path
-pairs are handled and that every other write is not, so adding a twelfth means
+That list is a contract, not a summary. A test asserts those thirteen method/path
+pairs are handled and that every other write is not, so adding a fourteenth means
 editing the allow-list in a diff somebody reads (CLAUDE.md §7.6).
 
 ## Continuous integration

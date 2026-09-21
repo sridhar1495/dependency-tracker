@@ -802,6 +802,101 @@ describe('e2e — scheduled delivery, asserted at the SMTP envelope', { skip: SK
   }, { timeout: 180_000 });
 });
 
+describe('e2e — the installation default SMTP server (Q52)', { skip: SKIP }, () => {
+  let token, project, adminToken;
+
+  async function sendNowAndWait(id) {
+    const r = await api.post(`/violation-cache/schedules/${id}/run-now`, {}, token);
+    if (r.status >= 300) return { status: r.status, code: r.json && r.json.code };
+    const until = Date.now() + 60_000;
+    while (Date.now() < until) {
+      const rows = await sql(
+        `SELECT status FROM schedule_runs WHERE schedule_id = $1 ORDER BY id DESC LIMIT 1`, [id]);
+      if (rows[0] && ['success', 'failed'].includes(rows[0].status)) return { status: 200, runStatus: rows[0].status };
+      await new Promise(s => setTimeout(s, 250));
+    }
+    return { status: 200, runStatus: 'timeout' };
+  }
+
+  before(async () => {
+    if (!ENABLED) return;
+    token = await api.signUp(account('defaultmailuser'));
+    await api.saveConnection(token, { apiUrl: dt.url, apiKey: dt.apiKey });
+    // Enabled, but deliberately no SMTP host of this account's own — the one
+    // state the fallback is for.
+    await api.saveMail(token, { enabled: true, to: 'reachedby-default@example.com' });
+    const roots = await (await fetch(`${dt.url}/api/v1/project?onlyRoot=true`,
+      { headers: { 'X-Api-Key': dt.apiKey } })).json();
+    project = { uuid: roots[0].uuid, name: roots[0].name, version: '' };
+    adminToken = (await api.login(stack.admin.loginId, stack.admin.password,
+      { isAdmin: true, force: true })).json.token;
+  }, { timeout: 60_000 });
+
+  afterEach(async () => {
+    await api.del('/admin/mail', adminToken);
+  });
+
+  test('an account with no host of its own sends through the configured default', async () => {
+    const put = await api.put('/admin/mail', {
+      enabled: true,
+      smtp: { host: stack.smtp.host, port: stack.smtp.port, secure: false, user: 'u', pass: 'p' },
+      from: 'installation-default@example.com',
+    }, adminToken);
+    assert.equal(put.status, 200, JSON.stringify(put.json));
+
+    stack.smtp.reset();
+    const r = await api.createSchedule(token, {
+      name: 'via-default', frequency: 'daily', hour: 9, minute: 0,
+      riskTypes: ['security'], projects: [project],
+    });
+    const result = await sendNowAndWait(r.json.schedule.id);
+    assert.equal(result.runStatus, 'success', JSON.stringify(result));
+
+    const mail = await stack.smtp.waitFor('reachedby-default@example.com', 10_000);
+    assert.ok(mail, 'no message reached the account\'s own recipient through the default server');
+    assert.match(mail.data, /From:.*installation-default@example\.com/i);
+  }, { timeout: 180_000 });
+
+  test('clearing the default refuses a send, rather than silently doing nothing', async () => {
+    // No default configured at all — afterEach already cleared it.
+    const r = await api.createSchedule(token, {
+      name: 'no-default', frequency: 'daily', hour: 9, minute: 0,
+      riskTypes: ['security'], projects: [project],
+    });
+    const result = await sendNowAndWait(r.json.schedule.id);
+    assert.equal(result.status, 400);
+    assert.equal(result.code, 'MAIL_NOT_CONFIGURED');
+  }, { timeout: 60_000 });
+
+  test('an account with its own SMTP server is unaffected by the default existing or not', async () => {
+    await api.saveMail(token, {
+      enabled: true, to: 'ownserver@example.com',
+      smtp: { host: stack.smtp.host, port: stack.smtp.port, secure: false, user: 'u2', pass: 'p2' },
+      from: 'own-account@example.com',
+    });
+    try {
+      const put = await api.put('/admin/mail', {
+        enabled: true, smtp: { host: 'unreachable.invalid', port: 2525 }, from: 'x@example.com',
+      }, adminToken);
+      assert.equal(put.status, 200, JSON.stringify(put.json));
+
+      stack.smtp.reset();
+      const r = await api.createSchedule(token, {
+        name: 'own-server', frequency: 'daily', hour: 9, minute: 0,
+        riskTypes: ['security'], projects: [project],
+      });
+      const result = await sendNowAndWait(r.json.schedule.id);
+      assert.equal(result.runStatus, 'success', JSON.stringify(result));
+      const mail = await stack.smtp.waitFor('ownserver@example.com', 10_000);
+      assert.ok(mail, 'the account\'s own server must still be used, not the (unreachable) default');
+    } finally {
+      // Leave the account clean for the tests above, which rely on it having
+      // no host of its own.
+      await api.saveMail(token, { enabled: true, to: 'reachedby-default@example.com' });
+    }
+  }, { timeout: 180_000 });
+});
+
 // ══════════════════════════════════════════════════════════════════════════════
 /**
  * Pull the xlsx attachment out of a raw SMTP conversation.
@@ -1200,10 +1295,15 @@ describe('e2e — the dashboard in a real browser', { skip: BROWSER_SKIP }, () =
   // keeps a genuine failure reporting as exactly one failure, with its own
   // message. It deliberately does not assert — cleanup that can itself fail is
   // one more way to lose the real error.
+  // The Settings/schedule side panel (#configPanel, §8.10's slide-in pattern)
+  // is the identical failure mode one class over: `.cfg-panel.open` covers the
+  // same width as the toolbar it slid out from, so a test that fails midway
+  // through the schedule drill-down leaves it there for every later click to
+  // "intercept pointer events" against, same as an un-closed modal would.
   afterEach(async () => {
     if (!page || page.isClosed()) return;
     await page.evaluate(() => {
-      document.querySelectorAll('.modal-overlay.open')
+      document.querySelectorAll('.modal-overlay.open, .cfg-panel.open')
         .forEach(el => el.classList.remove('open'));
     }).catch(() => {});
   });
@@ -1937,6 +2037,74 @@ describe('e2e — the dashboard in a real browser', { skip: BROWSER_SKIP }, () =
     assert.equal(await page.locator('#cfgMainView').isVisible(), true);
     assert.equal(await page.locator('#configPanel').first().evaluate(e => e.classList.contains('open')), true,
       'Cancel in the editor is one step back, never a dismissal');
+    await page.locator('.cfg-close').first().click(); await page.waitForTimeout(600);
+  }, { timeout: 120_000 });
+
+  test('a saved schedule still shows its anchors when reopened', async () => {
+    // The list route (reloadSchedules) attaches only a project COUNT, never
+    // projectUuids — a schedule opened straight from that cached list used to
+    // read its anchors as empty and show "No anchors — re-select them from the
+    // toolbar" even though the row beside it correctly said "Latest under 1
+    // anchor". service-102 is a leaf under Group 2 and DT's own stub marks it
+    // isLatest (i % 3 === 0), so latest_under resolves it to exactly one
+    // project — a clean, unambiguous count to assert on.
+    //
+    // The prior test leaves a checkbox selection behind — cancelling its own
+    // schedule editor does not clear the tree's selection, by design (§8.5:
+    // "Never mutate allProjects… derive everything else from it" says nothing
+    // about the checkbox state, which is a deliberately persistent workspace).
+    // Start from a known-clean selection so this test's own count is not
+    // whatever the previous test happened to leave checked.
+    await page.evaluate(() => toggleSelectAll(false));
+    await page.locator('tr:has-text("service-102") .proj-select-cb[data-leaf="1"]').check();
+    await page.waitForTimeout(300);
+    await page.click('#genReportBtn'); await page.waitForTimeout(400);
+    await page.locator('#rptDropMenu button:has-text("Schedule Reports")').click();
+    await page.waitForTimeout(1200);
+    assert.equal(await page.locator('#cfgSchedView').isVisible(), true);
+
+    const label = `Reopen check ${Date.now()}`;
+    await page.fill('#cfgSchedLabel', label);
+    await page.selectOption('#cfgSchedMode', 'latest_under');
+    await page.waitForTimeout(300);
+    // Still inside the freshly-picked selection (schedCurrentAnchors reads
+    // _schedPendingProjects here) — this half already worked before the fix.
+    const beforeSave = await page.locator('#cfgSchedProjects').textContent();
+    assert.match(beforeSave, /anchor/i);
+    assert.match(beforeSave, /1 project/);
+    assert.doesNotMatch(beforeSave, /No anchors/);
+
+    await page.click('#cfgSaveBtn');
+    await page.waitForTimeout(1500);
+    assert.equal(await page.locator('#cfgSchedView').isVisible(), true, 'saving keeps the editor open');
+    // The editor's own re-render after save must already be correct — not just
+    // the cold reopen below — since saveScheduleEditor() also went through the
+    // list-cached, anchor-less path before this fix.
+    const afterSave = await page.locator('#cfgSchedProjects').textContent();
+    assert.match(afterSave, /anchor/i);
+    assert.match(afterSave, /1 project/);
+    assert.doesNotMatch(afterSave, /No anchors/);
+
+    await page.click('#cfgBackBtn');
+    await page.waitForTimeout(600);
+    assert.equal(await page.locator('#cfgMainView').isVisible(), true);
+    assert.match(await page.locator('#cfgSchedList').textContent(), /Latest under 1 anchor/,
+      'the list row itself always had the right count — projectCount, not projectUuids');
+
+    // The actual regression: a cold reopen, straight from the list-cached row.
+    await page.locator(`#cfgSchedList .sched-row:has-text("${label}")`).click();
+    await page.waitForTimeout(900);
+    assert.equal(await page.locator('#cfgSchedView').isVisible(), true);
+    const reopened = await page.locator('#cfgSchedProjects').textContent();
+    assert.doesNotMatch(reopened, /No anchors/, 'the anchor must survive a cold reopen');
+    assert.match(reopened, /anchor/i);
+    assert.match(reopened, /1 project/);
+
+    // Clean up: cancel deletes it outright (§8.1), so later tests in this
+    // shared-page suite see the same schedule list they would have otherwise.
+    await page.click('#cfgSchedDeleteBtn'); await page.waitForTimeout(700);
+    await page.locator('#confirmOkBtn').click(); await page.waitForTimeout(900);
+    assert.equal(await page.locator('#cfgMainView').isVisible(), true);
     await page.locator('.cfg-close').first().click(); await page.waitForTimeout(600);
   }, { timeout: 120_000 });
 

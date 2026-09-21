@@ -523,7 +523,7 @@ rather than shown a screen whose every request would be refused.
 
 ### What administration can and cannot do
 
-**It is mostly read-only, and what it may change is a closed list of eleven
+**It is mostly read-only, and what it may change is a closed list of thirteen
 things** — not a general-purpose account editor:
 
 | # | Action | Where |
@@ -539,6 +539,8 @@ things** — not a general-purpose account editor:
 | 9 | Show or hide the risk-trend panel for everyone | Customization |
 | 10 | Upload a colour theme | Customization |
 | 11 | Remove the theme, returning to the built-in colours | Customization |
+| 12 | Set the **default** SMTP server | Default Email Server |
+| 13 | Clear the default SMTP server | Default Email Server |
 
 Everything else is readable only. Administration **cannot** read anyone's
 DependencyTrack API key, SMTP password, reports, findings or schedules' contents.
@@ -788,6 +790,31 @@ own copy or download it first.
 > external resources and cover the page; a fixed list of colour properties
 > cannot. The service renders the CSS itself from the names and values it
 > recognises.
+
+### 12–13. The default email server
+
+**Default Email Server** sets one SMTP server every account with no server of
+its own can send through — the installation's fallback, not a replacement for
+an account's own settings.
+
+**How this reaches a user.** Nothing visible changes until they turn email on
+for themselves in their own **⚙ Settings**. From then on, if they leave **Host**
+blank, their Settings panel shows *"Using the installation's default mail
+server (host:port). Fill in a host below to use your own instead."* and they
+only need to add a recipient — no SMTP host, port or credentials to find. An
+account that has already entered its own host is never affected by this
+screen at all; the default is only ever read for an account with none of its
+own.
+
+The state line says how many accounts currently rely on it, so the consequence
+of a change is visible before you make it — the same reasoning the report and
+schedule defaults use.
+
+> **Clearing it does not touch any account's own settings.** Every account
+> that had entered its own SMTP server keeps working exactly as before. Only
+> accounts relying on the fallback are affected, and they simply need their
+> own server before their next report can send — the same "refuses, never
+> deletes" rule a lowered report or schedule limit follows.
 
 ### Storage
 

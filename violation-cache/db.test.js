@@ -13,7 +13,7 @@
 // These tests create their own throwaway schema and drop it afterwards. They
 // never assume pre-existing data.
 
-const { test, describe, before, after } = require('node:test');
+const { test, describe, before, after, afterEach } = require('node:test');
 const assert = require('node:assert/strict');
 const fs     = require('node:fs');
 const os     = require('node:os');
@@ -980,7 +980,7 @@ describe('admin credential file', { skip: !ENABLED && 'TEST_DATABASE_URL not set
 
 describe('multi-tenant data access', { skip: !ENABLED && 'TEST_DATABASE_URL not set' }, () => {
   let pool, users, dtCrypto, dtConnections, userSettings, appSettings, mailSettings,
-      schedulesDb, reportsDb, caches;
+      defaultMailSettings, schedulesDb, reportsDb, caches;
   let alice, bob;
 
   // Real DependencyTrack project ids are uuids, and so is schedule_projects.project_uuid.
@@ -1008,6 +1008,7 @@ describe('multi-tenant data access', { skip: !ENABLED && 'TEST_DATABASE_URL not 
     userSettings  = require('./lib/user-settings');
     appSettings   = require('./lib/app-settings');
     mailSettings  = require('./lib/mail-settings');
+    defaultMailSettings = require('./lib/default-mail-settings');
     schedulesDb   = require('./lib/schedules');
     reportsDb     = require('./lib/reports-db');
     caches        = require('./lib/caches');
@@ -1015,6 +1016,7 @@ describe('multi-tenant data access', { skip: !ENABLED && 'TEST_DATABASE_URL not 
     const key = dtCrypto.parseEncryptionKey(process.env.SECRET_ENCRYPTION_KEY);
     dtConnections.configure(key);
     mailSettings.configure(key);
+    defaultMailSettings.configure(key);
 
     await pool.query("DELETE FROM users WHERE login_id IN ('zz_alice', 'zz_bob')");
     const hash = await dtCrypto.hashPassword('password123');
@@ -1027,6 +1029,7 @@ describe('multi-tenant data access', { skip: !ENABLED && 'TEST_DATABASE_URL not 
       await pool.query("DELETE FROM users WHERE login_id IN ('zz_alice', 'zz_bob')");
       await pool.query("DELETE FROM violation_caches WHERE fingerprint LIKE 'zz%'");
       await pool.query("DELETE FROM system_state WHERE key = 'legacy_dt_connection_migrated'");
+      await pool.query('DELETE FROM default_mail_settings WHERE id = TRUE');
       await pool.close();
     }
   });
@@ -1472,6 +1475,151 @@ describe('multi-tenant data access', { skip: !ENABLED && 'TEST_DATABASE_URL not 
       () => mailSettings.save(alice.id, { smtp: { port: 99999 } }),
       (e) => e.code === 'VALIDATION_FAILED' && e.field === 'smtpPort'
     );
+  });
+
+  // ── default_mail_settings (migration 018) ────────────────────────────────
+  describe('the installation default SMTP server', () => {
+    afterEach(async () => {
+      await defaultMailSettings.clear();
+      // Bob is the account these tests flip enabled/host on; a clean slate
+      // between tests is what keeps them independent of each other's order.
+      await mailSettings.save(bob.id, { enabled: false, smtp: {}, from: '', to: [], cc: [] });
+    });
+
+    test('round-trips, masks the password to the admin view, and keeps it on a placeholder save', async () => {
+      await defaultMailSettings.save({
+        enabled: true,
+        smtp: { host: 'mail.example.com', port: 587, secure: false, user: 'relay', pass: 'sup3rsecret' },
+        from: 'noreply@example.com',
+      });
+
+      const admin = await defaultMailSettings.getForAdmin();
+      assert.equal(admin.smtp.pass, defaultMailSettings.PASSWORD_PLACEHOLDER);
+      assert.doesNotMatch(JSON.stringify(admin), /sup3rsecret/);
+
+      // Re-saving the placeholder must not overwrite the stored password —
+      // the identical rule lib/mail-settings.js's own save() follows.
+      await defaultMailSettings.save({
+        enabled: true,
+        smtp: { host: 'mail.example.com', port: 2525, secure: true, user: 'relay',
+                pass: defaultMailSettings.PASSWORD_PLACEHOLDER },
+        from: 'noreply@example.com',
+      });
+      const resolved = await defaultMailSettings.getResolved();
+      assert.equal(resolved.smtp.pass, 'sup3rsecret');
+      assert.equal(resolved.smtp.port, 2525, 'the rest of the form still saved');
+    });
+
+    test('an out-of-range SMTP port is rejected before any write', async () => {
+      await assert.rejects(
+        () => defaultMailSettings.save({ smtp: { port: 0 } }),
+        (e) => e.code === 'VALIDATION_FAILED' && e.field === 'smtpPort'
+      );
+    });
+
+    test('clearing it removes the row entirely, not merely disables it', async () => {
+      await defaultMailSettings.save({ enabled: true, smtp: { host: 'mail.example.com' }, from: 'x@example.com' });
+      await defaultMailSettings.clear();
+      assert.equal(await defaultMailSettings.getForAdmin(), null);
+      assert.equal(await defaultMailSettings.getResolved(), null);
+    });
+
+    test('an account with no host of its own falls back to it as one unit', async () => {
+      await defaultMailSettings.save({
+        enabled: true,
+        smtp: { host: 'mail.example.com', port: 2525, secure: true, user: 'relay', pass: 'relaypass' },
+        from: 'noreply@example.com',
+      });
+      await mailSettings.save(bob.id, { enabled: true, smtp: {}, from: '', to: ['bob@example.com'], cc: [] });
+
+      const resolved = await mailSettings.getResolved(bob.id);
+      assert.equal(resolved.smtp.host, 'mail.example.com');
+      assert.equal(resolved.smtp.port, 2525);
+      assert.equal(resolved.smtp.secure, true);
+      assert.equal(resolved.smtp.user, 'relay');
+      assert.equal(resolved.smtp.pass, 'relaypass');
+      assert.equal(resolved.from, 'noreply@example.com');
+      // Bob's own recipients are untouched — only the connection is shared.
+      assert.deepEqual(resolved.to, ['bob@example.com']);
+
+      const client = await mailSettings.getForClient(bob.id);
+      assert.equal(client.usingDefault, true);
+      assert.deepEqual(client.defaultSmtp, { host: 'mail.example.com', port: 2525, from: 'noreply@example.com' });
+      // The client-facing form must stay genuinely blank — never the
+      // default's values — so a bare Save cannot freeze today's default into
+      // this account's own row (CLAUDE.md §6.9).
+      assert.equal(client.smtp.host, '');
+      assert.equal(client.smtp.pass, '', 'never the installation\'s password, and never this account\'s dots either');
+    });
+
+    test('an account with its own host is never touched by the default', async () => {
+      await defaultMailSettings.save({
+        enabled: true, smtp: { host: 'mail.example.com', pass: 'relaypass' }, from: 'noreply@example.com',
+      });
+      await mailSettings.save(bob.id, {
+        enabled: true,
+        smtp: { host: 'smtp.bob.example', port: 465, secure: true, user: 'bob', pass: 'bobpass' },
+        from: 'bob@example.com', to: ['bob@example.com'], cc: [],
+      });
+
+      const resolved = await mailSettings.getResolved(bob.id);
+      assert.equal(resolved.smtp.host, 'smtp.bob.example');
+      assert.equal(resolved.smtp.pass, 'bobpass');
+      assert.equal(resolved.from, 'bob@example.com');
+
+      const client = await mailSettings.getForClient(bob.id);
+      assert.equal(client.usingDefault, false);
+      assert.equal(client.defaultSmtp, null);
+    });
+
+    test('a disabled account never falls back, even with no host and a default configured', async () => {
+      await defaultMailSettings.save({ enabled: true, smtp: { host: 'mail.example.com' }, from: 'noreply@example.com' });
+      await mailSettings.save(bob.id, { enabled: false, smtp: {}, from: '', to: ['bob@example.com'], cc: [] });
+
+      const resolved = await mailSettings.getResolved(bob.id);
+      assert.equal(resolved.enabled, false);
+      assert.equal(resolved.smtp.host, '', 'no surprise emails — the account never opted in');
+
+      const client = await mailSettings.getForClient(bob.id);
+      assert.equal(client.usingDefault, false);
+    });
+
+    test('a disabled or cleared default degrades to nothing, not a crash', async () => {
+      await mailSettings.save(bob.id, { enabled: true, smtp: {}, from: '', to: ['bob@example.com'], cc: [] });
+
+      // No default configured at all.
+      let resolved = await mailSettings.getResolved(bob.id);
+      assert.equal(resolved.smtp.host, '');
+
+      // A default exists but is turned off.
+      await defaultMailSettings.save({ enabled: false, smtp: { host: 'mail.example.com' }, from: 'x@example.com' });
+      resolved = await mailSettings.getResolved(bob.id);
+      assert.equal(resolved.smtp.host, '');
+    });
+
+    test('the account\'s own From wins even while borrowing the default\'s connection', async () => {
+      await defaultMailSettings.save({
+        enabled: true, smtp: { host: 'mail.example.com' }, from: 'noreply@example.com',
+      });
+      await mailSettings.save(bob.id, {
+        enabled: true, smtp: {}, from: 'bob-replies@example.com', to: ['bob@example.com'], cc: [],
+      });
+      const resolved = await mailSettings.getResolved(bob.id);
+      assert.equal(resolved.smtp.host, 'mail.example.com', 'the connection still comes from the default');
+      assert.equal(resolved.from, 'bob-replies@example.com', 'but this account chose its own From');
+    });
+
+    test('countReliantOnDefault counts only enabled accounts with no host of their own', async () => {
+      await mailSettings.save(bob.id, { enabled: true, smtp: {}, from: '', to: ['bob@example.com'], cc: [] });
+      const before = await mailSettings.countReliantOnDefault();
+      assert.ok(before >= 1, 'bob is enabled with no host and must be counted');
+
+      await mailSettings.save(bob.id, {
+        enabled: true, smtp: { host: 'smtp.bob.example' }, from: 'bob@example.com', to: ['bob@example.com'], cc: [],
+      });
+      const afterOwnHost = await mailSettings.countReliantOnDefault();
+      assert.equal(afterOwnHost, before - 1, 'bob no longer relies on it once he has his own host');
+    });
   });
 
   // ── reports + chunked bytes ────────────────────────────────────────────

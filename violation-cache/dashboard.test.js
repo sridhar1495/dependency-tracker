@@ -2592,17 +2592,76 @@ describe('admin.html schedule limit', () => {
     assert.equal((fn.match(/apiFetch\('\/admin\/settings'/g) || []).length, 1);
   });
 
-  test('the administration allow-list is still exactly eleven method/path pairs', () => {
+  test('the administration allow-list is still exactly thirteen method/path pairs', () => {
     // CLAUDE.md §7.6 — the list is the contract, and it grows only in a diff
-    // somebody reads. Six to nine to eleven: the icon pair mirrors the
-    // background pair, the trend switch hides a panel, and the theme pair
-    // changes colours. Each changes how the product LOOKS or what it SHOWS,
+    // somebody reads. Six to nine to eleven to thirteen: the icon pair mirrors
+    // the background pair, the trend switch hides a panel, the theme pair
+    // changes colours, and the mail pair sets an installation-wide connection
+    // every account may already reach on its own if it knows the server. Each
+    // changes how the product LOOKS, what it SHOWS, or a shared CONNECTION —
     // never what an account is or what it may reach — the same bar the
     // branding three cleared. The schedule limit, by contrast, rode on the
     // settings routes that already existed rather than adding one.
     const adminRoute = fs.readFileSync(path.join(__dirname, 'routes', 'admin.js'), 'utf8');
     const writes = [...adminRoute.matchAll(/method === '(PUT|POST|DELETE)'/g)].length;
-    assert.equal(writes, 11, `expected eleven write handlers, found ${writes}`);
+    assert.equal(writes, 13, `expected thirteen write handlers, found ${writes}`);
+  });
+});
+
+describe('admin.html default email server section', () => {
+  test('the fields, badge and actions all exist with unique ids', () => {
+    for (const id of ['accMail', 'accMailBody', 'mailBadge', 'mailEnabled', 'mailState',
+                      'mailHost', 'mailPort', 'mailSecure', 'mailUser', 'mailPass', 'mailFrom',
+                      'mailErr', 'mailSave', 'mailRemove']) {
+      const count = (ADMIN_HTML.match(new RegExp(`id="${id}"`, 'g')) || []).length;
+      assert.equal(count, 1, `#${id} should appear exactly once`);
+    }
+  });
+
+  test('every new handler is window-exported', () => {
+    for (const fn of ['saveDefaultMail', 'removeDefaultMail']) {
+      assert.match(ADMIN_HTML, new RegExp(`window\\.${fn}\\s*=`), `${fn} must be exported`);
+      assert.match(ADMIN_HTML, new RegExp(`onclick="${fn}\\(\\)"`), `${fn} must be wired up`);
+    }
+  });
+
+  test('loadDefaultMail runs at boot beside the other reads', () => {
+    // A read left out of reloadAll() would leave the form showing whatever it
+    // last rendered — stale after a reload, or blank on first load — the same
+    // bug class the theme controls' own "runs at boot" test guards against.
+    const fn = extractFunction(ADMIN_HTML, 'reloadAll');
+    assert.match(fn, /loadDefaultMail\(\)/);
+  });
+
+  test('removal has no confirmation dialog, matching its siblings', () => {
+    // admin.html has no showConfirm helper (the customization tests already
+    // assert this globally); removeDefaultMail must not be the one function
+    // that tries to call it.
+    const fn = extractFunction(ADMIN_HTML, 'removeDefaultMail');
+    assert.ok(!/showConfirm\(/.test(fn));
+  });
+
+  test('the password field never gets the account\'s own placeholder-dots treatment mixed up', () => {
+    // The admin form's own password field is a real <input type="password">,
+    // not a text field that could leak the masked value into a visible
+    // attribute — a structural check, since the masking itself is proven at
+    // the data layer (server.test.js, db.test.js).
+    assert.match(ADMIN_HTML, /id="mailPass" type="password"/);
+  });
+
+  test('saving sends the live form values, not a cached copy', () => {
+    const fn = extractFunction(ADMIN_HTML, 'saveDefaultMail');
+    for (const id of ['mailEnabled', 'mailHost', 'mailPort', 'mailSecure', 'mailUser', 'mailPass', 'mailFrom']) {
+      assert.match(fn, new RegExp(`\\$\\('${id}'\\)`), `save must read #${id} fresh`);
+    }
+    assert.match(fn, /method:\s*'PUT'/);
+    assert.match(fn, /'\/admin\/mail'/);
+  });
+
+  test('clearing calls DELETE and re-renders from the empty response', () => {
+    const fn = extractFunction(ADMIN_HTML, 'removeDefaultMail');
+    assert.match(fn, /method:\s*'DELETE'/);
+    assert.match(fn, /renderDefaultMail\(null, 0\)/);
   });
 });
 
@@ -2913,6 +2972,54 @@ describe('smaller pre-release fixes', () => {
 // ── The settings panel's chrome ──────────────────────────────────────────────
 // Four defects found in the deployed build, all of them in how the drill-down
 // shares the panel with the settings list.
+// ── The installation-wide default SMTP server, as index.html shows it ────────
+describe('index.html mail settings: the installation default (§6.9)', () => {
+  test('the form fields stay the account\'s own — populated straight from the response', () => {
+    // A bare Save must resubmit exactly what this account has stored, even
+    // when relying on the default — never the default's own values, which
+    // would freeze today's default into this account's row the moment
+    // somebody clicked Save for an unrelated reason (CLAUDE.md §6.9).
+    const fn = extractFunction(INDEX_HTML, 'loadConfigFromServer');
+    assert.match(fn, /cfgSmtpHost'\)\.value\s*=\s*smtp\.host \|\| ''/);
+    assert.match(fn, /cfgMailFrom'\)\.value\s*=\s*m\.from \|\| ''/);
+  });
+
+  test('the placeholder and note reflect usingDefault, and reset when it is false', () => {
+    const fn = extractFunction(INDEX_HTML, 'loadConfigFromServer');
+    assert.match(fn, /m\.usingDefault && m\.defaultSmtp/);
+    assert.match(fn, /cfgMailDefaultNote/);
+    assert.match(fn, /cfgSmtpHost'\)\.placeholder = m\.defaultSmtp\.host/);
+    // The else branch is what stops a stale placeholder from a previous
+    // account/session surviving into one that has no default available.
+    assert.match(fn, /note\.style\.display = 'none'/);
+  });
+
+  test('the toolbar gate accepts the default as satisfying "has a host"', () => {
+    // scheduleReports() used to require cfg.mail.smtp.host directly, which
+    // would refuse to open the schedule editor for an account that can
+    // actually send mail fine, via the installation default.
+    const fn = extractFunction(INDEX_HTML, 'scheduleReports');
+    assert.match(fn, /cfg\.mail\.smtp\.host \|\| cfg\.mail\.usingDefault/);
+  });
+
+  test('the schedule-section hint accounts for the default too', () => {
+    // updateSchedToggleState() reads live DOM values, which are genuinely
+    // blank while relying on the default — without this it would nag a
+    // correctly-configured account to "configure SMTP host… above".
+    const fn = extractFunction(INDEX_HTML, 'updateSchedToggleState');
+    assert.match(fn, /usingDefault/);
+    assert.match(fn, /host \|\| usingDefault/);
+  });
+
+  test('test-email falls back to the default connection when the on-screen host is blank', () => {
+    // Send Test Email always sends the live form's smtp block — routes/config.js
+    // is what must apply the fallback, or the button fails for an account the
+    // scheduler would happily send for.
+    const routeSrc = fs.readFileSync(path.join(__dirname, 'routes', 'config.js'), 'utf8');
+    assert.match(routeSrc, /applyDefaultFallback\(mailCfg\.smtp, mailCfg\.from\)/);
+  });
+});
+
 describe('index.html settings panel chrome', () => {
   test('the hidden attribute is made to win against class rules', () => {
     // The browser's own rule is `[hidden] { display: none }` in the user-agent
@@ -3331,12 +3438,13 @@ describe('the documents describe the behaviour the code has', () => {
       'the README must say the installer does not ask for it');
   });
 
-  test('the administration allow-list is stated as eleven everywhere it is stated', () => {
+  test('the administration allow-list is stated as thirteen everywhere it is stated', () => {
     const adminSrc = fs.readFileSync(path.join(__dirname, 'routes', 'admin.js'), 'utf8');
     const writes = [...adminSrc.matchAll(/method === '(PUT|POST|DELETE)'/g)].length;
-    assert.equal(writes, 11);
-    assert.match(README, /exactly eleven things/);
-    for (const stale of [/exactly three things/, /exactly six things/, /exactly nine things/]) {
+    assert.equal(writes, 13);
+    assert.match(README, /exactly thirteen things/);
+    for (const stale of [/exactly three things/, /exactly six things/, /exactly nine things/,
+                         /exactly eleven things/]) {
       assert.doesNotMatch(README, stale, 'the README states a count the routes no longer have');
     }
   });
@@ -6349,6 +6457,51 @@ describe('latest-only scheduling — the editor and the list (PR 2)', () => {
   test('readScheduleEditor sends the mode', () => {
     assert.match(extractFunction(INDEX_HTML, 'readScheduleEditor'),
       /selectionMode:\s*document\.getElementById\('cfgSchedMode'\)\.value/);
+  });
+
+  // ── Reopening an existing schedule must not lose its anchors ────────────────
+  // The list route (`reloadSchedules`) only ever attaches a project COUNT — one
+  // cheap aggregate per row — never `projectUuids`, so a schedule opened from
+  // the cached list read its anchors as empty and the preview showed a false
+  // "No anchors/projects — re-select them" warning even though the row's own
+  // count, right beside it, was correct. `GET /schedules/:id` is the one route
+  // that does carry them; schedLoadDetail() is what fetches it.
+  test('schedLoadDetail fetches the one route that carries projectUuids and merges it in', () => {
+    const fn = extractFunction(INDEX_HTML, 'schedLoadDetail');
+    assert.match(fn, /apiFetch\(`\/violation-cache\/schedules\/\$\{encodeURIComponent\(id\)\}`\)/);
+    assert.match(fn, /_schedules\[i\] = d\.schedule/, 'an existing cached row must be replaced');
+    assert.match(fn, /_schedules\.push\(d\.schedule\)/, 'a row missing from the cache must be added');
+  });
+
+  test('opening an existing schedule fetches its detail before the preview renders', () => {
+    // The toolbar's own pending selection (a brand-new, unsaved schedule) is the
+    // one case with nothing to fetch yet — everything else was cached from the
+    // list and needs the real anchors, or the preview lies about what is saved.
+    const fn = extractFunction(INDEX_HTML, 'openScheduleEditor');
+    assert.match(fn, /if \(id && !projects\) \{\s*\n\s*const fresh = await schedLoadDetail\(id\);/);
+    const loadAt   = fn.indexOf('schedLoadDetail(id)');
+    const modeAt   = fn.indexOf("getElementById('cfgSchedMode').value");
+    const renderAt = fn.indexOf('renderSchedPreview()');
+    assert.ok(loadAt !== -1 && loadAt < modeAt && modeAt < renderAt,
+      'the detail must be in hand before the mode is read and the preview drawn from it');
+  });
+
+  test('a superseded detail fetch must not overwrite a newer edit session', () => {
+    // The user can switch to a different schedule while the fetch for the
+    // first one is still in flight; the guard is what stops that late answer
+    // from clobbering the editor that has since moved on.
+    const fn = extractFunction(INDEX_HTML, 'openScheduleEditor');
+    assert.match(fn, /if \(_schedEditingId !== id\) return;/);
+  });
+
+  test('saving refreshes the detail too, so the very next render is not stale', () => {
+    // saveScheduleEditor clears _schedPendingProjects and calls reloadSchedules(),
+    // which re-fetches the same anchor-less list — without this, the editor
+    // kept showing the pre-save render until reopened, at which point it broke
+    // exactly the same way the cold-open case did.
+    const fn = extractFunction(INDEX_HTML, 'saveScheduleEditor');
+    assert.match(fn, /await reloadSchedules\(\)[\s\S]*await schedLoadDetail\(id\)/);
+    assert.match(fn, /renderSchedPreview\(\)/);
   });
 
   test('all four projectCount gates are mode-aware, so latest_all is usable', () => {

@@ -2770,6 +2770,34 @@ describe('mail settings — recipient parsing', () => {
   });
 });
 
+// ── lib/default-mail-settings.js — the installation default (migration 018) ──
+const defaultMailSettingsMod = require('./lib/default-mail-settings');
+
+describe('default mail settings — validation and the password placeholder', () => {
+  test('an out-of-range port is rejected before any query is issued', async () => {
+    // Not configured with an encryption key or a pool in this tier — if the
+    // check below ever moved to run after the write, this would throw a very
+    // different error and the test would still (wrongly) look green.
+    for (const bad of [0, -1, 65536, 2.5, 'ten']) {
+      await assert.rejects(
+        () => defaultMailSettingsMod.save({ smtp: { port: bad } }),
+        (e) => e.code === 'VALIDATION_FAILED' && e.field === 'smtpPort',
+        `expected port ${bad} to be rejected`
+      );
+    }
+  });
+
+  test('shares the identical placeholder literal with the per-user module', () => {
+    // Two different sentinels would mean the account-level Settings form and
+    // the administration form each have to remember which one applies where
+    // — one constant removes the choice. admin.html never hardcodes it as a
+    // string: the field simply round-trips whatever getForAdmin() sent, which
+    // db.test.js's "round-trips… kept on a placeholder save" test proves end
+    // to end against a real database.
+    assert.equal(defaultMailSettingsMod.PASSWORD_PLACEHOLDER, mailSettingsMod.PASSWORD_PLACEHOLDER);
+  });
+});
+
 // ── lib/user-settings.js — quota bounds ──────────────────────────────────────
 // The report ceiling moved from a preference each user set for themselves to a
 // capacity decision the administrator makes, globally or per account (migration
@@ -7531,4 +7559,110 @@ describe('routes — the theme', () => {
       assert.equal(ctx.res.statusCode, 403);
     });
   }
+});
+
+describe('routes — the installation default SMTP server', () => {
+  const routeAdminMod = require('./routes/admin');
+  const defaultMailMod = require('./lib/default-mail-settings');
+  const mailSettingsRouteMod = require('./lib/mail-settings');
+
+  const adminCtx = (method, path, body) => ({
+    method, url: path, path, res: makeRes(),
+    principal: asAdmin(), req: mockReq(body === undefined ? '' : JSON.stringify(body)),
+  });
+
+  test('the read returns the stored default and how many accounts rely on it', async () => {
+    const restore = stub(defaultMailMod, {
+      getForAdmin: async () => ({
+        enabled: true, smtp: { host: 'mail.example.com', port: 587, secure: false, user: 'relay', pass: '••••••••' },
+        from: 'noreply@example.com', updatedAt: new Date(0),
+      }),
+    });
+    const restore2 = stub(mailSettingsRouteMod, { countReliantOnDefault: async () => 3 });
+    try {
+      const ctx = adminCtx('GET', '/admin/mail');
+      assert.equal(await routeAdminMod.handle(ctx), true);
+      assert.equal(ctx.res.statusCode, 200);
+      assert.equal(ctx.res.json.mail.smtp.host, 'mail.example.com');
+      assert.equal(ctx.res.json.accountsReliant, 3);
+    } finally { restore(); restore2(); }
+  });
+
+  test('a rejected save answers 400 with the field named, before touching the database', async () => {
+    // Not stubbed: defaultMailSettings.save()'s port check runs before any
+    // query, so the real function is exactly what server.test.js may call
+    // (CLAUDE.md §10.1) — this is the route's own VALIDATION_FAILED → 400
+    // translation, proven against the real validator rather than a stand-in
+    // that might drift from what it actually throws.
+    const ctx = adminCtx('PUT', '/admin/mail', { enabled: true, smtp: { port: 99999 } });
+    assert.equal(await routeAdminMod.handle(ctx), true);
+    assert.equal(ctx.res.statusCode, 400);
+    assert.equal(ctx.res.json.code, 'VALIDATION_FAILED');
+    assert.equal(ctx.res.json.field, 'smtpPort');
+  });
+
+  test('an accepted save returns the masked settings and the current reliance count', async () => {
+    let savedInput = null;
+    const restore = stub(defaultMailMod, {
+      save: async (input) => {
+        savedInput = input;
+        return { enabled: true, smtp: { host: input.smtp.host, port: 587, secure: false, user: '', pass: '' },
+                 from: input.from, updatedAt: new Date(0) };
+      },
+    });
+    const restore2 = stub(mailSettingsRouteMod, { countReliantOnDefault: async () => 2 });
+    try {
+      const ctx = adminCtx('PUT', '/admin/mail', {
+        enabled: true,
+        smtp: { host: 'mail.example.com', port: 587, secure: false, user: 'relay', pass: 'sup3rsecret' },
+        from: 'noreply@example.com',
+      });
+      assert.equal(await routeAdminMod.handle(ctx), true);
+      assert.equal(ctx.res.statusCode, 200);
+      assert.equal(ctx.res.json.mail.smtp.host, 'mail.example.com');
+      assert.equal(ctx.res.json.accountsReliant, 2);
+      assert.equal(savedInput.smtp.host, 'mail.example.com');
+      // The password never rides back in the response body.
+      assert.doesNotMatch(JSON.stringify(ctx.res.json), /sup3rsecret/);
+    } finally { restore(); restore2(); }
+  });
+
+  test('clearing it reports how many accounts were affected, counted before the clear', async () => {
+    let cleared = false;
+    let countCalls = 0;
+    const restore = stub(defaultMailMod, { clear: async () => { cleared = true; } });
+    const restore2 = stub(mailSettingsRouteMod, {
+      countReliantOnDefault: async () => { countCalls++; return 4; },
+    });
+    try {
+      const ctx = adminCtx('DELETE', '/admin/mail');
+      assert.equal(await routeAdminMod.handle(ctx), true);
+      assert.equal(ctx.res.statusCode, 200);
+      assert.equal(ctx.res.json.mail, null);
+      assert.equal(ctx.res.json.accountsAffected, 4);
+      assert.equal(cleared, true);
+      assert.equal(countCalls, 1, 'counted once, before clear() removes the row it would count against');
+    } finally { restore(); restore2(); }
+  });
+
+  for (const [method, path] of [['PUT', '/admin/mail'], ['DELETE', '/admin/mail'], ['GET', '/admin/mail']]) {
+    test(`${method} ${path} is administrator-only`, async () => {
+      const ctx = {
+        method, url: path, path, res: makeRes(),
+        principal: { kind: 'user', userId: 'u1' },
+        req: mockReq('{}'),
+      };
+      assert.equal(await routeAdminMod.handle(ctx), true);
+      assert.equal(ctx.res.statusCode, 403);
+    });
+  }
+
+  test('the administration allow-list count includes these two routes', () => {
+    // A cheap, direct proof this describe block is testing routes that are
+    // actually counted in §7.6's closed list, not a pair that quietly fell
+    // outside the regex the count test reads.
+    const adminSrc = fs.readFileSync(path.join(__dirname, 'routes', 'admin.js'), 'utf8');
+    assert.match(adminSrc, /method === 'PUT' && parsedPath === '\/admin\/mail'/);
+    assert.match(adminSrc, /method === 'DELETE' && parsedPath === '\/admin\/mail'/);
+  });
 });
