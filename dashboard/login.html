@@ -332,6 +332,14 @@
        centre-clip when the window is short. */
     .modal-overlay { overflow-y: auto; }
     .modal { margin: auto; }
+    /* Q47: an uploaded icon replaces the initials in the same box, so the
+       header geometry never moves between the two. `contain`, not `cover`:
+       a mark is cropped by cover, and an operator's logo losing its edges is
+       worse than a little letterboxing inside an already near-square box. */
+    .has-icon {
+      background-size: contain; background-repeat: no-repeat; background-position: center;
+      color: transparent; font-size: 0;
+    }
   </style>
 </head>
 <body>
@@ -860,6 +868,29 @@ function brandInitials(title) {
   const letters = words.map(w => w[0].toUpperCase()).join('');
   return letters.slice(0, 3) || brandInitials(DEFAULT_APP_TITLE);
 }
+/**
+ * Q47: draw the logo mark — the uploaded icon, or the title's initials.
+ *
+ * The icon wins when one is configured, and the initials are the fallback
+ * rather than a placeholder to be replaced: an installation that uploads
+ * nothing keeps exactly the mark it has today. The `?v=` is the image's own
+ * sha256, so the URL is immutable and the browser re-fetches precisely when
+ * the administrator changes the file — the same rule the sign-in background
+ * already follows.
+ */
+function applyBrandMark(el, title, icon) {
+  if (!el) return;
+  if (icon && icon.version) {
+    el.textContent = '';
+    el.classList.add('has-icon');
+    el.style.backgroundImage = `url('/branding/icon?v=${encodeURIComponent(icon.version)}')`;
+  } else {
+    el.classList.remove('has-icon');
+    el.style.backgroundImage = '';
+    el.textContent = brandInitials(title);
+  }
+}
+
 
 /**
  * Title, mark and background, from the one public branding endpoint.
@@ -908,7 +939,7 @@ async function applyBranding() {
   if (b && typeof b.title === 'string' && b.title.trim()) title = b.title.trim();
   if (b && b.background && b.background.version) background = b.background;
   document.title = 'Sign in — ' + title;
-  $('brandMark').textContent = brandInitials(title);
+  applyBrandMark($('brandMark'), title, b && b.icon);
   $('brandText').textContent = title;
   if (background) {
     // The version is the image's own hash, so this URL is immutable and the

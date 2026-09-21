@@ -33,6 +33,15 @@ async function handle(ctx) {
         background: b.background
           ? { version: b.background.etag, width: b.background.width, height: b.background.height }
           : null,
+        // Q47: the mark falls back to the title's initials when absent, so the
+        // page needs to know which it is drawing before it draws anything.
+        icon: b.icon
+          ? { version: b.icon.etag, width: b.icon.width, height: b.icon.height }
+          : null,
+        // Q48: the dashboard needs this before it draws anything, and it is no
+        // more sensitive than the title beside it — it says whether a panel is
+        // on screen, not what is in it.
+        trendEnabled: b.trendEnabled,
       });
     } catch (e) {
       // The sign-in page must render even when this fails, so the failure is
@@ -41,13 +50,47 @@ async function handle(ctx) {
       // read would be a far worse outcome than showing the default one.
       log('warn', 'Branding read failed; serving defaults', { err: e.message });
       jsonReply(res, 200, {
-        title: branding.DEFAULT_TITLE, titleIsDefault: true, background: null,
+        title: branding.DEFAULT_TITLE, titleIsDefault: true, background: null, icon: null,
+        trendEnabled: true,
       });
     }
     return true;
   }
 
   // ── The image itself ───────────────────────────────────────────────────
+  // S32, same reasoning as the background: the sign-in page draws the mark
+  // before anybody has a token, so anyone who can reach the page can already
+  // see it. Returns an image and nothing else — no account, no setting, no
+  // count. SVG is refused upstream at upload, so these bytes are always a
+  // raster image from our own origin.
+  if (method === 'GET' && path === '/branding/icon') {
+    try {
+      const asset = await branding.getIconBytes();
+      if (!asset) {
+        jsonReply(res, 404, { error: 'No application icon is configured.', code: 'NO_ICON' });
+        return true;
+      }
+      const etag = `"${asset.etag}"`;
+      if (ctx.req.headers['if-none-match'] === etag) {
+        res.writeHead(304, { ETag: etag });
+        res.end();
+        return true;
+      }
+      res.writeHead(200, {
+        'Content-Type':   asset.mimeType,
+        'Content-Length': asset.bytes.length,
+        ETag:             etag,
+        'Cache-Control':  'public, max-age=31536000, immutable',
+        'X-Content-Type-Options': 'nosniff',
+      });
+      res.end(asset.bytes);
+    } catch (e) {
+      log('error', 'Icon read failed', { err: e.message });
+      jsonReply(res, 500, { error: 'Could not read the icon.', code: 'INTERNAL' });
+    }
+    return true;
+  }
+
   if (method === 'GET' && path === '/branding/background') {
     try {
       const asset = await branding.getBackgroundBytes();

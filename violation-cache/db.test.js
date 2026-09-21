@@ -1243,6 +1243,123 @@ describe('multi-tenant data access', { skip: !ENABLED && 'TEST_DATABASE_URL not 
     );
   });
 
+  // ── The icon and the trend switch (migration 016) ──────────────────────
+
+  test('016 replays cleanly — it drops a constraint before re-adding it', async () => {
+    // §5.3 asks for idempotency at the FILE level, so a partially-applied
+    // state can recover. The tests above prove the runner skips what the
+    // ledger already has; this one proves the SQL itself survives a replay,
+    // which matters for 016 specifically: it is the first migration that has
+    // to DROP something to widen it, and a bare ADD CONSTRAINT on a second
+    // pass would fail with "already exists".
+    const sql = fs.readFileSync(
+      path.join(__dirname, 'db', 'migrations', '016_app_icon_and_trend_toggle.sql'), 'utf8');
+    await pool.query(sql);
+    await pool.query(sql);
+
+    // And the constraint it leaves behind is the widened one, not a duplicate.
+    const { rows } = await pool.query(
+      `SELECT count(*)::int AS n FROM pg_constraint WHERE conname = 'branding_kind'`);
+    assert.equal(rows[0].n, 1, 'one constraint, replaced rather than stacked');
+    await pool.query(
+      `INSERT INTO branding_assets (kind, bytes, mime_type, etag, width, height, byte_size)
+       VALUES ('app_icon', $1, 'image/png', 'replay', 64, 64, 1)`, [Buffer.from([1])]);
+    await pool.query(`DELETE FROM branding_assets WHERE etag = 'replay'`);
+  });
+
+  test('the icon is a second kind on the same table, independent of the background', async () => {
+    try {
+      await branding.putBackground({ bytes: Buffer.from([1]), mimeType: 'image/png', width: 1920, height: 1080 });
+      await branding.putIcon({ bytes: Buffer.from([2, 2]), mimeType: 'image/png', width: 256, height: 256 });
+      const b = await branding.get();
+      assert.ok(b.background && b.icon, 'both survive — two kinds, one table');
+      assert.notEqual(b.icon.etag, b.background.etag);
+      assert.deepEqual((await branding.getIconBytes()).bytes, Buffer.from([2, 2]));
+
+      // Clearing one must leave the other exactly where it was.
+      await branding.clearIcon();
+      const after = await branding.get();
+      assert.equal(after.icon, null);
+      assert.equal(after.background.etag, b.background.etag,
+        'the pairs are separate controls on the same screen; one must not touch the other');
+    } finally {
+      await branding.clearBackground();
+      await branding.clearIcon();
+    }
+  });
+
+  test('replacing the icon moves its etag and keeps one row', async () => {
+    try {
+      await branding.putIcon({ bytes: Buffer.from([1]), mimeType: 'image/png', width: 128, height: 128 });
+      const first = (await branding.get()).icon.etag;
+      await branding.putIcon({ bytes: Buffer.from([3, 4]), mimeType: 'image/webp', width: 512, height: 512 });
+      const second = (await branding.get()).icon;
+      assert.notEqual(second.etag, first, 'the URL is keyed on the etag, so it must move');
+      assert.equal(second.mimeType, 'image/webp');
+      const { rows } = await pool.query(
+        `SELECT count(*)::int AS n FROM branding_assets WHERE kind = 'app_icon'`);
+      assert.equal(rows[0].n, 1, 'one icon, replaced in place');
+    } finally {
+      await branding.clearIcon();
+    }
+  });
+
+  test('the widened CHECK admits app_icon and still refuses everything else', async () => {
+    // Migration 016 drops and re-adds the constraint. The point of that is
+    // that it is STRICTLY wider: login_background keeps working, app_icon
+    // becomes possible, and nothing else does.
+    await assert.rejects(
+      () => pool.query(
+        `INSERT INTO branding_assets (kind, bytes, mime_type, etag, width, height, byte_size)
+         VALUES ('favicon', $1, 'image/png', 'x', 10, 10, 1)`, [Buffer.from([1])]),
+      (e) => e.code === '23514', 'a third kind is a schema decision, not an insert');
+    await assert.rejects(
+      () => pool.query(
+        `INSERT INTO branding_assets (kind, bytes, mime_type, etag, width, height, byte_size)
+         VALUES ('app_icon', $1, 'image/svg+xml', 'x', 10, 10, 1)`, [Buffer.from([1])]),
+      (e) => e.code === '23514', 'S32 applies to the icon exactly as to the background');
+  });
+
+  test('the trend switch defaults on and round-trips', async () => {
+    assert.equal((await branding.get()).trendEnabled, true,
+      'an installation that has never touched it shows the panel');
+    try {
+      await branding.setTrendEnabled(false);
+      assert.equal((await branding.get()).trendEnabled, false);
+      await branding.setTrendEnabled(true);
+      assert.equal((await branding.get()).trendEnabled, true);
+    } finally {
+      await branding.setTrendEnabled(true);
+    }
+  });
+
+  test('turning the panel off does not stop a snapshot being captured', async () => {
+    // Display only: the history behind the graph must be unbroken when it is
+    // turned back on, because a gap in a year-long series cannot be recovered.
+    const fp = 'e'.repeat(48) + '3333cccc4444dddd';
+    const snapshots = require('./lib/snapshots');
+    try {
+      await branding.setTrendEnabled(false);
+      await snapshots.upsertForDay(fp, {
+        rootProjectCount: 2,
+        sev: { critical: 1, high: 0, medium: 0, low: 0, unassigned: 0 },
+        pol: {
+          ops_fail: 0, ops_warn: 0, ops_info: 0,
+          lic_fail: 0, lic_warn: 0, lic_info: 0,
+          secpol_fail: 0, secpol_warn: 0, secpol_info: 0,
+        },
+      }, new Date('2026-03-01T10:00:00Z'));
+
+      const series = await snapshots.series(fp, 3, new Date('2026-03-01T12:00:00Z'));
+      const day = series.points.find(d => d.day === '2026-03-01');
+      assert.ok(day && day.captured, 'the build writes history regardless of who can see it');
+      assert.equal(day.sev.critical, 1);
+    } finally {
+      await branding.setTrendEnabled(true);
+      await pool.query('DELETE FROM risk_snapshots WHERE fingerprint = $1', [fp]);
+    }
+  });
+
   // ── mail_settings ──────────────────────────────────────────────────────
   test('the SMTP password is encrypted, masked to the client and kept on a placeholder save', async () => {
     await mailSettings.save(alice.id, {

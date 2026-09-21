@@ -2577,13 +2577,16 @@ describe('admin.html schedule limit', () => {
     assert.equal((fn.match(/apiFetch\('\/admin\/settings'/g) || []).length, 1);
   });
 
-  test('the administration allow-list is still exactly six method/path pairs', () => {
-    // CLAUDE.md §7.6 — the list is the contract. The schedule limit rides on
-    // the two settings routes that already existed rather than adding a
-    // seventh, which is the bar a new one has to clear.
+  test('the administration allow-list is still exactly nine method/path pairs', () => {
+    // CLAUDE.md §7.6 — the list is the contract, and it grows only in a diff
+    // somebody reads. Six to nine: the icon pair mirrors the background pair,
+    // and the trend switch hides a panel. Each changes how the product LOOKS
+    // or what it SHOWS, never what an account is or what it may reach — the
+    // same bar the branding three cleared. The schedule limit, by contrast,
+    // rode on the settings routes that already existed rather than adding one.
     const adminRoute = fs.readFileSync(path.join(__dirname, 'routes', 'admin.js'), 'utf8');
     const writes = [...adminRoute.matchAll(/method === '(PUT|POST|DELETE)'/g)].length;
-    assert.equal(writes, 6, `expected six write handlers, found ${writes}`);
+    assert.equal(writes, 9, `expected nine write handlers, found ${writes}`);
   });
 });
 
@@ -3311,12 +3314,14 @@ describe('the documents describe the behaviour the code has', () => {
       'the README must say the installer does not ask for it');
   });
 
-  test('the administration allow-list is stated as six everywhere it is stated', () => {
+  test('the administration allow-list is stated as nine everywhere it is stated', () => {
     const adminSrc = fs.readFileSync(path.join(__dirname, 'routes', 'admin.js'), 'utf8');
     const writes = [...adminSrc.matchAll(/method === '(PUT|POST|DELETE)'/g)].length;
-    assert.equal(writes, 6);
-    assert.match(README, /exactly six things/);
-    assert.doesNotMatch(README, /exactly three things/, 'the README still says three');
+    assert.equal(writes, 9);
+    assert.match(README, /exactly nine things/);
+    for (const stale of [/exactly three things/, /exactly six things/]) {
+      assert.doesNotMatch(README, stale, 'the README states a count the routes no longer have');
+    }
   });
 
   test('one schedule per user is not claimed anywhere', () => {
@@ -3395,7 +3400,10 @@ describe('trend — folding a stored day into what a chart plots', () => {
   test('the fold matches the page\'s own computeSummaryTotals, term for term', () => {
     // Cross-layer: the tile formula is read out of index.html here too, so
     // changing one without the other fails rather than drifting silently.
-    const src = extractFunction(INDEX_HTML, 'computeSummaryTotals');
+    // Q45 moved the fold into computeTotalsFor(), which takes a leaf set so a
+    // filter can be applied to it; computeSummaryTotals() is now the thin
+    // caller. The arithmetic this test guards lives in the former.
+    const src = extractFunction(INDEX_HTML, 'computeTotalsFor');
     for (const line of [
       /t\.critical \+= \(s\.critical\|\|0\) \+ \(o\.fail\|\|0\) \+ \(l\.fail\|\|0\) \+ \(sp\.fail\|\|0\)/,
       /t\.high\s+\+= \(s\.high\|\|0\)\s+\+ \(o\.warn\|\|0\) \+ \(l\.warn\|\|0\) \+ \(sp\.warn\|\|0\)/,
@@ -5439,10 +5447,15 @@ describe('project tree — group-row aggregation (Q35)', () => {
     + INDEX_HTML.match(/const CATS = \[[\s\S]*?\];/)[0] + '\n'
     + INDEX_HTML.match(/const AGG_LEVELS = \{[\s\S]*?\n\};/)[0] + '\n'
     + 'const nodeMap = new Map();\n'
+    // Q45: buildTree() now also records which leaves the roll-up counted, so
+    // the module state and the helper it writes come into the sandbox with it.
+    + 'let countedLeafUuids = new Set(); let allProjects = [];\n'
     + extractFunction(INDEX_HTML, 'collectionChildren') + '\n'
+    + extractFunction(INDEX_HTML, 'computeCountedLeaves') + '\n'
     + extractFunction(INDEX_HTML, 'aggregateTree') + '\n'
     + extractFunction(INDEX_HTML, 'buildTree') + '\n'
-    + 'return { buildTree, aggregateTree, collectionChildren, nodeMap };'
+    + 'return { buildTree, aggregateTree, collectionChildren, nodeMap,'
+    + '         computeCountedLeaves, counted: () => countedLeafUuids };'
   )();
 
   /** A leaf project with the §8.6 shape; only the fields under test are set. */
@@ -6344,5 +6357,262 @@ describe('latest-only scheduling — the editor and the list (PR 2)', () => {
       + extractFunction(INDEX_HTML, 'renderSchedPreview');
     assert.ok(!/apiFetch|fetch\(/.test(fn),
       'a control that costs a round trip per keystroke is one people stop using');
+  });
+});
+
+// ── The pages parse ─────────────────────────────────────────────────────────
+// Every other test in this file extracts ONE function by name and reasons
+// about it, so a page can be syntactically broken and every one of them still
+// passes. That is not hypothetical: a helper appended one line past its IIFE's
+// closing brace — between the `}` and the `)();` — left `admin.html` unable to
+// parse at all, with the whole offline tier green. The browser tier caught it,
+// twenty minutes and a database later. Compiling each block is two lines and
+// catches the entire class offline.
+describe('every page compiles', () => {
+  const vm = require('node:vm');
+  // Inline blocks only: a `src=` script is a file, not this page's source.
+  const BLOCKS = /<script(?![^>]*\bsrc=)[^>]*>([\s\S]*?)<\/script>/g;
+
+  for (const [name, src] of [['index.html', INDEX_HTML], ['login.html', LOGIN_HTML],
+                             ['admin.html', ADMIN_HTML]]) {
+    test(`${name} — every inline script is valid JavaScript`, () => {
+      const blocks = [...src.matchAll(BLOCKS)].map(m => m[1]);
+      assert.ok(blocks.length > 0, `${name} has no inline script — the regex is wrong`);
+      blocks.forEach((code, i) => {
+        // Compiles without running: no DOM, no network, no side effects.
+        assert.doesNotThrow(() => new vm.Script(code, { filename: `${name}#${i}` }),
+          `${name}: inline script ${i} does not parse`);
+      });
+    });
+  }
+
+  test('index.html keeps its two blocks — the head gate and the page', () => {
+    // §8.4: the auth gate runs in <head>, before the body is parsed. Folding it
+    // into the main script would put the flash straight back, and a page that
+    // merely parses would not say so.
+    assert.equal([...INDEX_HTML.matchAll(BLOCKS)].length, 2);
+  });
+});
+
+// ── Tiles, icon and the trend switch (PR A+B+C) ─────────────────────────────
+
+describe('Q45: the tiles and the filter see the same leaves', () => {
+  const projectTree = require('./lib/project-tree');
+  const page = new Function(
+    INDEX_HTML.match(/const CAT_LEVELS = \{[\s\S]*?\n\};/)[0] + '\n'
+    + INDEX_HTML.match(/const CATS = \[[\s\S]*?\];/)[0] + '\n'
+    + INDEX_HTML.match(/const AGG_LEVELS = \{[\s\S]*?\n\};/)[0] + '\n'
+    + 'const nodeMap = new Map();\n'
+    + 'let countedLeafUuids = new Set(); let allProjects = []; let summaryTotals = null;\n'
+    + 'let treeRoots = [];\n'
+    + extractFunction(INDEX_HTML, 'collectionChildren') + '\n'
+    + extractFunction(INDEX_HTML, 'computeCountedLeaves') + '\n'
+    + extractFunction(INDEX_HTML, 'countedLeafProjects') + '\n'
+    + extractFunction(INDEX_HTML, 'aggregateTree') + '\n'
+    + extractFunction(INDEX_HTML, 'buildTree') + '\n'
+    + extractFunction(INDEX_HTML, 'riskScore') + '\n'
+    + extractFunction(INDEX_HTML, 'computeTotalsFor') + '\n'
+    + 'return { buildTree, computeTotalsFor, counted: () => countedLeafUuids,'
+    + '         setProjects: (p) => { allProjects = p; } };'
+  )();
+
+  const leaf = (uuid, parentUuid, n = {}) => ({
+    uuid, name: uuid, parentUuid: parentUuid || null, _dataWarn: null,
+    isLatest: n.latest === true, tags: n.tags || [],
+    collectionLogic: n.logic || '', collectionTag: n.tag || '',
+    security:   { critical: n.c || 0, high: 0, medium: 0, low: 0, unassigned: 0 },
+    operations: { fail: 0, warn: 0, info: 0, unassigned: 0 },
+    license:    { fail: 0, warn: 0, info: 0, unassigned: 0 },
+    secpolicy:  { fail: 0, warn: 0, info: 0, unassigned: 0 },
+  });
+
+  //  g (LATEST) ── stale (c:5, not latest)   ← counted by nothing
+  //             └─ fresh (c:3, latest)       ← the only leaf that counts
+  const PORTFOLIO = [
+    leaf('g', null, { logic: 'AGGREGATE_LATEST_VERSION_CHILDREN' }),
+    leaf('stale', 'g', { c: 5 }),
+    leaf('fresh', 'g', { c: 3, latest: true }),
+  ];
+
+  test('the counted set is what the roll-up reached, not every leaf', () => {
+    page.setProjects(PORTFOLIO);
+    page.buildTree(PORTFOLIO);
+    assert.deepEqual([...page.counted()], ['fresh'],
+      'the stale child contributes nothing to the group row, so it is not filterable');
+  });
+
+  test('folding the counted leaves equals the roll-up the group row shows', () => {
+    // The invariant this whole change rests on: summing counted leaves is the
+    // same arithmetic as summing treeRoots, because the roll-up IS that sum.
+    // If it ever stops being true, a card contradicts the row beneath it.
+    page.setProjects(PORTFOLIO);
+    const roots = page.buildTree(PORTFOLIO);
+    const fromLeaves = page.computeTotalsFor(
+      PORTFOLIO.filter(p => page.counted().has(p.uuid)));
+    const fromRoots = page.computeTotalsFor(roots);
+    assert.equal(fromLeaves.critical, fromRoots.critical);
+    assert.equal(fromLeaves.critical, 3, 'the latest child alone, not 3 + 5');
+  });
+
+  test('the project counts fold the SAME set as the figures above them', () => {
+    // Before Q45 these walked every leaf while the figure above counted only
+    // what the roll-up reached, so one tile disagreed with itself.
+    page.setProjects(PORTFOLIO);
+    page.buildTree(PORTFOLIO);
+    const t = page.computeTotalsFor(PORTFOLIO.filter(p => page.counted().has(p.uuid)));
+    assert.equal(t.leafCount, 1, 'one counted leaf, not two');
+    assert.equal(t.criticalProjects, 1);
+  });
+
+  test('a portfolio with no collection logic still counts every leaf', () => {
+    const plain = [leaf('r', null), leaf('a', 'r', { c: 1 }), leaf('b', 'r', { c: 2 })];
+    page.setProjects(plain);
+    page.buildTree(plain);
+    assert.deepEqual([...page.counted()].sort(), ['a', 'b'],
+      'v4 and organisational parents must be unaffected by this change');
+  });
+
+  test('applyFilters draws from the counted set, and keeps groups in the tree view', () => {
+    const fn = extractFunction(INDEX_HTML, 'applyFilters');
+    assert.match(fn, /countedLeafUuids\.has\(p\.uuid\)/);
+    assert.match(fn, /parentUuids\.has\(p\.uuid\) \|\| countedLeafUuids\.has\(p\.uuid\)/,
+      'a group is structure — dropping it would orphan the descendants that DID count');
+  });
+
+  test('buildTree recomputes the counted set, so a refetch cannot leave it stale', () => {
+    assert.match(extractFunction(INDEX_HTML, 'buildTree'), /computeCountedLeaves\(roots\)/);
+  });
+});
+
+describe('Q46: the tiles reflect the active filter', () => {
+  test('filteredTotals is null while nothing is filtered', () => {
+    const fn = extractFunction(INDEX_HTML, 'applyFilters');
+    assert.match(fn, /filteredTotals = hasFilter/,
+      'null is what lets renderSummary tell "no filter" from "matched nothing"');
+    assert.match(fn, /computeTotalsFor\(filtered\.filter\(p => countedLeafUuids\.has\(p\.uuid\)\)\)/,
+      'the tiles must fold the same leaves the table is showing');
+  });
+
+  test('renderSummary reads the filtered totals but the portfolio denominator', () => {
+    const fn = extractFunction(INDEX_HTML, 'renderSummary');
+    assert.match(fn, /const shown = filteredTotals \|\| summaryTotals;/);
+    assert.match(fn, /filteredTotals && total !== n/,
+      'the denominator is drawn only when it differs and only when filtering');
+    assert.match(fn, /summaryTotals\.criticalProjects/,
+      'the "of N" half must come from the portfolio, not the filtered set');
+  });
+
+  test('the denominator is quieter than the figure it qualifies', () => {
+    const rule = INDEX_HTML.match(/\.summary-card \.card-of \{[^}]*\}/)[0];
+    assert.match(rule, /color: var\(--text-muted\)/);
+    const value = INDEX_HTML.match(/\.summary-card \.value \{[^}]*\}/)[0];
+    const ofSize = Number(/font-size: (\d+)px/.exec(rule)[1]);
+    const valSize = Number(/font-size: (\d+)px/.exec(value)[1]);
+    assert.ok(ofSize < valSize,
+      `context must not read as the reported number (${ofSize}px vs ${valSize}px)`);
+  });
+});
+
+describe('Q47: the application icon', () => {
+  const image = require('./lib/image');
+
+  test('the icon bounds are far narrower than the background\'s', () => {
+    assert.ok(image.ICON_LIMITS.maxBytes < image.MAX_BYTES);
+    assert.ok(image.ICON_LIMITS.minWidth < image.MIN_WIDTH,
+      'a 1280px minimum would refuse every icon ever made');
+    assert.equal(image.ICON_LIMITS.maxBytes, 256 * 1024);
+  });
+
+  test('the default bounds are unchanged, so the background path is untouched', () => {
+    assert.equal(image.MAX_BYTES, 5 * 1024 * 1024);
+    assert.equal(image.MIN_WIDTH, 1280);
+  });
+
+  test('SVG is refused for the icon exactly as for the background (S32)', () => {
+    // It is XML, it can carry script, and both are served from our own origin
+    // to visitors who have not signed in.
+    const svg = Buffer.from('<svg xmlns="http://www.w3.org/2000/svg"></svg>');
+    assert.throws(() => image.inspect(svg, image.ICON_LIMITS), /not a PNG, JPEG or WebP/);
+    for (const mig of ['007_branding.sql', '016_app_icon_and_trend_toggle.sql']) {
+      const sql = fs.readFileSync(path.join(__dirname, 'db', 'migrations', mig), 'utf8');
+      assert.ok(!/image\/svg/.test(sql), `${mig} must not admit SVG`);
+    }
+  });
+
+  test('an icon far from square is refused with the ratio named, never cropped', () => {
+    // Cropping would decide for the operator which half of their mark to lose.
+    const png = (w, h) => {
+      const b = Buffer.alloc(24);
+      Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]).copy(b, 0);
+      b.write('IHDR', 12, 'ascii');
+      b.writeUInt32BE(w, 16); b.writeUInt32BE(h, 20);
+      return b;
+    };
+    assert.throws(() => image.inspect(png(512, 128), image.ICON_LIMITS),
+      /512×128.*too far from square.*1\.25:1/s,
+      'the message must name the ratio it measured and the bound it missed');
+    assert.equal(image.inspect(png(256, 256), image.ICON_LIMITS).width, 256,
+      'a square icon inside every bound passes');
+    assert.equal(image.inspect(png(256, 224), image.ICON_LIMITS).height, 224,
+      'slightly off square is inside 1.25:1 and must not be refused');
+    // The background path has no aspect bound at all, and must not grow one.
+    assert.equal(image.inspect(png(2560, 1280)).width, 2560,
+      'a 2:1 page background is the ordinary case, not a violation');
+  });
+
+  test('all three pages fall back to the initials when no icon is configured', () => {
+    for (const [name, src] of [['index', INDEX_HTML], ['login', LOGIN_HTML], ['admin', ADMIN_HTML]]) {
+      const fn = extractFunction(src, 'applyBrandMark');
+      assert.match(fn, /brandInitials\(title\)/, `${name}: the initials are the fallback`);
+      assert.match(fn, /icon && icon\.version/, `${name}: the icon wins when present`);
+      assert.match(fn, /encodeURIComponent\(icon\.version\)/,
+        `${name}: the etag makes the URL immutable, so it is cached until it changes`);
+    }
+  });
+
+  test('the migration widens the kind CHECK without touching a row', () => {
+    const sql = fs.readFileSync(
+      path.join(__dirname, 'db', 'migrations', '016_app_icon_and_trend_toggle.sql'), 'utf8');
+    assert.match(sql, /CHECK \(kind IN \('login_background', 'app_icon'\)\)/);
+    assert.match(sql, /login_background/, 'the existing kind must still be permitted');
+    assert.ok(!/DELETE FROM|DROP TABLE|DROP COLUMN/.test(sql), 'nothing is destroyed');
+  });
+});
+
+describe('Q48: the administrator\'s risk-trend switch', () => {
+  test('a hidden panel makes no request, not just no render', () => {
+    const fn = extractFunction(INDEX_HTML, 'loadTrend');
+    const gate = fn.indexOf('if (!_trendEnabled)');
+    const fetchAt = fn.indexOf('apiFetch(');
+    assert.ok(gate !== -1 && gate < fetchAt,
+      'gating only the render would still fetch a series nobody can see');
+  });
+
+  test('an older server, or a missing field, reads as ON', () => {
+    // The panel existed before the switch did. A missing field must never turn
+    // a working feature off for an installation that never asked.
+    assert.match(extractFunction(INDEX_HTML, 'applyBranding'),
+      /_trendEnabled = !\(b && b\.trendEnabled === false\)/);
+    assert.match(extractFunction(ADMIN_HTML, 'renderBranding'),
+      /b\.trendEnabled !== false/);
+  });
+
+  test('the switch is display only — snapshots keep being captured', () => {
+    const sql = fs.readFileSync(
+      path.join(__dirname, 'db', 'migrations', '016_app_icon_and_trend_toggle.sql'), 'utf8');
+    assert.match(sql, /Display only/i);
+    // Nothing in the capture path may consult it, or a hidden period becomes a
+    // permanent hole in the history.
+    for (const mod of ['violation-cache.js', 'snapshots.js']) {
+      const src = fs.readFileSync(path.join(__dirname, 'lib', mod), 'utf8');
+      assert.ok(!/trendEnabled|trend_enabled/.test(src),
+        `${mod} must not gate capture on a display setting`);
+    }
+  });
+
+  test('a failed save puts the switch back where the server still has it', () => {
+    const fn = extractFunction(ADMIN_HTML, 'saveTrendEnabled');
+    assert.match(fn, /\$\('trendEnabled'\)\.checked = !enabled;/,
+      'a control must never show a state that was not stored');
   });
 });

@@ -64,7 +64,7 @@ dep-service-201-2` — and says when there is more than one way in.
 |---|---|
 | ![Risk trend](docs/images/risk-trend.png) | **Risk trend.** Critical/high/medium/low over the last week, month or year. A day nobody refreshed carries the previous reading, drawn dashed and shaded so it cannot be mistaken for a measurement. |
 | ![Settings](docs/images/settings.png) | **Settings.** Your own DependencyTrack connection, mail, and schedules. The API key is write-only — it is never returned to a browser. |
-| ![Administration](docs/images/administration.png) | **Administration.** Accounts, quotas, storage headroom and branding. It can do exactly six things and read nothing sensitive. |
+| ![Administration](docs/images/administration.png) | **Administration.** Accounts, quotas, storage headroom and branding. It can do exactly nine things and read nothing sensitive. |
 | ![Sign-in](docs/images/login.png) | **Sign-in.** Registration and sign-in, with the administrator-configurable title and background. |
 
 </details>
@@ -209,7 +209,7 @@ screen of their own at `/admin.html`: the account list with each account's
 limits, a detail pane, the service-wide defaults, storage headroom for the
 volume the database sits on, and the sign-in branding.
 
-Beyond reading it can do exactly six things — set the default report and
+Beyond reading it can do exactly nine things — set the default report and
 schedule limits, set one account's limits, reset one account's password, change
 the application title, and upload or remove the sign-in background. Everything
 else about an account is readable only: **no administrator route can read

@@ -177,6 +177,18 @@ violation state — not a severity.
 is a larger number than the Critical column alone. Each card is clickable and
 filters the table to the projects contributing to it.
 
+**The cards count the same projects the group rows do.** A project that no
+parent's collection logic counts — `service-401` in the example above — is not
+in the cards' figures, is not in their "N projects" line, and does not appear in
+the table when you filter or switch to Flat View. If you need to see it, change
+the collection logic in DependencyTrack, or look at the parent it sits under.
+
+**The cards follow your filter.** Search for a team's projects, or click a card,
+and the four figures become that selection's rather than the whole portfolio's.
+The portfolio number stays beside them in grey — *12 **of 47*** — so you can
+still see how large a slice you are looking at. Clear the filter and the grey
+half disappears, because there is nothing left to compare against.
+
 **Other controls:**
 
 - **Search** — two characters or more, matches project names.
@@ -522,6 +534,9 @@ things** — not a general-purpose account editor:
 | 4 | Reset **one account's** password | Users → account → Reset password |
 | 5 | Set the application title | Customization |
 | 6 | Upload or remove the sign-in background | Customization |
+| 7 | Upload the application icon | Customization |
+| 8 | Remove the icon, returning to the initials mark | Customization |
+| 9 | Show or hide the risk-trend panel for everyone | Customization |
 
 Everything else is readable only. Administration **cannot** read anyone's
 DependencyTrack API key, SMTP password, reports, findings or schedules' contents.
@@ -646,6 +661,47 @@ the footer — and the small logo mark is derived from it, up to three initials,
 a renamed installation does not keep wearing the old name's badge. The
 background is public by construction: it is on the sign-in page, which anyone who
 can reach the service can already see.
+
+### 7–8. The application icon
+
+The mark beside the application name is the title's initials — up to three
+letters from its first three words. Upload an icon in **Customization** and it
+replaces them everywhere the mark appears: the dashboard header, the sign-in
+page and the administration screen.
+
+| Requirement | Value |
+|---|---|
+| Format | PNG, JPEG or WebP |
+| Size | 256 KB at most |
+| Dimensions | 64×64 to 512×512 |
+| Shape | Near-square — at most 1.25:1 |
+
+**SVG is deliberately not accepted.** It is XML and can carry script, and this
+image is served to anyone who can reach the sign-in page, before they have
+signed in. The same rule applies to the sign-in background.
+
+A file outside those bounds is **refused with the reason**, naming which limit
+it missed, rather than being resized or cropped. Cropping would decide for you
+which part of your mark to lose.
+
+**How this reaches a user:** the new mark appears on their next page load, on
+every screen. Nobody needs to sign out. **Remove** returns every screen to the
+initials — the icon is a replacement for them, not a requirement, so an
+installation that never uploads one keeps exactly the mark it has today.
+
+### 9. Showing or hiding the risk trend
+
+The **Risk trend** panel sits above the project table and charts how the
+portfolio's risk has moved. Turn it off in **Customization** and it disappears
+for every user.
+
+**How this reaches a user:** the panel is simply not on their dashboard. The
+rest of the screen is unchanged, and no setting of theirs is lost.
+
+**History keeps being recorded while it is hidden.** Every violation refresh
+still stores that day's snapshot, so turning the panel back on shows an
+unbroken line rather than a gap for the period it was off. This matters because
+a gap cannot be filled in later — the measurement it needed is gone.
 
 ### Storage
 

@@ -232,6 +232,10 @@
     }
     .summary-card .value { font-size: 28px; font-weight: 700; line-height: 1; }
     .summary-card .sub { font-size: 11px; color: var(--text-muted); margin-top: 4px; }
+    /* Q46: the portfolio denominator beside a narrowed tile. Deliberately
+       quieter and smaller than the figure it qualifies — it is context, and a
+       reader must never mistake it for the number the tile is reporting. */
+    .summary-card .card-of { font-size: 15px; font-weight: 600; color: var(--text-muted); }
     .summary-card .hover-detail {
       display: none;
       position: absolute; top: calc(100% + 6px); left: 0; right: 0;
@@ -1146,6 +1150,14 @@
     .cfg-weekday input:checked + span { background: var(--accent); color: #fff; border-color: var(--accent); }
     .cfg-weekday:hover span { border-color: var(--accent); }
     @media (max-width: 768px) { .cfg-panel { width: 100%; } }
+    /* Q47: an uploaded icon replaces the initials in the same box, so the
+       header geometry never moves between the two. `contain`, not `cover`:
+       a mark is cropped by cover, and an operator's logo losing its edges is
+       worse than a little letterboxing inside an already near-square box. */
+    .has-icon {
+      background-size: contain; background-repeat: no-repeat; background-position: center;
+      color: transparent; font-size: 0;
+    }
   </style>
 </head>
 <body>
@@ -1870,6 +1882,13 @@ let expandedUuids    = new Set();
 
 let summaryTotals    = null; // computed once after data load; never recalculated
 let parentUuids      = new Set(); // cached in afterLoad(); never recomputed during filtering
+// Q45: the leaves the roll-up counted, per each level's own collectionLogic.
+// Rebuilt by computeCountedLeaves() at the end of every buildTree().
+let countedLeafUuids = new Set();
+// Q46: the tiles for the CURRENT filter, or null while nothing is filtered.
+let filteredTotals   = null;
+// Q48: the administrator's risk-trend switch, read from /branding at boot.
+let _trendEnabled    = true;
 let currentMatchSet  = null;      // last filter match set; reused by lighter expand/collapse render
 let filterLatestOnly = false; // when true: show only isLatest=true projects + ancestors
 let liveMode         = false;
@@ -2046,6 +2065,29 @@ function brandInitials(title) {
   const letters = words.map(w => w[0].toUpperCase()).join('');
   return letters.slice(0, 3) || brandInitials(DEFAULT_APP_TITLE);
 }
+/**
+ * Q47: draw the logo mark — the uploaded icon, or the title's initials.
+ *
+ * The icon wins when one is configured, and the initials are the fallback
+ * rather than a placeholder to be replaced: an installation that uploads
+ * nothing keeps exactly the mark it has today. The `?v=` is the image's own
+ * sha256, so the URL is immutable and the browser re-fetches precisely when
+ * the administrator changes the file — the same rule the sign-in background
+ * already follows.
+ */
+function applyBrandMark(el, title, icon) {
+  if (!el) return;
+  if (icon && icon.version) {
+    el.textContent = '';
+    el.classList.add('has-icon');
+    el.style.backgroundImage = `url('/branding/icon?v=${encodeURIComponent(icon.version)}')`;
+  } else {
+    el.classList.remove('has-icon');
+    el.style.backgroundImage = '';
+    el.textContent = brandInitials(title);
+  }
+}
+
 
 /**
  * Apply the administrator's title to the tab, the topbar and the footer.
@@ -2092,12 +2134,15 @@ async function readBranding() {
 async function applyBranding() {
   let title = DEFAULT_APP_TITLE;
   const b = await readBranding();
+  // Absent on an older server, which must read as ON: the panel existed before
+  // the switch did, and a missing field must never turn a working feature off.
+  _trendEnabled = !(b && b.trendEnabled === false);
   if (b && typeof b.title === 'string' && b.title.trim()) title = b.title.trim();
   document.title = title;
   const mark = document.getElementById('brandMark');
   const text = document.getElementById('brandText');
   const foot = document.querySelector('.footer-brand');
-  if (mark) mark.textContent = brandInitials(title);
+  applyBrandMark(mark, title, b && b.icon);
   if (text) text.textContent = title;
   if (foot) foot.textContent = title;
 }
@@ -3727,7 +3772,44 @@ function buildTree(projects) {
   }
   sortSiblings(roots);
   aggregateTree(roots);
+  computeCountedLeaves(roots);
   return roots;
+}
+
+// ── Q45: which leaves the roll-up actually counted ──────────────────────────
+// Q39 made a group row's total obey its own collectionLogic, so a stale
+// non-latest child under a LATEST parent contributes nothing to the number on
+// screen. Two things went on reading every project regardless, and both were
+// visibly wrong:
+//
+//   * Clicking a tile filtered `allProjects`, so a tile reading 22 opened a
+//     table containing projects that never contributed to 22 — the view was
+//     huge and full of rows the number had excluded.
+//   * The tile's own sub-line ("7 projects") counted every leaf while the
+//     figure above it counted only the ones the roll-up reached, so the two
+//     halves of ONE tile disagreed with each other.
+//
+// `countedLeafUuids` is the single answer both now use: descend from the roots
+// through collectionChildren() — the identical filter aggregateTree() applies —
+// and collect the leaves. Summing these is the same arithmetic as summing
+// treeRoots, because the roll-up IS that sum; a test pins the two against each
+// other, since that equality is what keeps a card equal to the rows beneath it.
+function computeCountedLeaves(roots) {
+  const out = new Set();
+  const seen = new Set();
+  const walk = (node) => {
+    if (!node || seen.has(node)) return;
+    seen.add(node);
+    if (!node.children || node.children.length === 0) { out.add(node.uuid); return; }
+    for (const kid of collectionChildren(node)) walk(kid);
+  };
+  for (const root of roots || []) walk(root);
+  countedLeafUuids = out;
+}
+
+/** The live project records for the counted leaves, in `allProjects` order. */
+function countedLeafProjects() {
+  return allProjects.filter(p => countedLeafUuids.has(p.uuid));
 }
 
 // ── Q35: roll descendant counts up into every group row ────────────────────
@@ -3953,16 +4035,25 @@ function computeLevels(projects) {
 // so parent=7, child-a=5, child-b=2 → shows 7, not 14.
 // Project counts: single-pass over leaves (uses cached module-level parentUuids).
 // Called once per data load; stored in summaryTotals and never recalculated.
-function computeSummaryTotals() {
-  // Q35: the tiles sum the tree's OWN root nodes, which carry the rolled-up
-  // totals aggregateTree() computed — not the raw root entries in allProjects.
-  // The root SET is identical either way (buildTree treats a project whose
-  // parentUuid is absent or unknown as a root, exactly as the filter here used
-  // to); what differs is that these numbers are now guaranteed to equal the
-  // sum of the rows beneath them. Reading the raw entries instead would let a
-  // card contradict the group row directly under it — the same failure §6.3
-  // guards against between the trend graph and these tiles.
-  const roots = treeRoots;
+/**
+ * Fold a set of LEAF projects into the four tile numbers.
+ *
+ * Q45: this used to sum `treeRoots`, whose rolled-up figures aggregateTree()
+ * had already computed. Summing the counted leaves instead gives the identical
+ * answer — the roll-up IS that sum — while being something a FILTER can also
+ * be applied to, which summing roots is not. A test pins the two against each
+ * other, because that equality is what keeps a card equal to the group rows
+ * beneath it (§6.3, Q35).
+ *
+ * The project counts in the sub-line fold the same set, which they did not
+ * before: they walked every leaf in `allProjects` while the figure above them
+ * counted only what the roll-up reached, so one tile disagreed with itself on
+ * any portfolio with a LATEST or WITH_TAG parent.
+ *
+ * @param {object[]} [leaves] — defaults to the counted leaves (the portfolio)
+ */
+function computeTotalsFor(leaves) {
+  const roots = leaves || countedLeafProjects();
 
   const t = { critical:0, high:0, medium:0, low:0 };
   let _sCrit=0,_oFail=0,_lFail=0,_spFail=0,
@@ -3990,11 +4081,11 @@ function computeSummaryTotals() {
     low:      { sec: _sLow,  unassigned: _sUn },
   };
 
-  // Single-pass over all projects — skip non-leaves via parentUuids cache.
-  // Replaces 6 separate .filter() passes on the leaves array.
+  // Q45: the SAME set the figures above were folded from. This walked
+  // `allProjects` and skipped non-leaves via parentUuids, which counted every
+  // leaf in the portfolio — including ones no parent's collectionLogic counts.
   let leafCount=0, risky=0, criticalProjects=0, highProjects=0, mediumProjects=0, lowProjects=0;
-  allProjects.forEach(p => {
-    if (parentUuids.has(p.uuid)) return; // not a leaf
+  roots.forEach(p => {
     leafCount++;
     if (riskScore(p) > 0) risky++;
     if ((p.security.critical||0)+(p.operations.fail||0)+(p.license.fail||0)+(p.secpolicy?.fail||0) > 0) criticalProjects++;
@@ -4008,8 +4099,12 @@ function computeSummaryTotals() {
   t.highProjects     = highProjects;
   t.mediumProjects   = mediumProjects;
   t.lowProjects      = lowProjects;
+  return t;
+}
 
-  summaryTotals = t;
+/** Recompute the portfolio tiles. The filtered pair is Q46, in applyFilters(). */
+function computeSummaryTotals() {
+  summaryTotals = computeTotalsFor();
 }
 
 // ── After data load: build tree + populate caches ─────────────────────────
@@ -5791,6 +5886,14 @@ function saveTrendView() {
  * did not ask for.
  */
 async function loadTrend() {
+  // Q48: hidden by the administrator means hidden AND silent. Gating only the
+  // render would still fetch a series nobody can see, once per period change,
+  // for every user on the installation.
+  if (!_trendEnabled) {
+    const panel = document.getElementById('trendPanel');
+    if (panel) panel.hidden = true;
+    return;
+  }
   const seq = ++_trendReqSeq;
   try {
     const r = await apiFetch(
@@ -6218,11 +6321,20 @@ function onTrendResize() {
 // Tile clicks and filter changes do not alter these numbers.
 // Only the active-highlight on the clicked tile updates dynamically.
 function renderSummary() {
+  // Q46: the tiles read whichever set the table is showing. `filteredTotals` is
+  // null while nothing is filtered, so an unfiltered screen renders exactly as
+  // it always did and the denominators below are simply not drawn.
+  const shown = filteredTotals || summaryTotals;
   const { critical, high, medium, low, risky, leafCount,
-          criticalProjects, highProjects, mediumProjects, lowProjects, breakdown } = summaryTotals;
+          criticalProjects, highProjects, mediumProjects, lowProjects, breakdown } = shown;
   const allCount   = leafCount;   // leaf projects only
   const activeRisk = document.getElementById('riskFilter').value;
   const bd = breakdown;
+
+  // The portfolio figure a narrowed tile is a fraction OF. Replacing one
+  // unexplained number with another is what makes a filtered dashboard hard to
+  // read; "12 of 47" keeps the frame of reference on screen.
+  const ofTotal = (n, total) => (filteredTotals && total !== n ? ` of ${total}` : '');
 
   function card(label, valueHtml, sub, filterVal, hoverDetail) {
     const active = activeRisk === filterVal ? ' active' : '';
@@ -6235,14 +6347,15 @@ function renderSummary() {
 
   document.getElementById('summaryGrid').innerHTML =
     card('Projects',        `<span style="color:var(--accent)">${allCount}</span>`,   `${risky} with risks`, 'all',
-         `Total leaf projects: ${allCount}<br>With at least one issue: ${risky}`) +
-    card('Critical Issues', `<span class="c-critical">${critical}</span>`, `${criticalProjects} projects · click to filter`, 'critical',
+         `Total leaf projects: ${allCount}${ofTotal(allCount, summaryTotals.leafCount)}`
+         + `<br>With at least one issue: ${risky}`) +
+    card('Critical Issues', `<span class="c-critical">${critical}</span>` + `<span class="card-of">${ofTotal(critical, summaryTotals.critical)}</span>`, `${criticalProjects}${ofTotal(criticalProjects, summaryTotals.criticalProjects)} projects · click to filter`, 'critical',
          `Security Critical: ${bd.critical.sec}<br>Operational Fail: ${bd.critical.ops}<br>License Fail: ${bd.critical.lic}<br>Security Policy Fail: ${bd.critical.secpol}`) +
-    card('High Issues',     `<span class="c-high">${high}</span>`,         `${highProjects} projects · click to filter`,     'high',
+    card('High Issues',     `<span class="c-high">${high}</span>`,         `${highProjects}${ofTotal(highProjects, summaryTotals.highProjects)} projects · click to filter`, 'high',
          `Security High: ${bd.high.sec}<br>Operational Warn: ${bd.high.ops}<br>License Warn: ${bd.high.lic}<br>Security Policy Warn: ${bd.high.secpol}`) +
-    card('Medium Issues',   `<span class="c-medium">${medium}</span>`,     `${mediumProjects} projects · click to filter`,   'medium',
+    card('Medium Issues',   `<span class="c-medium">${medium}</span>`,     `${mediumProjects}${ofTotal(mediumProjects, summaryTotals.mediumProjects)} projects · click to filter`, 'medium',
          `Security Medium: ${bd.medium.sec}<br>Operational Info: ${bd.medium.ops}<br>License Info: ${bd.medium.lic}<br>Security Policy Info: ${bd.medium.secpol}`) +
-    card('Low Issues',      `<span class="c-low">${low}</span>`,           `${lowProjects} projects · click to filter`,      'low',
+    card('Low Issues',      `<span class="c-low">${low}</span>`,           `${lowProjects}${ofTotal(lowProjects, summaryTotals.lowProjects)} projects · click to filter`, 'low',
          `Security Low: ${bd.low.sec}<br>Security Unassigned: ${bd.low.unassigned}`) +
     card('Clean',           `<span class="c-ok">${allCount - risky}</span>`, `no known risks · click to filter`, 'ok',
          `Projects with zero issues across all categories`);
@@ -6281,8 +6394,14 @@ function applyFilters() {
   const cat    = document.getElementById('categoryFilter').value;
   const tagVal = document.getElementById('tagFilter').value;
 
-  // Use the module-level parentUuids cache (set once in afterLoad) — no per-call rebuild.
-  const sourceProjects = flatView ? allProjects.filter(p => !parentUuids.has(p.uuid)) : allProjects;
+  // Q45: only the leaves the roll-up counted are filterable. A tile reading 22
+  // used to open a table built from every project, so it showed rows that
+  // contributed nothing to 22 — a stale non-latest child under a LATEST parent,
+  // say. Group rows stay in the tree view regardless: they are structure, not
+  // data, and dropping them would orphan the descendants that DID count.
+  const sourceProjects = flatView
+    ? allProjects.filter(p => countedLeafUuids.has(p.uuid))
+    : allProjects.filter(p => parentUuids.has(p.uuid) || countedLeafUuids.has(p.uuid));
 
   // flat filtered array: each project's own (API-returned) data is used directly
   // P4: use pre-computed _nameLower; skip text filter if query is too short
@@ -6366,6 +6485,15 @@ function applyFilters() {
     updateGenReportBtn();
   }
 
+  // Q46: the tiles read the current filter, with the portfolio total kept
+  // beside them. Folding the SAME leaf set the table is showing is what makes
+  // the pair honest — a tile that narrows while the denominator stays put says
+  // "12 critical of 47" rather than replacing one unexplained number with
+  // another. Null while nothing is filtered, so renderSummary() can tell
+  // "no filter" from "a filter that matched nothing".
+  filteredTotals = hasFilter
+    ? computeTotalsFor(filtered.filter(p => countedLeafUuids.has(p.uuid)))
+    : null;
   renderSummary();
 
   // Cache match set for lighter expand/collapse render paths (toggleNode, toggleExpandCollapse).
@@ -7814,6 +7942,12 @@ window.__cacheWatchTick     = async () => {
 // Read-only: neither can change what is rendered.
 window.__trendSeries        = () => _trendSeries;
 window.__trendValues        = trendValues;
+// Exposed for the same reason again: which leaves the roll-up counted (Q45)
+// decides both halves of a tile and what the filter may list, and none of that
+// is legible from the rendered DOM — a project that is simply absent looks
+// identical to one that was never there. Read-only.
+window.__countedLeafUuids   = () => countedLeafUuids;
+window.__allProjects        = () => allProjects;
 // Exposed for the same reason, one layer over: when a dependency-path walk
 // produces no chain, the four backend states the dialog collapses into one
 // sentence ('none', 'stalled', 'failed', or 'ready' with nothing resolved)
