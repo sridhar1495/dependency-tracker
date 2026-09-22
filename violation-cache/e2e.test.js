@@ -1582,6 +1582,34 @@ describe('e2e — the dashboard in a real browser', { skip: BROWSER_SKIP }, () =
       `the collection root must show only its latest child's 3, not 8 — got ${byName['Collection 4']}`);
   }, { timeout: 60_000 });
 
+  test('Q53: a search filter no longer excludes an uncounted leaf', async () => {
+    // service-401 is the STALE child of the "latest only" Collection 4 root —
+    // Q39 correctly keeps it out of Collection 4's OWN rollup (3, not 8), but
+    // before this fix a filter also hid the row entirely, even when it
+    // matched. Searching its own name must now show it; the parent's own
+    // total must stay exactly as the unfiltered test above proved.
+    await page.locator('#searchInput').fill('service-401');
+    await page.waitForTimeout(400);
+    const byName = await page.evaluate(() => {
+      const out = {};
+      for (const tr of document.querySelectorAll('#tableBody tr')) {
+        const name = tr.querySelector('.proj-name-text');
+        const tds  = tr.querySelectorAll('td');
+        if (name && tds.length > 4) out[name.textContent.trim()] = tds[4].textContent.trim();
+      }
+      return out;
+    });
+    assert.ok('service-401' in byName,
+      `the stale child must render while filtered — it matched the search; got ${JSON.stringify(Object.keys(byName))}`);
+    assert.equal(byName['service-401'], '5', 'its own count is unaffected by the filter');
+    assert.equal(byName['Collection 4'], '3',
+      'the parent\'s own rollup must stay exactly as Q39 computes it, filter or not');
+    assert.ok(!('service-402' in byName), 'the sibling that does not match the search must not render');
+
+    await page.locator('#searchInput').fill('');
+    await page.waitForTimeout(400);
+  }, { timeout: 60_000 });
+
   test('the vulnerability dialog opens from the eye icon and lists real findings', async () => {
     // The eye icon only appears on a leaf row with at least one finding
     // (CLAUDE.md §8.1 vulnerability dialog rules) — the dt-stub portfolio
@@ -2005,6 +2033,15 @@ describe('e2e — the dashboard in a real browser', { skip: BROWSER_SKIP }, () =
     assert.match(tip, /reading/, 'it must name the day the number came from');
     assert.equal(await page.locator('#trendTip .trend-tip-row').count(), 4,
       'the four values should still be readable');
+
+    // Q55: the first day of a gap is compared against its OWN inherited
+    // reading (Q23's row === the previous position's row here), so the delta
+    // must read "no change" — a real browser proof that the tooltip compares
+    // against the previous POSITION, not the last real measurement further back.
+    assert.equal(await page.locator('#trendTip .trend-tip-delta').count(), 4,
+      'every level gets a delta once a previous position exists');
+    assert.match(await page.locator('#trendTip .trend-tip-delta').first().textContent(), /±0/,
+      'nothing was measured on this carried day, so nothing changed');
     await page.mouse.move(5, 5);
   }, { timeout: 60_000 });
 
@@ -2281,6 +2318,37 @@ describe('e2e — the dashboard in a real browser', { skip: BROWSER_SKIP }, () =
         'and every other light-mode property must be equally untouched');
     } finally {
       assert.equal((await api.del('/admin/theme', adminToken)).status, 200);
+    }
+  }, { timeout: 90_000 });
+
+  test('Q54: the three tree row colours are themeable, and actually paint a real row', async () => {
+    // The generic cascade mechanism is already proven above for --accent/--bg;
+    // this proves the SPECIFIC claim Q54 makes — that uploading a theme
+    // actually repaints a real <tr> in the real table, not just that the
+    // custom property resolves somewhere on the page.
+    const adminToken = (await api.login(stack.admin.loginId, stack.admin.password,
+      { isAdmin: true, force: true })).json.token;
+    const groupBg = () => page.evaluate(() => {
+      const row = [...document.querySelectorAll('#tableBody tr.group-row')][0];
+      return row ? getComputedStyle(row).backgroundColor : null;
+    });
+
+    const before = await groupBg();
+    assert.ok(before, 'a group row must exist to test against');
+
+    const put = await api.put('/admin/theme',
+      { version: 1, name: 'Q54 e2e', dark: { 'tree-group-bg': 'rgb(18,52,86)' },
+        light: { 'tree-group-bg': 'rgb(18,52,86)' } }, adminToken);
+    assert.equal(put.status, 200, JSON.stringify(put.json));
+    try {
+      await page.reload({ waitUntil: 'networkidle' });
+      await page.waitForTimeout(500);
+      assert.equal(await groupBg(), 'rgb(18, 52, 86)',
+        'the uploaded colour must reach the actual row, not just the token');
+    } finally {
+      assert.equal((await api.del('/admin/theme', adminToken)).status, 200);
+      await page.reload({ waitUntil: 'networkidle' });
+      await page.waitForTimeout(500);
     }
   }, { timeout: 90_000 });
 

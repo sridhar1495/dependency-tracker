@@ -747,7 +747,7 @@ names are the same in both schemes:
 | Surfaces and text | `bg`, `surface`, `surface2`, `border`, `text`, `text-muted` |
 | Accent | `accent`, `accent-hover`, `on-accent` |
 | Severity | `critical`, `high`, `medium`, `low`, `ok`, and each one's `-bg` tint |
-| Table and code | `cat-operations`, `cat-secpolicy`, `code`, `scrollbar`, `scrollbar-hover` |
+| Table and code | `cat-operations`, `cat-secpolicy`, `code`, `scrollbar`, `scrollbar-hover`, `tree-group-bg`, `tree-counted-bg`, `tree-uncounted-bg` |
 | Sign-in page | `login-blob-1`…`4`, `login-blob-admin-1`…`4`, `logo-gradient-end` |
 
 Values are `#rgb`, `#rrggbb` or `rgba(r,g,b,a)`. Colour names like `red`,

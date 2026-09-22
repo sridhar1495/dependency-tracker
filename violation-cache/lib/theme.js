@@ -81,6 +81,12 @@ const TOKENS = Object.freeze({
   scrollbar:         '#2e3352',
   'scrollbar-hover': '#8892a4',
 
+  // Q54: the tree's three row kinds (§8.7, Q39/Q53) — a group row, a leaf
+  // the roll-up counts, and a leaf it does not.
+  'tree-group-bg':     'rgba(99,102,241,0.035)',
+  'tree-counted-bg':   'rgba(99,102,241,0.09)',
+  'tree-uncounted-bg': 'rgba(148,163,184,0.10)',
+
   // The sign-in page
   'login-blob-1':       '#6366f1',
   'login-blob-2':       '#8b5cf6',
@@ -120,6 +126,9 @@ const LIGHT_OVERRIDES = Object.freeze({
   code:              '#1d4ed8',
   scrollbar:         '#8899bb',
   'scrollbar-hover': '#5c6a85',
+  'tree-group-bg':     'rgba(79,82,217,0.05)',
+  'tree-counted-bg':   'rgba(79,82,217,0.11)',
+  'tree-uncounted-bg': 'rgba(92,106,133,0.10)',
 });
 
 const SCHEMES = Object.freeze(['dark', 'light']);

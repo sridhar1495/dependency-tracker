@@ -3452,7 +3452,7 @@ const TREND_FN_NAMES = [
   'trendValues', 'trendNiceCeil', 'trendTicks', 'trendGeometry',
   'trendLinePath', 'trendAreaPath', 'trendStack', 'trendPeak',
   'trendDayLabel', 'trendLabelIndices', 'trendLabelCapacity',
-  'trendCarry', 'trendGapRuns',
+  'trendCarry', 'trendGapRuns', 'trendDeltaLabel',
 ];
 const trend = new Function(
   // TREND_LEVELS and TREND_GEOM are const declarations the helpers close over.
@@ -3960,6 +3960,45 @@ describe('trend — carrying a reading across unrefreshed days (Q23)', () => {
     assert.match(fn, /carried forward/,
       'the legend must say what the shading means now that lines are continuous');
   });
+});
+
+describe('Q55: the trend tooltip names the change since the previous reading', () => {
+  test('a positive change is signed', () => {
+    assert.equal(trend.trendDeltaLabel(12, 9), '+3');
+  });
+
+  test('a negative change keeps its own sign, not a double one', () => {
+    assert.equal(trend.trendDeltaLabel(5, 9), '-4');
+  });
+
+  test('no change reads as ±0, not a blank or a bare 0', () => {
+    // A bare "0" beside a value reads as a second value, not "unchanged".
+    assert.equal(trend.trendDeltaLabel(7, 7), '±0');
+  });
+
+  test('either value missing means no delta, not a guess', () => {
+    assert.equal(trend.trendDeltaLabel(null, 5), null);
+    assert.equal(trend.trendDeltaLabel(5, null), null);
+    assert.equal(trend.trendDeltaLabel(undefined, undefined), null);
+  });
+
+  test('the tooltip computes it against the previous POSITION, not the previous MEASURED day', () => {
+    // A carried position still has a row (Q23) — the comparison reads
+    // left-to-right the same way the chart does, so it must use that row
+    // rather than skipping back to the last real measurement.
+    const fn = extractFunction(INDEX_HTML, 'showTrendTip');
+    assert.match(fn, /const prevRow = i > 0 \? carry\.values\[i - 1\] : null;/);
+    assert.match(fn, /trendDeltaLabel\(row\[l\.key\], prevRow \? prevRow\[l\.key\] : null\)/);
+  });
+
+  test('the delta renders inside the value cell, never a second row', () => {
+    const fn = extractFunction(INDEX_HTML, 'showTrendTip');
+    assert.match(fn, /trend-tip-delta/);
+    // Nested inside .trend-tip-val, not a sibling .trend-tip-row — a second
+    // row per level would duplicate the swatch and the label.
+    assert.match(fn, /trend-tip-val">\$\{row\[l\.key\]\}`\s*\n\s*\+ \(delta \?/);
+  });
+
 });
 
 // ── Vulnerability detail dialog ─────────────────────────────────────────────
@@ -6642,7 +6681,7 @@ describe('Q45: the tiles and the filter see the same leaves', () => {
     page.setProjects(PORTFOLIO);
     page.buildTree(PORTFOLIO);
     assert.deepEqual([...page.counted()], ['fresh'],
-      'the stale child contributes nothing to the group row, so it is not filterable');
+      'the stale child contributes nothing to the group row\'s own total (Q53: it is still filterable)');
   });
 
   test('folding the counted leaves equals the roll-up the group row shows', () => {
@@ -6676,15 +6715,57 @@ describe('Q45: the tiles and the filter see the same leaves', () => {
       'v4 and organisational parents must be unaffected by this change');
   });
 
-  test('applyFilters draws from the counted set, and keeps groups in the tree view', () => {
+  test('Q53: a filter is literal — it no longer excludes an uncounted leaf', () => {
+    // Q45's original restriction (intersecting with countedLeafUuids) only ever
+    // affected the FILTERED path — the unfiltered render bypasses it entirely
+    // (matchSet is null, so collectVisible shows every treeRoots node). Picking
+    // a tag or typing a search therefore used to silently drop a project that
+    // matched but wasn't "counted" by an unrelated DT rollup setting on its
+    // parent. The fix: while filtering, match against everything; only a group
+    // row's own already-rolled-up total (aggregateTree, untouched) still obeys
+    // collectionChildren().
     const fn = extractFunction(INDEX_HTML, 'applyFilters');
-    assert.match(fn, /countedLeafUuids\.has\(p\.uuid\)/);
-    assert.match(fn, /parentUuids\.has\(p\.uuid\) \|\| countedLeafUuids\.has\(p\.uuid\)/,
-      'a group is structure — dropping it would orphan the descendants that DID count');
+    assert.doesNotMatch(fn, /allProjects\.filter\(p => countedLeafUuids\.has\(p\.uuid\)\)/,
+      'flat view must no longer restrict to the counted set');
+    assert.doesNotMatch(fn, /parentUuids\.has\(p\.uuid\) \|\| countedLeafUuids\.has\(p\.uuid\)/,
+      'tree view must no longer restrict to parents-or-counted');
+    assert.match(fn, /const sourceProjects = flatView\s*\n\s*\? allProjects\.filter\(p => !parentUuids\.has\(p\.uuid\)\)\s*\n\s*: allProjects;/,
+      'tree view keeps everything; flat view excludes only actual parent rows');
   });
 
   test('buildTree recomputes the counted set, so a refetch cannot leave it stale', () => {
     assert.match(extractFunction(INDEX_HTML, 'buildTree'), /computeCountedLeaves\(roots\)/);
+  });
+});
+
+describe('Q54: three row colours — group, counted leaf, uncounted leaf', () => {
+  test('renderTree assigns exactly one of the three classes per row kind', () => {
+    const fn = extractFunction(INDEX_HTML, 'renderTree');
+    assert.match(fn, /tr\.classList\.add\('group-row'\)/);
+    assert.match(fn,
+      /tr\.classList\.add\(countedLeafUuids\.has\(node\.uuid\) \? 'counted-leaf-row' : 'uncounted-leaf-row'\)/,
+      'a leaf row must get exactly one of the two leaf classes, decided by the counted set');
+  });
+
+  test('renderFlatList assigns the same two leaf classes — flat view has no groups to tag', () => {
+    const fn = extractFunction(INDEX_HTML, 'renderFlatList');
+    assert.match(fn,
+      /tr\.classList\.add\(countedLeafUuids\.has\(node\.uuid\) \? 'counted-leaf-row' : 'uncounted-leaf-row'\)/);
+  });
+
+  test('the three tokens exist in both themes, and the counted tier reuses the parent\'s hue family', () => {
+    for (const block of [/\n {4}:root \{[\s\S]*?\n {4}\}/, /\[data-theme="light"\] \{[\s\S]*?\n {4}\}/]) {
+      const css = block.exec(INDEX_HTML)[0];
+      assert.match(css, /--tree-group-bg:\s*rgba\(/);
+      assert.match(css, /--tree-counted-bg:\s*rgba\(/);
+      assert.match(css, /--tree-uncounted-bg:\s*rgba\(/);
+    }
+  });
+
+  test('the CSS rules point at the tokens, not a literal colour', () => {
+    assert.match(INDEX_HTML, /tbody tr\.group-row \{ background: var\(--tree-group-bg\); \}/);
+    assert.match(INDEX_HTML, /tbody tr\.counted-leaf-row\s*\{ background: var\(--tree-counted-bg\); \}/);
+    assert.match(INDEX_HTML, /tbody tr\.uncounted-leaf-row \{ background: var\(--tree-uncounted-bg\); \}/);
   });
 });
 
@@ -6693,7 +6774,9 @@ describe('Q46: the tiles reflect the active filter', () => {
     const fn = extractFunction(INDEX_HTML, 'applyFilters');
     assert.match(fn, /filteredTotals = hasFilter/,
       'null is what lets renderSummary tell "no filter" from "matched nothing"');
-    assert.match(fn, /computeTotalsFor\(filtered\.filter\(p => countedLeafUuids\.has\(p\.uuid\)\)\)/,
+    // Q53: excludes parent rows only, not countedLeafUuids — the tile agrees
+    // with the literal, unrestricted set the table is now showing.
+    assert.match(fn, /computeTotalsFor\(filtered\.filter\(p => !parentUuids\.has\(p\.uuid\)\)\)/,
       'the tiles must fold the same leaves the table is showing');
   });
 
