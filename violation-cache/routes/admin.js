@@ -8,19 +8,31 @@
 //   GET /admin/storage                    disk and database usage
 //   GET /admin/users/:loginId             one account's detail
 //   GET /admin/settings                   service-wide settings
-//   PUT /admin/settings                   change the default report limit
+//   PUT /admin/settings                   change the default report/schedule limits
 //   PUT /admin/users/:loginId/settings    set or clear one account's limit
 //   POST /admin/users/:loginId/password   reset one account's password
-//   GET  /admin/branding                  title and background, with limits
+//   GET  /admin/branding                  title, background and icon, with limits
 //   PUT  /admin/branding                  set or clear the application title
 //   POST /admin/branding/background       upload the sign-in background
 //   DELETE /admin/branding/background     restore the animated background
+//   POST /admin/branding/icon             upload the application icon
+//   DELETE /admin/branding/icon           restore the title-initials mark
+//   PUT  /admin/trend                     show or hide the risk-trend panel
+//   GET  /admin/theme                     the stored colour theme and the template
+//   PUT  /admin/theme                     upload a colour theme
+//   DELETE /admin/theme                   restore the built-in colours
+//   GET  /admin/mail                      the installation's SMTP server
+//   PUT  /admin/mail                      set it — pauses/resumes schedules on an availability change
+//   POST /admin/mail/test-email           send a test using the saved connection
+//   DELETE /admin/mail                    clear it — no account can send until one is set again
 //
-// This area WAS read-only. It is not any more, and the SIX writes above are the
-// whole of what it can do — deliberately a closed list rather than a
-// general-purpose account editor. The three branding writes were added
-// knowingly: they change how the product looks, never what an account is or
-// what it may reach, and none of them reads another principal's data.
+// This area WAS read-only. It is not any more, and the FOURTEEN writes above
+// (every PUT/POST/DELETE; the GETs are reads and are not counted — CLAUDE.md
+// §7.6) are the whole of what it can do — deliberately a closed list rather
+// than a general-purpose account editor. Each one was weighed on the same bar:
+// it changes how the product looks, what it shows, or the one connection
+// every account's mail now depends on entirely (Q52) — never what an
+// account IS, and none of them reads another principal's data.
 //
 // Everything else about an account is still only readable: there is no route
 // here that deletes an account, edits a name, disconnects a session on its own,
@@ -52,6 +64,11 @@ const disk        = require('../lib/disk');
 const branding    = require('../lib/branding');
 const image       = require('../lib/image');
 const theme       = require('../lib/theme');
+const defaultMail = require('../lib/default-mail-settings');
+const mailSettings = require('../lib/mail-settings');
+const schedulesDb = require('../lib/schedules');
+const scheduler   = require('../lib/scheduler');
+const mail        = require('../lib/mail');
 
 /**
  * Administrator-only guard.
@@ -529,6 +546,141 @@ async function handle({ method, path: parsedPath, req, res, principal }) {
     return true;
   }
 
+  // ── The installation's SMTP server (migration 018) ──────────────────────
+  // GET is a read and so is deliberately NOT on §7.6's allow-list, the same
+  // reasoning GET /admin/theme is exempt for.
+  if (method === 'GET' && parsedPath === '/admin/mail') {
+    if (!requireAdmin(principal, res)) return true;
+    try {
+      const [def, reliant] = await Promise.all([
+        defaultMail.getForAdmin(),
+        mailSettings.countEnabled(),
+      ]);
+      jsonReply(res, 200, { mail: def, accountsReliant: reliant });
+    } catch (e) {
+      log('error', `Mail settings read failed: ${e.message}`);
+      jsonReply(res, 500, { error: 'Could not read the mail settings.', code: 'INTERNAL' });
+    }
+    return true;
+  }
+
+  // Q52: mail configuration became administrator-only, so a schedule cannot
+  // simply stay "enabled" through an outage of the one server every account
+  // sends through — it would fail on its next run with nothing to tell its
+  // owner why. syncScheduleOrchestration is the pair that keeps that
+  // invisible: it pauses every currently-enabled schedule the moment the
+  // installation's server becomes unavailable, flagged as its own doing, and
+  // resumes exactly those — never one an owner disabled themselves — the
+  // moment it is available again. Nothing is ever deleted; only `enabled`
+  // and the flag move.
+  async function syncScheduleOrchestration(wasAvailable, isNowAvailable) {
+    if (wasAvailable === isNowAvailable) return { paused: 0, resumed: 0 };
+    if (wasAvailable && !isNowAvailable) {
+      const paused = await schedulesDb.disableAllEnabledForSmtp();
+      log('info', 'SMTP became unavailable — paused every enabled schedule', { paused });
+      return { paused, resumed: 0 };
+    }
+    // Recovering: each row needs its OWN freshly computed next_run_at, never
+    // the stale one from before the outage, which could already be in the
+    // past — so this is a fetch-and-recompute pass, not a single UPDATE.
+    const rows = await schedulesDb.listDisabledBySmtp();
+    for (const row of rows) {
+      await schedulesDb.reenableOne(row.id, scheduler.calcNextRun(row));
+    }
+    log('info', 'SMTP became available — resumed the schedules it paused', { resumed: rows.length });
+    return { paused: 0, resumed: rows.length };
+  }
+
+  if (method === 'PUT' && parsedPath === '/admin/mail') {
+    if (!requireAdmin(principal, res)) return true;
+    const body = await readJson(req, res);
+    if (body === null) return true;
+    try {
+      const wasAvailable = await defaultMail.isAvailable();
+      const saved = await defaultMail.save(body);
+      const isNowAvailable = await defaultMail.isAvailable();
+      const { paused, resumed } = await syncScheduleOrchestration(wasAvailable, isNowAvailable);
+      const reliant = await mailSettings.countEnabled();
+      log('info', 'Mail settings changed', {
+        enabled: saved.enabled, host: saved.smtp.host || null, accountsReliant: reliant, paused, resumed,
+      });
+      jsonReply(res, 200, { mail: saved, accountsReliant: reliant, schedulesPaused: paused, schedulesResumed: resumed });
+    } catch (e) {
+      if (e.code === 'VALIDATION_FAILED') {
+        jsonReply(res, 400, { error: e.message, code: 'VALIDATION_FAILED', field: e.field });
+        return true;
+      }
+      log('error', `Saving the mail settings failed: ${e.message}`);
+      jsonReply(res, 500, { error: 'Could not save the mail settings.', code: 'INTERNAL' });
+    }
+    return true;
+  }
+
+  // ── POST /admin/mail/test-email ──────────────────────────────────────────
+  // The administrator's own test, using the connection exactly as saved — no
+  // "current unsaved form values" mode the way the per-user test-email route
+  // has, because there is no per-user SMTP form left to be live about (Q52).
+  if (method === 'POST' && parsedPath === '/admin/mail/test-email') {
+    if (!requireAdmin(principal, res)) return true;
+    const body = await readJson(req, res);
+    if (body === null) return true;
+    try {
+      const to = mailSettings.toAddressArray(body.to);
+      if (!to.length) {
+        jsonReply(res, 400, { error: 'A recipient address is required.', code: 'VALIDATION_FAILED', field: 'to' });
+        return true;
+      }
+      const def = await defaultMail.getResolved();
+      if (!def) {
+        jsonReply(res, 400, { error: 'Save an enabled SMTP server first.', code: 'MAIL_NOT_CONFIGURED' });
+        return true;
+      }
+      if (!def.from) {
+        jsonReply(res, 400, { error: 'Set a From address before sending a test.', code: 'VALIDATION_FAILED', field: 'from' });
+        return true;
+      }
+      const appTitle = await branding.getTitle();
+      await mail.sendEmail(
+        { enabled: true, smtp: def.smtp, from: def.from, to, cc: [] },
+        null,
+        {
+          appTitle,
+          subject: `${appTitle} — test email`,
+          body: `This is a test email from ${appTitle}'s installation mail server, sent on `
+              + `${new Date().toLocaleString()}. Configuration is working correctly.`,
+        }
+      );
+      jsonReply(res, 200, { ok: true, message: 'Test email sent successfully' });
+    } catch (e) {
+      const def = await defaultMail.getResolved().catch(() => null);
+      const friendly = mail.describeSmtpError(e, def && def.smtp);
+      log('error', `Admin test email failed: ${e.message}`);
+      jsonReply(res, 500, friendly
+        ? { error: friendly.message, code: friendly.code, detail: e.message }
+        : { error: `Email failed: ${e.message}`, code: 'MAIL_SEND_FAILED' });
+    }
+    return true;
+  }
+
+  if (method === 'DELETE' && parsedPath === '/admin/mail') {
+    if (!requireAdmin(principal, res)) return true;
+    try {
+      const wasAvailable = await defaultMail.isAvailable();
+      // The count is taken before clearing — afterwards every one of these
+      // accounts is still enabled, but the number describes who this action
+      // actually affects, not who is left waiting by it.
+      const reliant = await mailSettings.countEnabled();
+      await defaultMail.clear();
+      const { paused } = await syncScheduleOrchestration(wasAvailable, false);
+      log('info', 'Mail settings cleared', { accountsAffected: reliant, schedulesPaused: paused });
+      jsonReply(res, 200, { mail: null, accountsAffected: reliant, schedulesPaused: paused });
+    } catch (e) {
+      log('error', `Clearing the mail settings failed: ${e.message}`);
+      jsonReply(res, 500, { error: 'Could not clear the mail settings.', code: 'INTERNAL' });
+    }
+    return true;
+  }
+
   if (method === 'DELETE' && parsedPath === '/admin/branding/background') {
     if (!requireAdmin(principal, res)) return true;
     try {
@@ -699,13 +851,12 @@ async function handle({ method, path: parsedPath, req, res, principal }) {
           defaultMaxReports: row.defaultMaxReports,
           limits: { min: appSettings.MIN_MAX_REPORTS, max: appSettings.MAX_MAX_REPORTS },
         },
+        // Q52: the SMTP connection is the installation's, not this account's —
+        // see GET /admin/mail for that.
         mail: {
-          enabled:     row.mailEnabled === true,
-          host:        row.mailHost || '',
-          port:        row.mailPort,
-          from:        row.mailFrom || '',
-          recipients:  row.mailRecipients || 0,
-          hasPassword: row.mailHasPassword === true,
+          enabled:    row.mailEnabled === true,
+          from:       row.mailFrom || '',
+          recipients: row.mailRecipients || 0,
         },
         schedules: {
           total:         row.scheduleCount,

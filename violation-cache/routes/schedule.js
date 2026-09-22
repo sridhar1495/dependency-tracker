@@ -69,6 +69,11 @@ function forClient(row, projects) {
     isRunning:           Boolean(row.runningSince),
     projectCount:        row.projectCount ?? (projects ? projects.length : 0),
     projectUuids:        projects ? projects.map(p => p.uuid) : undefined,
+    // Q52: set only by the SMTP-outage pause (lib/schedules.js
+    // disableAllEnabledForSmtp), never by the user's own Cancel/disable — so
+    // the dashboard can tell "you turned this off" from "the administrator's
+    // mail server is unavailable" and word the paused state accordingly.
+    disabledBySmtp:      Boolean(row.disabledBySmtp),
   };
 }
 
@@ -237,6 +242,19 @@ async function handle({ method, path: parsedPath, req, res, principal }) {
         });
         return true;
       }
+      // Q52: arming while mail cannot actually be sent would leave a schedule
+      // reading "enabled" that is certain to fail on its first run, with
+      // nothing on screen to explain why. mailSettings.getResolved() is null
+      // for exactly the two reasons that matter here — this account never
+      // turned email on, or the administrator's server is not available.
+      if (!(await mailSettings.getResolved(userId))) {
+        jsonReply(res, 400, {
+          error: 'Email delivery is not available — turn on email in Settings, '
+               + 'or ask your administrator to configure the mail server.',
+          code: 'MAIL_NOT_CONFIGURED',
+        });
+        return true;
+      }
       const updated = await schedulesDb.arm(userId, id, scheduler.calcNextRun(row));
       log('info', 'Schedule armed', { userId, scheduleId: id, nextRun: updated.nextRunAt });
       jsonReply(res, 200, { ok: true, nextRun: updated.nextRunAt, schedule: forClient(updated) });
@@ -293,7 +311,8 @@ async function handle({ method, path: parsedPath, req, res, principal }) {
       const mail = scheduler.applyScheduleRecipients(account, row);
       if (!mail || !mail.enabled || !mail.smtp.host || !(mail.to || []).length) {
         jsonReply(res, 400, {
-          error: 'Email is not configured — set the SMTP server and a recipient in Settings first.',
+          error: 'Email is not available — turn it on and set a recipient in Settings, '
+               + 'or ask your administrator to configure the mail server.',
           code: 'MAIL_NOT_CONFIGURED',
         });
         return true;

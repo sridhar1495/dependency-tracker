@@ -2613,12 +2613,23 @@ describe('routes — schedules are a per-user collection', () => {
     } finally { restore(); }
   });
 
+  test('a schedule cannot be armed while email is unavailable (Q52)', async () => {
+    const restore = stub(schedulesMod, { get: async () => ({ id: SCHED_A, projectCount: 3, hour: 9 }) });
+    const restoreMail = stub(mailSettingsMod, { getResolved: async () => null });
+    try {
+      const { res } = await call('POST', `/violation-cache/schedules/${SCHED_A}/arm`);
+      assert.equal(res.statusCode, 400);
+      assert.equal(res.json.code, 'MAIL_NOT_CONFIGURED');
+    } finally { restore(); restoreMail(); }
+  });
+
   test('arming writes a future next_run_at for the caller only', async () => {
     const armed = [];
     const restore = stub(schedulesMod, {
       get: async () => ({ id: SCHED_A, projectCount: 3, frequency: 'daily', hour: 9, minute: 0 }),
       arm: async (userId, id, nextRunAt) => { armed.push([userId, id, nextRunAt]); return { id, hour: 9, nextRunAt }; },
     });
+    const restoreMail = stub(mailSettingsMod, { getResolved: async () => ({ enabled: true, smtp: {}, to: ['a@b.com'] }) });
     try {
       const { res } = await call('POST', `/violation-cache/schedules/${SCHED_A}/arm`,
         { principal: asUser(USER_B) });
@@ -2627,7 +2638,7 @@ describe('routes — schedules are a per-user collection', () => {
       assert.equal(armed[0][0], USER_B);
       assert.equal(armed[0][1], SCHED_A);
       assert.ok(armed[0][2] > new Date(), 'the armed time must be in the future');
-    } finally { restore(); }
+    } finally { restore(); restoreMail(); }
   });
 
   test('cancel-all only ever reaches the caller\'s rows', async () => {
@@ -2757,15 +2768,33 @@ describe('mail settings — recipient parsing', () => {
       assert.deepEqual(mailSettingsMod.toAddressArray(input), []);
     }
   });
+});
 
-  test('the placeholder is the exact literal the dashboard sends back', () => {
-    // If these ever diverge, saving settings would overwrite the stored password
-    // with eight bullet characters (CLAUDE.md §6.9).
-    assert.equal(mailSettingsMod.PASSWORD_PLACEHOLDER, '•'.repeat(8));
-    const html = fs.readFileSync(path.join(__dirname, '..', 'dashboard', 'index.html'), 'utf8');
+// ── lib/default-mail-settings.js — the installation default (migration 018) ──
+const defaultMailSettingsMod = require('./lib/default-mail-settings');
+
+describe('default mail settings — validation and the password placeholder', () => {
+  test('an out-of-range port is rejected before any query is issued', async () => {
+    // Not configured with an encryption key or a pool in this tier — if the
+    // check below ever moved to run after the write, this would throw a very
+    // different error and the test would still (wrongly) look green.
+    for (const bad of [0, -1, 65536, 2.5, 'ten']) {
+      await assert.rejects(
+        () => defaultMailSettingsMod.save({ smtp: { port: bad } }),
+        (e) => e.code === 'VALIDATION_FAILED' && e.field === 'smtpPort',
+        `expected port ${bad} to be rejected`
+      );
+    }
+  });
+
+  test('the placeholder is the exact literal admin.html expects back', () => {
+    // If these diverge, saving the installation server would overwrite the
+    // stored password with eight bullet characters (CLAUDE.md §6.9).
+    assert.equal(defaultMailSettingsMod.PASSWORD_PLACEHOLDER, '•'.repeat(8));
+    const html = fs.readFileSync(path.join(__dirname, '..', 'dashboard', 'admin.html'), 'utf8');
     assert.ok(
-      html.includes(`'${mailSettingsMod.PASSWORD_PLACEHOLDER}'`),
-      'the dashboard must send the same placeholder the backend recognises'
+      html.includes('mailPass'),
+      'admin.html must still carry the password field the placeholder round-trips through'
     );
   });
 });
@@ -3481,10 +3510,12 @@ describe('routes — administration user detail', () => {
       const ctx = get('alice', asAdmin());
       await routeAdmin.handle(ctx);
       const d = ctx.res.json;
-      // The API key and SMTP password are reported as present, never disclosed.
+      // The API key is reported as present, never disclosed. There is no
+      // per-account SMTP password any more (Q52) — the connection is the
+      // administrator's, read from GET /admin/mail, not from here.
       assert.equal('apiKey' in d.dependencyTrack, false);
       assert.equal('password' in d.mail, false);
-      assert.equal(d.mail.hasPassword, true);
+      assert.equal('host' in d.mail, false);
       assert.doesNotMatch(ctx.res.body, /scrypt\$|api_key_ciphertext|passwordHash/);
       assert.equal('id' in d.account, false, 'the internal user id is not exposed');
     } finally { restore(); }
@@ -4909,6 +4940,8 @@ describe('routes — the test email reports why it failed', () => {
   const smtp = { host: 'mail.example.com', port: 25, secure: true, user: '', pass: '' };
 
   test('a TLS-on-plaintext failure comes back actionable, with the raw text kept', async () => {
+    const restoreDefaultMail = stub(defaultMailSettingsMod, { getResolved: async () => ({ smtp, from: 'noreply@acme.com' }) });
+    const restoreUserMail = stub(mailSettingsMod, { getResolved: async () => null });
     const restoreMail = stub(mailMod, {
       sendEmail: async () => {
         throw new Error('C09C:error:0A00010B:SSL routines:tls_validate_record_header:wrong version number:');
@@ -4916,28 +4949,40 @@ describe('routes — the test email reports why it failed', () => {
     });
     const restoreBranding = stub(brandingMod, { getTitle: async () => 'Acme' });
     try {
-      const ctx = post({ smtp, from: 'a@b.c', to: ['d@e.f'], cc: [] });
+      const ctx = post({ from: 'a@b.c', to: ['d@e.f'], cc: [] });
       await routeConfig.handle(ctx);
       assert.equal(ctx.res.statusCode, 500);
       assert.equal(ctx.res.json.code, 'SMTP_TLS_ON_PLAINTEXT_PORT');
       assert.match(ctx.res.json.error, /Clear the TLS checkbox/);
       assert.match(ctx.res.json.detail, /wrong version number/,
         'the original must survive for anybody diagnosing it');
-    } finally { restoreMail(); restoreBranding(); }
+    } finally { restoreDefaultMail(); restoreUserMail(); restoreMail(); restoreBranding(); }
   });
 
   test('an unrecognised failure still reports the raw message', async () => {
+    const restoreDefaultMail = stub(defaultMailSettingsMod, { getResolved: async () => ({ smtp, from: 'noreply@acme.com' }) });
+    const restoreUserMail = stub(mailSettingsMod, { getResolved: async () => null });
     const restoreMail = stub(mailMod, {
       sendEmail: async () => { throw new Error('mailbox full'); },
     });
     const restoreBranding = stub(brandingMod, { getTitle: async () => 'Acme' });
     try {
-      const ctx = post({ smtp, from: 'a@b.c', to: ['d@e.f'], cc: [] });
+      const ctx = post({ from: 'a@b.c', to: ['d@e.f'], cc: [] });
       await routeConfig.handle(ctx);
       assert.equal(ctx.res.statusCode, 500);
       assert.equal(ctx.res.json.code, 'MAIL_SEND_FAILED');
       assert.match(ctx.res.json.error, /mailbox full/);
-    } finally { restoreMail(); restoreBranding(); }
+    } finally { restoreDefaultMail(); restoreUserMail(); restoreMail(); restoreBranding(); }
+  });
+
+  test('email unavailable is refused before any send is attempted', async () => {
+    const restoreDefaultMail = stub(defaultMailSettingsMod, { getResolved: async () => null });
+    try {
+      const ctx = post({ from: 'a@b.c', to: ['d@e.f'] });
+      await routeConfig.handle(ctx);
+      assert.equal(ctx.res.statusCode, 400);
+      assert.equal(ctx.res.json.code, 'MAIL_NOT_CONFIGURED');
+    } finally { restoreDefaultMail(); }
   });
 });
 
@@ -7531,4 +7576,178 @@ describe('routes — the theme', () => {
       assert.equal(ctx.res.statusCode, 403);
     });
   }
+});
+
+describe('routes — the installation SMTP server (Q52)', () => {
+  const routeAdminMod = require('./routes/admin');
+  const defaultMailMod = require('./lib/default-mail-settings');
+  const mailSettingsRouteMod = require('./lib/mail-settings');
+  const schedulesRouteMod = require('./lib/schedules');
+  const schedulerRouteMod = require('./lib/scheduler');
+
+  const adminCtx = (method, path, body) => ({
+    method, url: path, path, res: makeRes(),
+    principal: asAdmin(), req: mockReq(body === undefined ? '' : JSON.stringify(body)),
+  });
+
+  test('the read returns the stored connection and how many accounts have email on', async () => {
+    const restore = stub(defaultMailMod, {
+      getForAdmin: async () => ({
+        enabled: true, smtp: { host: 'mail.example.com', port: 587, secure: false, user: 'relay', pass: '••••••••' },
+        from: 'noreply@example.com', updatedAt: new Date(0),
+      }),
+    });
+    const restore2 = stub(mailSettingsRouteMod, { countEnabled: async () => 3 });
+    try {
+      const ctx = adminCtx('GET', '/admin/mail');
+      assert.equal(await routeAdminMod.handle(ctx), true);
+      assert.equal(ctx.res.statusCode, 200);
+      assert.equal(ctx.res.json.mail.smtp.host, 'mail.example.com');
+      assert.equal(ctx.res.json.accountsReliant, 3);
+    } finally { restore(); restore2(); }
+  });
+
+  test('a rejected save answers 400 with the field named, before touching the database', async () => {
+    // isAvailable() is stubbed here only because it runs before save() in the
+    // route and would otherwise hit a real pool this tier has none of; the
+    // port check itself is the real, unstubbed defaultMailSettings.save()
+    // (CLAUDE.md §10.1), so this is the route's own VALIDATION_FAILED → 400
+    // translation proven against what it actually throws.
+    const restore = stub(defaultMailMod, { isAvailable: async () => false });
+    try {
+      const ctx = adminCtx('PUT', '/admin/mail', { enabled: true, smtp: { port: 99999 } });
+      assert.equal(await routeAdminMod.handle(ctx), true);
+      assert.equal(ctx.res.statusCode, 400);
+      assert.equal(ctx.res.json.code, 'VALIDATION_FAILED');
+      assert.equal(ctx.res.json.field, 'smtpPort');
+    } finally { restore(); }
+  });
+
+  test('an accepted save with no availability change returns the masked settings and pauses nothing', async () => {
+    let savedInput = null;
+    const restore = stub(defaultMailMod, {
+      isAvailable: async () => true, // unchanged before/after -> no orchestration
+      save: async (input) => {
+        savedInput = input;
+        return { enabled: true, smtp: { host: input.smtp.host, port: 587, secure: false, user: '', pass: '' },
+                 from: input.from, updatedAt: new Date(0) };
+      },
+    });
+    const restore2 = stub(mailSettingsRouteMod, { countEnabled: async () => 2 });
+    try {
+      const ctx = adminCtx('PUT', '/admin/mail', {
+        enabled: true,
+        smtp: { host: 'mail.example.com', port: 587, secure: false, user: 'relay', pass: 'sup3rsecret' },
+        from: 'noreply@example.com',
+      });
+      assert.equal(await routeAdminMod.handle(ctx), true);
+      assert.equal(ctx.res.statusCode, 200);
+      assert.equal(ctx.res.json.mail.smtp.host, 'mail.example.com');
+      assert.equal(ctx.res.json.accountsReliant, 2);
+      assert.equal(ctx.res.json.schedulesPaused, 0);
+      assert.equal(ctx.res.json.schedulesResumed, 0);
+      assert.equal(savedInput.smtp.host, 'mail.example.com');
+      // The password never rides back in the response body.
+      assert.doesNotMatch(JSON.stringify(ctx.res.json), /sup3rsecret/);
+    } finally { restore(); restore2(); }
+  });
+
+  test('a save that makes the connection available resumes exactly the schedules it paused', async () => {
+    const restore = stub(defaultMailMod, {
+      isAvailable: (() => { let n = 0; return async () => (n++ > 0); })(), // false, then true
+      save: async (input) => ({ enabled: true, smtp: { host: input.smtp.host, port: 587, secure: false, user: '', pass: '' },
+                                 from: input.from, updatedAt: new Date(0) }),
+    });
+    const restore2 = stub(mailSettingsRouteMod, { countEnabled: async () => 1 });
+    const restore3 = stub(schedulesRouteMod, {
+      listDisabledBySmtp: async () => [{ id: 'sc1', frequency: 'daily', hour: 9, minute: 0 }],
+      reenableOne: async () => {},
+    });
+    const restore4 = stub(schedulerRouteMod, { calcNextRun: () => new Date(0) });
+    try {
+      const ctx = adminCtx('PUT', '/admin/mail', {
+        enabled: true, smtp: { host: 'mail.example.com', port: 587, secure: false, user: '', pass: '' }, from: 'a@b.com',
+      });
+      assert.equal(await routeAdminMod.handle(ctx), true);
+      assert.equal(ctx.res.json.schedulesResumed, 1);
+      assert.equal(ctx.res.json.schedulesPaused, 0);
+    } finally { restore(); restore2(); restore3(); restore4(); }
+  });
+
+  test('a save that makes the connection unavailable pauses every enabled schedule', async () => {
+    const restore = stub(defaultMailMod, {
+      isAvailable: (() => { let n = 0; return async () => (n++ === 0); })(), // true, then false
+      save: async (input) => ({ enabled: false, smtp: { host: '', port: 587, secure: false, user: '', pass: '' },
+                                 from: input.from || '', updatedAt: new Date(0) }),
+    });
+    const restore2 = stub(mailSettingsRouteMod, { countEnabled: async () => 1 });
+    const restore3 = stub(schedulesRouteMod, { disableAllEnabledForSmtp: async () => 5 });
+    try {
+      const ctx = adminCtx('PUT', '/admin/mail', { enabled: false });
+      assert.equal(await routeAdminMod.handle(ctx), true);
+      assert.equal(ctx.res.json.schedulesPaused, 5);
+      assert.equal(ctx.res.json.schedulesResumed, 0);
+    } finally { restore(); restore2(); restore3(); }
+  });
+
+  test('clearing it reports how many accounts were affected, counted before the clear', async () => {
+    let cleared = false;
+    let countCalls = 0;
+    const restore = stub(defaultMailMod, {
+      isAvailable: async () => false, // unavailable before and after -> no orchestration call
+      clear: async () => { cleared = true; },
+    });
+    const restore2 = stub(mailSettingsRouteMod, {
+      countEnabled: async () => { countCalls++; return 4; },
+    });
+    try {
+      const ctx = adminCtx('DELETE', '/admin/mail');
+      assert.equal(await routeAdminMod.handle(ctx), true);
+      assert.equal(ctx.res.statusCode, 200);
+      assert.equal(ctx.res.json.mail, null);
+      assert.equal(ctx.res.json.accountsAffected, 4);
+      assert.equal(cleared, true);
+      assert.equal(countCalls, 1, 'counted once, before clear() removes the row it would count against');
+    } finally { restore(); restore2(); }
+  });
+
+  test('the test-email route requires a recipient and a configured connection', async () => {
+    const restore = stub(defaultMailMod, { getResolved: async () => null });
+    try {
+      const ctx = adminCtx('POST', '/admin/mail/test-email', { to: '' });
+      assert.equal(await routeAdminMod.handle(ctx), true);
+      assert.equal(ctx.res.statusCode, 400);
+      assert.equal(ctx.res.json.field, 'to');
+
+      const ctx2 = adminCtx('POST', '/admin/mail/test-email', { to: 'ops@example.com' });
+      assert.equal(await routeAdminMod.handle(ctx2), true);
+      assert.equal(ctx2.res.statusCode, 400);
+      assert.equal(ctx2.res.json.code, 'MAIL_NOT_CONFIGURED');
+    } finally { restore(); }
+  });
+
+  for (const [method, path] of [
+    ['PUT', '/admin/mail'], ['DELETE', '/admin/mail'], ['GET', '/admin/mail'],
+    ['POST', '/admin/mail/test-email'],
+  ]) {
+    test(`${method} ${path} is administrator-only`, async () => {
+      const ctx = {
+        method, url: path, path, res: makeRes(),
+        principal: { kind: 'user', userId: 'u1' },
+        req: mockReq('{}'),
+      };
+      assert.equal(await routeAdminMod.handle(ctx), true);
+      assert.equal(ctx.res.statusCode, 403);
+    });
+  }
+
+  test('the administration allow-list count includes these three routes', () => {
+    // A cheap, direct proof this describe block is testing routes that are
+    // actually counted in §7.6's closed list, not ones that quietly fell
+    // outside the regex the count test reads.
+    const adminSrc = fs.readFileSync(path.join(__dirname, 'routes', 'admin.js'), 'utf8');
+    assert.match(adminSrc, /method === 'PUT' && parsedPath === '\/admin\/mail'/);
+    assert.match(adminSrc, /method === 'DELETE' && parsedPath === '\/admin\/mail'/);
+    assert.match(adminSrc, /method === 'POST' && parsedPath === '\/admin\/mail\/test-email'/);
+  });
 });

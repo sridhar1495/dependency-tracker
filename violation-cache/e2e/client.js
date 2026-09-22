@@ -68,8 +68,12 @@ function makeClient(baseUrl) {
     saveConnection: (token, { apiUrl, apiKey, frontendUrl = '' }) =>
       post('/violation-cache/config', { connection: { apiUrl, apiKey, frontendUrl } }, token),
 
-    /** Save mail settings. They live under `config.mail`. */
+    /** Save mail settings. They live under `config.mail`. No SMTP fields any
+     *  more (Q52) — the connection is the administrator's, via saveAdminMail. */
     saveMail: (token, mail) => post('/violation-cache/config', { config: { mail } }, token),
+
+    /** Set the installation's one SMTP server. Requires an administrator token. */
+    saveAdminMail: (adminToken, smtpAndFrom) => put('/admin/mail', smtpAndFrom, adminToken),
 
     /**
      * Create a schedule. `projects` is an array of OBJECTS — the data layer

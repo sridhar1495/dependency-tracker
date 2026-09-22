@@ -13,7 +13,7 @@
 // These tests create their own throwaway schema and drop it afterwards. They
 // never assume pre-existing data.
 
-const { test, describe, before, after } = require('node:test');
+const { test, describe, before, after, afterEach } = require('node:test');
 const assert = require('node:assert/strict');
 const fs     = require('node:fs');
 const os     = require('node:os');
@@ -980,7 +980,7 @@ describe('admin credential file', { skip: !ENABLED && 'TEST_DATABASE_URL not set
 
 describe('multi-tenant data access', { skip: !ENABLED && 'TEST_DATABASE_URL not set' }, () => {
   let pool, users, dtCrypto, dtConnections, userSettings, appSettings, mailSettings,
-      schedulesDb, reportsDb, caches;
+      defaultMailSettings, schedulesDb, reportsDb, caches;
   let alice, bob;
 
   // Real DependencyTrack project ids are uuids, and so is schedule_projects.project_uuid.
@@ -1008,13 +1008,16 @@ describe('multi-tenant data access', { skip: !ENABLED && 'TEST_DATABASE_URL not 
     userSettings  = require('./lib/user-settings');
     appSettings   = require('./lib/app-settings');
     mailSettings  = require('./lib/mail-settings');
+    defaultMailSettings = require('./lib/default-mail-settings');
     schedulesDb   = require('./lib/schedules');
     reportsDb     = require('./lib/reports-db');
     caches        = require('./lib/caches');
 
     const key = dtCrypto.parseEncryptionKey(process.env.SECRET_ENCRYPTION_KEY);
     dtConnections.configure(key);
-    mailSettings.configure(key);
+    // mailSettings.js no longer holds an encryption key — it has no secret of
+    // its own since Q52 moved the SMTP connection to default-mail-settings.js.
+    defaultMailSettings.configure(key);
 
     await pool.query("DELETE FROM users WHERE login_id IN ('zz_alice', 'zz_bob')");
     const hash = await dtCrypto.hashPassword('password123');
@@ -1027,6 +1030,7 @@ describe('multi-tenant data access', { skip: !ENABLED && 'TEST_DATABASE_URL not 
       await pool.query("DELETE FROM users WHERE login_id IN ('zz_alice', 'zz_bob')");
       await pool.query("DELETE FROM violation_caches WHERE fingerprint LIKE 'zz%'");
       await pool.query("DELETE FROM system_state WHERE key = 'legacy_dt_connection_migrated'");
+      await pool.query('DELETE FROM default_mail_settings WHERE id = TRUE');
       await pool.close();
     }
   });
@@ -1443,35 +1447,195 @@ describe('multi-tenant data access', { skip: !ENABLED && 'TEST_DATABASE_URL not 
     }
   });
 
-  // ── mail_settings ──────────────────────────────────────────────────────
-  test('the SMTP password is encrypted, masked to the client and kept on a placeholder save', async () => {
+  // ── mail_settings — per-account preferences only (Q52) ──────────────────
+  test('mailSettings.save keeps only preferences — no SMTP fields to accept', async () => {
     await mailSettings.save(alice.id, {
-      enabled: true,
-      smtp: { host: 'smtp.example.com', port: 587, secure: false, user: 'alice', pass: 'sup3rsecret' },
-      from: 'alice@example.com', to: 'ops@example.com, dev@example.com', cc: '',
+      enabled: true, from: 'alice@example.com',
+      to: 'ops@example.com, dev@example.com', cc: '', subject: 'Weekly', body: 'See attached.',
     });
-
     const client = await mailSettings.getForClient(alice.id);
-    assert.equal(client.smtp.pass, mailSettings.PASSWORD_PLACEHOLDER);
     assert.deepEqual(client.to, ['ops@example.com', 'dev@example.com']);
-    assert.doesNotMatch(JSON.stringify(client), /sup3rsecret/);
-
-    // Saving the placeholder back must not overwrite the stored password.
-    await mailSettings.save(alice.id, {
-      enabled: true,
-      smtp: { host: 'smtp.example.com', port: 2525, secure: true, user: 'alice', pass: mailSettings.PASSWORD_PLACEHOLDER },
-      from: 'alice@example.com', to: ['ops@example.com'], cc: [],
-    });
-    const resolved = await mailSettings.getResolved(alice.id);
-    assert.equal(resolved.smtp.pass, 'sup3rsecret');
-    assert.equal(resolved.smtp.port, 2525, 'the rest of the form still saved');
+    assert.equal('smtp' in client, false, 'there is no SMTP shape left to send to the browser');
   });
 
-  test('an out-of-range SMTP port is rejected before any write', async () => {
-    await assert.rejects(
-      () => mailSettings.save(alice.id, { smtp: { port: 99999 } }),
-      (e) => e.code === 'VALIDATION_FAILED' && e.field === 'smtpPort'
-    );
+  // ── default_mail_settings (migration 018) — the ONLY SMTP connection ────
+  describe('the installation SMTP server (Q52)', () => {
+    afterEach(async () => {
+      await defaultMailSettings.clear();
+      // Bob is the account these tests flip enabled on; a clean slate between
+      // tests is what keeps them independent of each other's order.
+      await mailSettings.save(bob.id, { enabled: false, from: '', to: [], cc: [] });
+    });
+
+    test('round-trips, masks the password to the admin view, and keeps it on a placeholder save', async () => {
+      await defaultMailSettings.save({
+        enabled: true,
+        smtp: { host: 'mail.example.com', port: 587, secure: false, user: 'relay', pass: 'sup3rsecret' },
+        from: 'noreply@example.com',
+      });
+
+      const admin = await defaultMailSettings.getForAdmin();
+      assert.equal(admin.smtp.pass, defaultMailSettings.PASSWORD_PLACEHOLDER);
+      assert.doesNotMatch(JSON.stringify(admin), /sup3rsecret/);
+
+      // Re-saving the placeholder must not overwrite the stored password.
+      await defaultMailSettings.save({
+        enabled: true,
+        smtp: { host: 'mail.example.com', port: 2525, secure: true, user: 'relay',
+                pass: defaultMailSettings.PASSWORD_PLACEHOLDER },
+        from: 'noreply@example.com',
+      });
+      const resolved = await defaultMailSettings.getResolved();
+      assert.equal(resolved.smtp.pass, 'sup3rsecret');
+      assert.equal(resolved.smtp.port, 2525, 'the rest of the form still saved');
+    });
+
+    test('an out-of-range SMTP port is rejected before any write', async () => {
+      await assert.rejects(
+        () => defaultMailSettings.save({ smtp: { port: 0 } }),
+        (e) => e.code === 'VALIDATION_FAILED' && e.field === 'smtpPort'
+      );
+    });
+
+    test('clearing it removes the row entirely, not merely disables it', async () => {
+      await defaultMailSettings.save({ enabled: true, smtp: { host: 'mail.example.com' }, from: 'x@example.com' });
+      await defaultMailSettings.clear();
+      assert.equal(await defaultMailSettings.getForAdmin(), null);
+      assert.equal(await defaultMailSettings.getResolved(), null);
+    });
+
+    test('an enabled account resolves to the installation connection as one unit', async () => {
+      await defaultMailSettings.save({
+        enabled: true,
+        smtp: { host: 'mail.example.com', port: 2525, secure: true, user: 'relay', pass: 'relaypass' },
+        from: 'noreply@example.com',
+      });
+      await mailSettings.save(bob.id, { enabled: true, from: '', to: ['bob@example.com'], cc: [] });
+
+      const resolved = await mailSettings.getResolved(bob.id);
+      assert.equal(resolved.smtp.host, 'mail.example.com');
+      assert.equal(resolved.smtp.port, 2525);
+      assert.equal(resolved.smtp.secure, true);
+      assert.equal(resolved.smtp.user, 'relay');
+      assert.equal(resolved.smtp.pass, 'relaypass');
+      assert.equal(resolved.from, 'noreply@example.com');
+      // Bob's own recipients are untouched — only the connection is shared.
+      assert.deepEqual(resolved.to, ['bob@example.com']);
+
+      const client = await mailSettings.getForClient(bob.id);
+      assert.equal(client.smtpAvailable, true);
+      assert.equal('smtp' in client, false, 'the client shape carries no connection, only availability');
+    });
+
+    test('a disabled account never resolves, even with a connection configured', async () => {
+      await defaultMailSettings.save({ enabled: true, smtp: { host: 'mail.example.com' }, from: 'noreply@example.com' });
+      await mailSettings.save(bob.id, { enabled: false, from: '', to: ['bob@example.com'], cc: [] });
+
+      const resolved = await mailSettings.getResolved(bob.id);
+      assert.equal(resolved, null, 'no surprise emails — the account never opted in');
+
+      const client = await mailSettings.getForClient(bob.id);
+      assert.equal(client.smtpAvailable, true, 'availability is independent of this account\'s own toggle');
+    });
+
+    test('a disabled or cleared connection degrades getResolved to null, not a crash', async () => {
+      await mailSettings.save(bob.id, { enabled: true, from: '', to: ['bob@example.com'], cc: [] });
+
+      // No connection configured at all.
+      let resolved = await mailSettings.getResolved(bob.id);
+      assert.equal(resolved, null);
+
+      // A connection exists but is turned off.
+      await defaultMailSettings.save({ enabled: false, smtp: { host: 'mail.example.com' }, from: 'x@example.com' });
+      resolved = await mailSettings.getResolved(bob.id);
+      assert.equal(resolved, null);
+    });
+
+    test('the account\'s own From wins over the installation\'s', async () => {
+      await defaultMailSettings.save({
+        enabled: true, smtp: { host: 'mail.example.com' }, from: 'noreply@example.com',
+      });
+      await mailSettings.save(bob.id, {
+        enabled: true, from: 'bob-replies@example.com', to: ['bob@example.com'], cc: [],
+      });
+      const resolved = await mailSettings.getResolved(bob.id);
+      assert.equal(resolved.smtp.host, 'mail.example.com', 'the connection is still the installation\'s');
+      assert.equal(resolved.from, 'bob-replies@example.com', 'but this account chose its own From');
+    });
+
+    test('countEnabled counts every account with email turned on', async () => {
+      await mailSettings.save(bob.id, { enabled: true, from: '', to: ['bob@example.com'], cc: [] });
+      const before = await mailSettings.countEnabled();
+      assert.ok(before >= 1, 'bob is enabled and must be counted');
+
+      await mailSettings.save(bob.id, { enabled: false, from: '', to: ['bob@example.com'], cc: [] });
+      const after = await mailSettings.countEnabled();
+      assert.equal(after, before - 1, 'bob is no longer counted once disabled');
+    });
+  });
+
+  // ── schedules.disabled_by_smtp orchestration (migration 019, Q52) ───────
+  describe('schedule pause/resume on an SMTP availability change', () => {
+    test('disableAllEnabledForSmtp pauses only currently-enabled schedules, flagged', async () => {
+      const s1 = await schedulesDb.create(bob.id, { name: 'A', frequency: 'daily', hour: 9, minute: 0 });
+      const s2 = await schedulesDb.create(bob.id, { name: 'B', frequency: 'daily', hour: 10, minute: 0 });
+      await schedulesDb.setProjects(bob.id, s1.id, [{ uuid: '22222222-2222-4222-8222-222222222201', name: 'p1', version: '1' }]);
+      await schedulesDb.setProjects(bob.id, s2.id, [{ uuid: '22222222-2222-4222-8222-222222222202', name: 'p2', version: '1' }]);
+      await schedulesDb.arm(bob.id, s1.id, new Date(Date.now() + 60000));
+      // s2 stays disabled — the user's own choice, never touched.
+
+      const paused = await schedulesDb.disableAllEnabledForSmtp();
+      assert.ok(paused >= 1);
+
+      const after1 = await schedulesDb.get(bob.id, s1.id);
+      assert.equal(after1.enabled, false);
+      assert.equal(after1.disabledBySmtp, true);
+      const after2 = await schedulesDb.get(bob.id, s2.id);
+      assert.equal(after2.enabled, false);
+      assert.equal(after2.disabledBySmtp, false, 'a schedule the user never armed must not be marked as SMTP-paused');
+
+      await schedulesDb.remove(bob.id, s1.id);
+      await schedulesDb.remove(bob.id, s2.id);
+    });
+
+    test('reenableOne only resumes rows the flag marks, and a user pause survives the cycle', async () => {
+      const s1 = await schedulesDb.create(bob.id, { name: 'C', frequency: 'daily', hour: 9, minute: 0 });
+      await schedulesDb.setProjects(bob.id, s1.id, [{ uuid: '22222222-2222-4222-8222-222222222203', name: 'p3', version: '1' }]);
+      await schedulesDb.arm(bob.id, s1.id, new Date(Date.now() + 60000));
+      await schedulesDb.disableAllEnabledForSmtp();
+
+      const disabled = await schedulesDb.listDisabledBySmtp();
+      assert.ok(disabled.some(r => r.id === s1.id));
+
+      await schedulesDb.reenableOne(s1.id, new Date(Date.now() + 120000));
+      const after = await schedulesDb.get(bob.id, s1.id);
+      assert.equal(after.enabled, true);
+      assert.equal(after.disabledBySmtp, false);
+
+      // The user's own explicit disable, taken AFTER an SMTP-caused pause,
+      // must clear the flag so a later resume cannot silently re-arm it.
+      await schedulesDb.disableAllEnabledForSmtp();
+      await schedulesDb.disable(bob.id, s1.id);
+      const ownPause = await schedulesDb.get(bob.id, s1.id);
+      assert.equal(ownPause.disabledBySmtp, false);
+      const stillListed = await schedulesDb.listDisabledBySmtp();
+      assert.ok(!stillListed.some(r => r.id === s1.id),
+        'a schedule the user disabled themselves must not be resumed by the next SMTP recovery');
+
+      await schedulesDb.remove(bob.id, s1.id);
+    });
+
+    test('no data is deleted by the pause/resume cycle — only enabled and the flag move', async () => {
+      const s1 = await schedulesDb.create(bob.id, { name: 'D', frequency: 'daily', hour: 9, minute: 0 });
+      await schedulesDb.setProjects(bob.id, s1.id, [{ uuid: '22222222-2222-4222-8222-222222222204', name: 'p4', version: '1' }]);
+      await schedulesDb.arm(bob.id, s1.id, new Date(Date.now() + 60000));
+      await schedulesDb.disableAllEnabledForSmtp();
+      await schedulesDb.reenableOne(s1.id, new Date(Date.now() + 60000));
+      const row = await schedulesDb.get(bob.id, s1.id);
+      assert.equal(row.name, 'D');
+      assert.equal(row.projectCount, 1);
+      await schedulesDb.remove(bob.id, s1.id);
+    });
   });
 
   // ── reports + chunked bytes ────────────────────────────────────────────
@@ -2382,7 +2546,6 @@ describe('administration user detail', { skip: !ENABLED && 'TEST_DATABASE_URL no
     reportsDb     = require('./lib/reports-db');
     const key = dtCrypto.parseEncryptionKey(process.env.SECRET_ENCRYPTION_KEY);
     dtConnections.configure(key);
-    mailSettings.configure(key);
 
     await pool.query("DELETE FROM users WHERE login_id = 'zz_erin'");
     erin = await users.create({
@@ -2415,10 +2578,10 @@ describe('administration user detail', { skip: !ENABLED && 'TEST_DATABASE_URL no
 
   test('configuration is reflected without disclosing any secret', async () => {
     await dtConnections.save(erin.id, { apiUrl: 'https://dt.example.com', apiKey: 'erin_secret_key' });
+    // No SMTP fields here any more (Q52) — the connection is the
+    // administrator's, not this account's.
     await mailSettings.save(erin.id, {
-      enabled: true,
-      smtp: { host: 'smtp.example.com', port: 587, user: 'erin', pass: 'erin_smtp_pw' },
-      from: 'erin@example.com', to: 'a@x.com, b@x.com',
+      enabled: true, from: 'erin@example.com', to: 'a@x.com, b@x.com',
     });
     await schedulesDb.create(erin.id, { enabled: true, frequency: 'weekly', hour: 7 });
     await schedulesDb.create(erin.id, { enabled: false, frequency: 'daily', hour: 7 });
@@ -2429,16 +2592,14 @@ describe('administration user detail', { skip: !ENABLED && 'TEST_DATABASE_URL no
     assert.equal(d.dtHasApiKey, true, 'presence is reported');
     assert.equal(d.mailEnabled, true);
     assert.equal(d.mailRecipients, 2, 'the recipient count, not the addresses');
-    assert.equal(d.mailHasPassword, true);
     assert.equal(d.scheduleCount, 2);
     assert.equal(d.schedulesActive, 1);
     assert.equal(d.maxSchedules, 5, 'the seeded default is visible');
     assert.equal(d.maxSchedulesOverridden, false);
 
-    // Neither secret may appear anywhere in the projection.
+    // The API key may not appear anywhere in the projection.
     const serialised = JSON.stringify(d);
     assert.doesNotMatch(serialised, /erin_secret_key/);
-    assert.doesNotMatch(serialised, /erin_smtp_pw/);
     assert.doesNotMatch(serialised, /scrypt\$/);
   });
 

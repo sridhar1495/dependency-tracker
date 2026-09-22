@@ -220,7 +220,7 @@ Inline comments use lettered prefixes to trace design decisions:
 - **O-numbers** — observability notes (`// O3: JSON log format for log aggregators`)
 - **S-numbers** — security rationale (`// S2: token hashed before storage`) — **new in revision 2**
 
-Highest numbers currently in use: **Q51, P20, O5, S35**. When adding logic with a
+Highest numbers currently in use: **Q52, P20, O5, S35**. When adding logic with a
 non-obvious trade-off, add the next number in the appropriate series. Check the
 current maximum before assigning — parallel branches can claim the same number.
 
@@ -299,14 +299,15 @@ await tx(async (client) => {
 | `dt_connections` | Per-user DT URL and encrypted API key |
 | `app_settings` | Service-wide settings the administrator owns (singleton row) |
 | `user_settings` | Per-user report and schedule limits — `NULL` means "follow the global default" |
-| `mail_settings` | Per-user SMTP connection **and default recipients** |
-| `schedules`, `schedule_projects`, `schedule_runs` | Scheduled reports, **any number per user** (migration 009). `report_name` `NULL` means "generate one"; `name` is the label in the settings list and a different field. `schedule_runs.schedule_id` is `ON DELETE SET NULL` so cancelling never erases the record that it ran. `to_addrs`/`cc_addrs`/`subject`/`body` are delivery overrides — `NULL` means "use the account's" (migrations 010, 011). An empty `cc_addrs` means "copy nobody"; an empty `to_addrs` is refused. `selection_mode` (migration 015) says how the `schedule_projects` rows are READ: `fixed` = the projects themselves (the default, so nothing existing changed), `latest_under` = **anchors** to descend from, `latest_all` = ignored entirely, which is why an empty project list stopped meaning "not configured yet". `schedule_runs.resolved_project_count`/`resolved_projects` record what each run actually covered, because under a rule that set moves on its own |
+| `mail_settings` | Per-user mail preferences only — enabled flag, From, default recipients, subject, body. The SMTP connection itself moved to `default_mail_settings` (Q52); `smtp_*` columns (migration 002) still exist, unread, since dropping them is a destructive migration this change did not need to make |
+| `schedules`, `schedule_projects`, `schedule_runs` | Scheduled reports, **any number per user** (migration 009). `report_name` `NULL` means "generate one"; `name` is the label in the settings list and a different field. `schedule_runs.schedule_id` is `ON DELETE SET NULL` so cancelling never erases the record that it ran. `to_addrs`/`cc_addrs`/`subject`/`body` are delivery overrides — `NULL` means "use the account's" (migrations 010, 011). An empty `cc_addrs` means "copy nobody"; an empty `to_addrs` is refused. `selection_mode` (migration 015) says how the `schedule_projects` rows are READ: `fixed` = the projects themselves (the default, so nothing existing changed), `latest_under` = **anchors** to descend from, `latest_all` = ignored entirely, which is why an empty project list stopped meaning "not configured yet". `schedule_runs.resolved_project_count`/`resolved_projects` record what each run actually covered, because under a rule that set moves on its own. `disabled_by_smtp` (migration 019) marks a pause caused by the installation's mail server becoming unavailable, never the user's own Cancel — the flag is what lets re-enabling the server resume only the schedules it paused (§6.9, Q52) |
 | `reports`, `report_file_chunks` | Report metadata and file bytes |
 | `violation_caches` | Shared violation cache, keyed by connection fingerprint |
 | `risk_snapshots` | One row per connection per day, written when a violation-cache build completes; the history behind the trend view (migration 012). Keyed by fingerprint for the same reason the cache is, so accounts sharing a connection share one series. Stores the severity counts and the policy counts **separately** — "critical" means two different things in this product and a schema that accretes history must not decide which one a graph plots. **No foreign key to `violation_caches`**: a cache row is a 24-hour artefact that housekeeping deletes as a matter of routine, and a cascade would let that destroy a year of measurements |
 | `dependency_paths` | One row per connection per project, the cached result of walking that project's DependencyTrack dependency graph (migration 013) — see §6.3a. Keyed by `(fingerprint, project_uuid)` for the same sharing reason as every other cache here. Holds only the expensive, opt-in half (the graph walk); the cheap Direct/Transitive classification is never stored — see §6.3a for why. `paths` entries carry `chains`, a parallel `routeCounts`, and `rootsTotal` **only when the display cap is hiding parents** (Q33). `routes_exact` (migration 014) says whether those counts are answers or floors, and is a column because it describes the whole walk — migration 013's own comment still documents the original one-chain shape, since a merged migration is never edited (§5.3) |
 | `branding_assets` | The administrator's sign-in background and application icon (migration 016). Bytes live here, **not** on `app_settings`, because the administration listing cross-joins that table |
 | `app_themes` | The administrator's colour theme (migration 017), singleton. Holds the validated **document** and the **stylesheet it renders to**: the document is what the screen shows back and what the download button serves, the CSS is what the public route serves on every page load. Rendering per request would put a template render on the hottest path in the product; rendering at boot would let a change to the generator apply itself to a theme nobody re-reviewed |
+| `default_mail_settings` | The administrator's installation-wide SMTP server (migration 018), singleton — the *only* SMTP connection in the schema since Q52. Every account's `mail_settings` row now holds preferences, not a connection: this table is what actually sends. Encrypted the same way `mail_settings.smtp_pass_*` was |
 | `schema_migrations` | Migration ledger |
 
 ### 5.6 What remains on disk
@@ -918,14 +919,15 @@ if (method === 'GET' && path === '/violation-cache/status') {
   `user_settings.max_schedules` override, resolved in `userSettings.get()` and
   nowhere else, enforced on create with 429 `QUOTA_REACHED`. Being over it
   blocks; it never deletes a schedule.
-- **Only the addressing and the covering note are per schedule.**
-  `mail_settings` keeps the SMTP host, port, TLS, credentials and From address,
-  because they describe one mail server the account authenticates to —
-  duplicating them per schedule would mean re-entering a password to change a
-  recipient. `schedules.to_addrs`, `cc_addrs`, `subject` and `body` override the
-  account defaults, merged in `scheduler.applyScheduleRecipients()` and nowhere
-  else. `NULL` means "inherit". The body is `mailBody` on the wire, because the
-  route handler's own variable for the request payload is already `body`.
+- **Only the addressing and the covering note are per schedule, and the SMTP
+  connection is not even per account any more** (Q52). `mail_settings` keeps
+  only an account's own From address and its default recipients, subject and
+  body; the host, port, TLS and credentials are the administrator's single
+  installation-wide server (`default_mail_settings`). `schedules.to_addrs`,
+  `cc_addrs`, `subject` and `body` override the account defaults, merged in
+  `scheduler.applyScheduleRecipients()` and nowhere else. `NULL` means
+  "inherit". The body is `mailBody` on the wire, because the route handler's
+  own variable for the request payload is already `body`.
 - **`to_addrs` and `cc_addrs` are deliberately not symmetric.** An empty
   `to_addrs` would mean "send to nobody", which is a silent outage rather than a
   configuration, so the database refuses it — with `cardinality()`, not
@@ -1018,11 +1020,70 @@ if (method === 'GET' && path === '/violation-cache/status') {
 
 ### 6.9 Email (`nodemailer`)
 
-- `sendEmail(mailCfg, attachment, overrides)` builds a transporter from the user's
-  decrypted SMTP settings.
-- The SMTP password placeholder `'••••••••'` sent by the frontend must be detected
-  and discarded so the stored password is not overwritten.
+- `sendEmail(mailCfg, attachment, overrides)` builds a transporter from the
+  installation's decrypted SMTP settings, resolved in for every account.
 - Never return a password in any HTTP response.
+
+**Q52: the SMTP connection is administrator-owned, entirely — not a
+fallback, the only connection.** `lib/default-mail-settings.js` (migration
+018, singleton `default_mail_settings`) holds the host, port, TLS and
+credentials; `lib/mail-settings.js` (`mail_settings`) holds only what is
+genuinely per account: whether this account wants email at all, its own
+From address, its recipients, subject and body. No account has ever
+authenticated to its own mail server since this shipped — asking each new
+user to find and enter one was friction with no isolation benefit, since a
+report's identity was always the account's From/To, never its transport.
+
+- **`mailSettings.getResolved(userId)` returns `null` for two different
+  reasons a caller must treat identically**: the account has not turned
+  email on, or the administrator's server is not configured/enabled right
+  now. Both mean "cannot send", so every send path — the scheduler, the
+  per-user test-email route, the schedule `arm` guard — checks this one
+  function rather than `enabled` alone.
+- **`getForClient(userId)` returns `smtpAvailable`, never SMTP fields.**
+  There is no host/port/TLS/credential shape left to send to the browser at
+  all — Settings has nothing to populate there. `smtpAvailable` is what lets
+  the panel show "waiting on your administrator" instead of controls that
+  quietly do nothing, independent of whether the account itself has email on.
+- **A decryption failure degrades to unavailable, never a request.** Same
+  reasoning as an account's own unreadable secret (§7.7):
+  `defaultMailSettings.getResolved()` catches the error and returns `null`
+  rather than throwing, so a key rotation that breaks the installation
+  connection costs every account a visible "not available", not a 500.
+- **`disabled_by_smtp` (migration 019) is what lets an outage be undone
+  without asking the user anything.** Disabling requirement #1 is
+  non-negotiable: nothing about a schedule's stored definition — its
+  projects, recipients, subject, body — is ever touched by an availability
+  change, only `enabled` and this one flag. `schedulesDb.disableAllEnabledForSmtp()`
+  pauses every currently-`enabled` schedule and sets the flag; an
+  already-disabled schedule (the user's own pause) is untouched, because the
+  `UPDATE` is scoped to `WHERE enabled = true`. `schedulesDb.reenableOne()`
+  only re-arms a row where `disabled_by_smtp = true`, so a schedule the user
+  paused themselves is never silently resumed by an admin action — and
+  `arm()`/`disable()` (the user's own explicit actions) always clear the
+  flag on their own row, which is what hands ownership of that pause back to
+  the user the moment they touch it themselves.
+- **`routes/admin.js`'s `syncScheduleOrchestration(wasAvailable, isNowAvailable)`
+  is the one place this runs**, called from both `PUT /admin/mail` and
+  `DELETE /admin/mail` after the write, comparing `isAvailable()` before and
+  after. Unchanged availability (most saves — editing the From address,
+  say) does nothing; available→unavailable pauses; unavailable→available
+  resumes only what this mechanism paused. Nothing here is a poller: the
+  transition is edge-triggered, on the admin's own write.
+- **`POST /admin/mail/test-email` and the per-user
+  `POST /violation-cache/config/test-email` both resolve the same
+  connection** — the admin route reads it via `defaultMailSettings.getResolved()`
+  directly (From = the installation's own), the user route via
+  `mailSettings.getResolved(userId)` (From = the account's own, falling back
+  to the installation's) — so neither can report success on a connection the
+  other would refuse.
+- **`mailSettings.countEnabled()`** — accounts with email turned on, which
+  after this change is every account this server actually touches — is what
+  the administration screen shows as "accounts this affects", the same
+  reasoning `appSettings.accountsOverDefault()` gives the report ceiling
+  (§7.6). Clearing the connection **never deletes anything**: it pauses the
+  schedules requirement #1 protects and nothing else, the identical
+  "refuses/pauses, never deletes" rule §7.5 applies to every other quota.
 
 ---
 
@@ -1137,7 +1198,7 @@ is a correctness bug, not a style issue.
 ### 7.6 Administration writes
 
 Administration was read-only by design. It is not any more, and what it may do is
-a **closed list of three**, not a general-purpose account editor:
+a **closed list of fourteen**, not a general-purpose account editor:
 
 | Route | Effect |
 |---|---|
@@ -1152,25 +1213,31 @@ a **closed list of three**, not a general-purpose account editor:
 | `PUT /admin/trend` | Show or hide the risk-trend panel for every user (Q48) |
 | `PUT /admin/theme` | Upload a colour theme; partial files are the normal case (Q49) |
 | `DELETE /admin/theme` | Restore the built-in colours |
+| `PUT /admin/mail` | Set the installation's SMTP server — pauses/resumes schedules on an availability change (Q52) |
+| `DELETE /admin/mail` | Clear it — no account can send until one is set again |
+| `POST /admin/mail/test-email` | Send a test using the saved connection, to an address the administrator types |
 
 Everything else about an account stays readable only. A test asserts exactly
-these **eleven** are handled and every other method/path combination is not — a
-blanket ban that had to be deleted would have stopped protecting anything, so
-the allow-list is the contract and adding a tenth means editing it in a
-diff somebody reads.
+these **fourteen** are handled and every other method/path combination is not
+— a blanket ban that had to be deleted would have stopped protecting
+anything, so the allow-list is the contract and adding a fifteenth means
+editing it in a diff somebody reads.
 
 The schedule limit rides on the two settings routes that already existed rather
 than adding a seventh — it is the same kind of decision about the same rows,
 made by the same principal. That is what the allow-list is for: a new capability
 has to justify a new entry, and this one did not need one.
 
-The list went from three to six when customisation landed, then to nine, then
-to eleven: the icon pair (Q47) mirrors the background pair exactly, the trend
-switch (Q48) hides a panel, and the theme pair (Q49) changes colours. Every
-one of the eight additions was weighed on the same bar rather than waved
-through — they change how the product *looks* or what it *shows*, never what
-an account is or what it may reach, and none of them reads another
-principal's data. That is the bar a twelfth has to clear too.
+The list went from three to six when customisation landed, then to nine, to
+eleven, to thirteen, then to fourteen: the icon pair (Q47) mirrors the
+background pair exactly, the trend switch (Q48) hides a panel, the theme pair
+(Q49) changes colours, and the mail trio (Q52) is the installation's one SMTP
+connection — no account has a server of its own any more, so every one of
+them depends on this. Every one of the eleven additions was weighed on the
+same bar rather than waved through — they change how the product *looks*,
+what it *shows*, or a shared *connection*, never what an account is or what
+it may reach, and none of them reads another principal's data. That is the
+bar a fifteenth has to clear too.
 
 **`GET /admin/theme` is deliberately not on the list**, and neither is any
 other read. The allow-list is about writes; adding reads to it would dilute
@@ -2582,6 +2649,34 @@ Running the browser checks in CI was on this list and is now the `e2e` job.
   clears back to it, an empty `to_addrs` is refused by the database, and the
   merge is checked against a real SMTP conversation so the assertion is about
   which addresses reach `RCPT TO` rather than which object was built.
+- The installation SMTP server (Q52): an out-of-range port is rejected before
+  any query; the password placeholder round-trips; an enabled account
+  resolves to the installation's connection whenever one is configured,
+  regardless of anything it once had of its own — there is no per-account
+  host any more; a disabled account never resolves even with a connection
+  configured (no surprise emails); a disabled or cleared connection degrades
+  `getResolved()` to `null` rather than throwing; an account's own From
+  address wins over the installation's; and `countEnabled()` counts every
+  account with email on, changing by exactly one when a single account's
+  toggle flips. The client-facing shape is pinned separately: `getForClient()`
+  returns `smtpAvailable` and no SMTP fields at all, so there is nothing left
+  for a bare Save to freeze into an account's row. `mail.sendEmail`/
+  `describeSmtpError` are asserted to be what both `POST /admin/mail/test-email`
+  and the per-user test-email route call, so "what a scheduled report sends
+  with" and "what either Send Test Email verifies" cannot drift apart.
+  **The disable/re-enable orchestration** (`disableAllEnabledForSmtp`,
+  `listDisabledBySmtp`, `reenableOne`, `disabled_by_smtp`): only
+  currently-`enabled` schedules are paused, an already-disabled one is
+  untouched; only schedules the flag marks are resumed, a user's own
+  explicit pause survives an admin disable/re-enable cycle unchanged; no row
+  is ever deleted by the cycle; and `arm()`/`disable()` clear the flag on
+  the row they touch, so acting on a schedule takes ownership of its pause
+  away from the mechanism. The end-to-end tier proves the whole path joined
+  up: an account with mail enabled gets a real message through the SMTP stub
+  once an administrator configures the connection, an enabled schedule
+  pauses the moment the administrator clears it and resumes the moment it is
+  reconfigured, and a schedule the user paused themselves stays paused
+  through both transitions.
 - Risk snapshots: the fold sums the same projects for both halves and never
   yields `NaN` from a missing upstream metric; a day nobody refreshed comes back
   `captured: false` rather than as the previous day carried forward; the upsert
@@ -3116,7 +3211,9 @@ aspirations, and each is verifiable.
 Neither the report limit nor the schedule limit is an environment variable. It is service configuration
 the administrator owns at runtime, held in `app_settings` and edited from the
 administration screen — an operator should not have to restart a container to
-change a quota.
+change a quota. The installation-wide default SMTP server (Q52) follows the
+same rule: it lives in `default_mail_settings`, set from the administration
+screen, never from `.env`.
 
 `DT_API_INTERNAL_URL`, `DT_API_KEY` and `DT_FRONTEND_URL` are **no longer read at
 request time**. They survive in `.env` only so an installation upgrading from the

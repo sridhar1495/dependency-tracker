@@ -364,10 +364,11 @@ async function detailForAdmin(loginId) {
             (st.max_schedules IS NOT NULL) AS "maxSchedulesOverridden",
             aps.default_max_schedules::int AS "defaultMaxSchedules",
 
-            m.enabled AS "mailEnabled", m.smtp_host AS "mailHost",
-            m.smtp_port AS "mailPort", m.from_addr AS "mailFrom",
+            -- Q52: the SMTP connection is the administrator's, not this
+            -- account's — there is no per-account host/port/password left to
+            -- show here.
+            m.enabled AS "mailEnabled", m.from_addr AS "mailFrom",
             COALESCE(array_length(m.to_addrs, 1), 0) AS "mailRecipients",
-            (m.smtp_pass_ciphertext IS NOT NULL) AS "mailHasPassword",
 
             COALESCE(sc.total, 0)::int  AS "scheduleCount",
             COALESCE(sc.active, 0)::int AS "schedulesActive",

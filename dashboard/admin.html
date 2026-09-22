@@ -628,6 +628,76 @@
           </div>
         </section>
 
+        <section class="acc" id="accMail">
+          <button class="acc-head" onclick="toggleAccordion('accMail')" aria-expanded="false" aria-controls="accMailBody">
+            <span class="acc-caret">›</span>
+            <h2>Default Email Server</h2>
+            <span class="acc-count" id="mailBadge">—</span>
+          </button>
+          <div class="acc-body" id="accMailBody">
+            <div class="note">
+              The one SMTP server this installation sends every report through.
+              Accounts no longer configure a server of their own — each still
+              turns email on for itself and sets its own From, recipients,
+              subject and body, but the connection below is what actually
+              sends it. Turning this off or clearing it pauses every account's
+              enabled schedules until it is configured again; turning it back
+              on resumes exactly the ones it paused.
+            </div>
+            <div class="branding-toggle-row">
+              <label class="cfg-toggle" title="Turn the installation default on or off">
+                <input type="checkbox" id="mailEnabled">
+                <span class="cfg-toggle-slider"></span>
+              </label>
+              <div class="branding-state" id="mailState">Not configured</div>
+            </div>
+            <div class="field" style="margin-top:12px">
+              <label class="label" for="mailHost">SMTP host</label>
+              <input class="input" id="mailHost" type="text">
+            </div>
+            <div class="field">
+              <label class="label" for="mailPort">Port</label>
+              <input class="input" id="mailPort" type="number" min="1" max="65535" step="1"
+                     value="587" style="width:120px">
+            </div>
+            <div class="branding-toggle-row">
+              <label class="cfg-toggle" title="Use a TLS connection">
+                <input type="checkbox" id="mailSecure">
+                <span class="cfg-toggle-slider"></span>
+              </label>
+              <div class="branding-state">TLS</div>
+            </div>
+            <div class="field">
+              <label class="label" for="mailUser">SMTP username</label>
+              <input class="input" id="mailUser" type="text" autocomplete="off">
+            </div>
+            <div class="field">
+              <label class="label" for="mailPass">SMTP password</label>
+              <input class="input" id="mailPass" type="password" autocomplete="new-password"
+                     placeholder="Leave blank to keep the stored password">
+            </div>
+            <div class="field">
+              <label class="label" for="mailFrom">From address</label>
+              <input class="input" id="mailFrom" type="text">
+            </div>
+            <div class="err" id="mailErr"></div>
+            <div class="branding-actions">
+              <button class="btn primary" id="mailSave" onclick="saveDefaultMail()">Save</button>
+              <button class="btn danger" id="mailRemove" onclick="removeDefaultMail()" hidden>
+                Clear
+              </button>
+            </div>
+            <div class="field" style="margin-top:16px;border-top:1px solid var(--border);padding-top:12px">
+              <label class="label" for="mailTestTo">Send a test email to</label>
+              <input class="input" id="mailTestTo" type="text" placeholder="you@company.com">
+            </div>
+            <div class="err" id="mailTestErr"></div>
+            <div class="branding-actions">
+              <button class="btn" id="mailTestSend" onclick="sendAdminTestEmail()">Send Test Email</button>
+            </div>
+          </div>
+        </section>
+
         <section class="acc" id="accStorage">
           <button class="acc-head" onclick="toggleAccordion('accStorage')" aria-expanded="false" aria-controls="accStorageBody">
             <span class="acc-caret">›</span>
@@ -1108,10 +1178,8 @@
       <div class="card">
         <h3>Email</h3>
         ${kv('Enabled', yes(d.mail.enabled))}
-        ${kv('SMTP host', txt(d.mail.host))}
         ${kv('From', txt(d.mail.from))}
         ${kv('Recipients', txt(d.mail.recipients))}
-        ${kv('Password stored', yes(d.mail.hasPassword))}
       </div>
 
       <div class="card">
@@ -1715,6 +1783,131 @@
     }
   }
 
+  // ── The installation-wide default SMTP server ────────────────────────────
+  function renderDefaultMail(mail, accountsReliant) {
+    const badge = accountsReliant
+      ? `${accountsReliant} account${accountsReliant === 1 ? '' : 's'} using it`
+      : (mail && mail.enabled ? 'configured' : '—');
+    $('mailBadge').textContent = badge;
+
+    $('mailEnabled').checked = Boolean(mail && mail.enabled);
+    $('mailHost').value = (mail && mail.smtp.host) || '';
+    $('mailPort').value = (mail && mail.smtp.port) || 587;
+    $('mailSecure').checked = Boolean(mail && mail.smtp.secure);
+    $('mailUser').value = (mail && mail.smtp.user) || '';
+    // The placeholder dots mean "a password is stored"; never retyping it on
+    // save is what keeps it that way (CLAUDE.md §6.9's convention, applied here).
+    $('mailPass').value = (mail && mail.smtp.pass) || '';
+    $('mailFrom').value = (mail && mail.from) || '';
+
+    $('mailState').textContent = mail && mail.enabled
+      ? `Enabled — ${accountsReliant || 0} account${accountsReliant === 1 ? '' : 's'} currently rely on it`
+      : 'Not configured — every account needs its own SMTP server';
+    $('mailRemove').hidden = !mail;
+  }
+
+  async function loadDefaultMail() {
+    try {
+      const r = await apiFetch('/admin/mail');
+      if (!r.ok) return;
+      const bd = await r.json();
+      renderDefaultMail(bd.mail, bd.accountsReliant);
+    } catch (_) {
+      // Same degradation as loadTheme(): the rest of the screen still works,
+      // and the form simply keeps showing whatever it last rendered.
+    }
+  }
+
+  async function saveDefaultMail() {
+    $('mailErr').textContent = '';
+    const port = parseInt($('mailPort').value, 10);
+    if (!Number.isInteger(port) || port < 1 || port > 65535) {
+      $('mailErr').textContent = 'Port must be a whole number between 1 and 65535.';
+      return;
+    }
+    const btn = $('mailSave');
+    btn.disabled = true;
+    try {
+      const r = await apiFetch('/admin/mail', {
+        method:  'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          enabled: $('mailEnabled').checked,
+          smtp: {
+            host: $('mailHost').value.trim(),
+            port,
+            secure: $('mailSecure').checked,
+            user: $('mailUser').value.trim(),
+            pass: $('mailPass').value,
+          },
+          from: $('mailFrom').value.trim(),
+        }),
+      });
+      const bd = await r.json().catch(() => ({}));
+      if (!r.ok) {
+        $('mailErr').textContent = bd.error || 'Could not save the default mail settings.';
+        return;
+      }
+      renderDefaultMail(bd.mail, bd.accountsReliant);
+      // schedulesPaused/schedulesResumed (§6.9) say whether this save flipped
+      // availability — a save that leaves it unchanged reports both 0.
+      const orchestration = bd.schedulesResumed
+        ? ` ${bd.schedulesResumed} paused schedule${bd.schedulesResumed === 1 ? '' : 's'} resumed.`
+        : (bd.schedulesPaused ? ` ${bd.schedulesPaused} schedule${bd.schedulesPaused === 1 ? '' : 's'} paused.` : '');
+      showToast(`Default mail settings saved.${orchestration}`, 'success');
+    } catch (e) {
+      $('mailErr').textContent = `Could not save the default mail settings: ${e.message}`;
+    } finally {
+      btn.disabled = false;
+    }
+  }
+
+  async function removeDefaultMail() {
+    $('mailErr').textContent = '';
+    // No confirmation, matching removeTheme/removeBackground/removeIcon beside
+    // it: the state line already says how many accounts rely on it, and
+    // re-entering the server is the whole undo.
+    try {
+      const r = await apiFetch('/admin/mail', { method: 'DELETE' });
+      const bd = await r.json().catch(() => ({}));
+      if (!r.ok) {
+        $('mailErr').textContent = bd.error || 'Could not clear the default mail settings.';
+        return;
+      }
+      renderDefaultMail(null, 0);
+      const paused = bd.schedulesPaused
+        ? ` ${bd.schedulesPaused} enabled schedule${bd.schedulesPaused === 1 ? '' : 's'} paused.` : '';
+      showToast(`Default mail settings cleared.${paused}`, 'success');
+    } catch (e) {
+      $('mailErr').textContent = `Could not clear the default mail settings: ${e.message}`;
+    }
+  }
+
+  async function sendAdminTestEmail() {
+    $('mailTestErr').textContent = '';
+    const to = $('mailTestTo').value.trim();
+    if (!to) { $('mailTestErr').textContent = 'Enter a recipient address.'; return; }
+    const btn = $('mailTestSend');
+    btn.disabled = true;
+    try {
+      const r = await apiFetch('/admin/mail/test-email', {
+        method:  'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body:    JSON.stringify({ to }),
+      });
+      const bd = await r.json().catch(() => ({}));
+      if (!r.ok) {
+        $('mailTestErr').textContent = bd.error || 'Could not send the test email.';
+        return;
+      }
+      showToast('Test email sent.', 'success');
+    } catch (e) {
+      $('mailTestErr').textContent = `Could not send the test email: ${e.message}`;
+    } finally {
+      btn.disabled = false;
+    }
+  }
+
   // ── The risk-trend panel (Q48) ─────────────────────────────────────────
   function renderTrendState(enabled) {
     $('trendEnabled').checked = enabled;
@@ -1816,7 +2009,7 @@
   }
 
   async function reloadAll() {
-    await Promise.all([loadUsers(), loadSettings(), loadBranding(), loadTheme()]);
+    await Promise.all([loadUsers(), loadSettings(), loadBranding(), loadTheme(), loadDefaultMail()]);
     if ($('accStorage').classList.contains('open')) await loadStorage();
   }
 
@@ -1886,6 +2079,9 @@
   window.removeTheme           = removeTheme;
   window.downloadTheme         = downloadTheme;
   window.downloadThemeTemplate = downloadThemeTemplate;
+  window.saveDefaultMail       = saveDefaultMail;
+  window.removeDefaultMail     = removeDefaultMail;
+  window.sendAdminTestEmail    = sendAdminTestEmail;
   window.removeBackground      = removeBackground;
 
   boot();

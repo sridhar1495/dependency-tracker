@@ -83,7 +83,7 @@ const auth          = require('./lib/auth');
 const admin         = require('./lib/admin');
 const dtConnections = require('./lib/dt-connections');
 const disk          = require('./lib/disk');
-const mailSettings  = require('./lib/mail-settings');
+const defaultMailSettings = require('./lib/default-mail-settings');
 
 const routeModules = [
   require('./routes/auth'),
@@ -307,11 +307,13 @@ async function boot() {
   auth.configure(cfg);
   admin.load(cfg.paths.adminCreds);
 
-  // S23: the encryption key is parsed once and handed to the two modules that
-  // store secrets. Nothing else in the process holds it.
+  // S23: the encryption key is parsed once and handed to the modules that
+  // store secrets. Nothing else in the process holds it. mail-settings.js no
+  // longer holds one itself — the SMTP password it used to encrypt per
+  // account is administrator-owned now (default-mail-settings.js).
   const encryptionKey = cryptoLib.parseEncryptionKey(cfg.secretEncryptionKey);
   dtConnections.configure(encryptionKey);
-  mailSettings.configure(encryptionKey);
+  defaultMailSettings.configure(encryptionKey);
 
   // Step 4b: one-shot seed of existing accounts from a pre-multi-user .env, so
   // upgrading a working deployment does not silently drop everyone back to
