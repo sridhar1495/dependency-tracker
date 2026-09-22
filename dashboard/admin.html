@@ -636,11 +636,13 @@
           </button>
           <div class="acc-body" id="accMailBody">
             <div class="note">
-              One SMTP server every account with no server of its own can send
-              through. An account still has to turn email on for itself in its
-              own Settings — this only saves it from having to find and enter a
-              mail server too. An account that has already entered its own host
-              keeps using it; this never overrides it.
+              The one SMTP server this installation sends every report through.
+              Accounts no longer configure a server of their own — each still
+              turns email on for itself and sets its own From, recipients,
+              subject and body, but the connection below is what actually
+              sends it. Turning this off or clearing it pauses every account's
+              enabled schedules until it is configured again; turning it back
+              on resumes exactly the ones it paused.
             </div>
             <div class="branding-toggle-row">
               <label class="cfg-toggle" title="Turn the installation default on or off">
@@ -684,6 +686,14 @@
               <button class="btn danger" id="mailRemove" onclick="removeDefaultMail()" hidden>
                 Clear
               </button>
+            </div>
+            <div class="field" style="margin-top:16px;border-top:1px solid var(--border);padding-top:12px">
+              <label class="label" for="mailTestTo">Send a test email to</label>
+              <input class="input" id="mailTestTo" type="text" placeholder="you@company.com">
+            </div>
+            <div class="err" id="mailTestErr"></div>
+            <div class="branding-actions">
+              <button class="btn" id="mailTestSend" onclick="sendAdminTestEmail()">Send Test Email</button>
             </div>
           </div>
         </section>
@@ -1168,10 +1178,8 @@
       <div class="card">
         <h3>Email</h3>
         ${kv('Enabled', yes(d.mail.enabled))}
-        ${kv('SMTP host', txt(d.mail.host))}
         ${kv('From', txt(d.mail.from))}
         ${kv('Recipients', txt(d.mail.recipients))}
-        ${kv('Password stored', yes(d.mail.hasPassword))}
       </div>
 
       <div class="card">
@@ -1841,7 +1849,12 @@
         return;
       }
       renderDefaultMail(bd.mail, bd.accountsReliant);
-      showToast('Default mail settings saved.', 'success');
+      // schedulesPaused/schedulesResumed (§6.9) say whether this save flipped
+      // availability — a save that leaves it unchanged reports both 0.
+      const orchestration = bd.schedulesResumed
+        ? ` ${bd.schedulesResumed} paused schedule${bd.schedulesResumed === 1 ? '' : 's'} resumed.`
+        : (bd.schedulesPaused ? ` ${bd.schedulesPaused} schedule${bd.schedulesPaused === 1 ? '' : 's'} paused.` : '');
+      showToast(`Default mail settings saved.${orchestration}`, 'success');
     } catch (e) {
       $('mailErr').textContent = `Could not save the default mail settings: ${e.message}`;
     } finally {
@@ -1862,9 +1875,36 @@
         return;
       }
       renderDefaultMail(null, 0);
-      showToast('Default mail settings cleared.', 'success');
+      const paused = bd.schedulesPaused
+        ? ` ${bd.schedulesPaused} enabled schedule${bd.schedulesPaused === 1 ? '' : 's'} paused.` : '';
+      showToast(`Default mail settings cleared.${paused}`, 'success');
     } catch (e) {
       $('mailErr').textContent = `Could not clear the default mail settings: ${e.message}`;
+    }
+  }
+
+  async function sendAdminTestEmail() {
+    $('mailTestErr').textContent = '';
+    const to = $('mailTestTo').value.trim();
+    if (!to) { $('mailTestErr').textContent = 'Enter a recipient address.'; return; }
+    const btn = $('mailTestSend');
+    btn.disabled = true;
+    try {
+      const r = await apiFetch('/admin/mail/test-email', {
+        method:  'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body:    JSON.stringify({ to }),
+      });
+      const bd = await r.json().catch(() => ({}));
+      if (!r.ok) {
+        $('mailTestErr').textContent = bd.error || 'Could not send the test email.';
+        return;
+      }
+      showToast('Test email sent.', 'success');
+    } catch (e) {
+      $('mailTestErr').textContent = `Could not send the test email: ${e.message}`;
+    } finally {
+      btn.disabled = false;
     }
   }
 
@@ -2041,6 +2081,7 @@
   window.downloadThemeTemplate = downloadThemeTemplate;
   window.saveDefaultMail       = saveDefaultMail;
   window.removeDefaultMail     = removeDefaultMail;
+  window.sendAdminTestEmail    = sendAdminTestEmail;
   window.removeBackground      = removeBackground;
 
   boot();

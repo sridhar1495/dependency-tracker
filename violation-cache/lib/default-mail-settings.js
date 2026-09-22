@@ -2,17 +2,19 @@
 // Copyright (c) 2024 Dependency-Track Risk Dashboard contributors
 'use strict';
 
-// ── The installation-wide default SMTP server (migration 018) ────────────────
-// One administrator-owned mail server every account with no SMTP host of its
-// own can fall back to. lib/mail-settings.js is what actually resolves the
-// fallback for a given account; this module owns the row itself — reading,
-// saving and clearing it — the same split app-settings.js/user-settings.js
-// already draw between the installation's own configuration and a per-user one.
+// ── The installation's SMTP server (migration 018) ────────────────────────────
+// Mail configuration is administrator-owned, full stop: no account has a
+// server of its own any more (lib/mail-settings.js keeps only an account's
+// enabled flag, From address and recipients — see that module's banner for
+// why From stays per-account). This module owns the one shared connection —
+// reading, saving and clearing it — the same split app-settings.js/
+// user-settings.js already draw between the installation's own configuration
+// and a per-user one.
 //
-// The password is AES-256-GCM encrypted at rest, exactly like a user's own
-// (CLAUDE.md §7.7): a per-record nonce and auth tag stored alongside it, never
-// returned in any response, and the same '••••••••' placeholder convention so
-// re-saving the form without retyping the password leaves it untouched.
+// The password is AES-256-GCM encrypted at rest (CLAUDE.md §7.7): a
+// per-record nonce and auth tag stored alongside it, never returned in any
+// response, and the '••••••••' placeholder convention so re-saving the form
+// without retyping the password leaves it untouched.
 
 const { query } = require('../db/pool');
 const { log } = require('./log');
@@ -141,10 +143,26 @@ async function save(input) {
   return getForAdmin();
 }
 
-/** Remove the default. Every account falls back to needing its own SMTP server. */
+/** Remove the configured server. No account can send until one is set again. */
 async function clear() {
   await query('DELETE FROM default_mail_settings WHERE id = TRUE');
   log('info', 'Default mail settings cleared');
 }
 
-module.exports = { configure, getForAdmin, getResolved, save, clear, PASSWORD_PLACEHOLDER };
+/**
+ * Whether any account could possibly send right now — enabled, with a host.
+ *
+ * A cheap boolean, deliberately separate from getResolved(): a route guard
+ * (arm, run-now, test-email) or the outage orchestration only needs to know
+ * whether sending is possible at all, not the decrypted password, and asking
+ * for the password on every such check would mean decrypting it far more
+ * often than it is ever actually used.
+ */
+async function isAvailable() {
+  const { rows } = await query(
+    `SELECT (enabled AND smtp_host <> '') AS available FROM default_mail_settings WHERE id = TRUE`
+  );
+  return rows[0] ? rows[0].available : false;
+}
+
+module.exports = { configure, getForAdmin, getResolved, save, clear, isAvailable, PASSWORD_PLACEHOLDER };

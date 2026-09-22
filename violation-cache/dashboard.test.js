@@ -2592,19 +2592,20 @@ describe('admin.html schedule limit', () => {
     assert.equal((fn.match(/apiFetch\('\/admin\/settings'/g) || []).length, 1);
   });
 
-  test('the administration allow-list is still exactly thirteen method/path pairs', () => {
+  test('the administration allow-list is still exactly fourteen method/path pairs', () => {
     // CLAUDE.md §7.6 — the list is the contract, and it grows only in a diff
-    // somebody reads. Six to nine to eleven to thirteen: the icon pair mirrors
-    // the background pair, the trend switch hides a panel, the theme pair
-    // changes colours, and the mail pair sets an installation-wide connection
-    // every account may already reach on its own if it knows the server. Each
-    // changes how the product LOOKS, what it SHOWS, or a shared CONNECTION —
-    // never what an account is or what it may reach — the same bar the
-    // branding three cleared. The schedule limit, by contrast, rode on the
-    // settings routes that already existed rather than adding one.
+    // somebody reads. Six to nine to eleven to thirteen to fourteen: the icon
+    // pair mirrors the background pair, the trend switch hides a panel, the
+    // theme pair changes colours, and the mail trio (Q52) is the
+    // installation's one SMTP connection — no account has a server of its
+    // own any more. Each changes how the product LOOKS, what it SHOWS, or a
+    // shared CONNECTION — never what an account is or what it may reach —
+    // the same bar the branding three cleared. The schedule limit, by
+    // contrast, rode on the settings routes that already existed rather than
+    // adding one.
     const adminRoute = fs.readFileSync(path.join(__dirname, 'routes', 'admin.js'), 'utf8');
     const writes = [...adminRoute.matchAll(/method === '(PUT|POST|DELETE)'/g)].length;
-    assert.equal(writes, 13, `expected thirteen write handlers, found ${writes}`);
+    assert.equal(writes, 14, `expected fourteen write handlers, found ${writes}`);
   });
 });
 
@@ -2612,14 +2613,15 @@ describe('admin.html default email server section', () => {
   test('the fields, badge and actions all exist with unique ids', () => {
     for (const id of ['accMail', 'accMailBody', 'mailBadge', 'mailEnabled', 'mailState',
                       'mailHost', 'mailPort', 'mailSecure', 'mailUser', 'mailPass', 'mailFrom',
-                      'mailErr', 'mailSave', 'mailRemove']) {
+                      'mailErr', 'mailSave', 'mailRemove',
+                      'mailTestTo', 'mailTestErr', 'mailTestSend']) {
       const count = (ADMIN_HTML.match(new RegExp(`id="${id}"`, 'g')) || []).length;
       assert.equal(count, 1, `#${id} should appear exactly once`);
     }
   });
 
   test('every new handler is window-exported', () => {
-    for (const fn of ['saveDefaultMail', 'removeDefaultMail']) {
+    for (const fn of ['saveDefaultMail', 'removeDefaultMail', 'sendAdminTestEmail']) {
       assert.match(ADMIN_HTML, new RegExp(`window\\.${fn}\\s*=`), `${fn} must be exported`);
       assert.match(ADMIN_HTML, new RegExp(`onclick="${fn}\\(\\)"`), `${fn} must be wired up`);
     }
@@ -2812,38 +2814,14 @@ describe('migration 011', () => {
   });
 });
 
-// ── The pre-release fixes ────────────────────────────────────────────────────
-describe('SMTP password sentinel', () => {
-  test('the page keeps the sentinel the server sends', () => {
-    // Blanking it here is what broke Send Test Email: the field then read as
-    // "no password meant", and a correctly configured account was told its
-    // credentials were rejected.
-    const fn = extractFunction(INDEX_HTML, 'loadConfigFromServer');
-    assert.match(fn, /cfgSmtpPass'\)\.value\s*=\s*smtp\.pass/);
-    assert.doesNotMatch(fn, /cfgSmtpPass'\)\.value\s*=\s*''/);
-  });
-
-  test('both halves compare against one named constant', () => {
-    assert.match(INDEX_HTML, /const SMTP_PASS_PLACEHOLDER = '\u2022{8}'/);
-    const test_ = extractFunction(INDEX_HTML, 'testEmailFromPanel');
-    assert.match(test_, /passVal === SMTP_PASS_PLACEHOLDER/);
-    const save = extractFunction(INDEX_HTML, 'saveConfigPanel');
-    assert.match(save, /SMTP_PASS_PLACEHOLDER/);
-    // No comparison spells the literal out any more — that divergence is what
-    // let the two halves disagree.
-    assert.doesNotMatch(test_, /=== '\u2022{8}'/);
-    assert.doesNotMatch(save, /'\u2022{8}'/);
-  });
-
-  test('an empty field with a username still means "the stored one"', () => {
-    const fn = extractFunction(INDEX_HTML, 'testEmailFromPanel');
-    assert.match(fn, /passVal === '' && userVal !== ''/);
-  });
-
-  test('focus clears the sentinel so typing replaces it', () => {
-    // Without this a new password would be appended to the eight bullets.
-    assert.match(INDEX_HTML, /onfocus="clearSmtpPassPlaceholder\(\)"/);
-    assert.match(INDEX_HTML, /window\.clearSmtpPassPlaceholder = clearSmtpPassPlaceholder;/);
+// ── The pre-release fixes ───────────────────────────────────────────────────────────────────────────────────
+describe('index.html has no per-account SMTP fields left (Q52)', () => {
+  test('none of the removed field ids remain', () => {
+    for (const id of ['cfgSmtpHost', 'cfgSmtpPort', 'cfgSmtpSecure', 'cfgSmtpUser',
+                      'cfgSmtpPass', 'cfgMailDefaultNote']) {
+      assert.doesNotMatch(INDEX_HTML, new RegExp(`id="${id}"`), `${id} must be removed — SMTP is admin-only now`);
+    }
+    assert.doesNotMatch(INDEX_HTML, /SMTP_PASS_PLACEHOLDER|clearSmtpPassPlaceholder|usingDefault|defaultSmtp/);
   });
 });
 
@@ -2972,51 +2950,36 @@ describe('smaller pre-release fixes', () => {
 // ── The settings panel's chrome ──────────────────────────────────────────────
 // Four defects found in the deployed build, all of them in how the drill-down
 // shares the panel with the settings list.
-// ── The installation-wide default SMTP server, as index.html shows it ────────
-describe('index.html mail settings: the installation default (§6.9)', () => {
-  test('the form fields stay the account\'s own — populated straight from the response', () => {
-    // A bare Save must resubmit exactly what this account has stored, even
-    // when relying on the default — never the default's own values, which
-    // would freeze today's default into this account's row the moment
-    // somebody clicked Save for an unrelated reason (CLAUDE.md §6.9).
+// ── The installation's one SMTP server, as index.html shows it (Q52) ────
+describe('index.html mail settings: administrator-owned SMTP (Q52)', () => {
+  test('the account\'s own preferences load straight from the response', () => {
     const fn = extractFunction(INDEX_HTML, 'loadConfigFromServer');
-    assert.match(fn, /cfgSmtpHost'\)\.value\s*=\s*smtp\.host \|\| ''/);
     assert.match(fn, /cfgMailFrom'\)\.value\s*=\s*m\.from \|\| ''/);
+    assert.match(fn, /cfgMailUnavailNote/);
   });
 
-  test('the placeholder and note reflect usingDefault, and reset when it is false', () => {
+  test('the unavailable note is driven by smtpAvailable, not a per-account host', () => {
     const fn = extractFunction(INDEX_HTML, 'loadConfigFromServer');
-    assert.match(fn, /m\.usingDefault && m\.defaultSmtp/);
-    assert.match(fn, /cfgMailDefaultNote/);
-    assert.match(fn, /cfgSmtpHost'\)\.placeholder = m\.defaultSmtp\.host/);
-    // The else branch is what stops a stale placeholder from a previous
-    // account/session surviving into one that has no default available.
-    assert.match(fn, /note\.style\.display = 'none'/);
+    assert.match(fn, /cfgMailUnavailNote'\)\.style\.display = m\.smtpAvailable \? 'none' : ''/);
   });
 
-  test('the toolbar gate accepts the default as satisfying "has a host"', () => {
-    // scheduleReports() used to require cfg.mail.smtp.host directly, which
-    // would refuse to open the schedule editor for an account that can
-    // actually send mail fine, via the installation default.
+  test('the toolbar gate reads smtpAvailable', () => {
+    // scheduleReports() must not refuse to open the schedule editor over a
+    // field that no longer exists on the response.
     const fn = extractFunction(INDEX_HTML, 'scheduleReports');
-    assert.match(fn, /cfg\.mail\.smtp\.host \|\| cfg\.mail\.usingDefault/);
+    assert.match(fn, /cfg\.mail\.smtpAvailable/);
+    assert.doesNotMatch(fn, /cfg\.mail\.smtp\.host/);
   });
 
-  test('the schedule-section hint accounts for the default too', () => {
-    // updateSchedToggleState() reads live DOM values, which are genuinely
-    // blank while relying on the default — without this it would nag a
-    // correctly-configured account to "configure SMTP host… above".
+  test('the schedule-section hint reads smtpAvailable off _appConfig', () => {
     const fn = extractFunction(INDEX_HTML, 'updateSchedToggleState');
-    assert.match(fn, /usingDefault/);
-    assert.match(fn, /host \|\| usingDefault/);
+    assert.match(fn, /_appConfig\.mail\.smtpAvailable/);
   });
 
-  test('test-email falls back to the default connection when the on-screen host is blank', () => {
-    // Send Test Email always sends the live form's smtp block — routes/config.js
-    // is what must apply the fallback, or the button fails for an account the
-    // scheduler would happily send for.
-    const routeSrc = fs.readFileSync(path.join(__dirname, 'routes', 'config.js'), 'utf8');
-    assert.match(routeSrc, /applyDefaultFallback\(mailCfg\.smtp, mailCfg\.from\)/);
+  test('test-email sends only from/to/cc — no smtp block', () => {
+    const fn = extractFunction(INDEX_HTML, 'testEmailFromPanel');
+    assert.doesNotMatch(fn, /smtp:/);
+    assert.match(fn, /from: document\.getElementById\('cfgMailFrom'\)\.value\.trim\(\)/);
   });
 });
 
@@ -3179,6 +3142,14 @@ describe('index.html per-schedule delivery', () => {
     for (const own of ['cfgSchedTo', 'cfgSchedCc', 'cfgSchedSubject']) {
       assert.match(view, new RegExp(own));
     }
+  });
+});
+
+describe('index.html schedule list: disabled-by-SMTP state (Q52)', () => {
+  test('a schedule paused by the SMTP outage reads differently from a user pause', () => {
+    const fn = extractFunction(INDEX_HTML, 'renderScheduleList');
+    assert.match(fn, /sc\.disabledBySmtp/);
+    assert.match(fn, /Paused — waiting on mail server/);
   });
 });
 
@@ -3438,13 +3409,13 @@ describe('the documents describe the behaviour the code has', () => {
       'the README must say the installer does not ask for it');
   });
 
-  test('the administration allow-list is stated as thirteen everywhere it is stated', () => {
+  test('the administration allow-list is stated as fourteen everywhere it is stated', () => {
     const adminSrc = fs.readFileSync(path.join(__dirname, 'routes', 'admin.js'), 'utf8');
     const writes = [...adminSrc.matchAll(/method === '(PUT|POST|DELETE)'/g)].length;
-    assert.equal(writes, 13);
-    assert.match(README, /exactly thirteen things/);
+    assert.equal(writes, 14);
+    assert.match(README, /exactly fourteen things/);
     for (const stale of [/exactly three things/, /exactly six things/, /exactly nine things/,
-                         /exactly eleven things/]) {
+                         /exactly eleven things/, /exactly thirteen things/]) {
       assert.doesNotMatch(README, stale, 'the README states a count the routes no longer have');
     }
   });

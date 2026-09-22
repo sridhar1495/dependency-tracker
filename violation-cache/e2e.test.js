@@ -698,7 +698,7 @@ describe('e2e — schedules: the three CC states and the body override', { skip:
 
 // ══════════════════════════════════════════════════════════════════════════════
 describe('e2e — scheduled delivery, asserted at the SMTP envelope', { skip: SKIP }, () => {
-  let token, project;
+  let token, project, adminToken;
 
   /** Trigger a run and wait for it to reach a terminal state. */
   async function sendNowAndWait(id) {
@@ -716,18 +716,31 @@ describe('e2e — scheduled delivery, asserted at the SMTP envelope', { skip: SK
 
   before(async () => {
     if (!ENABLED) return;
+    adminToken = (await api.login(stack.admin.loginId, stack.admin.password,
+      { isAdmin: true, force: true })).json.token;
+    // The SMTP connection is the administrator's, entirely (Q52) — every
+    // account in this describe sends through this one server.
+    await api.saveAdminMail(adminToken, {
+      enabled: true,
+      smtp: { host: stack.smtp.host, port: stack.smtp.port, secure: false, user: 'u', pass: 'p' },
+      from: 'installation@example.com',
+    });
     token = await api.signUp(account('mailuser'));
     await api.saveConnection(token, { apiUrl: dt.url, apiKey: dt.apiKey });
     await api.saveMail(token, {
       enabled: true, from: 'dashboard@example.com',
       to: 'account-to@example.com', cc: 'account-cc@example.com',
       subject: 'Account subject', body: 'Account body',
-      smtp: { host: stack.smtp.host, port: stack.smtp.port, secure: false, user: 'u', pass: 'p' },
     });
     const roots = await (await fetch(`${dt.url}/api/v1/project?onlyRoot=true`,
       { headers: { 'X-Api-Key': dt.apiKey } })).json();
     project = { uuid: roots[0].uuid, name: roots[0].name, version: '' };
   }, { timeout: 60_000 });
+
+  after(async () => {
+    if (!ENABLED) return;
+    await api.del('/admin/mail', adminToken);
+  });
 
   test('a schedule that inherits reaches the account recipients', async () => {
     stack.smtp.reset();
@@ -802,7 +815,7 @@ describe('e2e — scheduled delivery, asserted at the SMTP envelope', { skip: SK
   }, { timeout: 180_000 });
 });
 
-describe('e2e — the installation default SMTP server (Q52)', { skip: SKIP }, () => {
+describe('e2e — the installation SMTP server and schedule pause/resume (Q52)', { skip: SKIP }, () => {
   let token, project, adminToken;
 
   async function sendNowAndWait(id) {
@@ -820,47 +833,45 @@ describe('e2e — the installation default SMTP server (Q52)', { skip: SKIP }, (
 
   before(async () => {
     if (!ENABLED) return;
+    adminToken = (await api.login(stack.admin.loginId, stack.admin.password,
+      { isAdmin: true, force: true })).json.token;
     token = await api.signUp(account('defaultmailuser'));
     await api.saveConnection(token, { apiUrl: dt.url, apiKey: dt.apiKey });
-    // Enabled, but deliberately no SMTP host of this account's own — the one
-    // state the fallback is for.
-    await api.saveMail(token, { enabled: true, to: 'reachedby-default@example.com' });
+    await api.saveMail(token, { enabled: true, to: 'reachedby-install@example.com' });
     const roots = await (await fetch(`${dt.url}/api/v1/project?onlyRoot=true`,
       { headers: { 'X-Api-Key': dt.apiKey } })).json();
     project = { uuid: roots[0].uuid, name: roots[0].name, version: '' };
-    adminToken = (await api.login(stack.admin.loginId, stack.admin.password,
-      { isAdmin: true, force: true })).json.token;
   }, { timeout: 60_000 });
 
   afterEach(async () => {
     await api.del('/admin/mail', adminToken);
   });
 
-  test('an account with no host of its own sends through the configured default', async () => {
-    const put = await api.put('/admin/mail', {
+  test('an enabled account sends through the installation\'s configured connection', async () => {
+    const put = await api.saveAdminMail(adminToken, {
       enabled: true,
       smtp: { host: stack.smtp.host, port: stack.smtp.port, secure: false, user: 'u', pass: 'p' },
       from: 'installation-default@example.com',
-    }, adminToken);
+    });
     assert.equal(put.status, 200, JSON.stringify(put.json));
 
     stack.smtp.reset();
     const r = await api.createSchedule(token, {
-      name: 'via-default', frequency: 'daily', hour: 9, minute: 0,
+      name: 'via-install', frequency: 'daily', hour: 9, minute: 0,
       riskTypes: ['security'], projects: [project],
     });
     const result = await sendNowAndWait(r.json.schedule.id);
     assert.equal(result.runStatus, 'success', JSON.stringify(result));
 
-    const mail = await stack.smtp.waitFor('reachedby-default@example.com', 10_000);
-    assert.ok(mail, 'no message reached the account\'s own recipient through the default server');
+    const mail = await stack.smtp.waitFor('reachedby-install@example.com', 10_000);
+    assert.ok(mail, 'no message reached the account\'s recipient through the installation server');
     assert.match(mail.data, /From:.*installation-default@example\.com/i);
   }, { timeout: 180_000 });
 
-  test('clearing the default refuses a send, rather than silently doing nothing', async () => {
-    // No default configured at all — afterEach already cleared it.
+  test('no connection configured refuses a send, rather than silently doing nothing', async () => {
+    // No connection configured at all — afterEach already cleared it.
     const r = await api.createSchedule(token, {
-      name: 'no-default', frequency: 'daily', hour: 9, minute: 0,
+      name: 'no-connection', frequency: 'daily', hour: 9, minute: 0,
       riskTypes: ['security'], projects: [project],
     });
     const result = await sendNowAndWait(r.json.schedule.id);
@@ -868,33 +879,49 @@ describe('e2e — the installation default SMTP server (Q52)', { skip: SKIP }, (
     assert.equal(result.code, 'MAIL_NOT_CONFIGURED');
   }, { timeout: 60_000 });
 
-  test('an account with its own SMTP server is unaffected by the default existing or not', async () => {
-    await api.saveMail(token, {
-      enabled: true, to: 'ownserver@example.com',
-      smtp: { host: stack.smtp.host, port: stack.smtp.port, secure: false, user: 'u2', pass: 'p2' },
-      from: 'own-account@example.com',
+  test('an outage pauses an enabled schedule, and recovery resumes exactly it — a user\'s own pause survives', async () => {
+    await api.saveAdminMail(adminToken, {
+      enabled: true,
+      smtp: { host: stack.smtp.host, port: stack.smtp.port, secure: false, user: 'u', pass: 'p' },
+      from: 'installation-default@example.com',
     });
-    try {
-      const put = await api.put('/admin/mail', {
-        enabled: true, smtp: { host: 'unreachable.invalid', port: 2525 }, from: 'x@example.com',
-      }, adminToken);
-      assert.equal(put.status, 200, JSON.stringify(put.json));
+    const armed = await api.createSchedule(token, {
+      name: 'armed-before-outage', frequency: 'daily', hour: 9, minute: 0,
+      riskTypes: ['security'], projects: [project],
+    });
+    // A second schedule the user disables THEMSELVES, before the outage —
+    // this must never come back on its own.
+    const ownPause = await api.createSchedule(token, {
+      name: 'user-paused', frequency: 'daily', hour: 9, minute: 0,
+      riskTypes: ['security'], projects: [project],
+    });
+    await api.post(`/violation-cache/schedules/${ownPause.json.schedule.id}/disable`, {}, token);
 
-      stack.smtp.reset();
-      const r = await api.createSchedule(token, {
-        name: 'own-server', frequency: 'daily', hour: 9, minute: 0,
-        riskTypes: ['security'], projects: [project],
-      });
-      const result = await sendNowAndWait(r.json.schedule.id);
-      assert.equal(result.runStatus, 'success', JSON.stringify(result));
-      const mail = await stack.smtp.waitFor('ownserver@example.com', 10_000);
-      assert.ok(mail, 'the account\'s own server must still be used, not the (unreachable) default');
-    } finally {
-      // Leave the account clean for the tests above, which rely on it having
-      // no host of its own.
-      await api.saveMail(token, { enabled: true, to: 'reachedby-default@example.com' });
-    }
-  }, { timeout: 180_000 });
+    // The outage: clearing the connection must pause the armed schedule.
+    const cleared = await api.del('/admin/mail', adminToken);
+    assert.equal(cleared.status, 200);
+    assert.ok(cleared.json.schedulesPaused >= 1, JSON.stringify(cleared.json));
+    let list = await api.listSchedules(token);
+    let armedRow = list.find(s => s.id === armed.json.schedule.id);
+    assert.equal(armedRow.enabled, false);
+    assert.equal(armedRow.disabledBySmtp, true);
+    let ownRow = list.find(s => s.id === ownPause.json.schedule.id);
+    assert.equal(ownRow.disabledBySmtp, false, 'the user\'s own pause must not be reflagged as SMTP-caused');
+
+    // Recovery: only the SMTP-paused schedule comes back.
+    const restored = await api.saveAdminMail(adminToken, {
+      enabled: true,
+      smtp: { host: stack.smtp.host, port: stack.smtp.port, secure: false, user: 'u', pass: 'p' },
+      from: 'installation-default@example.com',
+    });
+    assert.ok(restored.json.schedulesResumed >= 1, JSON.stringify(restored.json));
+    list = await api.listSchedules(token);
+    armedRow = list.find(s => s.id === armed.json.schedule.id);
+    assert.equal(armedRow.enabled, true);
+    assert.equal(armedRow.disabledBySmtp, false);
+    ownRow = list.find(s => s.id === ownPause.json.schedule.id);
+    assert.equal(ownRow.enabled, false, 'a schedule the user disabled themselves must stay disabled');
+  }, { timeout: 60_000 });
 });
 
 // ══════════════════════════════════════════════════════════════════════════════
@@ -932,16 +959,22 @@ describe('e2e — Q37 survives the scheduler\'s own report path', { skip: SKIP }
   // one is built in memory and attached to an email (§6.8), so nothing proved
   // the workbook that actually reaches an inbox carries the Origin and
   // Dependency Path columns. This opens the delivered attachment and reads them.
-  let token, leaf;
+  let token, leaf, adminToken;
 
   before(async () => {
     if (!ENABLED) return;
+    adminToken = (await api.login(stack.admin.loginId, stack.admin.password,
+      { isAdmin: true, force: true })).json.token;
+    await api.saveAdminMail(adminToken, {
+      enabled: true,
+      smtp: { host: stack.smtp.host, port: stack.smtp.port, secure: false, user: 'u', pass: 'p' },
+      from: 'installation@example.com',
+    });
     token = await api.signUp(account('schedorigin'));
     await api.saveConnection(token, { apiUrl: dt.url, apiKey: dt.apiKey });
     await api.saveMail(token, {
       enabled: true, from: 'dashboard@example.com', to: 'origins@example.com',
       subject: 'Scheduled origins', body: 'Attached.',
-      smtp: { host: stack.smtp.host, port: stack.smtp.port, secure: false, user: 'u', pass: 'p' },
     });
     // A leaf, not a root: the stub hangs its findings and its dependency graph
     // off the leaves, so a root would produce a workbook with nothing to label.
@@ -950,6 +983,11 @@ describe('e2e — Q37 survives the scheduler\'s own report path', { skip: SKIP }
     const p = (Array.isArray(all) ? all : all.values).find(x => /^service-/.test(x.name));
     leaf = { uuid: p.uuid, name: p.name, version: p.version || '' };
   }, { timeout: 60_000 });
+
+  after(async () => {
+    if (!ENABLED) return;
+    await api.del('/admin/mail', adminToken);
+  });
 
   test('the emailed workbook carries Origin and the real chain', async () => {
     const created = await api.createSchedule(token, {
@@ -1258,7 +1296,6 @@ describe('e2e — the dashboard in a real browser', { skip: BROWSER_SKIP }, () =
     await api.saveMail(token, {
       enabled: true, from: 'dashboard@example.com', to: 'team@example.com',
       subject: 'Subject', body: 'Body',
-      smtp: { host: stack.smtp.host, port: stack.smtp.port, secure: false, user: 'u', pass: 'p' },
     });
     await api.post('/violation-cache/refresh', {}, token);
     await api.waitForCache(token);
@@ -2272,16 +2309,22 @@ describe('e2e — a latest-only schedule delivers the projects the rule resolves
   // AGGREGATE_LATEST_VERSION_CHILDREN root over a stale child and a latest one,
   // so "the rule was applied" and "the rule was ignored" produce visibly
   // different workbooks rather than the same one.
-  let token, collection, latestChild, staleChild;
+  let token, collection, latestChild, staleChild, adminToken;
 
   before(async () => {
     if (!ENABLED) return;
+    adminToken = (await api.login(stack.admin.loginId, stack.admin.password,
+      { isAdmin: true, force: true })).json.token;
+    await api.saveAdminMail(adminToken, {
+      enabled: true,
+      smtp: { host: stack.smtp.host, port: stack.smtp.port, secure: false, user: 'u', pass: 'p' },
+      from: 'installation@example.com',
+    });
     token = await api.signUp(account('latestonly'));
     await api.saveConnection(token, { apiUrl: dt.url, apiKey: dt.apiKey });
     await api.saveMail(token, {
       enabled: true, from: 'dashboard@example.com', to: 'latestonly@example.com',
       subject: 'Latest only', body: 'Attached.',
-      smtp: { host: stack.smtp.host, port: stack.smtp.port, secure: false, user: 'u', pass: 'p' },
     });
     const all = await (await fetch(`${dt.url}/api/v1/project?onlyRoot=false`,
       { headers: { 'X-Api-Key': dt.apiKey } })).json();
@@ -2293,6 +2336,11 @@ describe('e2e — a latest-only schedule delivers the projects the rule resolves
     staleChild  = kids.find(p => p.isLatest !== true);
     assert.ok(latestChild && staleChild, 'and a latest child beside a stale one');
   }, { timeout: 60_000 });
+
+  after(async () => {
+    if (!ENABLED) return;
+    await api.del('/admin/mail', adminToken);
+  });
 
   test('an anchored rule covers the latest child and not the stale one', async () => {
     const created = await api.createSchedule(token, {

@@ -26,6 +26,7 @@ const mail    = require('../lib/mail');
 const dtConnections = require('../lib/dt-connections');
 const userSettings  = require('../lib/user-settings');
 const mailSettings  = require('../lib/mail-settings');
+const defaultMailSettings = require('../lib/default-mail-settings');
 const schedulesDb   = require('../lib/schedules');
 // The one place a schedule is shaped for the browser lives with the routes that
 // write them. Importing it is what keeps this listing and that collection from
@@ -63,7 +64,7 @@ async function handle({ method, path: parsedPath, req, res, principal }) {
         config: {
           maxReports:   settings.maxReports,
           maxSchedules: settings.maxSchedules,
-          mail:         mailCfg || { enabled: false },
+          mail:         mailCfg || { enabled: false, smtpAvailable: false },
           schedules:    schedules.map(s => scheduleRoute.forClient(s)),
         },
       });
@@ -109,7 +110,8 @@ async function handle({ method, path: parsedPath, req, res, principal }) {
         // route uses for loginId and email. The value is still returned by GET
         // so the dashboard can show what the account is allowed.
 
-        // ── SMTP ────────────────────────────────────────────────────
+        // ── Mail preferences (Q52: the SMTP connection itself is not
+        // among them any more — that is the administrator's, entirely) ──
         if (cfg.mail !== undefined) {
           if (typeof cfg.mail !== 'object' || cfg.mail === null) {
             jsonReply(res, 400, { error: 'mail must be an object.', code: 'VALIDATION_FAILED' });
@@ -249,9 +251,10 @@ async function handle({ method, path: parsedPath, req, res, principal }) {
   }
 
   // ── POST /violation-cache/config/test-email ─────────────────────────────
-  // Uses the values currently on screen so connectivity can be checked before
-  // saving. useStoredPass:true substitutes the stored password, which the
-  // browser only ever sees as a placeholder.
+  // Q52: the SMTP connection is administrator-owned now, so there is nothing
+  // live on screen for it to test — only From/To/CC are still this account's
+  // own, and those ARE read live, so a test reflects unsaved edits to
+  // addressing the same way it always has.
   if (method === 'POST' && parsedPath === '/violation-cache/config/test-email') {
     const userId = requireUser(principal, res);
     if (!userId) return true;
@@ -264,46 +267,28 @@ async function handle({ method, path: parsedPath, req, res, principal }) {
     let mailCfg;
 
     try {
-      if (body && body.smtp) {
-        let storedPass = '';
-        if (body.useStoredPass) {
-          const stored = await mailSettings.getResolved(userId);
-          storedPass = stored ? stored.smtp.pass : '';
-        }
-        mailCfg = {
-          enabled: true,
-          smtp: {
-            host:   body.smtp.host || '',
-            port:   body.smtp.port || 587,
-            secure: Boolean(body.smtp.secure),
-            user:   body.smtp.user || '',
-            pass:   body.useStoredPass ? storedPass : (body.smtp.pass || ''),
-          },
-          from: body.from || '',
-          to:   mailSettings.toAddressArray(body.to),
-          cc:   mailSettings.toAddressArray(body.cc),
-        };
-        // A blank host here is not necessarily "not configured" — it is also
-        // what the form legitimately shows while this account relies on the
-        // installation default (CLAUDE.md §6.9), and "Send Test Email" tests
-        // what is actually on screen. Without this, the test would refuse
-        // with "SMTP host is not configured" for an account a real scheduled
-        // report would send from without any trouble.
-        const withDefault = await mailSettings.applyDefaultFallback(mailCfg.smtp, mailCfg.from);
-        mailCfg.smtp = withDefault.smtp;
-        mailCfg.from = withDefault.from;
-      } else {
-        const stored = await mailSettings.getResolved(userId);
-        if (!stored || !stored.enabled) {
-          jsonReply(res, 400, { error: 'Email is not enabled in your settings.', code: 'MAIL_DISABLED' });
-          return true;
-        }
-        mailCfg = stored;
+      const def = await defaultMailSettings.getResolved();
+      if (!def) {
+        jsonReply(res, 400, {
+          error: 'Email delivery is not available yet — ask your administrator to configure the mail server.',
+          code: 'MAIL_NOT_CONFIGURED',
+        });
+        return true;
       }
 
-      if (!mailCfg.smtp.host || !mailCfg.from || !mailCfg.to.length) {
+      const stored = await mailSettings.getResolved(userId);
+      mailCfg = {
+        enabled: true,
+        smtp: def.smtp,
+        from: (body && typeof body.from === 'string' ? body.from.trim() : '')
+              || (stored ? stored.from : '') || def.from,
+        to: mailSettings.toAddressArray(body && body.to),
+        cc: mailSettings.toAddressArray(body && body.cc),
+      };
+
+      if (!mailCfg.from || !mailCfg.to.length) {
         jsonReply(res, 400, {
-          error: 'SMTP host, From address and at least one To address are required.',
+          error: 'A From address and at least one To address are required.',
           code: 'VALIDATION_FAILED',
         });
         return true;
@@ -315,7 +300,7 @@ async function handle({ method, path: parsedPath, req, res, principal }) {
         appTitle,
         subject: `${appTitle} — test email`,
         body: `This is a test email from ${appTitle}, sent on ${new Date().toLocaleString()}. `
-            + 'Your SMTP configuration is working correctly.',
+            + 'Your email configuration is working correctly.',
       });
       jsonReply(res, 200, { ok: true, message: 'Test email sent successfully' });
     } catch (err) {

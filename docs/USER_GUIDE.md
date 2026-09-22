@@ -368,10 +368,13 @@ Settings**, turn on **Email & Scheduled Reports**.
 
 ![Email settings](images/settings.png)
 
+The mail server itself — host, port, TLS, credentials — is configured once by
+your administrator for the whole installation; there is nothing to enter for
+it here. If it has not been set up yet, this panel shows a plain notice
+saying so, and everything below stays saved and ready for the moment it is.
+
 | Field | Notes |
 |---|---|
-| **Host**, **Port**, **TLS** | Your SMTP server. |
-| **Username**, **Password** | SMTP credentials. Stored encrypted; never returned to the browser. |
 | **From Address** | What recipients see as the sender. |
 | **To** | Default recipients, comma-separated. |
 | **CC** | Optional default copy list. |
@@ -523,7 +526,7 @@ rather than shown a screen whose every request would be refused.
 
 ### What administration can and cannot do
 
-**It is mostly read-only, and what it may change is a closed list of thirteen
+**It is mostly read-only, and what it may change is a closed list of fourteen
 things** — not a general-purpose account editor:
 
 | # | Action | Where |
@@ -539,8 +542,9 @@ things** — not a general-purpose account editor:
 | 9 | Show or hide the risk-trend panel for everyone | Customization |
 | 10 | Upload a colour theme | Customization |
 | 11 | Remove the theme, returning to the built-in colours | Customization |
-| 12 | Set the **default** SMTP server | Default Email Server |
-| 13 | Clear the default SMTP server | Default Email Server |
+| 12 | Set the installation's SMTP server | Default Email Server |
+| 13 | Clear it — every account loses email until it is set again | Default Email Server |
+| 14 | Send a test email using the saved connection | Default Email Server |
 
 Everything else is readable only. Administration **cannot** read anyone's
 DependencyTrack API key, SMTP password, reports, findings or schedules' contents.
@@ -562,7 +566,7 @@ Selecting an account opens its detail on the right:
 | **Session** | Whether they are signed in, from which IP, and when the session expires. |
 | **DependencyTrack** | Whether a connection is configured, its **API URL**, and whether a key is stored — **never the key itself**. |
 | **Reports** | Completed / in progress / failed, storage used, and the limit in force. |
-| **Email** | Whether mail is enabled, the SMTP host, the From address, how many recipients — and that a password is stored, **never the password**. |
+| **Email** | Whether mail is enabled, the From address and how many recipients. The SMTP server itself is the installation's, set from Default Email Server — not shown per account. |
 
 The administrator's own reserved identity is excluded from this list and from
 the account count. It holds their connection and settings, but nothing
@@ -791,30 +795,36 @@ own copy or download it first.
 > cannot. The service renders the CSS itself from the names and values it
 > recognises.
 
-### 12–13. The default email server
+### 12–14. The installation's mail server
 
-**Default Email Server** sets one SMTP server every account with no server of
-its own can send through — the installation's fallback, not a replacement for
-an account's own settings.
+**Default Email Server** is the one SMTP server the whole installation sends
+through. Accounts do not configure a server of their own at all — Settings
+has no Host, Port, TLS or credential fields any more, only an account's From
+address, recipients, subject and body.
 
-**How this reaches a user.** Nothing visible changes until they turn email on
-for themselves in their own **⚙ Settings**. From then on, if they leave **Host**
-blank, their Settings panel shows *"Using the installation's default mail
-server (host:port). Fill in a host below to use your own instead."* and they
-only need to add a recipient — no SMTP host, port or credentials to find. An
-account that has already entered its own host is never affected by this
-screen at all; the default is only ever read for an account with none of its
-own.
+**How this reaches a user.** Until you configure and enable a server here, an
+account that turns email on in its own **⚙ Settings** sees a plain notice —
+*"Email delivery isn't available yet — your administrator hasn't configured
+a mail server for this installation."* — and everything it typed stays saved,
+just waiting. The moment you save a working, enabled server, every account
+with email turned on can send immediately, with no further action from them.
 
-The state line says how many accounts currently rely on it, so the consequence
-of a change is visible before you make it — the same reasoning the report and
-schedule defaults use.
+The state line says how many accounts currently have email turned on, so the
+consequence of a change is visible before you make it — the same reasoning
+the report and schedule defaults use. **Send Test Email** sends a plain
+message from the server's own From address to an address you type, so you
+can confirm the connection works before anyone's scheduled report depends on it.
 
-> **Clearing it does not touch any account's own settings.** Every account
-> that had entered its own SMTP server keeps working exactly as before. Only
-> accounts relying on the fallback are affected, and they simply need their
-> own server before their next report can send — the same "refuses, never
-> deletes" rule a lowered report or schedule limit follows.
+> **Turning this off or clearing it pauses scheduled reports — it never
+> deletes anything.** Every account's own settings, schedules, recipients and
+> messages are untouched; only their schedules' enabled/paused state changes.
+> Any schedule that was running is paused, and a schedule you disable here is
+> marked as paused *because of this*, distinct from a schedule the account
+> paused itself. Turning the server back on **resumes exactly the schedules
+> this action paused** — a schedule the account had already paused on its own
+> stays paused, because pausing it themselves took it out of this mechanism's
+> hands. This is the same "refuses/pauses, never deletes" rule a lowered
+> report or schedule limit follows.
 
 ### Storage
 

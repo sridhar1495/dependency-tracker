@@ -53,7 +53,8 @@ const SCHEDULE_COLUMNS = `
   last_run_error AS "lastRunError", failure_notification AS "failureNotification",
   report_name AS "reportName", created_at AS "createdAt",
   selection_mode AS "selectionMode",
-  to_addrs AS "toAddrs", cc_addrs AS "ccAddrs", subject, body
+  to_addrs AS "toAddrs", cc_addrs AS "ccAddrs", subject, body,
+  disabled_by_smtp AS "disabledBySmtp"
 `;
 
 const PROJECT_COUNT = `
@@ -366,26 +367,94 @@ async function setProjects(userId, scheduleId, projects) {
   return getProjects(userId, scheduleId);
 }
 
-/** Arm one schedule by writing its next fire time. */
+/**
+ * Arm one schedule by writing its next fire time.
+ *
+ * Clears disabled_by_smtp: an explicit arm — the user's own action, taken
+ * through a route that already refused it while SMTP is unavailable — is
+ * ownership of the schedule's enabled state from here on, so a later SMTP
+ * outage-and-recovery cycle must not treat it as something IT paused.
+ */
 async function arm(userId, scheduleId, nextRunAt) {
   if (!UUID_RE.test(String(scheduleId || ''))) return null;
   const { rowCount } = await query(
-    'UPDATE schedules SET enabled = true, next_run_at = $3 WHERE id = $2 AND user_id = $1',
+    `UPDATE schedules SET enabled = true, next_run_at = $3, disabled_by_smtp = false
+      WHERE id = $2 AND user_id = $1`,
     [userId, scheduleId, nextRunAt]
   );
   if (!rowCount) return null;
   return get(userId, scheduleId);
 }
 
-/** Disable one schedule without discarding its definition. */
+/**
+ * Disable one schedule without discarding its definition.
+ *
+ * Always the user's own action (there is no other caller of this function —
+ * the SMTP-outage pause uses disableAllEnabledForSmtp below), so it always
+ * clears disabled_by_smtp: whatever state the flag was in, an explicit
+ * disable is the user taking over, and a later SMTP recovery must not
+ * re-enable a schedule they turned off themselves.
+ */
 async function disable(userId, scheduleId) {
   if (!UUID_RE.test(String(scheduleId || ''))) return null;
   const { rowCount } = await query(
-    'UPDATE schedules SET enabled = false, next_run_at = NULL WHERE id = $2 AND user_id = $1',
+    `UPDATE schedules SET enabled = false, next_run_at = NULL, disabled_by_smtp = false
+      WHERE id = $2 AND user_id = $1`,
     [userId, scheduleId]
   );
   if (!rowCount) return null;
   return get(userId, scheduleId);
+}
+
+// ── SMTP-outage orchestration ─────────────────────────────────────────────────
+// Mail configuration is administrator-owned now (lib/mail-settings.js, lib/
+// default-mail-settings.js): no account has a server of its own to fall back
+// to, so when the administrator's server becomes unavailable, EVERY enabled
+// schedule across every account would otherwise sit there and fail on its
+// next run. These two functions are the proactive pair that pauses them the
+// moment that happens and resumes exactly the ones they paused when it does
+// not any more — never a schedule its own owner already disabled.
+
+/**
+ * Pause every currently-enabled schedule, flagged as the administrator's
+ * doing rather than the owner's.
+ *
+ * Only rows that are `enabled` are touched — an already-disabled schedule
+ * (paused by its owner, or already caught by an earlier outage) is left
+ * exactly as it was, so this is safe to call on every `PUT /admin/mail` that
+ * turns out not to have changed availability at all.
+ *
+ * @returns {Promise<number>} how many schedules this pass paused
+ */
+async function disableAllEnabledForSmtp() {
+  const { rowCount } = await query(
+    `UPDATE schedules SET enabled = false, next_run_at = NULL, disabled_by_smtp = true
+      WHERE enabled = true`
+  );
+  return rowCount;
+}
+
+/**
+ * Every schedule this outage-pause paused and nothing has re-armed since —
+ * the exact set `reenableSmtpDisabled` (routes/admin.js) is about to compute
+ * fresh `next_run_at` values for and re-enable.
+ */
+async function listDisabledBySmtp() {
+  const { rows } = await query(`SELECT ${SCHEDULE_COLUMNS} FROM schedules WHERE disabled_by_smtp = true`);
+  return rows;
+}
+
+/**
+ * Re-enable one schedule the outage pause disabled, with a freshly computed
+ * next run time — never the stale one from before the outage, which could
+ * already be in the past.
+ */
+async function reenableOne(scheduleId, nextRunAt) {
+  await query(
+    `UPDATE schedules SET enabled = true, disabled_by_smtp = false, next_run_at = $2
+      WHERE id = $1 AND disabled_by_smtp = true`,
+    [scheduleId, nextRunAt]
+  );
 }
 
 // ── The poller's claim ────────────────────────────────────────────────────────
@@ -624,4 +693,5 @@ module.exports = {
   finishRun, releaseStaleClaims,
   ackNotification, startRun, completeRun, recentRuns, runStats, purgeRunsOlderThan,
   normalise, VALID_FREQUENCIES, VALID_RISK_TYPES, MAX_NAME_LENGTH,
+  disableAllEnabledForSmtp, listDisabledBySmtp, reenableOne,
 };
