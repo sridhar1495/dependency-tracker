@@ -889,12 +889,18 @@ describe('e2e — the installation SMTP server and schedule pause/resume (Q52)',
       name: 'armed-before-outage', frequency: 'daily', hour: 9, minute: 0,
       riskTypes: ['security'], projects: [project],
     });
-    // A second schedule the user disables THEMSELVES, before the outage —
-    // this must never come back on its own.
+    // A schedule is created disabled (schema default); arming it is what
+    // disableAllEnabledForSmtp() below actually needs to find.
+    const arm1 = await api.post(`/violation-cache/schedules/${armed.json.schedule.id}/arm`, {}, token);
+    assert.equal(arm1.status, 200, JSON.stringify(arm1.json));
+
+    // A second schedule the user arms, then disables THEMSELVES, before the
+    // outage — this must never come back on its own.
     const ownPause = await api.createSchedule(token, {
       name: 'user-paused', frequency: 'daily', hour: 9, minute: 0,
       riskTypes: ['security'], projects: [project],
     });
+    await api.post(`/violation-cache/schedules/${ownPause.json.schedule.id}/arm`, {}, token);
     await api.post(`/violation-cache/schedules/${ownPause.json.schedule.id}/disable`, {}, token);
 
     // The outage: clearing the connection must pause the armed schedule.
@@ -1286,11 +1292,21 @@ const playwright = ENABLED ? resolvePlaywright() : null;
 const BROWSER_SKIP = SKIP || (!playwright && 'Playwright is not available — see e2e/README.md');
 
 describe('e2e — the dashboard in a real browser', { skip: BROWSER_SKIP }, () => {
-  let browser, page, token, errors;
+  let browser, page, token, errors, adminToken;
   const USER = account('browseruser');
 
   before(async () => {
     if (BROWSER_SKIP) return;
+    // The schedule editor refuses to open while email is unavailable (Q52),
+    // and two tests below open it from the toolbar — the installation's SMTP
+    // server has to be configured, or #cfgSchedView never becomes visible.
+    adminToken = (await api.login(stack.admin.loginId, stack.admin.password,
+      { isAdmin: true, force: true })).json.token;
+    await api.saveAdminMail(adminToken, {
+      enabled: true,
+      smtp: { host: stack.smtp.host, port: stack.smtp.port, secure: false, user: 'u', pass: 'p' },
+      from: 'installation@example.com',
+    });
     token = await api.signUp(USER);
     await api.saveConnection(token, { apiUrl: dt.url, apiKey: dt.apiKey });
     await api.saveMail(token, {
@@ -1321,7 +1337,10 @@ describe('e2e — the dashboard in a real browser', { skip: BROWSER_SKIP }, () =
     page.on('pageerror', e => errors.push(e.message));
   }, { timeout: 180_000 });
 
-  after(async () => { if (browser) await browser.close(); });
+  after(async () => {
+    if (browser) await browser.close();
+    if (adminToken) await api.del('/admin/mail', adminToken);
+  });
 
   // A test that fails between opening a modal and closing it leaves the overlay
   // on screen, and `.modal-overlay.open` covers the whole viewport — so every
