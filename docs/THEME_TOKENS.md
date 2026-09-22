@@ -119,6 +119,9 @@ see the next section for why that heading is actually `high`-coloured.
 | `cat-secpolicy` | The **Security Policy** column-group heading and its left border. |
 | `code` | Monospaced `<code>` text inside a modal — today that is exactly one place: **Administration → Storage**, where the filesystem path is shown as `<code>/data</code>`. The rule is duplicated on all three pages for consistency (§8.8's mirroring pattern), but only `admin.html` currently renders a `<code>` element. |
 | `scrollbar` / `scrollbar-hover` | The custom scrollbar thumb (`::-webkit-scrollbar-thumb`) drawn over the table and any other scrolling panel. **Chromium and Edge only** — Firefox and Safari use their own scrollbar styling and ignore this property entirely, which is a browser limitation, not a bug in the theme. |
+| `tree-group-bg` | The background tint of a **group row** in the project table (tree and flat view). |
+| `tree-counted-bg` | The background tint of a **leaf row the roll-up counts** — a project whose numbers contribute to the group total above it. A little stronger than `tree-group-bg`, on purpose: the two are meant to read as one family. |
+| `tree-uncounted-bg` | The background tint of a **leaf row the roll-up does not count** — for example a non-latest sibling under a "latest only" collection root. Grey by default, deliberately a different hue family from the other two: it marks a row as *visible but not part of the number above it*, most often because it only appears while a search, tag or risk filter is active. |
 
 ### The sign-in page's decoration
 

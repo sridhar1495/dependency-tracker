@@ -220,7 +220,7 @@ Inline comments use lettered prefixes to trace design decisions:
 - **O-numbers** — observability notes (`// O3: JSON log format for log aggregators`)
 - **S-numbers** — security rationale (`// S2: token hashed before storage`) — **new in revision 2**
 
-Highest numbers currently in use: **Q52, P20, O5, S35**. When adding logic with a
+Highest numbers currently in use: **Q55, P20, O5, S35**. When adding logic with a
 non-obvious trade-off, add the next number in the appropriate series. Check the
 current maximum before assigning — parallel branches can claim the same number.
 
@@ -1438,6 +1438,28 @@ Four rules the panel must keep:
   hex in an SVG attribute is precisely where that mistake hides from a CSS
   review, so a test forbids one in `TREND_LEVELS`.
 
+**Q55: the change since the previous reading is a tooltip addition, not a
+second chart or a report column.** Three shapes were weighed for "how much did
+this move since last time" — a second chart/series in the panel, a new column
+in the generated Excel report, or the existing hover tooltip saying it. The
+tooltip won: it answers the question exactly where a reader is already
+looking (mid-hover, comparing days), needs no new geometry or controls, and
+carries no report-generation cost. `trendDeltaLabel(current, previous)` is a
+pure, three-line helper — signed (`+3`/`-4`), `±0` for no change (never a bare
+`0`, which would read as a second value rather than "unchanged"), `null` when
+either side is unknown so the caller omits it rather than printing a guess.
+
+- **Compared against the previous POSITION, not the previous MEASURED day.**
+  A carried position (Q23) still has a row to compare against, and the delta
+  reads left-to-right the same way the chart does — jumping back to the last
+  *real* measurement would silently skip every carried day's own comparison.
+- **Rendered inside the existing value cell**, `<span class="trend-tip-val">12<span class="trend-tip-delta">(+3)</span></span>`,
+  never a second `.trend-tip-row` — a second row per level would duplicate the
+  swatch and the label for one extra number.
+- **No new theme token.** `.trend-tip-delta` is `var(--text-muted)`, the same
+  token the tooltip's day label already uses — context, not a fifth colour
+  competing with the four severity tiers.
+
 **The findings dialog is an icon on the row, not a column.** A 👁 button sits
 inside the existing project-name `<td>`, before the tree toggle, on any leaf
 row `hasVulnerabilities()` **or** `hasLicenseRisk()` says is nonzero — never on
@@ -2007,11 +2029,11 @@ is — a refetch can never leave it stale. Four things are load-bearing:
   with findings of its own on this screen (Q35, Q42) — its figures *are* its
   counted descendants', so including it would double every total that folded
   the set.
-- **A group is still shown in the tree view.** `applyFilters()` draws from
-  `parentUuids.has(p.uuid) || countedLeafUuids.has(p.uuid)` there, and from the
-  counted set alone in flat view. A group is structure, not data: dropping it
-  would orphan the descendants that *did* count. Flat view has no structure to
-  preserve, so it shows exactly what the tiles fold.
+- **A group is still shown in the tree view.** A group is structure, not
+  data: dropping it would orphan the descendants that *did* count. **Q53
+  changed what else this set gates** — see below; `countedLeafUuids` itself,
+  and its use in `computeSummaryTotals()`'s unfiltered portfolio fold, are
+  unchanged by that.
 - **`computeSummaryTotals()` is now a thin caller of `computeTotalsFor(leaves)`,
   and the project-count pass folds that same argument.** Splitting the fold out
   is what makes the two halves of a tile provably the same set — the second bug
@@ -2024,9 +2046,9 @@ is — a refetch can never leave it stale. Four things are load-bearing:
 them.** The tiles described the whole portfolio regardless of what the table was
 showing, so filtering to one team left four headline numbers answering a
 question nobody had asked. `filteredTotals` is `computeTotalsFor()` over the
-filtered rows — intersected with `countedLeafUuids`, so the tiles and the table
-fold the identical set — and `renderSummary()` reads `filteredTotals ||
-summaryTotals`.
+filtered rows, excluding parent rows so a group's already-rolled-up total is
+never added on top of its own children — and `renderSummary()` reads
+`filteredTotals || summaryTotals`.
 
 `null` rather than "the totals happen to match" is what distinguishes *no
 filter* from *a filter that matched nothing*: the second must read 0, and a
@@ -2040,6 +2062,75 @@ second number with nothing to contrast against.
   Parent rows are auto-included when a child matches.
 - `generateMockProjects()` uses `makeLCG(seed)` (Q6) for deterministic output.
   Do **not** replace this with `Math.random()`.
+
+**Q53: a filter is literal — it stops being narrowed by an unrelated DT rollup
+setting on a project's parent.** Q45/Q46 shipped with `sourceProjects`/
+`filteredTotals` intersected with `countedLeafUuids`, on the reasoning that a
+tile reading 22 should not open onto rows that contributed nothing to 22. That
+reasoning is sound for the **unfiltered** portfolio view — and stays exactly as
+it was there — but it had an unintended second effect: it also applied the
+instant *any* filter turned on, so picking a tag could silently make a project
+that carried it disappear, just because a sibling collection root happens to be
+set to "latest only". Nothing on screen said anything had been excluded; the
+row was simply gone.
+
+- **The unfiltered view was never affected by the old restriction, and still
+  is not.** `currentMatchSet` is `null` while `hasFilter` is false, and
+  `collectVisible()`/`hasMatch()` show every `treeRoots` node when `matchSet`
+  is `null` — the countedLeafUuids intersection only ever took effect once
+  `filtered` actually got consumed as a non-null match set. So this is
+  entirely a "what does a filter do" change, not a "what does the dashboard
+  show by default" one.
+- **`sourceProjects` drops the `countedLeafUuids` requirement.** Tree view
+  keeps `allProjects` unrestricted — it always needed the full parent chain to
+  render structure regardless. Flat view narrows to `!parentUuids.has(p.uuid)`
+  instead of `countedLeafUuids.has(p.uuid)`: still leaves only, now *every*
+  leaf rather than only the counted ones.
+- **`filteredTotals` follows the same swap.** It folds
+  `filtered.filter(p => !parentUuids.has(p.uuid))` — parent rows excluded
+  (unchanged reasoning: their own total is already a sum of their children,
+  Q35), counted-vs-uncounted no longer distinguished.
+- **A group row's own number is untouched, and can now look "incomplete"
+  next to what the filter shows beneath it — deliberately.** `aggregateTree()`
+  still sums only `collectionChildren()` (Q39), independent of any filter, so
+  a previously-hidden uncounted leaf that a filter surfaces does not change
+  its parent's total. The alternative — recomputing the parent's number to
+  match whatever happens to be filtered — would mean the same group shows a
+  different total on every different search, which is its own kind of
+  confusing. Q54's grey colour tier (§8.10) is the signal that resolves the
+  apparent mismatch: it marks exactly the rows a filter surfaced that the
+  number above them does not include.
+
+**Q54: every row in the table carries one of three background tints, naming
+which of Q39's roll-up the row belongs to.** A group row, a leaf the roll-up
+counts, and a leaf it does not (§6.3a is unrelated — this is Q39/Q45's
+counted-vs-not, not Direct/Transitive) were visually identical before this:
+nothing on screen said whether a leaf's own numbers were part of the total
+sitting above it. `renderTree()` and `renderFlatList()` add exactly one of
+`group-row` / `counted-leaf-row` / `uncounted-leaf-row` per row, decided the
+same way `computeCountedLeaves()` already decides it —
+`countedLeafUuids.has(node.uuid)` — so this can never answer the question
+differently from the number it is standing next to.
+
+- **Three tokens, not a hard-coded colour**: `--tree-group-bg`,
+  `--tree-counted-bg`, `--tree-uncounted-bg`, one dark and one light value
+  each, added to `lib/theme.js`'s allow-list the same way every other themeable
+  colour is (§8.12) — an administrator can retint all three, and the two
+  cross-file tests that pin every other token pin these the same way, generically.
+- **Same hue family for the two counted tiers, a different one for the
+  third — on purpose.** The group and counted-leaf backgrounds are both the
+  accent colour at different alpha (the counted leaf a little stronger, per
+  the request this shipped from), so the eye reads "these both belong to the
+  number above them" as one family; greyed leaves read as a different
+  category rather than a fainter version of the same one.
+- **The existing `.group-row` background was already this colour, just
+  hard-coded.** Converting it to `var(--tree-group-bg)` rather than leaving
+  it as a literal while the two new tiers were themeable would have made the
+  three-tier story only two-thirds true.
+- **Independent of Q53.** Which tier a leaf belongs to never changes with a
+  filter; only whether the row is currently *visible* does (Q53). A leaf
+  surfaced by a filter that the roll-up does not count still renders grey —
+  that is the point, not a side effect.
 
 ### 8.8 Validation mirroring
 
@@ -2177,6 +2268,7 @@ The frontend never performs uniqueness checks — those are backend-only, via
 | `trendValues(point, metric)` | frontend | Fold a stored day into the four plotted numbers; `null` for a gap |
 | `trendNiceCeil(max)` | frontend | Round axis ceiling; never 0, because every y divides by it |
 | `trendCarry(rows)` | frontend | Carry the last reading over unrefreshed days; flags which positions were inherited |
+| `trendDeltaLabel(current, previous)` | frontend | Q55 — signed change since the previous reading, for the tooltip only; `null` when either side is unknown |
 | `trendLinePath` / `trendAreaPath` | frontend | SVG paths that break at `null` — what lets the solid overlay reveal the dashed bridge |
 | `hasVulnerabilities(node)` / `hasLicenseRisk(node)` / `vulnEyeIconHtml(node, isGroup)` | frontend | Gate (on either finding type) and render the 👁 icon on a leaf row |
 | `vulnFindingsQuery(name, version, page)` | frontend | The finding-search query, mirroring `lib/reports.js`'s `fetchAllFindings()` (Q24) |

@@ -65,6 +65,15 @@
       --header-h:     64px;
       --row-h:        44px;
       --radius:       8px;
+
+      /* Q54: the tree's three row kinds — a group, a leaf the aggregation
+         counts, and a leaf it does not (§8.7, Q39/Q53). Same hue family as
+         --accent, distinguished by depth rather than by three unrelated
+         colours, so the eye reads them as one family with the grey tier
+         standing apart on purpose. */
+      --tree-group-bg:     rgba(99,102,241,0.035);
+      --tree-counted-bg:   rgba(99,102,241,0.09);
+      --tree-uncounted-bg: rgba(148,163,184,0.10);
     }
 
     /* ── Light theme overrides ───────────────────────────────────────────────
@@ -117,6 +126,15 @@
       --code:            #1d4ed8;
       --scrollbar:       #8899bb;
       --scrollbar-hover: #5c6a85;
+
+      /* Q54: the light scheme's accent is darker to start with, so these need
+         less alpha than the dark scheme's to read as "light" rather than
+         "saturated". The grey tier reuses the light scheme's own muted-text
+         hue rather than a fresh grey, so it never clashes with --text-muted
+         elsewhere on the same row. */
+      --tree-group-bg:     rgba(79,82,217,0.05);
+      --tree-counted-bg:   rgba(79,82,217,0.11);
+      --tree-uncounted-bg: rgba(92,106,133,0.10);
     }
 
     html, body { height: 100%; }
@@ -396,6 +414,9 @@
     .trend-tip-row { display: flex; align-items: center; gap: 6px; }
     .trend-tip-row .trend-swatch { width: 8px; height: 8px; }
     .trend-tip-val { margin-left: auto; padding-left: 12px; font-weight: 600; }
+    /* Q55: the change since the previous reading — muted, so it reads as
+       context beside the value rather than competing with it. */
+    .trend-tip-delta { margin-left: 6px; font-weight: 400; color: var(--text-muted); }
     /* Why these numbers are the numbers — separated from them, so it reads as
        provenance rather than as another row of data. */
     .trend-tip-note {
@@ -570,9 +591,15 @@
     tbody tr:hover { background: rgba(99,102,241,0.06); }
 
     /* Group rows */
-    tbody tr.group-row { background: rgba(99,102,241,0.035); }
-    tbody tr.group-row:hover { background: rgba(99,102,241,0.08); }
+    tbody tr.group-row { background: var(--tree-group-bg); }
+    tbody tr.group-row:hover { background: var(--tree-counted-bg); }
     tbody tr.group-row td.project-name { font-weight: 600; }
+    /* Q54: the two leaf tiers §8.7/Q39 distinguishes — counted by the
+       roll-up (a little darker than a group row, still the same blue family)
+       and not counted (grey, so a filter-surfaced uncounted leaf, Q53, reads
+       as "here but not part of the number above it" without a word of text). */
+    tbody tr.counted-leaf-row   { background: var(--tree-counted-bg); }
+    tbody tr.uncounted-leaf-row { background: var(--tree-uncounted-bg); }
 
     td {
       padding: 0 10px; height: var(--row-h);
@@ -4422,6 +4449,11 @@ function renderTree(matchSet) {
     if (isGroup) {
       tr.classList.add('group-row');
       parentRows.push({ tr, node });
+    } else {
+      // Q54: which of the two leaf tiers this row belongs to — unrelated to
+      // whether it is currently visible because of a filter (Q53); the same
+      // rule applies whether or not one is active.
+      tr.classList.add(countedLeafUuids.has(node.uuid) ? 'counted-leaf-row' : 'uncounted-leaf-row');
     }
     frag.appendChild(tr);
   });
@@ -4471,6 +4503,8 @@ function renderFlatList() {
     });
     const tr = document.createElement('tr');
     tr.innerHTML = html;
+    // Q54: flat view is leaves only, so only the two leaf tiers apply.
+    tr.classList.add(countedLeafUuids.has(node.uuid) ? 'counted-leaf-row' : 'uncounted-leaf-row');
     frag.appendChild(tr);
   });
   tbody.appendChild(frag);
@@ -5815,6 +5849,24 @@ function trendCarry(rows) {
 }
 
 /**
+ * Q55: a signed, human-readable change from the previous reading, for the
+ * trend tooltip only (CLAUDE.md decision: tooltip, not a second chart or a
+ * report column). `null` when either value is unknown — the first point in
+ * the series, or a position before any reading exists — so the caller can
+ * simply omit the delta rather than print a false zero.
+ *
+ * @param {number|null|undefined} current
+ * @param {number|null|undefined} previous
+ * @returns {string|null}
+ */
+function trendDeltaLabel(current, previous) {
+  if (current == null || previous == null) return null;
+  const d = current - previous;
+  if (d === 0) return '±0';
+  return d > 0 ? `+${d}` : `${d}`;
+}
+
+/**
  * Index ranges of consecutive carried days, for the "not measured here" shading.
  *
  * One band per run rather than one per day: four adjacent rectangles with
@@ -6244,6 +6296,12 @@ function showTrendTip(cell, ev, points, i, carry) {
     }
   }
 
+  // Q55: the previous POSITION's row, not the previous MEASURED row — the
+  // delta reads left-to-right the same way the chart does, so a carried
+  // position (itself shown with no marker, per Q23) still contributes a
+  // "no change" comparison rather than being skipped over silently.
+  const prevRow = i > 0 ? carry.values[i - 1] : null;
+
   // Always all four, even in the split view. Hovering one small multiple to
   // read only the series you are already looking at would be pointless; the
   // value of the crosshair is seeing what the other three did on that day.
@@ -6252,9 +6310,12 @@ function showTrendTip(cell, ev, points, i, carry) {
     (row === null
       // Before the first reading there is nothing to carry and nothing to show.
       ? '<div>No data yet — history starts at the first refresh</div>'
-      : TREND_LEVELS.map(l =>
-          `<div class="trend-tip-row"><span class="trend-swatch" style="background:${l.colour}"></span>`
-          + `${l.label}<span class="trend-tip-val">${row[l.key]}</span></div>`).join('')
+      : TREND_LEVELS.map(l => {
+          const delta = trendDeltaLabel(row[l.key], prevRow ? prevRow[l.key] : null);
+          return `<div class="trend-tip-row"><span class="trend-swatch" style="background:${l.colour}"></span>`
+            + `${l.label}<span class="trend-tip-val">${row[l.key]}`
+            + (delta ? `<span class="trend-tip-delta">(${delta})</span>` : '') + `</span></div>`;
+        }).join('')
         + (sourceDay
             ? `<div class="trend-tip-note">No refresh that day — showing `
               + `${escHtml(trendDayLabel(sourceDay))}'s reading</div>`
@@ -6412,14 +6473,20 @@ function applyFilters() {
   const cat    = document.getElementById('categoryFilter').value;
   const tagVal = document.getElementById('tagFilter').value;
 
-  // Q45: only the leaves the roll-up counted are filterable. A tile reading 22
-  // used to open a table built from every project, so it showed rows that
-  // contributed nothing to 22 — a stale non-latest child under a LATEST parent,
-  // say. Group rows stay in the tree view regardless: they are structure, not
-  // data, and dropping them would orphan the descendants that DID count.
+  // Q53: a filter is literal — it matches whatever it matches, never narrowed
+  // by an unrelated DT rollup setting on the project's parent. This used to
+  // intersect with countedLeafUuids (Q45), which meant picking a tag could
+  // silently drop a project that carried it, just because a sibling collection
+  // root happens to be set to "latest only". The unfiltered view was never
+  // affected by that restriction anyway — matchSet is null there and every
+  // node renders regardless (§8.7) — so this only changes what a filter does.
+  // Tree view keeps every project, leaves and groups alike: it needs the full
+  // parent chain to render structure. Flat view excludes only actual parent
+  // rows (parentUuids) — a flat list has no structure to preserve, but it must
+  // still never show a group row as if it were a leaf.
   const sourceProjects = flatView
-    ? allProjects.filter(p => countedLeafUuids.has(p.uuid))
-    : allProjects.filter(p => parentUuids.has(p.uuid) || countedLeafUuids.has(p.uuid));
+    ? allProjects.filter(p => !parentUuids.has(p.uuid))
+    : allProjects;
 
   // flat filtered array: each project's own (API-returned) data is used directly
   // P4: use pre-computed _nameLower; skip text filter if query is too short
@@ -6508,9 +6575,12 @@ function applyFilters() {
   // the pair honest — a tile that narrows while the denominator stays put says
   // "12 critical of 47" rather than replacing one unexplained number with
   // another. Null while nothing is filtered, so renderSummary() can tell
-  // "no filter" from "a filter that matched nothing".
+  // "no filter" from "a filter that matched nothing". Q53: excludes parent
+  // rows only (never double-count a group's already-rolled-up total on top of
+  // its own children) — not countedLeafUuids, so the tile agrees with the
+  // literal, unrestricted set the table above is now showing.
   filteredTotals = hasFilter
-    ? computeTotalsFor(filtered.filter(p => countedLeafUuids.has(p.uuid)))
+    ? computeTotalsFor(filtered.filter(p => !parentUuids.has(p.uuid)))
     : null;
   renderSummary();
 
