@@ -6529,6 +6529,27 @@ describe('latest-only scheduling — the editor and the list (PR 2)', () => {
       /mode === 'latest_all'/, 'the editor preview');
   });
 
+  test('Q56: saving a latest_under schedule promotes anchors, not just previewing them', () => {
+    // Before this, ticking a CHILD (never its collection parent) and choosing
+    // latest_under stored that child's own uuid verbatim — the preview
+    // promoted it for DISPLAY only, and saveScheduleEditor sent the raw pick.
+    // The stored anchor then resolved to just itself forever, so the moment
+    // DependencyTrack moved isLatest onto a sibling the schedule silently
+    // covered nothing (CLAUDE.md §6.8, "Promotion...").
+    const fn = extractFunction(INDEX_HTML, 'saveScheduleEditor');
+    assert.match(fn, /body\.selectionMode === 'latest_under'/,
+      'promotion must be gated to latest_under — a fixed list is the literal selection');
+    assert.match(fn, /schedPromoteAnchors\(schedCurrentAnchors\(sc\), nodeMap\)/,
+      'it must promote the CURRENT anchors — the toolbar\'s fresh pick, or the loaded '
+      + 'schedule\'s stored ones — the same source schedCurrentAnchors() already gives the preview');
+    assert.match(fn, /body\.projects = promoted\.map/,
+      'the promoted set, not the raw selection, is what must reach the server');
+    // The non-latest_under path is unchanged: a fresh toolbar pick still ships
+    // as-is, and an edit that never touched project selection sends nothing
+    // (leaving whatever is already stored, exactly as before this fix).
+    assert.match(fn, /else if \(_schedPendingProjects\) \{\s*\n\s*body\.projects = _schedPendingProjects;/);
+  });
+
   test('the preview names the anchors, the count, and anything resolving to nothing', () => {
     const fn = extractFunction(INDEX_HTML, 'schedPreviewHtml');
     assert.match(fn, /right now/, 'the wording says the number is a snapshot of a rule');

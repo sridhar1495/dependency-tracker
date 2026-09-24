@@ -7023,6 +7023,58 @@ describe("the scheduler's project sweep (page shape and portfolio)", () => {
   });
 });
 
+// ── Q56: a stored latest_under anchor is promoted before it is resolved ─────
+// A leaf anchor stored before promotion was wired into the editor's save path
+// (or written by an older client) used to resolve to just itself forever —
+// resolveProjects()'s "anchor is itself a leaf" branch is a defensive
+// fallback for a deleted parent, not the ordinary path, and nothing upstream
+// of it ever promoted a raw leaf back to its group. The fix runs the same
+// promotion the editor's preview already trusted, against the SAME portfolio
+// already fetched for resolution, and persists the correction so the repair
+// only ever has to happen once per schedule. None of this is reachable
+// without a live scheduled run (dtGetWithRetry and collectReportData are
+// destructured at require time, so stub() cannot intercept scheduler.js's
+// calls to them — CLAUDE.md §10.4), so the shape is pinned against the
+// module's own source here, and the end-to-end tier proves it executes
+// correctly against a real stub and a real database.
+describe('the scheduler promotes a stored latest_under anchor before resolving (Q56)', () => {
+  const SRC = fs.readFileSync(path.join(__dirname, 'lib', 'scheduler.js'), 'utf8');
+
+  test('a leaf anchor is promoted before resolveProjects is called, only for latest_under', () => {
+    const promoteIdx  = SRC.indexOf('scheduleSelection.promoteAnchors(');
+    const resolveIdx  = SRC.indexOf('scheduleSelection.resolveProjects(');
+    assert.ok(promoteIdx >= 0, 'the scheduler must promote a stored anchor before resolving it');
+    assert.ok(resolveIdx >= 0, 'the scheduler must still resolve the (possibly promoted) anchors');
+    assert.ok(promoteIdx < resolveIdx,
+      'promotion must happen BEFORE resolution, or a leaf anchor resolves to just itself');
+
+    // Gated to latest_under: a fixed schedule's anchors ARE the projects, and
+    // promoting one would silently widen what a fixed list was told to cover.
+    const between = SRC.slice(SRC.lastIndexOf("mode === 'latest_under'", promoteIdx), promoteIdx);
+    assert.ok(between.length < 400,
+      "the promotion must be reached only through a mode === 'latest_under' guard");
+  });
+
+  test('resolveProjects is called with the PROMOTED anchors, not the raw stored ones', () => {
+    const call = /scheduleSelection\.resolveProjects\(\{\s*mode,\s*anchorUuids:\s*(\w+),/.exec(SRC);
+    assert.ok(call, 'resolveProjects must still be called with { mode, anchorUuids, portfolio }');
+    assert.notEqual(call[1], 'anchors',
+      'resolution must read the promoted variable — passing the raw stored anchors '
+      + 'reintroduces the exact bug this fixes');
+  });
+
+  test('the repaired anchors are persisted back through schedulesDb.setProjects', () => {
+    assert.match(SRC, /schedulesDb\.setProjects\(userId, scheduleId, repaired\)/,
+      'a promoted anchor must be written back, or every run repeats the same repair');
+  });
+
+  test('an anchor already at its parent is left alone — no needless write every run', () => {
+    // promoteAnchors() is a no-op on an anchor that is already a group, so the
+    // repair only fires when something actually changed.
+    assert.match(SRC, /const changed = /, 'the write must be conditioned on something changing');
+  });
+});
+
 // ── Which projects a schedule covers (PR 2) ──────────────────────────────────
 // `lib/schedule-selection.js` turns a stored RULE into the list of projects one
 // run reports on. Pure, so every mode is driven here with no database.
