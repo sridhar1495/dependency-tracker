@@ -220,7 +220,7 @@ Inline comments use lettered prefixes to trace design decisions:
 - **O-numbers** — observability notes (`// O3: JSON log format for log aggregators`)
 - **S-numbers** — security rationale (`// S2: token hashed before storage`) — **new in revision 2**
 
-Highest numbers currently in use: **Q55, P20, O5, S35**. When adding logic with a
+Highest numbers currently in use: **Q56, P20, O5, S35**. When adding logic with a
 non-obvious trade-off, add the next number in the appropriate series. Check the
 current maximum before assigning — parallel branches can claim the same number.
 
@@ -1012,10 +1012,54 @@ if (method === 'GET' && path === '/violation-cache/status') {
     every project as newly covered the run after any failure — and **names
     removals while merely counting additions**: a project that stopped being
     covered is what somebody has to go and look at.
-  - **Promotion of a leaf anchor to its parent lives in the resolver**, not the
-    browser, so the editor's preview and the run cannot disagree about what was
-    anchored. It **widens** the selection (a parent also holds its siblings), so
-    the editor says that it did rather than doing it silently.
+  - **Promotion of a leaf anchor to its parent is applied wherever an anchor is
+    about to be trusted — the editor's save, and the run itself — never left
+    to whichever caller remembers to ask for it.** It **widens** the selection
+    (a parent also holds its siblings), so the editor says that it did rather
+    than doing it silently.
+  - **Q56: the editor's save path used to be the one place promotion was
+    skipped, and that was the actual production defect.** `resolveProjects()`'s
+    "an anchor that is itself a leaf resolves to itself" branch (§6.8 above)
+    is a *defensive fallback* — for a stored anchor whose parent was deleted
+    after the fact — not the ordinary path; the ordinary path assumes
+    whatever is stored is already a promoted parent. The editor's preview
+    (`schedPreviewHtml`, `dashboard/index.html`) always promoted before
+    computing what it showed, so ticking child projects already marked latest
+    and switching the mode to `latest_under` displayed a correct, promoted
+    count — but `saveScheduleEditor()` sent the raw, unpromoted ticks
+    straight to the server. The stored anchor was therefore a single leaf
+    project, which resolved to *itself alone* forever: correct for as long as
+    that exact version stayed the one DependencyTrack marked `isLatest`, and
+    silently empty — "no projects" — the moment a release moved `isLatest`
+    onto a sibling, because nothing about a lone leaf anchor ever looks at
+    its siblings. A portfolio of many versioned services under `LATEST`
+    collection roots hit this gradually and unevenly: whichever anchors
+    happened to still be the current release kept working, and the rest went
+    quietly empty, which is exactly the "some branches produce reports, others
+    say no projects were found, with no pattern" symptom that surfaced it.
+    Two changes close the gap, and neither one alone would have been enough:
+    - **The save path now promotes, matching the preview it was already
+      showing.** `saveScheduleEditor()` promotes the schedule's current
+      anchors (a fresh toolbar pick, or — when editing without reselecting —
+      the schedule's own stored ones, via the same `schedCurrentAnchors()`
+      the preview reads) before building the request body, whenever the mode
+      is `latest_under`. Every schedule created or re-saved from now on
+      stores the parent, never the leaf, so the preview and what is actually
+      persisted can no longer disagree.
+    - **The run itself repairs whatever is still stored the old way.**
+      `runScheduledJob()` (`lib/scheduler.js`) promotes the stored anchors
+      against the same portfolio sweep it already fetches for resolution — no
+      extra upstream call — resolves against the promoted set, and, when
+      promotion actually changed anything, writes the correction back through
+      `schedulesDb.setProjects()`. This is the one-time repair: an already-
+      broken schedule fixes itself, and starts producing the correct report,
+      the very next time it fires — including a manual "Run now" — with
+      nothing for the account owner to do. Promoting an anchor that is
+      already a parent is a no-op, so a repaired schedule's next run writes
+      nothing and costs nothing beyond the promotion check itself. A failure
+      to persist the correction costs one run's worth of the write (logged as
+      a warning); resolution still uses the promoted anchors for that run
+      regardless, and the next run simply tries the write again.
 - Scheduled reports are built in memory and emailed; they are never written to disk.
 
 ### 6.9 Email (`nodemailer`)
@@ -3029,6 +3073,31 @@ Running the browser checks in CI was on this list and is now the `e2e` job.
   one and not the anchor — "the rule was applied" and "the rule was ignored"
   produce visibly different workbooks — and a `latest_all` schedule arms with
   no stored anchors at all.
+- **Anchor promotion at save and at run (Q56):** `dtGetWithRetry` and
+  `collectReportData` are destructured at require time in `lib/scheduler.js`,
+  so `stub()` cannot intercept `runScheduledJob`'s calls to them the way the
+  scheduler-pool tests intercept `dtConnections.getResolved` — the repair is
+  therefore pinned two ways rather than unit-executed. Against the module's
+  own source (`server.test.js`): that a leaf anchor is promoted strictly
+  *before* `resolveProjects` is called, gated to `mode === 'latest_under'`
+  only; that resolution reads the promoted variable, not the raw stored one
+  — the one-line regression that reintroduces the whole defect; that a
+  changed anchor is written back through `schedulesDb.setProjects`; and that
+  the write is conditioned on something having actually changed, so an
+  already-promoted anchor costs nothing on every later run. On the page
+  (`dashboard.test.js`, against `saveScheduleEditor`'s own source): that
+  promotion is gated to `latest_under`, reads the schedule's *current*
+  anchors — a fresh toolbar pick, or the loaded schedule's stored ones via
+  the same `schedCurrentAnchors()` the preview already used — through
+  `schedPromoteAnchors`, and that the promoted set is what is assigned to
+  `body.projects`; and that the non-`latest_under` path (a fresh pick shipped
+  as-is, or nothing sent when project selection was never touched) is
+  unchanged. The end-to-end tier is what proves the repair itself: a schedule
+  is created directly against the API with the stale child's own uuid as its
+  anchor — reproducing exactly what the unfixed editor used to store, bypassing
+  the now-fixed save path entirely — its `Run now` still delivers a workbook
+  covering the CURRENT latest sibling rather than nothing, and a follow-up
+  `GET` on the schedule shows the stored anchor rewritten to the parent.
 - The counted leaf set (Q45): that a `LATEST` group's stale child is **not** in
   it while the latest one is; that a portfolio with no collection logic still
   counts every leaf, since v4 and organisational parents must be untouched by

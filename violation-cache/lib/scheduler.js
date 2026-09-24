@@ -260,7 +260,43 @@ async function runScheduledJob(schedule, { manual = false } = {}) {
     }
 
     const anchors = selected.map(p => p.uuid);
-    const resolution = scheduleSelection.resolveProjects({ mode, anchorUuids: anchors, portfolio });
+    // Q56: a stored latest_under anchor may still be the raw leaf a toolbar
+    // selection attached before promotion was wired into the save path (or
+    // an older client). resolveProjects()'s "anchor is itself a leaf" branch
+    // is a defensive fallback for a deleted parent, not the ordinary path —
+    // left as-is, a leaf anchor resolves to just itself and silently stops
+    // matching anything the moment DependencyTrack moves isLatest onto a
+    // sibling. Promoting here, against the SAME portfolio already fetched
+    // for resolution (no extra upstream call), self-heals every affected
+    // schedule the first time it next runs — including a manual "Run now" —
+    // and the correction is persisted so later reads (the settings list, a
+    // future run) see the parent anchor too. Promoting an anchor that is
+    // already a parent is a no-op, so this never needs to run twice.
+    let resolveAnchors = anchors;
+    if (mode === 'latest_under') {
+      const promoted = scheduleSelection.promoteAnchors(anchors, portfolio);
+      const changed = JSON.stringify([...anchors].sort()) !== JSON.stringify([...promoted].sort());
+      if (changed) {
+        resolveAnchors = promoted;
+        const portfolioByUuid = new Map(portfolio.map(p => [p.uuid, p]));
+        const repaired = promoted.map((uuid) => {
+          const p = portfolioByUuid.get(uuid);
+          return { uuid, name: p ? p.name : '', version: p ? (p.version || '') : '' };
+        });
+        try {
+          await schedulesDb.setProjects(userId, scheduleId, repaired);
+          log('info', 'Repaired latest_under schedule anchors (promoted leaf to parent)', {
+            userId, scheduleId, before: anchors.length, after: promoted.length,
+          });
+        } catch (e) {
+          // A repair that fails to persist costs nothing THIS run — the
+          // promoted anchors are still used to resolve below — and the next
+          // run simply tries the repair again.
+          log('warn', `Could not persist promoted schedule anchors: ${e.message}`, { userId, scheduleId });
+        }
+      }
+    }
+    const resolution = scheduleSelection.resolveProjects({ mode, anchorUuids: resolveAnchors, portfolio });
     const byUuid = new Map(portfolio.map(p => [p.uuid, p]));
     const projects = resolution.uuids
       .filter(uuid => byUuid.has(uuid))

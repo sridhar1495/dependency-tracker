@@ -3364,7 +3364,25 @@ async function saveScheduleEditor() {
   const btn = document.getElementById('cfgSaveBtn');
   if (btn) { btn.disabled = true; btn.textContent = 'Saving…'; }
   try {
-    if (_schedPendingProjects) body.projects = _schedPendingProjects;
+    // Q56: latest_under stores the PROMOTED (parent) anchor, never the raw
+    // leaf a toolbar selection or an older schedule may carry — the same
+    // promotion schedPreviewHtml() already applies to what it SHOWS, now
+    // applied to what actually gets SAVED. Skipping this meant the preview
+    // and the stored row could disagree: a schedule silently resolved to
+    // nothing the moment DependencyTrack moved isLatest off the exact
+    // version somebody had ticked, because the resolver's "anchor is itself
+    // a leaf" branch is a defensive fallback for a deleted parent, not the
+    // ordinary path (CLAUDE.md §6.8, "Promotion...").
+    if (body.selectionMode === 'latest_under') {
+      const sc = _schedEditingId ? _schedules.find(s => s.id === _schedEditingId) : null;
+      const promoted = schedPromoteAnchors(schedCurrentAnchors(sc), nodeMap);
+      body.projects = promoted.map(uuid => {
+        const node = nodeMap.get(uuid);
+        return { uuid, name: node ? node.name : '', version: node ? (node.version || '') : '' };
+      });
+    } else if (_schedPendingProjects) {
+      body.projects = _schedPendingProjects;
+    }
     const editing = _schedEditingId;
     const r = await apiFetch(
       editing ? `/violation-cache/schedules/${encodeURIComponent(editing)}` : '/violation-cache/schedules',

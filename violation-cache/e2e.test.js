@@ -2465,6 +2465,52 @@ describe('e2e — a latest-only schedule delivers the projects the rule resolves
       'the anchor is traversed, never reported on (Q42)');
   }, { timeout: 180_000 });
 
+  test('Q56: a raw leaf anchor is repaired to its parent, and still resolves correctly', async () => {
+    // Reproduces the bug this fixes: before promotion was wired into the save
+    // path, ticking a CHILD (never its collection parent) and choosing
+    // latest_under stored that child's own uuid as the anchor —
+    // resolveProjects()'s "anchor is itself a leaf" branch then resolved it
+    // to just itself, so the moment DependencyTrack moved isLatest onto a
+    // sibling the run silently covered nothing. Creating the schedule
+    // directly against the API with the STALE child's uuid (never the
+    // collection's) reproduces exactly that stored shape, bypassing the
+    // now-fixed editor entirely.
+    const created = await api.createSchedule(token, {
+      name: 'latest-under-raw-leaf', frequency: 'daily', hour: 11, minute: 0,
+      riskTypes: ['security'],
+      selectionMode: 'latest_under',
+      projects: [{ uuid: staleChild.uuid, name: staleChild.name, version: staleChild.version || '' }],
+    });
+    assert.ok(created.status < 300, `${created.status} ${JSON.stringify(created.json)}`);
+    const id = created.json.schedule.id;
+
+    const before = await api.get(`/violation-cache/schedules/${id}`, token);
+    assert.deepEqual(before.json.schedule.projectUuids, [staleChild.uuid],
+      'the raw leaf must actually be what got stored, or this is not reproducing the bug');
+
+    stack.smtp.reset();
+    const r = await api.post(`/violation-cache/schedules/${id}/run-now`, {}, token);
+    assert.ok(r.status < 300, `Send now answered ${r.status} ${JSON.stringify(r.json)}`);
+
+    const mail = await stack.smtp.waitFor('latestonly@example.com', 120_000);
+    assert.ok(mail, 'the run must still reach an inbox — repair, not failure, is the fix');
+    const bytes = xlsxFromMime(mail.data);
+    assert.ok(bytes, 'no xlsx attachment was found in the delivered message');
+    const wb = new (require('exceljs').Workbook)();
+    await wb.xlsx.load(bytes);
+    const ws = wb.getWorksheet('SV_Project Summary');
+    const names = [];
+    ws.eachRow((row, n) => { if (n > 1) names.push(String(row.getCell(2).value || '')); });
+    assert.ok(names.includes(latestChild.name),
+      `a repaired run must still cover the CURRENT latest child; got ${JSON.stringify(names)}`);
+    assert.ok(!names.includes(staleChild.name),
+      'the stale child that was originally ticked must not itself be reported on');
+
+    const after = await api.get(`/violation-cache/schedules/${id}`, token);
+    assert.deepEqual(after.json.schedule.projectUuids, [collection.uuid],
+      'the stored anchor must be rewritten to the parent — the one-time repair');
+  }, { timeout: 180_000 });
+
   test('a rule schedule arms with no stored anchors at all (latest_all)', async () => {
     // latest_all stores nothing in schedule_projects, which used to mean "not
     // configured yet" — the route would refuse to arm it and it would never run.
